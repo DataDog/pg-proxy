@@ -200,10 +200,11 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		if expectation == ParseReply || expectation == BindReply || expectation == DescribeReply || expectation == ExecuteReply || expectation == CloseReply {
 			// This error was in response to an Extended Query Mode message. Postgres will discard all messages until a sync
 			action.DiscardUntilSync = true
-		} else if expectation == QueryReply {
-			// An ErrorResponse to a simple Query should be followed by a ReadyForQuery. Don't clear expectation.
+		} else if expectation == QueryReply || expectation == SyncReply {
+			// An ErrorResponse to a simple Query should be followed by a ReadyForQuery. So should one to a
+			// Sync: committing an implicit transaction there can fail, for example on a deferred constraint
+			// or a serialization failure. Don't clear expectation.
 		} else {
-			// We shouldn't see an ErrorResponse for a SyncReply
 			return PgMessageAction{}, fmt.Errorf("expected a %s, but received %#v", expectation, m)
 		}
 

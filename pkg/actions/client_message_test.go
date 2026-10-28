@@ -112,6 +112,7 @@ type ClientMessageActionTest struct {
 	enableNamedPreparedStatements bool
 	passthroughUser               bool
 	wantDeallocate                bool
+	wantEnsureUnnamed             bool
 	deallocatePreparedStmt        prepared.PreparedStatement
 	dynamicRoutingEnabled         bool
 	autoCachedEnabled             bool
@@ -179,10 +180,11 @@ func TestClientMessageActions(t *testing.T) {
 			enableNamedPreparedStatements: true,
 		},
 		{
-			name:         "simple describe",
-			msg:          &pgproto3.Describe{ObjectType: 'S'},
-			proxyMsgToPg: &pgproto3.Describe{ObjectType: 'S'},
-			wantExp:      query.DescribeReply,
+			name:              "simple describe",
+			msg:               &pgproto3.Describe{ObjectType: 'S'},
+			proxyMsgToPg:      &pgproto3.Describe{ObjectType: 'S'},
+			wantExp:           query.DescribeReply,
+			wantEnsureUnnamed: true,
 		},
 		{
 			name:           "simple close",
@@ -202,10 +204,11 @@ func TestClientMessageActions(t *testing.T) {
 			},
 		},
 		{
-			name:         "simple bind",
-			msg:          &pgproto3.Bind{},
-			proxyMsgToPg: &pgproto3.Bind{},
-			wantExp:      query.BindReply,
+			name:              "simple bind",
+			msg:               &pgproto3.Bind{},
+			proxyMsgToPg:      &pgproto3.Bind{},
+			wantExp:           query.BindReply,
+			wantEnsureUnnamed: true,
 		},
 		{
 			name:         "simple execute",
@@ -318,6 +321,7 @@ func TestClientMessageActions(t *testing.T) {
 			if test.wantDeallocate {
 				wantAction.DeallocatePreparedStmt = test.deallocatePreparedStmt
 			}
+			wantAction.EnsureUnnamedPreparedStmt = test.wantEnsureUnnamed
 			wantAction.HandleReadQuery = test.wantHandleReadQuery
 			assert.EqualValues(wantAction, action, "for test %s", test.name)
 		}

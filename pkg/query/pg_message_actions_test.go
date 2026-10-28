@@ -300,10 +300,10 @@ func TestPgMessageActions(t *testing.T) {
 			wantTraceFinished: true,
 		},
 		{
-			name:              "unexpected error response",
+			name:              "commit error response to sync",
 			msg:               &pgproto3.ErrorResponse{Message: "testing"},
 			expectation:       SyncReply,
-			wantErrContains:   "expected a SyncReply",
+			wantJustProxy:     true,
 			wantTraceFinished: true,
 		},
 		{
