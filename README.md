@@ -33,6 +33,41 @@ unavailable. Docker tests cover multiple backends and usernames, transaction
 pooling, startup cleanup, cancellation, shutdown, and SQL health-check connection
 reuse.
 
+### Integration tests
+
+`test/integration` runs the `cmd/pg-proxy` binary as a black box: each test
+starts a proxy process from a YAML configuration and connects to it with pgx,
+against a PostgreSQL container shared by the package. The harness lives in
+`internal/itest`:
+
+- `itest.Main` builds the binary once and starts shared fixtures from `TestMain`.
+- `itest.StartPostgres` starts a PostgreSQL container; `Postgres.Database`
+  returns a `pkg/config` database entry pointing at it.
+- `itest.StartProxy` / `itest.MustStartProxy` write a `pkg/config.Config` to a
+  file, start the binary on a free loopback port, and stop it with SIGTERM.
+  `MustStartProxy` fails the test if the process does not exit cleanly and logs
+  its output when the test fails.
+
+```sh
+go test -tags=integration ./test/integration
+```
+
+Running with `-race` also builds the proxy binary with `-race`. Other settings:
+
+| Variable | Effect |
+| --- | --- |
+| `PG_PROXY_ITEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
+| `PG_PROXY_ITEST_BINARY` | Prebuilt pg-proxy binary instead of building one |
+| `PG_PROXY_ITEST_BUILD_FLAGS` | Extra `go build` flags for the binary, such as `-cover` |
+
+Detecting a client that disconnects while waiting for a backend connection relies
+on Linux `POLLRDHUP`, so that test is skipped on other platforms. To run the
+full suite from macOS, run it in a Linux container that uses the host's Docker:
+
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
+```
+
 The repository uses standard Go tooling and public dependencies. Bazel and a
 Datadog account are not required to build supplied source. While the repository
 has internal visibility, obtaining its source still requires repository access.
@@ -47,7 +82,7 @@ manual runs after the workflow reaches the default branch.
 | --- | --- |
 | Go (minimum) | Exact Go version from `go.mod`; formatting, module tidiness, build, vet, and unit tests |
 | Go (stable) | Current stable Go release; build, vet, and unit tests with race detection |
-| PostgreSQL integration | Current stable Go release; Docker-backed tests using the pinned public PostgreSQL image |
+| PostgreSQL integration | Current stable Go release; Docker-backed tests with race detection using the pinned public PostgreSQL image |
 
 Jobs use GitHub-hosted Ubuntu 24.04 runners, CGO, public module downloads, and a
 read-only repository token. Actions are pinned to commit SHAs. Go automatically
