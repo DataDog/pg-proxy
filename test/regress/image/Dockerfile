@@ -1,11 +1,13 @@
 # PostgreSQL built from source with its regression suite. The same image runs
 # the server and the pg_regress client, so the paths that tests hand to the
-# server (regress.so, data files, results/) exist on both sides.
+# server (regress.so, data files, results/) exist on both sides. PG_VERSION and
+# PG_SHA256 come from ../versions.json.
 ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
 
 FROM ${DEBIAN_IMAGE} AS build
-ARG PG_VERSION=17.11
-ARG PG_SHA256=dd27f2b3c59e73ed14aa3324901242bf69a032a6347805f274e6260322d42979
+ARG PG_VERSION
+ARG PG_SHA256
+RUN test -n "${PG_VERSION}" && test -n "${PG_SHA256}"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bison bzip2 ca-certificates curl flex gcc libc6-dev make perl \
  && rm -rf /var/lib/apt/lists/*
@@ -24,7 +26,7 @@ COPY --from=build /usr/local/pgsql /usr/local/pgsql
 COPY --from=build /src/src/test/regress /usr/local/pgsql/regress
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN useradd --create-home postgres \
- && mkdir -p /var/lib/postgresql/data /usr/local/pgsql/regress/results \
+ && mkdir -p /var/lib/postgresql/data /usr/local/pgsql/regress/results /usr/local/pgsql/regress/testtablespace \
  && chown -R postgres /var/lib/postgresql /usr/local/pgsql/regress
 ENV PATH=/usr/local/pgsql/bin:$PATH PGDATA=/var/lib/postgresql/data
 USER postgres

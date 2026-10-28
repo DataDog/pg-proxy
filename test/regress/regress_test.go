@@ -1,22 +1,28 @@
 //go:build integration && regress
 
 // Package regress runs PostgreSQL's own regression suite (installcheck) through
-// pg-proxy to measure and enforce wire and behavioral compatibility.
+// pg-proxy to measure and enforce wire and behavioral compatibility, for every
+// PostgreSQL major version in versions.json.
 //
-// The image under image/ builds PostgreSQL from source with its regression
-// tests. One container from it is the backend; another runs pg_regress against
-// the proxy, which runs on the host through the internal/itest harness. Results
-// are compared with expected_failures.txt: a new failure or a new pass fails the
-// test, so the list only shrinks deliberately.
+// The image under image/ builds a PostgreSQL release from source with its
+// regression tests. One container from it is the backend; another runs
+// pg_regress against the proxy, which runs on the host through the
+// internal/itest harness. baseline/pg<major>.txt lists the tests skipped by
+// design and the tests expected to fail: an unlisted failure or a listed test
+// that passes fails the run, so the list only changes deliberately.
 package regress
 
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -32,106 +38,242 @@ import (
 // regressDatabase is the database pg_regress and its expected output assume.
 const regressDatabase = "regression"
 
-// image is the regression image used by every test in the package.
-var image string
+// pgVersion is an entry of versions.json.
+type pgVersion struct {
+	Major   string `json:"major"`
+	Version string `json:"version"`
+	SHA256  string `json:"sha256"`
+	image   string
+}
+
+// versions are the versions selected for this run, with their images.
+var versions []*pgVersion
 
 func TestMain(m *testing.M) {
-	os.Exit(itest.Main(m, func(ctx context.Context) (func(), error) {
-		if prebuilt := os.Getenv("PG_PROXY_REGRESS_IMAGE"); prebuilt != "" {
-			image = prebuilt
-			return nil, nil
-		}
-		// Building from source takes several minutes the first time; later builds
-		// reuse Docker's layer cache.
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
-		defer cancel()
+	os.Exit(itest.Main(m, func(context.Context) (func(), error) {
 		var err error
-		image, err = buildImage(ctx)
-		return nil, err
+		if versions, err = selectVersions(os.Getenv("PG_PROXY_REGRESS_PG_MAJORS")); err != nil {
+			return nil, err
+		}
+		// Building from source takes several minutes per version the first time;
+		// later builds reuse Docker's layer cache.
+		ctx, cancel := context.WithTimeout(context.Background(), 90*time.Minute)
+		defer cancel()
+		for _, v := range versions {
+			if v.image, err = buildImage(ctx, v); err != nil {
+				return nil, err
+			}
+		}
+		return nil, nil
 	}))
 }
 
-// buildImage builds image/ with the Docker CLI. Testcontainers' builder is not
-// used because it queries every configured credential helper, which fails on
-// machines with helpers for unreachable registries.
-func buildImage(ctx context.Context) (string, error) {
-	const tag = "pg-proxy-regress:local"
-	cmd := exec.CommandContext(ctx, "docker", "build", "--tag", tag, "image")
+// selectVersions returns the versions in versions.json named by majors, a
+// comma-separated list or "all". It defaults to the newest version.
+func selectVersions(majors string) ([]*pgVersion, error) {
+	data, err := os.ReadFile("versions.json")
+	if err != nil {
+		return nil, err
+	}
+	var all []*pgVersion
+	if err := json.Unmarshal(data, &all); err != nil {
+		return nil, fmt.Errorf("versions.json: %w", err)
+	}
+	if len(all) == 0 {
+		return nil, fmt.Errorf("versions.json lists no versions")
+	}
+	switch majors {
+	case "":
+		return all[len(all)-1:], nil
+	case "all":
+		return all, nil
+	}
+	var selected []*pgVersion
+	for _, major := range strings.Split(majors, ",") {
+		index := slices.IndexFunc(all, func(v *pgVersion) bool { return v.Major == strings.TrimSpace(major) })
+		if index < 0 {
+			return nil, fmt.Errorf("PostgreSQL %s is not in versions.json", major)
+		}
+		selected = append(selected, all[index])
+	}
+	return selected, nil
+}
+
+// buildImage builds image/ for v with the Docker CLI. Testcontainers' builder is
+// not used because it queries every configured credential helper, which fails
+// on machines with helpers for unreachable registries.
+func buildImage(ctx context.Context, v *pgVersion) (string, error) {
+	tag := "pg-proxy-regress:" + v.Version
+	cmd := exec.CommandContext(ctx, "docker", "build", "--tag", tag,
+		"--build-arg", "PG_VERSION="+v.Version, "--build-arg", "PG_SHA256="+v.SHA256, "image")
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output
 	if os.Getenv("PG_PROXY_REGRESS_BUILD_LOG") != "" {
 		cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	}
 	if err := cmd.Run(); err != nil {
-		return "", fmt.Errorf("build regression image: %w\n%s", err, output.String())
+		return "", fmt.Errorf("build regression image for PostgreSQL %s: %w\n%s", v.Version, err, output.String())
 	}
 	return tag, nil
 }
 
-// TestInstallcheckDirect runs the suite against the backend without the proxy.
-// Every test must pass; a failure here means the setup, not pg-proxy, is wrong.
+// TestInstallcheckDirect runs the full suite against the backend without the
+// proxy. Every test must pass; a failure here means the setup, not pg-proxy, is
+// wrong.
 func TestInstallcheckDirect(t *testing.T) {
-	backend, volume := startBackend(t)
-	results, diffs := runInstallcheck(t, backend.Port, volume, "direct")
-	require.NotEmpty(t, results, "pg_regress reported no tests")
-	logDiffs(t, results.failed(), diffs)
-	require.Empty(t, results.failed(), "tests failed without the proxy; see the diffs above")
+	for _, v := range versions {
+		t.Run(v.Major, func(t *testing.T) {
+			backend, volume := startBackend(t, v)
+			schedule, _ := readSchedule(t, backend, nil)
+			run := runInstallcheck(t, v, backend.Port, volume, schedule, "")
+			logDiffs(t, run.results.failed(), run.diffs)
+			require.Empty(t, run.results.failed(), "tests failed without the proxy; see the diffs above")
+		})
+	}
 }
 
-// TestInstallcheckThroughProxy runs the suite through pg-proxy and compares the
-// failures with expected_failures.txt.
+// TestInstallcheckThroughProxy runs the suite through pg-proxy, without the
+// tests the baseline skips, and compares the failures with the baseline.
 func TestInstallcheckThroughProxy(t *testing.T) {
-	backend, volume := startBackend(t)
+	for _, v := range versions {
+		t.Run(v.Major, func(t *testing.T) {
+			path := "baseline/pg" + v.Major + ".txt"
+			baseline := readBaseline(t, path)
+			backend, volume := startBackend(t, v)
+			schedule, scheduled := readSchedule(t, backend, baseline.skipped)
+			var stale []string
+			for name := range baseline.skipped {
+				if !scheduled[name] {
+					stale = append(stale, name)
+				}
+			}
+			slices.Sort(stale)
+			require.Empty(t, stale, "%s skips tests that PostgreSQL %s does not have", path, v.Version)
+
+			ctx := t.Context()
+			setup, rest := splitSetup(schedule)
+			var run installcheck
+			if setup != "" && hasSetting(t, ctx, backend, "allow_in_place_tablespaces") {
+				// test_setup creates a tablespace after SET allow_in_place_tablespaces,
+				// which the proxy resets after that transaction. Run it with the
+				// setting as the database default, then run the rest on a new
+				// backend connection without it, since the tablespace test checks
+				// the default.
+				require.NoError(t, backend.Exec(ctx, "ALTER DATABASE "+regressDatabase+" SET allow_in_place_tablespaces TO on"))
+				setupProxy := startRegressProxy(t, backend)
+				run = runInstallcheck(t, v, proxyPort(t, setupProxy), volume, setup, "setup")
+				require.NoError(t, setupProxy.Stop())
+				require.NoError(t, backend.Exec(ctx, "ALTER DATABASE "+regressDatabase+" RESET allow_in_place_tablespaces"))
+				run.merge(runInstallcheck(t, v, proxyPort(t, startRegressProxy(t, backend)), volume, rest, "tests"))
+			} else {
+				run = runInstallcheck(t, v, proxyPort(t, startRegressProxy(t, backend)), volume, schedule, "")
+			}
+			checkBaseline(t, path, baseline, run)
+		})
+	}
+}
+
+// startRegressProxy starts a proxy serving the regression database. It has one
+// backend connection: consecutive sessions then share temporary tables,
+// prepared statements and other connection state, as they would in a busy pool,
+// while results stay deterministic.
+func startRegressProxy(t *testing.T, backend *itest.Postgres) *itest.Proxy {
+	t.Helper()
 	database := backend.Database("regression-primary", regressDatabase)
-	// One backend connection: consecutive sessions then share temporary tables,
-	// prepared statements and other connection state, as they would in a busy
-	// pool, while results stay deterministic.
 	database.MaxConns = 1
-	proxy := itest.MustStartProxy(t, pgconfig.Config{
+	return itest.MustStartProxy(t, pgconfig.Config{
 		Databases:        []pgconfig.Database{database},
 		Clusters:         map[string]pgconfig.Cluster{"regression": {Primary: database.Name}},
 		LogicalDatabases: map[string]pgconfig.LogicalDatabase{regressDatabase: {Cluster: "regression"}},
 	})
+}
+
+func proxyPort(t *testing.T, proxy *itest.Proxy) uint16 {
+	t.Helper()
 	_, portText, err := net.SplitHostPort(proxy.Addr)
 	require.NoError(t, err)
 	port, err := strconv.ParseUint(portText, 10, 16)
 	require.NoError(t, err)
-
-	results, diffs := runInstallcheck(t, uint16(port), volume, "proxy")
-	require.NotEmpty(t, results, "pg_regress reported no tests")
-	checkBaseline(t, "expected_failures.txt", results, diffs)
+	return uint16(port)
 }
 
-// startBackend starts a regression-image server with a regression database
-// configured the way pg_regress configures one it creates. It also returns the
-// volume mounted at the server's results directory, which the runner shares:
-// some tests write a file with psql and read it with server-side COPY.
-func startBackend(t *testing.T) (*itest.Postgres, string) {
+// startBackend starts a server from v's image with a regression database set
+// up the way pg_regress sets up one it creates. It also returns the volume
+// mounted at the server's results directory, which the runner shares: some
+// tests write a file with psql and read it with server-side COPY.
+func startBackend(t *testing.T, v *pgVersion) (*itest.Postgres, string) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Minute)
 	defer cancel()
-	volume := fmt.Sprintf("pg-proxy-regress-%d-%s", os.Getpid(), strings.ToLower(t.Name()))
+	volume := "pg-proxy-regress-" + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
 	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volume).Run() })
-	backend, err := itest.StartPostgres(ctx, itest.WithImage(image),
+	backend, err := itest.StartPostgres(ctx, itest.WithImage(v.image),
 		itest.WithContainerOptions(testcontainers.WithMounts(resultsMount(volume))))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Terminate(context.Background()) })
 
-	statements := []string{"CREATE DATABASE " + regressDatabase + " TEMPLATE template0"}
-	// pg_regress applies these when it creates the database; --use-existing skips them.
-	for _, setting := range []string{
+	settings := []string{
+		// pg_regress applies these when it creates the database; --use-existing skips them.
 		"lc_messages TO 'C'", "lc_monetary TO 'C'", "lc_numeric TO 'C'", "lc_time TO 'C'",
 		"bytea_output TO 'hex'", "timezone_abbreviations TO 'Default'",
-		// pg_regress sends these as PGTZ and PGDATESTYLE startup parameters, which
-		// pg-proxy does not forward to backend connections.
-		"timezone TO 'PST8PDT'", "datestyle TO 'Postgres, MDY'",
-	} {
+	}
+	// pg_regress sends its time zone, date style and options as startup
+	// parameters, which pg-proxy does not forward to backend connections.
+	settings = append(settings, startupSettings(t, backend)...)
+	statements := []string{"CREATE DATABASE " + regressDatabase + " TEMPLATE template0"}
+	for _, setting := range settings {
 		statements = append(statements, "ALTER DATABASE "+regressDatabase+" SET "+setting)
 	}
 	require.NoError(t, backend.Exec(ctx, statements...))
 	return backend, volume
 }
 
+var (
+	setenvPattern   = regexp.MustCompile(`setenv\("(PGTZ|PGDATESTYLE)", "([^"]+)"`)
+	pgoptionPattern = regexp.MustCompile(`-c (\w+)=(\S+)`)
+	myPgoptions     = regexp.MustCompile(`my_pgoptions = "([^"]+)"`)
+)
+
+// startupSettings returns the settings pg_regress sends at startup, read from
+// the pg_regress source in the image so that they match its version.
+func startupSettings(t *testing.T, backend *itest.Postgres) []string {
+	t.Helper()
+	source := copyFromContainer(t, backend.Container(), regressDir+"/pg_regress.c")
+	parameters := map[string]string{"PGTZ": "timezone", "PGDATESTYLE": "datestyle"}
+	var settings []string
+	for _, match := range setenvPattern.FindAllStringSubmatch(source, -1) {
+		settings = append(settings, parameters[match[1]]+" TO '"+match[2]+"'")
+		delete(parameters, match[1])
+	}
+	require.Empty(t, parameters, "pg_regress.c does not set these environment variables")
+	options := myPgoptions.FindStringSubmatch(source)
+	require.NotNil(t, options, "pg_regress.c has no PGOPTIONS")
+	for _, match := range pgoptionPattern.FindAllStringSubmatch(options[1], -1) {
+		settings = append(settings, match[1]+" TO '"+match[2]+"'")
+	}
+	return settings
+}
+
+func hasSetting(t *testing.T, ctx context.Context, backend *itest.Postgres, name string) bool {
+	t.Helper()
+	conn, err := backend.Connect(ctx, "postgres")
+	require.NoError(t, err)
+	defer conn.Close(context.Background())
+	var exists bool
+	require.NoError(t, conn.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_settings WHERE name = $1)", name).Scan(&exists))
+	return exists
+}
+
 func resultsMount(volume string) testcontainers.ContainerMount {
 	return testcontainers.VolumeMount(volume, testcontainers.ContainerMountTarget(regressDir+"/results"))
+}
+
+func copyFromContainer(t *testing.T, c testcontainers.Container, path string) string {
+	t.Helper()
+	reader, err := c.CopyFileFromContainer(context.Background(), path)
+	require.NoError(t, err, "copy %s", path)
+	defer reader.Close()
+	data, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	return string(data)
 }

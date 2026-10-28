@@ -101,6 +101,11 @@ func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, erro
 	return pg, nil
 }
 
+// Container returns the underlying container, for example to copy files from it.
+func (p *Postgres) Container() testcontainers.Container {
+	return p.container
+}
+
 // Terminate removes the container.
 func (p *Postgres) Terminate(ctx context.Context) error {
 	return p.container.Terminate(ctx)

@@ -71,34 +71,44 @@ docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -
 ### PostgreSQL regression suite
 
 `test/regress` runs PostgreSQL's own regression suite (`make installcheck`)
-through pg-proxy. [`image/Dockerfile`](test/regress/image/Dockerfile) builds
-PostgreSQL 17 from a checksum-pinned source release together with its test
-programs. One container from that image is the backend and another runs
-`pg_regress`; it reaches the proxy on the host through Testcontainers' host port
-forwarding, so the proxy keeps its loopback listener. Tests run one at a time
-against a single backend connection, and both containers share the `results`
-directory because some tests write a file with psql and read it with server-side
-`COPY`. pg-proxy does not forward client startup parameters, so the `regression`
-database is created with the `TimeZone` and `DateStyle` that `pg_regress` would
-otherwise send at startup.
+through pg-proxy for every supported PostgreSQL major version.
+[`versions.json`](test/regress/versions.json) lists them, with the latest
+release of each and its source checksum; update it when a release comes out or
+a major version reaches end of life, and add a baseline file for a new major.
+[`image/Dockerfile`](test/regress/image/Dockerfile) builds that release from
+source together with its test programs.
+
+One container from the image is the backend and another runs `pg_regress`; it
+reaches the proxy on the host through Testcontainers' host port forwarding, so
+the proxy keeps its loopback listener. Tests run one at a time against a single
+backend connection, and both containers share the `results` directory because
+some tests write a file with psql and read it with server-side `COPY`. pg-proxy
+does not forward client startup parameters, so the `regression` database is
+created with the time zone, date style and options that `pg_regress` sends at
+startup, read from that version's `pg_regress.c`.
 
 ```sh
 go test -tags=integration,regress -timeout=60m -v ./test/regress
 ```
 
-The first run builds the image, which takes a few minutes; later runs reuse
-Docker's cache. `TestInstallcheckDirect` runs the suite without the proxy and
-must pass completely, which checks the setup itself. `TestInstallcheckThroughProxy`
-compares failures with [`expected_failures.txt`](test/regress/expected_failures.txt):
-it fails when an unlisted test fails or a listed test passes, so update the list
-in the same change that fixes or breaks compatibility. Each entry names a cause,
-explained at the top of the file.
+By default only the newest version runs; `PG_PROXY_REGRESS_PG_MAJORS=14,17` or
+`all` selects others. The first run of a version builds its image, which takes a
+few minutes; later runs reuse Docker's cache.
+
+`TestInstallcheckDirect` runs the full suite without the proxy and must pass
+completely, which checks the setup itself. `TestInstallcheckThroughProxy` reads
+[`baseline/pg<major>.txt`](test/regress/baseline): `skip` entries are tests that
+pg-proxy cannot pass by design, such as tests relying on `SET` across
+transactions, and are left out of the schedule; `fail` entries are tests expected
+to fail. The test fails when an unlisted test fails or a listed one passes, so
+update the baseline in the same change that fixes or breaks compatibility. Each
+entry names a cause, explained at the top of the file.
 
 | Variable | Effect |
 | --- | --- |
-| `PG_PROXY_REGRESS_UPDATE` | Rewrite `expected_failures.txt` from this run, keeping existing reasons |
+| `PG_PROXY_REGRESS_PG_MAJORS` | Comma-separated major versions from `versions.json`, or `all` (default: the newest) |
+| `PG_PROXY_REGRESS_UPDATE` | Rewrite the `fail` entries of each baseline from this run, keeping `skip` entries and reasons |
 | `PG_PROXY_REGRESS_ARTIFACTS` | Directory for `pg_regress` output and `regression.diffs` (default: a new temporary directory, logged) |
-| `PG_PROXY_REGRESS_IMAGE` | Prebuilt regression image instead of building `image/` |
 | `PG_PROXY_REGRESS_BUILD_LOG` | Print the image build log |
 
 Failed tests' diffs are logged, truncated; the artifacts directory has them in
@@ -119,7 +129,7 @@ manual runs after the workflow reaches the default branch.
 | Go (minimum) | Exact Go version from `go.mod`; formatting, module tidiness, build, vet, and unit tests |
 | Go (stable) | Current stable Go release; build, vet, and unit tests with race detection |
 | PostgreSQL integration | Current stable Go release; Docker-backed tests with race detection using the pinned public PostgreSQL image |
-| PostgreSQL regression ([separate workflow](.github/workflows/regress.yml)) | PostgreSQL's regression suite through pg-proxy against `expected_failures.txt`; uploads `pg_regress` output |
+| PostgreSQL regression ([separate workflow](.github/workflows/regress.yml)) | One job per version in `test/regress/versions.json`: PostgreSQL's regression suite through pg-proxy against its baseline; uploads `pg_regress` output |
 
 Jobs use GitHub-hosted Ubuntu 24.04 runners, CGO, public module downloads, and a
 read-only repository token. Actions are pinned to commit SHAs. Go automatically
