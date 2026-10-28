@@ -34,19 +34,48 @@ type Postgres struct {
 	container *postgres.PostgresContainer
 }
 
+// PostgresOption customizes StartPostgres.
+type PostgresOption func(*postgresOptions)
+
+type postgresOptions struct {
+	image       string
+	customizers []testcontainers.ContainerCustomizer
+}
+
+// WithImage starts image instead of the default. The image must run the server
+// with the official image's command line (`postgres -c ...`) and accept the
+// PostgresUser superuser over TCP.
+func WithImage(image string) PostgresOption {
+	return func(o *postgresOptions) { o.image = image }
+}
+
+// WithContainerOptions applies Testcontainers customizers, such as mounts, to
+// the container request.
+func WithContainerOptions(customizers ...testcontainers.ContainerCustomizer) PostgresOption {
+	return func(o *postgresOptions) { o.customizers = append(o.customizers, customizers...) }
+}
+
 // StartPostgres starts a PostgreSQL container and waits until it accepts
 // connections. Callers must Terminate it.
-func StartPostgres(ctx context.Context) (*Postgres, error) {
-	image := DefaultPostgresImage
+func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, error) {
+	options := postgresOptions{image: DefaultPostgresImage}
 	if override := os.Getenv("PG_PROXY_ITEST_POSTGRES_IMAGE"); override != "" {
-		image = override
+		options.image = override
 	}
-	container, err := postgres.Run(ctx, image,
+	for _, opt := range opts {
+		opt(&options)
+	}
+	image := options.image
+	customizers := append([]testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("postgres"), postgres.WithUsername(PostgresUser), postgres.WithPassword(PostgresPassword),
-		// The entrypoint restarts the server once after initdb, so wait for the second message.
-		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").
-			WithOccurrence(2).WithStartupTimeout(time.Minute)),
-	)
+		// The official entrypoint initializes with a server that does not listen on
+		// TCP and then restarts, so wait for a ready server listening on TCP.
+		testcontainers.WithWaitStrategy(wait.ForAll(
+			wait.ForLog("database system is ready to accept connections"),
+			wait.ForListeningPort("5432/tcp"),
+		).WithDeadline(2 * time.Minute)),
+	}, options.customizers...)
+	container, err := postgres.Run(ctx, image, customizers...)
 	pg := &Postgres{container: container}
 	if err != nil {
 		if container != nil {

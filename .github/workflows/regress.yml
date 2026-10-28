@@ -1,0 +1,52 @@
+name: PostgreSQL regression
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CGO_ENABLED: '1'
+  GOENV: 'off'
+  GOFLAGS: -mod=readonly
+  GOPROXY: https://proxy.golang.org
+  GOSUMDB: sum.golang.org
+  GOTOOLCHAIN: local
+  GOWORK: 'off'
+
+jobs:
+  installcheck:
+    name: installcheck through pg-proxy
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache-dependency-path: go.sum
+      - name: Check Docker
+        run: docker info
+      - name: Regression suite
+        env:
+          PG_PROXY_REGRESS_ARTIFACTS: ${{ runner.temp }}/regress
+        run: go test -tags=integration,regress -count=1 -timeout=55m -v ./test/regress
+      - name: Upload pg_regress output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pg-regress
+          path: ${{ runner.temp }}/regress
+          if-no-files-found: ignore
