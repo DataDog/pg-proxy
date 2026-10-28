@@ -1,0 +1,93 @@
+package config
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestExistingYAMLShape(t *testing.T) {
+	document := `databases:
+- name: write
+  host: localhost
+  dbname: postgres
+  sslmode: disable
+  max_conns: 7
+  connection_options: {statement_timeout: "5000"}
+  load_balanced_servers: [{host: node-a}, {host: node-b}]
+  credentials: {name: PG}
+clusters:
+  cluster: {primary: write}
+logical_databases:
+  app:
+    cluster: cluster
+    read_clusters: {cluster: {weight: 0}}
+proxy:
+  listener_address: 127.0.0.1:15433
+  tls_required: true
+  tls_cert_file: cert.pem
+  tls_key_file: key.pem
+  postgres_msg_buffer_size: 8192
+users:
+- static_credentials: {username: client, name: CLIENT}
+  databases: [app]
+  pg_roles: [reader]
+  max_sessions: 4
+mirroring: {enabled: false}
+`
+	cfg, err := ReadYAML(strings.NewReader(document))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := cfg.Databases[0]
+	if db.Connection.Database != "postgres" || db.MaxConns != 7 || len(db.LoadBalancedServers) != 2 || db.Connection.RuntimeParams["statement_timeout"] != "5000" {
+		t.Fatalf("lost flat database settings: %+v", db)
+	}
+	if !cfg.Proxy.TLSRequired || cfg.Proxy.ListenerAddress != "127.0.0.1:15433" || cfg.Proxy.TLSCertFile != "cert.pem" || cfg.Proxy.TLSKeyFile != "key.pem" || cfg.Proxy.PostgresMsgBufferSize != 8192 {
+		t.Fatal("lost listener/TLS settings")
+	}
+	if len(cfg.Users) != 1 || cfg.Users[0].StaticCredentials.Name != "CLIENT" || cfg.Users[0].MaxSessions != 4 || *cfg.LogicalDatabases["app"].ReadClusters["cluster"].Weight != 0 {
+		t.Fatal("lost user/routing settings")
+	}
+	// JSON keeps the existing camelCase names and flat database structure.
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{`"connection":`, `"pool":`, `"mode":`, `"servers":`, `"logical_databases":`} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("unexpected config shape: %s", data)
+		}
+	}
+	roundTrip, err := ReadJSON(strings.NewReader(string(data)))
+	if err != nil || !reflect.DeepEqual(cfg, roundTrip) {
+		t.Fatalf("config did not round-trip: %v", err)
+	}
+	for _, invalid := range []string{document + "---\n{}", strings.Replace(document, "tls_required:", "tls_requred:", 1), strings.Replace(document, "host: localhost", "password: secret-value", 1)} {
+		_, err := ReadYAML(strings.NewReader(invalid))
+		if err == nil || strings.Contains(err.Error(), "secret-value") {
+			t.Fatalf("unsafe or missing error: %v", err)
+		}
+	}
+}
+
+func TestReadJSONPreservesUnsetAndZero(t *testing.T) {
+	cfg, err := ReadJSON(strings.NewReader(`{"databases":[{"name":"db"}],"logicalDatabases":{"db":{"readClusters":{"default":{},"disabled":{"weight":0}}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	reads := cfg.LogicalDatabases["db"].ReadClusters
+	if reads["default"].Weight != nil || reads["disabled"].Weight == nil || *reads["disabled"].Weight != 0 {
+		t.Fatal("lost omitted versus explicit zero weight")
+	}
+	if cfg.Databases[0].MaxConns != 0 || cfg.Databases[0].Port != 0 {
+		t.Fatal("reader applied runtime defaults")
+	}
+	for _, document := range []string{`{} {}`, `{} trailing`, `{"unknown":"private-value"}`, `{"proxy":{"tlsRequired":"private-value"}}`} {
+		_, err := ReadJSON(strings.NewReader(document))
+		if err == nil || strings.Contains(err.Error(), "private-value") {
+			t.Fatal("missing or unsafe error", err)
+		}
+	}
+}

@@ -6,10 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"io"
-	"unicode"
+	"strings"
+	"unicode/utf8"
 
+	"github.com/xdg-go/stringprep"
 	"golang.org/x/text/unicode/norm"
-	"golang.org/x/text/width"
 )
 
 // This file implements the cryptographic primitives of RFC 5802, the building
@@ -69,37 +70,22 @@ func hash(data string) []byte {
 	return sum.Sum(nil)
 }
 
-// normalize prepares a password for hashing. It stands in for RFC 5802's
-// Normalize:
-//
-//	Apply the SASLprep profile (RFC 4013) of the "stringprep" algorithm (RFC
-//	3454) as the normalization algorithm to a UTF-8 encoded "str". The resulting
-//	string is also in UTF-8. When applying SASLprep, "str" is treated as a
-//	"stored string", which means that unassigned Unicode codepoints are
-//	prohibited.
-//
-// This is a simplified version: it applies NFKC normalization, maps characters
-// to their width equivalent, and then drops everything that is not printable
-// ASCII. RFC 5802 permits that — an implementation must either implement
-// SASLprep or disallow non-US-ASCII codepoints in passwords — but note the
-// consequence: a password containing them is not rejected, it is silently
-// reduced to the ASCII it does contain.
+// normalize follows PostgreSQL's SASLprep behavior, retaining the original bytes
+// when UTF-8 validation or preparation fails.
 func normalize(data string) string {
-	// Normalize the string using NFKC normalization
-	normData := norm.NFKC.String(data)
-
-	// Map the string to its width equivalent
-	mappedData := width.Narrow.String(normData)
-
-	// Remove non-ASCII and unassigned Unicode codepoints
-	var result []rune
-	for _, r := range mappedData {
-		if r <= unicode.MaxASCII && unicode.IsPrint(r) {
-			result = append(result, r)
-		}
+	if !utf8.ValidString(data) {
+		return data
 	}
 
-	return string(result)
+	// PostgreSQL maps U+200B to a space before the overlapping map-to-nothing
+	// rule, and checks prohibited/unassigned characters and bidi before NFKC.
+	profile := stringprep.SASLprep
+	profile.Normalize = false
+	prepared, err := profile.Prepare(strings.ReplaceAll(data, "\u200b", " "))
+	if err != nil || prepared == "" {
+		return data
+	}
+	return norm.NFKC.String(prepared)
 }
 
 // genSalt returns size cryptographically secure random bytes, for a salt or a

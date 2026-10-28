@@ -128,18 +128,6 @@ func (c *Controller[C, D]) Accept(cfg C) (err error) {
 	return nil
 }
 
-// ReconcileClusters reconciles each cluster's backend runtime with the resolved configuration.
-// The resolver runs under the lock shared with full configuration acceptance.
-func (c *Controller[C, D]) ReconcileClusters(resolve func() (map[Identifier]D, map[Identifier]Cluster, error)) error {
-	c.reconcileMu.Lock()
-	defer c.reconcileMu.Unlock()
-	databases, clusters, err := resolve()
-	if err != nil {
-		return fmt.Errorf("resolve cluster configuration: %w", err)
-	}
-	return c.reconciler.reconcileClusters(Snapshot[D]{Databases: databases, Clusters: clusters})
-}
-
 // Runtime returns the live backend, topology, and session inventory.
 func (c *Controller[C, D]) Runtime() *Warden {
 	return c.runtime

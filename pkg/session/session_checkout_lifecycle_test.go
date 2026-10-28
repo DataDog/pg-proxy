@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -177,8 +178,9 @@ func TestDrainDoesNotStartNewTransactionAfterCurrentOneEnds(t *testing.T) {
 	// Only the COMMIT should reach Postgres. The session forwards it and we report
 	// the transaction has ended ('I'), which releases the link and makes the session
 	// idle.
-	_, err = fakePg.Receive()
-	assert.NoError(err)
+	msg, err := fakePg.Receive()
+	require.NoError(t, err)
+	require.Equal(t, &pgproto3.Query{String: "COMMIT"}, msg)
 	fakePg.Send(&pgproto3.CommandComplete{})
 	fakePg.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	assert.NoError(fakePg.Flush())
@@ -196,6 +198,7 @@ func TestDrainDoesNotStartNewTransactionAfterCurrentOneEnds(t *testing.T) {
 	errResp, ok := drainMsg.(*pgproto3.ErrorResponse)
 	assert.True(ok, "expected ErrorResponse but got %#v", drainMsg)
 	assert.Equal(pgerrcode.AdminShutdown, errResp.Code)
+	assert.True(strings.HasPrefix(errResp.Message, orgstoreClientDrainPrefix), errResp.Message)
 
 	// The session terminated cleanly via drain().
 	select {
@@ -209,6 +212,115 @@ func TestDrainDoesNotStartNewTransactionAfterCurrentOneEnds(t *testing.T) {
 	// transaction was started, and the session is left unlinked.
 	assert.Equal(int32(1), backend.acquisitions.Load(), "a second transaction was started during draining")
 	assert.Nil(session.CurrentLink())
+}
+
+func TestDrainWaitsForAutocommitQuery(t *testing.T) {
+	const insert = "INSERT INTO t VALUES (1)"
+	for _, tc := range []struct {
+		name      string
+		requests  []pgproto3.FrontendMessage
+		responses []pgproto3.BackendMessage
+	}{
+		{
+			name:     "simple",
+			requests: []pgproto3.FrontendMessage{&pgproto3.Query{String: insert}},
+			responses: []pgproto3.BackendMessage{
+				&pgproto3.CommandComplete{CommandTag: []byte("INSERT 0 1")},
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+			},
+		},
+		{
+			name: "extended",
+			requests: []pgproto3.FrontendMessage{
+				&pgproto3.Parse{Query: insert},
+				&pgproto3.Bind{},
+				&pgproto3.Execute{},
+				&pgproto3.Sync{},
+			},
+			responses: []pgproto3.BackendMessage{
+				&pgproto3.ParseComplete{},
+				&pgproto3.BindComplete{},
+				&pgproto3.CommandComplete{CommandTag: []byte("INSERT 0 1")},
+				&pgproto3.ReadyForQuery{TxStatus: 'I'},
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			clientConn, proxyClientConn := net.Pipe()
+			proxyPgConn, postgresConn := net.Pipe()
+			connections := []net.Conn{clientConn, proxyClientConn, proxyPgConn, postgresConn}
+			var done chan struct{}
+			t.Cleanup(func() {
+				cancel()
+				for _, conn := range connections {
+					conn.Close()
+				}
+				if done != nil {
+					select {
+					case <-done:
+					case <-time.After(5 * time.Second):
+						t.Error("session did not exit after closing the test connections")
+					}
+				}
+			})
+			for _, conn := range connections {
+				require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+			}
+
+			client := pgproto3.NewFrontend(clientConn, clientConn)
+			postgres := pgproto3.NewBackend(postgresConn, postgresConn)
+			backend := frontendBackend("testcluster", pgproto3.NewFrontend(proxyPgConn, proxyPgConn))
+			session := newPortableSession(ctx, pgproto3.NewBackend(proxyClientConn, proxyClientConn), proxyClientConn, backend, nil)
+			var runErr error
+			done = make(chan struct{})
+			go func() {
+				runErr = session.Run()
+				close(done)
+			}()
+
+			for _, request := range tc.requests {
+				client.Send(request)
+			}
+			require.NoError(t, client.Flush())
+			for _, request := range tc.requests {
+				msg, err := postgres.Receive()
+				require.NoError(t, err)
+				require.IsType(t, request, msg)
+			}
+
+			// Drain after the full request reaches Postgres, but before it replies.
+			require.False(t, session.Idle())
+			cancel()
+			for _, response := range tc.responses {
+				postgres.Send(response)
+			}
+			require.NoError(t, postgres.Flush())
+
+			// The query must finish before the client receives the retry-safe drain error.
+			for _, response := range tc.responses {
+				msg, err := client.Receive()
+				require.NoError(t, err)
+				require.Equal(t, response, msg)
+			}
+			msg, err := client.Receive()
+			require.NoError(t, err)
+			drainError, ok := msg.(*pgproto3.ErrorResponse)
+			require.True(t, ok, "expected a drain error, got %T", msg)
+			require.Equal(t, "FATAL", drainError.Severity)
+			require.Equal(t, pgerrcode.AdminShutdown, drainError.Code)
+			require.True(t, strings.HasPrefix(drainError.Message, orgstoreClientDrainPrefix), drainError.Message)
+
+			select {
+			case <-done:
+				require.NoError(t, runErr)
+			case <-time.After(5 * time.Second):
+				t.Fatal("session did not drain and exit")
+			}
+			require.Nil(t, session.CurrentLink())
+			require.Equal(t, int32(1), backend.acquisitions.Load())
+		})
+	}
 }
 
 // TestDrainReadTimeoutDoesNotAbortInFlightTransaction verifies that a client

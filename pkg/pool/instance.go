@@ -4,9 +4,20 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// ConnectionPool is the pool surface shared by regular and resizable pools.
+type ConnectionPool interface {
+	Acquire(context.Context) (*pgxpool.Conn, error)
+	Ping(context.Context) error
+	Close()
+	Reset()
+	Stat() *pgxpool.Stat
+	Config() *pgxpool.Config
+}
 
 // PostgresInstance is a directly addressable PostgreSQL server.
 type PostgresInstance interface {
@@ -30,7 +41,7 @@ type InstanceConfig struct {
 	Database         string
 	ConnectionString string
 	Tags             []string
-	PoolFactory      func(context.Context, string) (*pgxpool.Pool, error)
+	PoolFactory      func(context.Context, string) (ConnectionPool, error)
 	Hooks            InstanceHooks
 }
 
@@ -40,17 +51,24 @@ type Instance struct {
 	database         string
 	connectionString string
 	tags             []string
-	pool             *pgxpool.Pool
+	pool             ConnectionPool
 	healthy          bool
-	poolFactory      func(context.Context, string) (*pgxpool.Pool, error)
+	closed           bool
+	poolFactory      func(context.Context, string) (ConnectionPool, error)
 	hooks            InstanceHooks
+	// initMu prevents duplicate construction; mu coordinates pool publication
+	// without holding a lock across connection establishment.
+	initMu sync.Mutex
+	mu     sync.RWMutex
 }
 
 // NewInstance creates an uninitialized PostgreSQL instance.
 func NewInstance(cfg InstanceConfig) *Instance {
 	poolFactory := cfg.PoolFactory
 	if poolFactory == nil {
-		poolFactory = NewPGX
+		poolFactory = func(ctx context.Context, connectionString string) (ConnectionPool, error) {
+			return NewPGX(ctx, connectionString)
+		}
 	}
 	return &Instance{
 		address:          cfg.Address,
@@ -72,62 +90,99 @@ func (i *Instance) Database() string { return i.database }
 func (i *Instance) Tags() []string { return i.tags }
 
 // Pool returns the underlying pool, or nil before initialization.
-func (i *Instance) Pool() *pgxpool.Pool { return i.pool }
+func (i *Instance) Pool() ConnectionPool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pool
+}
 
 // SetHealthy updates the health snapshot.
-func (i *Instance) SetHealthy(healthy bool) { i.healthy = healthy }
+func (i *Instance) SetHealthy(healthy bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.healthy = healthy
+}
 
 // IsHealthy reports the current health snapshot.
 func (i *Instance) IsHealthy() bool {
+	i.mu.RLock()
+	healthy := i.healthy
+	i.mu.RUnlock()
 	if i.hooks.HealthObserved != nil {
-		i.hooks.HealthObserved(i.address, i.healthy, i.tags)
+		i.hooks.HealthObserved(i.address, healthy, i.tags)
 	}
-	return i.healthy
+	return healthy
 }
 
 // AcquireConnection checks out a connection from the initialized pool.
 func (i *Instance) AcquireConnection(ctx context.Context) (*pgxpool.Conn, error) {
-	if i.pool == nil {
+	pool := i.Pool()
+	if pool == nil {
 		return nil, fmt.Errorf("pool unexpectedly not initialized when attempting to acquire connection")
 	}
-	return i.pool.Acquire(ctx)
+	return pool.Acquire(ctx)
 }
 
-// Close closes the underlying pool asynchronously.
+// Close prevents further initialization and closes the underlying pool asynchronously.
 func (i *Instance) Close() {
-	if i.pool != nil {
-		go i.pool.Close()
+	i.mu.Lock()
+	if i.closed {
+		i.mu.Unlock()
+		return
+	}
+	i.closed = true
+	pool := i.pool
+	i.mu.Unlock()
+	if pool != nil {
+		go pool.Close()
 	}
 }
 
 // Stat returns nil until the underlying pool is initialized.
 func (i *Instance) Stat() *pgxpool.Stat {
-	if i.pool == nil {
+	pool := i.Pool()
+	if pool == nil {
 		return nil
 	}
-	return i.pool.Stat()
+	return pool.Stat()
 }
 
 // Reset closes all connections while leaving the pool open.
 func (i *Instance) Reset() {
-	if i.pool != nil {
-		i.pool.Reset()
+	if pool := i.Pool(); pool != nil {
+		pool.Reset()
 	}
 }
 
-// EnsurePool initializes the pool if necessary.
+// EnsurePool initializes the pool if necessary, unless the instance is closed.
 func (i *Instance) EnsurePool(ctx context.Context) bool {
-	if i.pool != nil {
+	i.initMu.Lock()
+	defer i.initMu.Unlock()
+	i.mu.RLock()
+	closed, initialized := i.closed, i.pool != nil
+	i.mu.RUnlock()
+	if closed {
+		return false
+	}
+	if initialized {
 		return true
 	}
 	connectionString := strings.TrimSpace(strings.ReplaceAll(i.connectionString, "target_session_attrs=primary", ""))
 	pool, err := i.poolFactory(ctx, connectionString)
+
 	if err != nil {
 		if i.hooks.PoolCreateError != nil {
 			i.hooks.PoolCreateError(i.address, i.database, err)
 		}
 		return false
 	}
+	i.mu.Lock()
+	if i.closed {
+		i.mu.Unlock()
+		pool.Close()
+		return false
+	}
 	i.pool = pool
+	i.mu.Unlock()
 	return true
 }

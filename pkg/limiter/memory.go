@@ -18,12 +18,18 @@ const (
 	v1UnsetSentinel = 0x7FFFFFFFFFFFF000
 )
 
+// Memory is the process cgroup hard memory cap. Available is false when the
+// cgroup has no hard limit or the limit could not be read.
+type Memory struct {
+	Bytes     int64
+	Available bool
+}
+
 // ReadHardLimit returns the process cgroup hard memory cap.
 // Hierarchy is detected with statfs (cgroup2 super magic vs v1 tmpfs layout);
 // then the matching limit file is read: v2 memory.max (including a nested path
 // from /proc/self/cgroup), or v1 memory.limit_in_bytes. An unavailable result
-// is used both for an unlimited cgroup and for a read failure; callers that
-// refresh a live limit should use Limiter.RefreshFromCgroup instead.
+// is used both for an unlimited cgroup and for a read failure.
 func ReadHardLimit() Memory {
 	memory, _ := readDefaultHardLimit()
 	return memory

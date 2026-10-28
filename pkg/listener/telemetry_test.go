@@ -17,7 +17,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
-	"github.com/DataDog/pg-proxy/pkg/limiter"
 )
 
 type listenerMetricCall struct {
@@ -77,9 +76,6 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = engine.Close() })
 
-	engine.overCapRejectCount.Store(3)
-	engine.refreshOverCapGate()
-
 	handleConnError(newBufferConn(nil), errors.New("open failed"), "tls_upgrade_failure")
 
 	ssl, err := (&pgproto3.SSLRequest{}).Encode(nil)
@@ -102,10 +98,6 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 
 	assert.Equal(t, []listenerMetricCall{
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 3,
-			tags: []string{"outcome:error", "error_type:" + string(limiter.GlobalLimitExceeded), "cap_mode:default", "placement:accept_reject"}, rate: 1,
-		},
-		{
 			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"outcome:error", "placement:tls_upgrade_failure"}, rate: 1,
 		},
@@ -115,7 +107,7 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 		},
 		{
 			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
-			tags: []string{"user:limited", "database:testdb", "client_service_account:limited", "passthrough_user:false", "outcome:error", "error_type:service_limit_exceeded", "cap_mode:default", "placement:register_session", "client_notified:true"}, rate: 1,
+			tags: []string{"user:limited", "database:testdb", "client_service_account:limited", "passthrough_user:false", "outcome:error", "error_type:service_limit_exceeded", "placement:register_session", "client_notified:true"}, rate: 1,
 		},
 		{
 			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,

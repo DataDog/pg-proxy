@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -12,8 +13,9 @@ import (
 )
 
 const (
-	poolResizeMetric = "dd.orgstore.pg_proxy.connections.pool_resize"
-	poolLimitMetric  = "dd.orgstore.pg_proxy.connections.pool_limit"
+	poolResizeMetric        = "dd.orgstore.pg_proxy.connections.pool_resize"
+	poolLimitMetric         = "dd.orgstore.pg_proxy.connections.pool_limit"
+	retirementRetryInterval = 50 * time.Millisecond
 )
 
 // Resizable wraps one pgxpool.Pool and enforces a dynamic virtual limit on its
@@ -22,17 +24,21 @@ type Resizable struct {
 	pgx  *pgxpool.Pool
 	gate *resizableGate
 
-	// resizeMu keeps the gate update and any required pool reset in one resize operation.
-	resizeMu sync.Mutex
+	// resizeMu serializes limit changes and recovery resets.
+	resizeMu      sync.Mutex
+	reconcileWake chan struct{}
+	reconcileStop chan struct{}
+	reconcileDone chan struct{}
+	closeOnce     sync.Once
 }
 
 // New constructs a Resizable without modifying config. The physical ceiling
 // remains config.MaxConns, while limit controls current capacity.
 //
-// Resizable assumes config.MinConns and config.MinIdleConns remain zero.
-// pgxpool maintains non-zero minimums through Puddle's CreateResource path,
-// which can add a connection to the idle pool after Reset without checking
-// whether its construction began before the reset.
+// pgxpool defaults config.MinConns and config.MinIdleConns to zero, and
+// Resizable requires them to remain zero.
+// Non-zero minimums could repeatedly recreate connections retired by the
+// virtual limit; background minimum maintenance is not supported.
 func New(ctx context.Context, config *pgxpool.Config, limit int32) (*Resizable, error) {
 	if config == nil {
 		return nil, errors.New("pgxpool config must not be nil")
@@ -50,7 +56,15 @@ func New(ctx context.Context, config *pgxpool.Config, limit int32) (*Resizable, 
 	if err != nil {
 		return nil, err
 	}
-	return &Resizable{pgx: pgx, gate: gate}, nil
+	r := &Resizable{
+		pgx:           pgx,
+		gate:          gate,
+		reconcileWake: make(chan struct{}, 1),
+		reconcileStop: make(chan struct{}),
+		reconcileDone: make(chan struct{}),
+	}
+	go r.reconcileConnections(r.releaseIdleConnections)
+	return r, nil
 }
 
 func (r *Resizable) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
@@ -74,9 +88,10 @@ func acquireWithGate(
 	}
 }
 
-// Resize changes the virtual connection limit. Downsizing below the number of
-// open connections resets pgx so idle connections close immediately and
-// acquired connections close on return.
+// Resize accepts a new virtual connection limit without waiting for physical
+// closures. A worker retries idle retirement until enough connections are
+// closing, including connections published idle after the initial sweep.
+// Acquired connections are evaluated for retirement when returned.
 func (r *Resizable) Resize(limit int32) error {
 	r.resizeMu.Lock()
 	defer r.resizeMu.Unlock()
@@ -92,7 +107,7 @@ func (r *Resizable) Resize(limit int32) error {
 		return err
 	}
 	totalOpen := r.TotalConnectionsOpen()
-	resetRequired := limit < totalOpen
+	connRetirementRequired := limit < totalOpen
 	_ = pgproxy.Metrics().Count(poolResizeMetric, 1, []string{"outcome:success"}, 1)
 	_ = pgproxy.Metrics().Gauge(poolLimitMetric, float64(limit), nil, 1)
 	pgproxy.Logger().Debug("resizable connection pool limit changed",
@@ -100,20 +115,9 @@ func (r *Resizable) Resize(limit int32) error {
 		"new_limit", limit,
 		"physical_ceiling", physicalCeiling,
 		"total_open_connections", totalOpen,
-		"reset_required", resetRequired,
+		"retirement_required", connRetirementRequired,
 	)
-	if resetRequired {
-		// Reset retires the current pool generation so replacement connections
-		// obey the lower virtual limit. Idle connections close immediately, while
-		// acquired connections close when returned.
-		// TODO(OSQUERY-615): Consider retiring only excess connections instead
-		// of resetting every physical connection.
-		pgproxy.Logger().Warn("resetting resizable connection pool after downsize",
-			"new_limit", limit,
-			"total_open_connections", totalOpen,
-		)
-		r.pgx.Reset()
-	}
+	r.requestReconciliation()
 	return nil
 }
 
@@ -168,4 +172,58 @@ func (r *Resizable) Reset() {
 	r.pgx.Reset()
 }
 
-func (r *Resizable) Close() { r.pgx.Close() }
+// requestReconciliation coalesces resizes; the worker always reads the latest limit.
+func (r *Resizable) requestReconciliation() {
+	select {
+	case r.reconcileWake <- struct{}{}:
+	default:
+	}
+}
+
+// reconcileConnections sleeps between resize requests when no further
+// retirements are needed. Retrying while excess remains covers both the gap
+// after AfterRelease and canceled constructors that publish directly to idle.
+func (r *Resizable) reconcileConnections(sweep func()) {
+	defer close(r.reconcileDone)
+	for {
+		select {
+		case <-r.reconcileStop:
+			return
+		case <-r.reconcileWake:
+		}
+		ticker := time.NewTicker(retirementRetryInterval)
+		for r.gate.needsRetirement() {
+			select {
+			case <-r.reconcileStop:
+				ticker.Stop()
+				return
+			default:
+			}
+			sweep()
+			select {
+			case <-r.reconcileStop:
+				ticker.Stop()
+				return
+			case <-r.reconcileWake:
+			case <-ticker.C:
+			}
+		}
+		ticker.Stop()
+	}
+}
+
+func (r *Resizable) releaseIdleConnections() {
+	// AfterRelease owns retirement reservations, including concurrent client
+	// releases. The sweep must not reserve or close connections independently.
+	for _, conn := range r.pgx.AcquireAllIdle(context.Background()) {
+		conn.Release()
+	}
+}
+
+func (r *Resizable) Close() {
+	r.closeOnce.Do(func() {
+		close(r.reconcileStop)
+		<-r.reconcileDone
+		r.pgx.Close()
+	})
+}

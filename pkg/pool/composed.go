@@ -14,12 +14,12 @@ type PGXHooks struct {
 
 // PGXPool adapts pgxpool.Pool to the portable Pool contract.
 type PGXPool struct {
-	pool  *pgxpool.Pool
+	pool  ConnectionPool
 	hooks PGXHooks
 }
 
 // NewPGXPool wraps an initialized pgx pool.
-func NewPGXPool(pool *pgxpool.Pool, hooks PGXHooks) *PGXPool {
+func NewPGXPool(pool ConnectionPool, hooks PGXHooks) *PGXPool {
 	return &PGXPool{pool: pool, hooks: hooks}
 }
 
@@ -126,3 +126,6 @@ func (p *DirectOnlyPool) Close() {
 	}
 }
 func (p *DirectOnlyPool) Reset() { p.Direct.Reset() }
+
+// ConnectionPool returns the underlying physical pool.
+func (p *PGXPool) ConnectionPool() ConnectionPool { return p.pool }

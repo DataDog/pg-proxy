@@ -110,6 +110,16 @@ func sqlHealthCheckPoolConfig(connString, applicationName string) (*pgxpool.Conf
 		return nil, fmt.Errorf("parse SQL health-check pool config: %w", err)
 	}
 
+	return SQLHealthCheckConfig(cfg, SQLHealthCheckPoolsConfig{ApplicationName: applicationName}), nil
+}
+
+// SQLHealthCheckConfig copies connection settings and applies the probe limits.
+func SQLHealthCheckConfig(source *pgxpool.Config, options SQLHealthCheckPoolsConfig) *pgxpool.Config {
+	cfg := source.Copy()
+	applicationName := options.ApplicationName
+	if applicationName == "" {
+		applicationName = DefaultSQLHealthCheckApplicationName
+	}
 	// Apply health-check settings after parsing so connection-string parameters cannot override
 	// them. MinConns keeps the connection warm between checks.
 	cfg.MaxConns = sqlHealthCheckMaxConns
@@ -120,7 +130,7 @@ func sqlHealthCheckPoolConfig(connString, applicationName string) (*pgxpool.Conf
 	}
 	cfg.ConnConfig.RuntimeParams["application_name"] = applicationName
 	cfg.ConnConfig.RuntimeParams["statement_timeout"] = strconv.FormatInt(SQLHealthCheckStatementTimeout.Milliseconds(), 10)
-	return cfg, nil
+	return cfg
 }
 
 func newSQLHealthCheckPool(ctx context.Context, cfg *pgxpool.Config) (*pgxpool.Pool, error) {

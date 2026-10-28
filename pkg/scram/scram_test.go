@@ -1,7 +1,6 @@
 package scram
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
@@ -12,76 +11,73 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	xdgscram "github.com/xdg-go/scram"
 
 	"github.com/DataDog/pg-proxy/pkg/protocol"
 )
 
-// scramClient drives the client half of the PostgreSQL SCRAM-SHA-256 SASL exchange
-// over a pgproto3 frontend. It is a minimal, self-contained client used only to
-// behavior-test Authenticate: it speaks the real wire protocol and computes the
-// client proof from the password it is given (which may intentionally differ from the
-// server's expected password to exercise the failure path).
+// scramClient uses an independent SCRAM implementation with explicit prepared
+// password bytes, so neither client proofs nor server-signature checks share the
+// server's normalization or cryptographic helpers.
 type scramClient struct {
 	frontend  *pgproto3.Frontend
 	password  string
 	clientNon string
 }
 
-// run performs the full client side of the handshake and returns the final message the
-// server sent (an *AuthenticationSASLFinal on success), or an error if the exchange
-// could not be completed from the client's perspective.
 func (c *scramClient) run() (pgproto3.BackendMessage, error) {
-	// 1. Server advertises SASL mechanisms.
+	client, err := xdgscram.SHA256.NewClientUnprepped("", c.password, "")
+	if err != nil {
+		return nil, err
+	}
+	client.WithNonceGenerator(func() string { return c.clientNon })
+	conversation := client.NewConversation()
 	msg, err := c.frontend.Receive()
 	if err != nil {
-		return nil, fmt.Errorf("receiving AuthenticationSASL: %w", err)
+		return nil, err
 	}
 	if _, ok := msg.(*pgproto3.AuthenticationSASL); !ok {
 		return nil, fmt.Errorf("expected AuthenticationSASL, got %T", msg)
 	}
-
-	// 2. Client sends client-first-message. PostgreSQL clients send an empty username
-	//    in the SCRAM exchange (it was already provided in the startup message).
-	clientFirstBare := "n=,r=" + c.clientNon
-	c.frontend.Send(&pgproto3.SASLInitialResponse{
-		AuthMechanism: "SCRAM-SHA-256",
-		Data:          []byte("n,," + clientFirstBare),
-	})
-	if err := c.frontend.Flush(); err != nil {
-		return nil, fmt.Errorf("sending SASLInitialResponse: %w", err)
+	first, err := conversation.Step("")
+	if err != nil {
+		return nil, err
 	}
-
-	// 3. Server replies with server-first-message (combined nonce, salt, iterations).
+	c.frontend.Send(&pgproto3.SASLInitialResponse{AuthMechanism: "SCRAM-SHA-256", Data: []byte(first)})
+	if err := c.frontend.Flush(); err != nil {
+		return nil, err
+	}
 	msg, err = c.frontend.Receive()
 	if err != nil {
-		return nil, fmt.Errorf("receiving AuthenticationSASLContinue: %w", err)
+		return nil, err
 	}
 	cont, ok := msg.(*pgproto3.AuthenticationSASLContinue)
 	if !ok {
 		return nil, fmt.Errorf("expected AuthenticationSASLContinue, got %T", msg)
 	}
-	serverFirst := string(cont.Data)
-	combinedNonce, salt, iterations, err := parseServerFirst(serverFirst)
+	response, err := conversation.Step(string(cont.Data))
 	if err != nil {
 		return nil, err
 	}
-
-	// 4. Client computes the proof and sends client-final-message.
-	clientFinalWithoutProof := "c=biws,r=" + combinedNonce
-	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
-	proof, err := clientProof(c.password, salt, iterations, authMessage)
-	if err != nil {
-		return nil, err
-	}
-	c.frontend.Send(&pgproto3.SASLResponse{
-		Data: []byte(clientFinalWithoutProof + ",p=" + proof),
-	})
+	c.frontend.Send(&pgproto3.SASLResponse{Data: []byte(response)})
 	if err := c.frontend.Flush(); err != nil {
-		return nil, fmt.Errorf("sending SASLResponse: %w", err)
+		return nil, err
 	}
-
-	// 5. Server sends server-final-message on success.
-	return c.frontend.Receive()
+	msg, err = c.frontend.Receive()
+	if err != nil {
+		return nil, err
+	}
+	final, ok := msg.(*pgproto3.AuthenticationSASLFinal)
+	if !ok {
+		return nil, fmt.Errorf("expected AuthenticationSASLFinal, got %T", msg)
+	}
+	if _, err := conversation.Step(string(final.Data)); err != nil {
+		return nil, err
+	}
+	if !conversation.Valid() {
+		return nil, errors.New("server signature was not verified")
+	}
+	return final, nil
 }
 
 func parseServerFirst(data string) (nonce, salt string, iterations int, err error) {
@@ -103,27 +99,6 @@ func parseServerFirst(data string) (nonce, salt string, iterations int, err erro
 	return nonce, salt, iterations, nil
 }
 
-// clientProof computes the SCRAM-SHA-256 client proof the way a real Postgres client
-// would, from this package's primitives. Sharing them is a known weakness of this
-// test — an error common to both sides cancels out — which is why the app's
-// listener test drives the same exchange with pgx's independent implementation. What
-// this covers is the conversation and the state machine.
-func clientProof(password, b64Salt string, iterations int, authMessage string) (string, error) {
-	salt, err := base64.StdEncoding.DecodeString(b64Salt)
-	if err != nil {
-		return "", fmt.Errorf("decoding salt: %w", err)
-	}
-	saltedPassword := hi([]byte(normalize(password)), salt, iterations)
-	clientKey := hmacSHA256(saltedPassword, []byte("Client Key"))
-	storedKey := hash(string(clientKey))
-	clientSignature := hmacSHA256(storedKey, []byte(authMessage))
-	proof := make([]byte, len(clientSignature))
-	for i := range clientSignature {
-		proof[i] = clientKey[i] ^ clientSignature[i]
-	}
-	return base64.StdEncoding.EncodeToString(proof), nil
-}
-
 // startScramServer runs Authenticate on the server end of an in-memory pipe and
 // returns the client-side frontend plus a channel carrying the server's result. It
 // runs over a real ConnExchange, so the messages are genuinely encoded and decoded.
@@ -135,6 +110,7 @@ func startScramServer(t *testing.T, username, serverPassword string) (*pgproto3.
 
 	errChan := make(chan error, 1)
 	go func() {
+		defer server.Close()
 		ex := protocol.NewConnExchange(server, pgproto3.NewBackend(server, server))
 		errChan <- Authenticate(ex, username, serverPassword)
 	}()
@@ -238,4 +214,36 @@ func TestAuthenticate(t *testing.T) {
 		err = <-errChan
 		assert.ErrorContains(t, err, "does not match expected username")
 	})
+}
+
+func TestAuthenticatePasswordNormalization(t *testing.T) {
+	for _, tt := range passwordVectors {
+		t.Run(tt.name, func(t *testing.T) {
+			frontend, result, cleanup := startScramServer(t, "testuser", tt.password)
+			defer cleanup()
+			client := &scramClient{frontend: frontend, password: tt.prepared, clientNon: "independent-client-nonce"}
+			_, err := client.run()
+			require.NoError(t, err)
+			require.NoError(t, <-result)
+		})
+	}
+
+	for _, tt := range []struct{ name, password, rejected string }{
+		{"stripped Unicode", "abc密码", "abc"},
+		{"empty against Unicode", "密码", ""},
+		{"empty against mapped-to-empty", "\u00ad", ""},
+		{"stripped prohibited", "a\u00ad\a", "a"},
+		{"stripped invalid UTF-8", "a\u00ad\xff", "a"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			frontend, result, cleanup := startScramServer(t, "testuser", tt.password)
+			defer cleanup()
+			client := &scramClient{frontend: frontend, password: tt.rejected, clientNon: "independent-client-nonce"}
+			_, err := client.run()
+			require.Error(t, err)
+			var authErr *AuthFailedError
+			require.ErrorAs(t, <-result, &authErr)
+			assert.ErrorContains(t, authErr.Reason, "client proof mismatch")
+		})
+	}
 }

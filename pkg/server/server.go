@@ -25,15 +25,14 @@ type SessionRegistry interface {
 // Config contains listener settings, caller-owned inventories, and app integrations.
 // NewServer wires startup resolution, session construction, and lifecycle internally.
 type Config struct {
-	ListenAddress           string
-	TLSConfig               *tls.Config
-	RequireTLS              bool
-	Admission               listener.Admission
-	Authenticate            func(context.Context, listener.StartupRequest, listener.StartupResult[ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error)
-	LoadShedder             listener.LoadShedder
-	AcceptLoopRejectEnabled func(context.Context) bool
-	Runtime                 RuntimeConfig
-	Sessions                SessionRegistry
+	ListenAddress string
+	TLSConfig     *tls.Config
+	RequireTLS    bool
+	Admission     listener.Admission
+	Authenticate  func(context.Context, listener.StartupRequest, listener.StartupResult[ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error)
+	LoadShedder   listener.LoadShedder
+	Runtime       RuntimeConfig
+	Sessions      SessionRegistry
 }
 
 // Server owns the listener and the runtime used to construct its sessions.
@@ -57,12 +56,11 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		RequireTLS:    cfg.RequireTLS,
 		Admission:     cfg.Admission,
 		Hooks: listener.Hooks[ResolvedStartup]{
-			ResolveStartup:          runtime.ResolveStartup,
-			NewSession:              runtime.NewSession,
-			Authenticate:            cfg.Authenticate,
-			LoadShedder:             cfg.LoadShedder,
-			AcceptLoopRejectEnabled: cfg.AcceptLoopRejectEnabled,
-			Lifecycle:               sessionLifecycle(cfg.Sessions),
+			ResolveStartup: runtime.ResolveStartup,
+			NewSession:     runtime.NewSession,
+			Authenticate:   cfg.Authenticate,
+			LoadShedder:    cfg.LoadShedder,
+			Lifecycle:      sessionLifecycle(cfg.Sessions),
 		},
 	})
 	if err != nil {

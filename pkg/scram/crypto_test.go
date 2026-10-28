@@ -67,38 +67,33 @@ func TestHiFunction(t *testing.T) {
 	assert.NotEqual(t, result, result4)
 }
 
-func TestNormalizeFunction(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    string
-		expected string
-	}{
-		{
-			name:     "ASCII only",
-			input:    "password123",
-			expected: "password123",
-		},
-		{
-			name:     "Mixed case",
-			input:    "PassWord",
-			expected: "PassWord",
-		},
-		{
-			name:     "With spaces",
-			input:    "pass word",
-			expected: "pass word",
-		},
-		{
-			name:     "Special characters",
-			input:    "p@ssw0rd!",
-			expected: "p@ssw0rd!",
-		},
-	}
+// Expected bytes were checked against libpq 18.6 SCRAM verifiers. In particular,
+// libpq checks the mapped input before NFKC and rejects map-to-empty passwords.
+var passwordVectors = []struct {
+	name, password, prepared string
+}{
+	{"ASCII", "Pass word!123", "Pass word!123"},
+	{"mixed Unicode", "abc密码", "abc密码"},
+	{"Unicode only", "密码", "密码"},
+	{"mapped to nothing", "I\u00adX", "IX"},
+	{"non-ASCII space", "a\u00a0b", "a b"},
+	{"overlapping mappings", "a\u200bb", "a b"},
+	{"NFKC", "\u2168", "IX"},
+	{"combining", "e\u0301", "é"},
+	{"mapped to empty", "\u00ad", "\u00ad"},
+	{"prohibited", "a\u00ad\a", "a\u00ad\a"},
+	{"unassigned", "\u00ad\u0221", "\u00ad\u0221"},
+	{"invalid bidi", "a\u00ad\u0627", "a\u00ad\u0627"},
+	{"prohibited before NFKC", "\u0340", "\u0340"},
+	{"unassigned before NFKC", "\u1d2c", "\u1d2c"},
+	{"valid bidi", "\u0627\u0031\u0628", "\u0627\u0031\u0628"},
+	{"invalid UTF-8", "a\u00ad\xff", "a\u00ad\xff"},
+}
 
-	for _, tt := range tests {
+func TestNormalizeFunction(t *testing.T) {
+	for _, tt := range passwordVectors {
 		t.Run(tt.name, func(t *testing.T) {
-			result := normalize(tt.input)
-			assert.Equal(t, tt.expected, result)
+			assert.Equal(t, tt.prepared, normalize(tt.password))
 		})
 	}
 }

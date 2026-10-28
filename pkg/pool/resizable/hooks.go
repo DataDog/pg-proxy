@@ -12,6 +12,8 @@ import (
 // waits instead of returning it to the caller.
 var errVirtualConnectionLimit = errors.New("virtual connection limit reached")
 
+const retirementMarkerKey = "pg-proxy.resizable.retiring"
+
 // installHooks composes physical-capacity accounting with all lifecycle
 // hooks already configured by the caller.
 func installHooks(config *pgxpool.Config, gate *resizableGate) {
@@ -22,11 +24,11 @@ func installHooks(config *pgxpool.Config, gate *resizableGate) {
 		}
 		if beforeConnect != nil {
 			if err := beforeConnect(ctx, connConfig); err != nil {
-				gate.release()
+				gate.connConstructionFailed()
 				return err
 			}
 		}
-		connConfig.Tracer = newConnectionTracer(connConfig.Tracer, gate.release)
+		connConfig.Tracer = newConnectionTracer(connConfig.Tracer, gate.connConstructionFailed)
 		return nil
 	}
 
@@ -37,8 +39,8 @@ func installHooks(config *pgxpool.Config, gate *resizableGate) {
 		}
 		if err := afterConnect(ctx, conn); err != nil {
 			// pgxpool closes a connection rejected by AfterConnect without adding
-			// it to the pool, so BeforeClose cannot release its reserved gate slot.
-			releaseAfterCleanup(gate, conn.PgConn().CleanupDone())
+			// it to the pool, so BeforeClose cannot record when it finishes closing.
+			recordConnClosedAfterCleanup(gate, conn.PgConn().CleanupDone(), false)
 			return err
 		}
 		return nil
@@ -46,29 +48,54 @@ func installHooks(config *pgxpool.Config, gate *resizableGate) {
 
 	afterRelease := config.AfterRelease
 	config.AfterRelease = func(conn *pgx.Conn) bool {
-		keep := afterRelease == nil || afterRelease(conn)
-		if keep {
-			// pgxpool returns the connection after this hook. This notification is
-			// therefore only a hint; Acquire also retries on a bounded interval.
-			gate.notifyIdleConnAvailability()
+		keepConn := afterRelease == nil || afterRelease(conn)
+		if !keepConn {
+			if conn != nil {
+				gate.trackClosingConnection()
+				markForRetirement(conn)
+			}
+			return false
 		}
-		return keep
+		if gate.tryRetireExcessConnection() {
+			markForRetirement(conn)
+			return false
+		}
+		// pgxpool returns the connection after this hook. This notification is
+		// therefore only a hint; Acquire also retries on a bounded interval.
+		gate.notifyIdleConnAvailability()
+		return true
 	}
 
 	beforeClose := config.BeforeClose
 	config.BeforeClose = func(conn *pgx.Conn) {
-		defer releaseAfterCleanup(gate, conn.PgConn().CleanupDone())
+		defer recordConnClosedAfterCleanup(gate, conn.PgConn().CleanupDone(), isMarkedForRetirement(conn))
 		if beforeClose != nil {
 			beforeClose(conn)
 		}
 	}
 }
 
-// releaseAfterCleanup retains the physical slot until pgx confirms that the
-// underlying network resources have finished closing.
-func releaseAfterCleanup(gate *resizableGate, cleanupDone <-chan struct{}) {
+// markForRetirement records that AfterRelease selected this connection to
+// close, so BeforeClose can finish the corresponding gate accounting.
+func markForRetirement(conn *pgx.Conn) {
+	if conn != nil {
+		conn.PgConn().CustomData()[retirementMarkerKey] = struct{}{}
+	}
+}
+
+func isMarkedForRetirement(conn *pgx.Conn) bool {
+	_, marked := conn.PgConn().CustomData()[retirementMarkerKey]
+	return marked
+}
+
+// recordConnClosedAfterCleanup counts pending closures toward retirement while
+// retaining physical capacity until the underlying network resources are closed.
+func recordConnClosedAfterCleanup(gate *resizableGate, cleanupDone <-chan struct{}, retiring bool) {
+	if !retiring {
+		gate.trackClosingConnection()
+	}
 	go func() {
 		<-cleanupDone
-		gate.release()
+		gate.retiringConnClosed()
 	}()
 }

@@ -102,14 +102,79 @@ func TestHooksNotifyOnlyWhenConnectionReturnsIdle(t *testing.T) {
 	assert.True(t, channelClosed(signal))
 }
 
-func TestReleaseAfterCleanupRetainsSlotUntilCleanupCompletes(t *testing.T) {
+func TestRecordConnClosedAfterCleanupRetainsCountUntilCleanupCompletes(t *testing.T) {
 	gate, err := newResizableGate(1)
 	require.NoError(t, err)
 	require.True(t, gate.tryReserve())
 	cleanupDone := make(chan struct{})
 
-	releaseAfterCleanup(gate, cleanupDone)
+	recordConnClosedAfterCleanup(gate, cleanupDone, false)
 	assert.Never(t, func() bool { return gate.getTotalOpenConns() == 0 }, 10*time.Millisecond, time.Millisecond)
 	close(cleanupDone)
 	assert.Eventually(t, func() bool { return gate.getTotalOpenConns() == 0 }, time.Second, time.Millisecond)
+}
+
+func TestRecordConnClosedAfterCleanupCompletesRetirement(t *testing.T) {
+	gate, err := newResizableGate(1)
+	require.NoError(t, err)
+	require.True(t, gate.tryReserve())
+	gate.trackClosingConnection()
+	cleanupDone := make(chan struct{})
+
+	recordConnClosedAfterCleanup(gate, cleanupDone, true)
+	assert.EqualValues(t, 1, gate.getTotalOpenConns())
+	assert.EqualValues(t, 1, gate.getNumConnsRetiring())
+	close(cleanupDone)
+	assert.Eventually(t, func() bool {
+		return gate.getTotalOpenConns() == 0 && gate.getNumConnsRetiring() == 0
+	}, time.Second, time.Millisecond)
+}
+
+// Pending pgx closures must count toward a downsize before cleanup finishes.
+func TestPendingClosuresPreventExcessRetirement(t *testing.T) {
+	for _, resizeFirst := range []bool{false, true} {
+		name := "close_before_resize"
+		if resizeFirst {
+			name = "resize_before_close"
+		}
+		t.Run(name, func(t *testing.T) {
+			gate, err := newResizableGate(5)
+			require.NoError(t, err)
+			for i := 0; i < 5; i++ {
+				require.True(t, gate.tryReserve())
+			}
+			config, err := pgxpool.ParseConfig("postgres://localhost/test")
+			require.NoError(t, err)
+			installHooks(config, gate)
+
+			if resizeFirst {
+				require.NoError(t, gate.resize(3))
+			}
+			cleanupDone := make(chan struct{})
+			defer func() {
+				if !channelClosed(cleanupDone) {
+					close(cleanupDone)
+				}
+			}()
+			recordConnClosedAfterCleanup(gate, cleanupDone, false)
+			recordConnClosedAfterCleanup(gate, cleanupDone, false)
+			if !resizeFirst {
+				require.NoError(t, gate.resize(3))
+			}
+
+			assert.EqualValues(t, 5, gate.getTotalOpenConns())
+			assert.EqualValues(t, 2, gate.getNumConnsRetiring())
+			assert.False(t, gate.tryReserve(), "cleanup must still occupy physical capacity")
+			assert.False(t, gate.needsRetirement(), "reconciliation must exclude pending closures")
+			for i := 0; i < 3; i++ {
+				assert.True(t, config.AfterRelease(nil), "keep the remaining healthy connections")
+			}
+
+			close(cleanupDone)
+			assert.Eventually(t, func() bool {
+				return gate.getTotalOpenConns() == 3 && gate.getNumConnsRetiring() == 0
+			}, time.Second, time.Millisecond)
+			assert.False(t, gate.needsRetirement())
+		})
+	}
 }

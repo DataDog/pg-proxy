@@ -60,7 +60,6 @@ func newTestListener(ctx context.Context) (*Listener[struct{}], *limiter.Limiter
 	admission := limiter.New(limiter.Params{
 		GlobalLimit:       100,
 		DefaultServiceMax: 100,
-		MemoryFallback:    100,
 	})
 	shedder := &testLoadShedder{}
 	lifecycle := &testLifecycle{sessions: make(map[uint32]pgsession.SessionHandle)}
@@ -379,78 +378,6 @@ func TestLoadSheddingConnectionRejectionDoesNotBlockWithoutStartupBytes(t *testi
 	case <-time.After(loadSheddingStartupPeekTimeout + 500*time.Millisecond):
 		t.Fatal("load-shedding rejection blocked waiting for startup bytes")
 	}
-}
-
-// TestOverCapAcceptGate verifies the accept-loop over-cap gate: once the reject
-// flag is enabled and the global session count is at/over the effective cap, new
-// connections are bare-closed at accept time — before any protocol bytes are
-// exchanged — while connections proceed normally when the gate is disabled or
-// the count is under cap.
-func TestOverCapAcceptGate(t *testing.T) {
-	newGatedListener := func(t *testing.T, flagEnabled, atCap bool) *Listener[struct{}] {
-		t.Helper()
-		ctx, cancel := context.WithCancel(context.Background())
-		t.Cleanup(cancel)
-		engine, _, _, err := newTestListener(ctx)
-		require.NoError(t, err)
-		t.Cleanup(func() { _ = engine.Close() })
-		admission := limiter.New(limiter.Params{
-			GlobalLimit:       1,
-			DefaultServiceMax: 10,
-			MemoryFallback:    1,
-		})
-		engine.cfg.Admission = admission
-		if atCap {
-			require.NoError(t, admission.RegisterSession("at-cap"))
-		}
-		engine.cfg.Hooks.AcceptLoopRejectEnabled = func(context.Context) bool { return flagEnabled }
-		engine.refreshOverCapGate()
-		go func() { _ = engine.Run() }()
-		return engine
-	}
-	connect := func(t *testing.T, engine *Listener[struct{}]) (net.Conn, *pgproto3.Frontend) {
-		t.Helper()
-		conn, err := net.Dial("tcp", engine.Addr().String())
-		require.NoError(t, err)
-		conn.SetDeadline(time.Now().Add(2 * time.Second))
-		return conn, pgproto3.NewFrontend(conn, conn)
-	}
-	sendStartup := func(t *testing.T, frontend *pgproto3.Frontend) {
-		t.Helper()
-		frontend.Send(&pgproto3.StartupMessage{
-			ProtocolVersion: pgproto3.ProtocolVersionNumber,
-			Parameters:      map[string]string{"user": "testuser", "database": "testdb"},
-		})
-		require.NoError(t, frontend.Flush())
-	}
-
-	t.Run("flag off, at cap: startup rejects with error", func(t *testing.T) {
-		client, frontend := connect(t, newGatedListener(t, false, true))
-		defer client.Close()
-		sendStartup(t, frontend)
-		message, err := frontend.Receive()
-		require.NoError(t, err)
-		response, ok := message.(*pgproto3.ErrorResponse)
-		require.True(t, ok)
-		assert.Equal(t, pgerrcode.TooManyConnections, response.Code)
-	})
-	t.Run("flag on, under cap: gate does not engage", func(t *testing.T) {
-		client, frontend := connect(t, newGatedListener(t, true, false))
-		defer client.Close()
-		sendStartup(t, frontend)
-		message, err := frontend.Receive()
-		require.NoError(t, err)
-		_, ok := message.(*pgproto3.AuthenticationOk)
-		require.True(t, ok)
-	})
-	t.Run("flag on, at cap: connection is bare-closed at accept", func(t *testing.T) {
-		client, _ := connect(t, newGatedListener(t, true, true))
-		defer client.Close()
-		buffer := make([]byte, 1)
-		count, err := client.Read(buffer)
-		assert.Zero(t, count)
-		assert.ErrorIs(t, err, io.EOF)
-	})
 }
 
 func TestConnectionDrainingWatcherUnblocksIdleSession(t *testing.T) {

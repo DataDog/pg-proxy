@@ -53,13 +53,13 @@ func TestResizableGateDoesNotExceedLimitConcurrently(t *testing.T) {
 	assert.Equal(t, limit, gate.getTotalOpenConns())
 }
 
-func TestResizableGateReleaseWakesWaiterAtAvailableCapacity(t *testing.T) {
+func TestResizableGateConnCloseWakesWaiterAtAvailableCapacity(t *testing.T) {
 	gate, err := newResizableGate(1)
 	require.NoError(t, err)
 	require.True(t, gate.tryReserve())
 	signal := gate.getAvailabilitySignal()
 
-	gate.release()
+	gate.connClosed()
 	require.NoError(t, gate.wait(context.Background(), signal))
 	assert.EqualValues(t, 0, gate.getTotalOpenConns())
 	assert.True(t, gate.tryReserve())
@@ -86,14 +86,54 @@ func TestResizableGateResizeDownWaitsForEnoughConnectionsToClose(t *testing.T) {
 	signal := gate.getAvailabilitySignal()
 	require.NoError(t, gate.resize(1))
 
-	gate.release()
-	gate.release()
+	gate.connClosed()
+	gate.connClosed()
 	assert.False(t, channelClosed(signal), "capacity is still at the smaller limit")
 	assert.False(t, gate.tryReserve())
 
-	gate.release()
+	gate.connClosed()
 	assert.True(t, channelClosed(signal), "capacity is now below the smaller limit")
 	assert.True(t, gate.tryReserve())
+}
+
+func TestResizableGateRetiresOnlyConcurrentExcess(t *testing.T) {
+	gate, err := newResizableGate(5)
+	require.NoError(t, err)
+	for range 5 {
+		require.True(t, gate.tryReserve())
+	}
+	require.NoError(t, gate.resize(2))
+
+	const contenders = 100
+	start := make(chan struct{})
+	results := make(chan bool, contenders)
+	var wg sync.WaitGroup
+	for range contenders {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			results <- gate.tryRetireExcessConnection()
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	var retiring int32
+	for selected := range results {
+		if selected {
+			retiring++
+		}
+	}
+	assert.EqualValues(t, 3, retiring)
+	assert.EqualValues(t, 3, gate.getNumConnsRetiring())
+
+	for range retiring {
+		gate.retiringConnClosed()
+	}
+	assert.EqualValues(t, 2, gate.getTotalOpenConns())
+	assert.EqualValues(t, 0, gate.getNumConnsRetiring())
 }
 
 func TestResizableGateIdleNotificationWakesWaiterWithoutFreeingSlot(t *testing.T) {

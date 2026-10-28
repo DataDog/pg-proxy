@@ -10,23 +10,7 @@ import (
 	pgproxy "github.com/DataDog/pg-proxy"
 )
 
-// Memory-derived global session limit:
-// max(floor, (memory hard limit × safety fraction) / bytes per session).
-const (
-	defaultGaugeInterval = 2 * time.Second
-
-	// BytesPerSession is the marginal per-session memory cost — allocations that scale with
-	// the number of open sessions: TLS session state, pgproto3 read/write buffers, the
-	// per-connection goroutine stack, and per-connection kernel socket buffers. It is anchored
-	// on Δmemory/Δconnections analysis across pods (~50 KiB measured) and set above the measured
-	// value to leave room for heavier client workloads.
-	BytesPerSession = 60 * 1024 // 60 KiB
-
-	// MemorySafetyFraction accounts for process-wide overhead that does not scale per session:
-	// Go runtime/heap fragmentation and GC slack, baseline non-session allocations, and shared
-	// mappings. It is multiplicative so larger pods carry proportional slack.
-	MemorySafetyFraction = 0.8
-)
+const defaultGaugeInterval = 2 * time.Second
 
 // ServiceQuota is a per-service session cap. Name is the key RegisterSession
 // will look up (already normalized by the embedder).
@@ -35,27 +19,12 @@ type ServiceQuota struct {
 	Max  int32
 }
 
-// Memory is an optional memory budget used to derive a global session cap.
-// When Available is false, Params.MemoryFallback is used instead.
-type Memory struct {
-	Bytes     int64
-	Available bool
-}
-
 // Params constructs a Limiter. GlobalLimit is the configured cap.
 // DefaultServiceMax is applied to services that were not pre-registered.
-// MemoryFloor is the minimum derived cap; MemoryFallback is used when Memory
-// is unavailable.
 type Params struct {
 	GlobalLimit       int32
 	DefaultServiceMax int32
-	MemoryFloor       int32
-	MemoryFallback    int32
-	// MemDerivedGlobalLimitFloor is retained for compatibility with existing
-	// embedders. MemoryFloor takes precedence when it is positive.
-	MemDerivedGlobalLimitFloor int32
-	Memory                     Memory
-	Quotas                     []ServiceQuota
+	Quotas            []ServiceQuota
 	// GaugeInterval controls how often ExportGauges emits limiter state.
 	// Values at or below zero use the two-second production default.
 	GaugeInterval time.Duration
@@ -68,16 +37,7 @@ type Limiter struct {
 	globalCount atomic.Int32 // Total active sessions across all services
 	globalLimit atomic.Int32 // Configured global session cap
 
-	// Global session cap computed from the supplied memory budget at construction.
-	// Emitted as a gauge; when enforceMemDerived returns true, RegisterSession enforces
-	// min(globalLimit, memDerivedGlobalLimit) so the configured cap remains an upper bound.
-	memDerivedGlobalLimit      atomic.Int32
-	defaultServiceMax          int32
-	memDerivedGlobalLimitFloor int32
-
-	// Optional; when non-nil and returning true, RegisterSession clamps the active cap to
-	// memDerivedGlobalLimit. Read on every RegisterSession call.
-	enforceMemDerived func() bool
+	defaultServiceMax int32
 	gaugeInterval     time.Duration
 
 	services sync.Map // map[string]*ServiceState
@@ -97,17 +57,10 @@ const (
 	ServiceLimitExceeded ErrorType = "service_limit_exceeded"
 )
 
-// CapMode identifies which global cap was active when a session was registered.
-const (
-	CapModeDefault    = "default"
-	CapModeMemDerived = "mem_derived"
-)
-
 // Error is returned when a session exceeds a configured limit.
 type Error struct {
-	Type    ErrorType
-	CapMode string
-	Err     error
+	Type ErrorType
+	Err  error
 }
 
 func (e *Error) Error() string {
@@ -124,21 +77,11 @@ func New(p Params) *Limiter {
 	if gaugeInterval <= 0 {
 		gaugeInterval = defaultGaugeInterval
 	}
-	memoryFloor := p.MemoryFloor
-	if memoryFloor <= 0 {
-		memoryFloor = p.MemDerivedGlobalLimitFloor
-	}
-	memoryFallback := p.MemoryFallback
-	if memoryFallback <= 0 {
-		memoryFallback = p.GlobalLimit
-	}
 	sl := &Limiter{
-		defaultServiceMax:          p.DefaultServiceMax,
-		memDerivedGlobalLimitFloor: memoryFloor,
-		gaugeInterval:              gaugeInterval,
+		defaultServiceMax: p.DefaultServiceMax,
+		gaugeInterval:     gaugeInterval,
 	}
 	sl.globalLimit.Store(p.GlobalLimit)
-	sl.setMemDerivedGlobalLimit(p.Memory, memoryFallback)
 	for _, quota := range p.Quotas {
 		if quota.Name != "" {
 			sl.RegisterService(quota.Name, quota.Max)
@@ -148,7 +91,7 @@ func New(p Params) *Limiter {
 }
 
 // ExportGauges reports active per-service and global session counts plus the
-// memory-derived global limit until ctx is canceled.
+// configured global session limit until ctx is canceled.
 func (sl *Limiter) ExportGauges(ctx context.Context) {
 	ticker := time.NewTicker(sl.gaugeInterval)
 	defer ticker.Stop()
@@ -173,8 +116,8 @@ func (sl *Limiter) ExportGauges(ctx context.Context) {
 			)
 			_ = pgproxy.Metrics().Gauge(
 				"dd.orgstore.pg_proxy.session_limit.global",
-				float64(sl.GetMemDerivedGlobalLimit()),
-				[]string{"mode:mem_derived"},
+				float64(sl.globalLimit.Load()),
+				[]string{},
 				1,
 			)
 		}
@@ -191,19 +134,12 @@ func (sl *Limiter) RegisterSession(service string) error {
 	}
 
 	globalLimit := sl.globalLimit.Load()
-	capMode := CapModeDefault
-	if sl.enforceMemDerived != nil && sl.enforceMemDerived() {
-		if memLimit := sl.memDerivedGlobalLimit.Load(); memLimit < globalLimit {
-			globalLimit = memLimit
-			capMode = CapModeMemDerived
-		}
-	}
 
 	// Optimistically increment global session count.
 	// If we exceed the limit, roll back and reject.
 	if sl.globalCount.Add(1) > globalLimit {
 		sl.globalCount.Add(-1)
-		return newError(GlobalLimitExceeded, capMode, fmt.Sprintf("reached global connection capacity of %d (cap_mode=%s)", globalLimit, capMode))
+		return newError(GlobalLimitExceeded, fmt.Sprintf("reached global connection capacity of %d", globalLimit))
 	}
 
 	// Optimistically increment per-service session count.
@@ -211,7 +147,7 @@ func (sl *Limiter) RegisterSession(service string) error {
 	if serviceState.Count.Add(1) > serviceState.Limit.Load() {
 		serviceState.Count.Add(-1)
 		sl.globalCount.Add(-1)
-		return newError(ServiceLimitExceeded, capMode, fmt.Sprintf("%s reached connection capacity of %d", service, serviceState.Limit.Load()))
+		return newError(ServiceLimitExceeded, fmt.Sprintf("%s reached connection capacity of %d", service, serviceState.Limit.Load()))
 	}
 
 	return nil
@@ -256,58 +192,6 @@ func (sl *Limiter) GetGlobalCount() int32 {
 	return sl.globalCount.Load()
 }
 
-// EffectiveGlobalLimit returns the currently-enforced global session cap and
-// the active cap mode. It is the same limit that RegisterSession enforces.
-// Safe to call concurrently.
-func (sl *Limiter) EffectiveGlobalLimit() (int32, string) {
-	globalLimit := sl.globalLimit.Load()
-	capMode := CapModeDefault
-	if sl.enforceMemDerived != nil && sl.enforceMemDerived() {
-		if memLimit := sl.memDerivedGlobalLimit.Load(); memLimit < globalLimit {
-			globalLimit = memLimit
-			capMode = CapModeMemDerived
-		}
-	}
-	return globalLimit, capMode
-}
-
-// GetMemDerivedGlobalLimit returns the current memory-derived global limit.
-func (sl *Limiter) GetMemDerivedGlobalLimit() int32 {
-	return sl.memDerivedGlobalLimit.Load()
-}
-
-// RefreshFromCgroup re-reads the cgroup memory hard limit and republishes the
-// derived session cap, so an in-place pod resize is picked up without a restart.
-// It reports false if the limit could not be read, in which case the last
-// published cap is kept. A cgroup with no hard limit uses the configured global limit.
-func (sl *Limiter) RefreshFromCgroup() bool {
-	memory, ok := readDefaultHardLimit()
-	return sl.applyCgroupRefresh(memory, ok)
-}
-
-func (sl *Limiter) applyCgroupRefresh(memory Memory, ok bool) bool {
-	if !ok {
-		return false
-	}
-	sl.setMemDerivedGlobalLimit(memory, sl.globalLimit.Load())
-	return true
-}
-
-func (sl *Limiter) setMemDerivedGlobalLimit(memory Memory, unlimitedFallback int32) {
-	if memory.Available {
-		sl.memDerivedGlobalLimit.Store(MemDerivedLimit(memory.Bytes, sl.memDerivedGlobalLimitFloor))
-		return
-	}
-	sl.memDerivedGlobalLimit.Store(unlimitedFallback)
-}
-
-// SetEnforceMemDerived installs the flag check that RegisterSession uses to
-// decide whether to clamp the active cap to the memory-derived limit.
-// Must be called before RegisterSession.
-func (sl *Limiter) SetEnforceMemDerived(enforce func() bool) {
-	sl.enforceMemDerived = enforce
-}
-
 // GetCurrentServiceCount returns the active session count for a given service.
 func (sl *Limiter) GetCurrentServiceCount(service string) int32 {
 	if state, ok := sl.lookup(service); ok {
@@ -343,29 +227,6 @@ func (sl *Limiter) GetErrorType(err error) string {
 	return "unknown"
 }
 
-// GetCapMode returns the global cap mode active when the rejection occurred,
-// or "unknown" if err is not a Limit Error.
-func (sl *Limiter) GetCapMode(err error) string {
-	if e, ok := err.(*Error); ok {
-		return e.CapMode
-	}
-	return "unknown"
-}
-
-// MemDerivedLimit applies the memory-cap formula. Split out so it can be
-// unit-tested without depending on how memory was discovered.
-func MemDerivedLimit(memBytes int64, floor int32) int32 {
-	if memBytes <= 0 {
-		return floor
-	}
-	available := float64(memBytes) * MemorySafetyFraction
-	limit := int32(available / BytesPerSession)
-	if limit < floor {
-		return floor
-	}
-	return limit
-}
-
 func (sl *Limiter) lookup(service string) (*ServiceState, bool) {
 	value, ok := sl.services.Load(service)
 	if !ok {
@@ -382,10 +243,9 @@ func newServiceState(limit int32) *ServiceState {
 	return serviceState
 }
 
-func newError(t ErrorType, capMode, msg string) *Error {
+func newError(t ErrorType, msg string) *Error {
 	return &Error{
-		Type:    t,
-		CapMode: capMode,
-		Err:     fmt.Errorf("%s", msg),
+		Type: t,
+		Err:  fmt.Errorf("%s", msg),
 	}
 }

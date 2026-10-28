@@ -23,7 +23,16 @@ const (
 
 // NewPGX creates and verifies a PostgreSQL connection pool.
 func NewPGX(ctx context.Context, connectionString string) (*pgxpool.Pool, error) {
-	pool, err := pgxpool.New(ctx, connectionString)
+	cfg, err := pgxpool.ParseConfig(connectionString)
+	if err != nil {
+		return nil, err
+	}
+	return NewPGXWithConfig(ctx, cfg)
+}
+
+// NewPGXWithConfig creates and verifies a pool from already parsed settings.
+func NewPGXWithConfig(ctx context.Context, cfg *pgxpool.Config) (*pgxpool.Pool, error) {
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}

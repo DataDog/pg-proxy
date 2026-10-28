@@ -16,6 +16,8 @@ type resizableGate struct {
 	mu             sync.Mutex
 	limit          int32
 	totalOpenConns int32
+	// numConnsRetiring prevents concurrent releases from selecting more than the excess.
+	numConnsRetiring int32
 	// availabilitySignal is the channel each blocked acquisition waits on.
 	availabilitySignal chan struct{}
 }
@@ -43,17 +45,63 @@ func (g *resizableGate) tryReserve() bool {
 	return true
 }
 
-// release frees a physical slot after connection cleanup finishes.
-func (g *resizableGate) release() {
+// connConstructionFailed removes capacity reserved for a connection
+// that failed to finish construction.
+func (g *resizableGate) connConstructionFailed() {
+	g.decrementTotalOpenConns(false)
+}
+
+// connClosed records that a physical connection has finished closing.
+func (g *resizableGate) connClosed() {
+	g.decrementTotalOpenConns(false)
+}
+
+// retiringConnClosed records that a connection selected for retirement
+// has finished closing.
+func (g *resizableGate) retiringConnClosed() {
+	g.decrementTotalOpenConns(true)
+}
+
+func (g *resizableGate) decrementTotalOpenConns(retiring bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.totalOpenConns == 0 {
 		return
 	}
 	g.totalOpenConns--
+	if retiring && g.numConnsRetiring > 0 {
+		g.numConnsRetiring--
+	}
 	if g.totalOpenConns < g.limit {
 		g.wakeWaiters()
 	}
+}
+
+// trackClosingConnection records a closure selected by pgx or a caller hook
+// so downsizing excludes it while physical cleanup is pending.
+func (g *resizableGate) trackClosingConnection() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.numConnsRetiring++
+}
+
+// tryRetireExcessConnection selects one released connection for closure when
+// the connections not already retiring still exceed the current limit.
+func (g *resizableGate) tryRetireExcessConnection() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.totalOpenConns-g.numConnsRetiring <= g.limit {
+		return false
+	}
+	g.numConnsRetiring++
+	return true
+}
+
+// needsRetirement excludes connections whose cleanup is already pending.
+func (g *resizableGate) needsRetirement() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.totalOpenConns-g.numConnsRetiring > g.limit
 }
 
 // resize changes the maximum number of physical connections. Existing
@@ -114,6 +162,12 @@ func (g *resizableGate) getTotalOpenConns() int32 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.totalOpenConns
+}
+
+func (g *resizableGate) getNumConnsRetiring() int32 {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.numConnsRetiring
 }
 
 // getAvailabilitySignal returns the channel a blocked Acquire call should wait on.

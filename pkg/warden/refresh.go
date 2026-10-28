@@ -9,10 +9,12 @@ import (
 	pgproxy "github.com/DataDog/pg-proxy"
 )
 
-// Source loads a configuration value and its monotonically increasing version.
+// Source loads configuration and a source-defined, monotonically increasing revision.
+// The revision identifies changes for this refresher; it need not be the version
+// of a persisted object. A source combining multiple inputs may use a local counter.
 type Source[C any] func(context.Context) (C, uint64, error)
 
-// RefresherConfig configures portable polling and version handling.
+// RefresherConfig configures portable polling and source revision handling.
 type RefresherConfig[C any] struct {
 	Context  context.Context
 	Interval time.Duration
@@ -20,16 +22,16 @@ type RefresherConfig[C any] struct {
 	Apply    func(C) error
 }
 
-// Refresher polls versioned configuration and applies newer values.
+// Refresher polls configuration and applies newer source revisions.
 type Refresher[C any] struct {
 	ctx    context.Context
 	source Source[C]
 	apply  func(C) error
 	ticker *time.Ticker
 
-	mu            sync.Mutex
-	latestVersion uint64
-	hasVersion    bool
+	mu                          sync.Mutex
+	latestAppliedSourceRevision uint64
+	hasAppliedSourceRevision    bool
 }
 
 // NewRefresher creates a stopped configuration refresher.
@@ -55,29 +57,29 @@ func (r *Refresher[C]) Initialize() error {
 	return nil
 }
 
-// Refresh fetches and applies the latest configuration when its version is new.
+// Refresh fetches and applies the latest configuration when its source revision is new.
 func (r *Refresher[C]) Refresh() error {
-	cfg, version, err := r.source(r.ctx)
+	cfg, sourceRevision, err := r.source(r.ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch configuration: %w", err)
 	}
 
-	// Keep the version check and application together so concurrent refreshes
+	// Keep the source revision check and application together so concurrent refreshes
 	// cannot apply stale configuration or call Apply concurrently.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.hasVersion && version <= r.latestVersion {
-		pgproxy.Logger().Info(fmt.Sprintf("skipping configuration update: version %d is not newer than latest observed version %d", version, r.latestVersion))
+	if r.hasAppliedSourceRevision && sourceRevision <= r.latestAppliedSourceRevision {
+		pgproxy.Logger().Debug(fmt.Sprintf("skipping configuration update based on source change counters: source_revision=%d latest_applied_source_revision=%d", sourceRevision, r.latestAppliedSourceRevision))
 		pgproxy.Metrics().Count("dd.orgstore.pg_proxy.warden.accept.count", 1, []string{"outcome:skipped"}, 1)
 		return nil
 	}
-	pgproxy.Logger().Info(fmt.Sprintf("fetched new version (%d) of the configuration: %#v", version, &cfg))
+	pgproxy.Logger().Info(fmt.Sprintf("applying configuration using source change counter: source_revision=%d configuration=%#v", sourceRevision, &cfg))
 	if err := r.apply(cfg); err != nil {
 		return fmt.Errorf("failed to accept configuration: %w", err)
 	}
 
-	r.latestVersion = version
-	r.hasVersion = true
+	r.latestAppliedSourceRevision = sourceRevision
+	r.hasAppliedSourceRevision = true
 	return nil
 }
 

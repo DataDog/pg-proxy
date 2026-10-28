@@ -799,17 +799,20 @@ func (s *Session) Run() error {
 	}
 }
 
-// drain continues serving traffic until the session becomes idle, meaning its
-// SessionLink is released or Postgres has reached a reusable command boundary.
-// When that point is reached, it sends back an ErrorResponse to the client
-// and forcefully closes the connection.
+// drainMessage identifies a drain error that OrgStore clients may retry.
+// Send it only between calls, after any open transaction has finished.
+// Keep the prefix and this behavior compatible with deployed clients.
+const drainMessage = "Pg-proxy session has been terminated. For more information, see https://datadoghq.atlassian.net/wiki/spaces/ORGSTORE/pages/5672075405/Postgres+Client+Connection+Behavior"
+
+// drain finishes the active call or transaction, then sends drainMessage
+// and closes the client connection.
 func (s *Session) drain() error {
 	for {
 		if s.Idle() {
 			s.clientConn.Send(&pgproto3.ErrorResponse{
 				Severity: "FATAL",
 				Code:     pgerrcode.AdminShutdown,
-				Message:  "Pg-proxy session has been terminated. For more information, see https://datadoghq.atlassian.net/wiki/spaces/ORGSTORE/pages/5672075405/Postgres+Client+Connection+Behavior",
+				Message:  drainMessage,
 			})
 			s.clientConn.Flush()
 			s.close(io.EOF)

@@ -26,10 +26,7 @@ import (
 	pgsession "github.com/DataDog/pg-proxy/pkg/session"
 )
 
-const (
-	overCapGateRefreshInterval     = time.Second
-	loadSheddingStartupPeekTimeout = time.Second
-)
+const loadSheddingStartupPeekTimeout = time.Second
 
 // StartupRequest is the portable information parsed from a startup packet.
 type StartupRequest struct {
@@ -83,10 +80,7 @@ type LoadShedder interface {
 type Admission interface {
 	RegisterSession(string) error
 	DeregisterSession(string) error
-	GetGlobalCount() int32
-	EffectiveGlobalLimit() (int32, string)
 	GetErrorType(error) string
-	GetCapMode(error) string
 }
 
 // Lifecycle keeps app-owned session inventory and shutdown waiting outside the engine.
@@ -105,8 +99,6 @@ type Hooks[T any] struct {
 	NewSession     func(SessionConfig[T]) (Session, error)
 	Lifecycle      Lifecycle
 	LoadShedder    LoadShedder
-
-	AcceptLoopRejectEnabled func(context.Context) bool
 }
 
 // Config contains only portable listener settings and app callbacks.
@@ -130,10 +122,6 @@ type Listener[T any] struct {
 	cfg       Config[T]
 	ln        net.Listener
 	connCount atomic.Uint32
-
-	cachedAcceptLoopReject atomic.Bool
-	effectiveGlobalCap     atomic.Int32
-	overCapRejectCount     atomic.Int64
 }
 
 // ClientNotified marks an error for which the client was already sent a fatal
@@ -152,6 +140,9 @@ func (e *clientNotifiedError) Unwrap() error { return e.cause }
 
 // New creates and binds a listener.
 func New[T any](ctx context.Context, cfg Config[T]) (*Listener[T], error) {
+	if cfg.RequireTLS && cfg.TLSConfig == nil {
+		return nil, errors.New("listener requires TLS but TLS configuration is missing")
+	}
 	if cfg.Admission == nil {
 		return nil, errors.New("listener admission controller is required")
 	}
@@ -178,7 +169,6 @@ func (l *Listener[T]) Close() error { return l.ln.Close() }
 // Run serves connections until shutdown or an accept error.
 func (l *Listener[T]) Run() error {
 	pgproxy.Logger().Info("Listening", "address", l.cfg.ListenAddress)
-	l.startOverCapGateRefresher()
 	for {
 		select {
 		case <-l.ctx.Done():
@@ -193,27 +183,6 @@ func (l *Listener[T]) Run() error {
 			conn, err := l.ln.Accept()
 			if err != nil {
 				return err
-			}
-			// Note: this gate runs before attemptTLSUpgrade/handleFirstMessage reads the startup
-			// packet, so it can't distinguish a CancelRequest (which targets an existing session,
-			// not a new one) from any other incoming connection. We deliberately don't special-case
-			// it: fleet-wide cancel volume is low (<2/s including misrouted cancels) next to
-			// the reject rates this gate exists for, CancelRequest is already best-effort with no
-			// client-visible ack, and a lost cancel converges to the same outcome as a client that
-			// times out and disconnects — pg-proxy still detects that and closes the backend
-			// connection. Treating cancels like any other connection also avoids doing extra
-			// per-connection work on exactly the path we're trying to keep cheap under load.
-			if l.cachedAcceptLoopReject.Load() {
-				if capLimit := l.effectiveGlobalCap.Load(); capLimit > 0 && l.cfg.Admission.GetGlobalCount() >= capLimit {
-					l.overCapRejectCount.Add(1)
-					// Bare drop, no PG protocol reply: at this point we haven't read a single byte from the client,
-					// so we don't yet know the client's request type — each expects a different
-					// reply framing. Sending anything meaningful would require reading and parsing that first,
-					// which is exactly the TLS/auth-adjacent work this gate exists to skip. A bare close maximizes the
-					// sustainable reject rate under a real retry storm.
-					_ = conn.Close()
-					continue
-				}
 			}
 			configureKeepalive(conn)
 			go l.handleConnWithLoadShedding(conn)
@@ -252,38 +221,6 @@ func configureKeepalive(conn net.Conn) {
 				pgproxy.Logger().Warn("Failed to set TCP_KEEPCNT", "error", err)
 			}
 		})
-	}
-}
-
-func (l *Listener[T]) startOverCapGateRefresher() {
-	// Refresh once before the accept loop so the first connection never sees a
-	// zero cached cap while the ticker has not yet fired.
-	l.refreshOverCapGate()
-	go func() {
-		ticker := time.NewTicker(overCapGateRefreshInterval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-l.ctx.Done():
-				return
-			case <-ticker.C:
-				l.refreshOverCapGate()
-			}
-		}
-	}()
-}
-
-func (l *Listener[T]) refreshOverCapGate() {
-	enabled := false
-	if l.cfg.Hooks.AcceptLoopRejectEnabled != nil {
-		enabled = l.cfg.Hooks.AcceptLoopRejectEnabled(l.ctx)
-	}
-	l.cachedAcceptLoopReject.Store(enabled)
-	capLimit, capMode := l.cfg.Admission.EffectiveGlobalLimit()
-	l.effectiveGlobalCap.Store(capLimit)
-	if count := l.overCapRejectCount.Swap(0); count > 0 {
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", count,
-			[]string{"outcome:error", "error_type:" + string(limiter.GlobalLimitExceeded), "cap_mode:" + capMode, "placement:accept_reject"}, 1)
 	}
 }
 
@@ -410,7 +347,7 @@ func (l *Listener[T]) attemptTLSUpgrade(conn net.Conn) (net.Conn, pgproto3.Front
 	}
 	first, err = client.ReceiveStartupMessage()
 	if err != nil {
-		return nil, nil, fmt.Errorf("error receiving post-ssl startup message: %w", err)
+		return conn, nil, fmt.Errorf("error receiving post-ssl startup message: %w", err)
 	}
 	return conn, first, nil
 }
@@ -422,6 +359,8 @@ func (l *Listener[T]) handleFirstMessage(conn net.Conn, message pgproto3.Fronten
 	case *pgproto3.StartupMessage:
 		return l.handleStartup(conn, msg)
 	case *pgproto3.CancelRequest:
+		// Cancellation uses a separate connection and may be plaintext even when
+		// normal startup requires TLS. The session secret still authenticates it.
 		if err := l.handleCancel(msg); err != nil {
 			return nil, fmt.Errorf("failed to cancel request: %w", err)
 		}
@@ -433,6 +372,12 @@ func (l *Listener[T]) handleFirstMessage(conn net.Conn, message pgproto3.Fronten
 
 // handleStartup creates a new session for an incoming network connection.
 func (l *Listener[T]) handleStartup(conn net.Conn, msg *pgproto3.StartupMessage) (Session, error) {
+	if l.cfg.RequireTLS {
+		tlsConn, ok := conn.(*tls.Conn)
+		if !ok || !tlsConn.ConnectionState().HandshakeComplete {
+			return nil, errors.New("TLS is required")
+		}
+	}
 	user, ok := msg.Parameters["user"]
 	if !ok {
 		return nil, errors.New("user name not provided")
@@ -492,8 +437,7 @@ func (l *Listener[T]) handleStartup(conn net.Conn, msg *pgproto3.StartupMessage)
 		// under a capacity incident this fires once per rejected connection.
 		writeErr := handleSessionLimitExceeded(conn, err)
 		metricTags := append(tags, "outcome:error", "error_type:"+l.cfg.Admission.GetErrorType(err),
-			"cap_mode:"+l.cfg.Admission.GetCapMode(err), "placement:register_session",
-			fmt.Sprintf("client_notified:%t", writeErr == nil))
+			"placement:register_session", fmt.Sprintf("client_notified:%t", writeErr == nil))
 		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", 1, metricTags, 1)
 		// Suppress a duplicate client response / error log in handleConn — the client
 		// was already sent the 53300 above.
@@ -638,6 +582,11 @@ func handleConnError(conn net.Conn, err error, placement string) {
 	pgproxy.Logger().Error(fmt.Sprintf("failed to open connection from %s: %v", conn.RemoteAddr().String(), err))
 	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", 1,
 		[]string{"outcome:error", "placement:" + placement}, 1)
+	if tlsConn, ok := conn.(*tls.Conn); ok && !tlsConn.ConnectionState().HandshakeComplete {
+		// SSL was accepted, but the TLS handshake failed. Only TLS may write
+		// to this connection; do not send a PostgreSQL error on the raw socket.
+		return
+	}
 	buf, encodeErr := (&pgproto3.ErrorResponse{
 		Severity: "FATAL", Code: pgerrcode.ConnectionFailure, Message: err.Error(),
 	}).Encode(nil)

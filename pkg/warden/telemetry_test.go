@@ -110,7 +110,7 @@ func TestControllerTelemetry(t *testing.T) {
 
 	require.NoError(t, controller.Refresh())
 	assert.Equal(t, []logEvent{
-		{slog.LevelInfo, "fetched new version (1) of the configuration: &warden.telemetryConfig{Host:\"host\"}"},
+		{slog.LevelInfo, "applying configuration using source change counter: source_revision=1 configuration=&warden.telemetryConfig{Host:\"host\"}"},
 		{slog.LevelInfo, "Updated databases:\n{\n  \"primary\": \"host\"\n}"},
 		{slog.LevelInfo, "Updated clusters:\n{\n  \"cluster\": {\n    \"primary\": \"primary\",\n    \"replicas\": null,\n    \"Name\": \"cluster\"\n  }\n}"},
 		{slog.LevelInfo, "States to create: [cluster]"},

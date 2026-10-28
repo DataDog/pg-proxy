@@ -21,7 +21,7 @@ type ReplicaPoolHooks struct {
 // ReplicaPoolConfig configures a shared pgx pool across replica instances.
 type ReplicaPoolConfig struct {
 	Context              context.Context
-	NewBasePool          func() (*pgxpool.Pool, error)
+	NewBasePool          func() (ConnectionPool, error)
 	Snapshot             func() map[string]bool
 	HealthUpdates        HealthUpdates
 	Hooks                ReplicaPoolHooks
@@ -29,15 +29,19 @@ type ReplicaPoolConfig struct {
 	StartSnapshotRefresh bool
 }
 
+type physicalPoolRef struct{ pool ConnectionPool }
+
 // ReplicaPool owns the portable shared-pool and health-snapshot lifecycle.
 type ReplicaPool struct {
-	basePool      atomic.Pointer[pgxpool.Pool]
-	newBasePool   func() (*pgxpool.Pool, error)
+	basePool      atomic.Pointer[physicalPoolRef]
+	newBasePool   func() (ConnectionPool, error)
 	snapshot      func() map[string]bool
 	healthUpdates HealthUpdates
 	hooks         ReplicaPoolHooks
 	cancel        context.CancelFunc
 	closeOnce     sync.Once
+	mu            sync.Mutex
+	closed        bool
 
 	healthyMu sync.RWMutex
 	healthy   map[string]bool
@@ -63,7 +67,7 @@ func NewReplicaPool(cfg ReplicaPoolConfig) (*ReplicaPool, error) {
 		cancel()
 		return nil, err
 	}
-	pool.basePool.Store(base)
+	pool.basePool.Store(&physicalPoolRef{pool: base})
 	if cfg.InitializeSnapshot {
 		pool.RefreshSnapshot()
 	}
@@ -75,7 +79,7 @@ func NewReplicaPool(cfg ReplicaPoolConfig) (*ReplicaPool, error) {
 
 // AcquireConnection checks out a connection from the current shared pool.
 func (p *ReplicaPool) AcquireConnection(ctx context.Context) (*pgxpool.Conn, error) {
-	return p.basePool.Load().Acquire(ctx)
+	return p.basePool.Load().pool.Acquire(ctx)
 }
 
 // IsHealthy reports the latest health for an instance.
@@ -117,6 +121,12 @@ func (p *ReplicaPool) RefreshSnapshot() {
 
 // Swap replaces the shared pgx pool with a freshly configured pool.
 func (p *ReplicaPool) Swap(source string) {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return
+	}
 	next, err := p.newBasePool()
 	if err != nil {
 		if p.hooks.SwapFailed != nil {
@@ -124,9 +134,18 @@ func (p *ReplicaPool) Swap(source string) {
 		}
 		return
 	}
-	previous := p.basePool.Swap(next)
-	if previous != nil {
-		go previous.Close()
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if next != nil {
+			next.Close()
+		}
+		return
+	}
+	previous := p.basePool.Swap(&physicalPoolRef{pool: next})
+	p.mu.Unlock()
+	if previous != nil && previous.pool != nil {
+		go previous.pool.Close()
 	}
 	if p.hooks.SwapFinished != nil {
 		p.hooks.SwapFinished(source)
@@ -136,21 +155,25 @@ func (p *ReplicaPool) Swap(source string) {
 // ExportDirectPoolStats exports stats from the current shared pool.
 func (p *ReplicaPool) ExportDirectPoolStats() {
 	if p.hooks.ExportStats != nil {
-		p.hooks.ExportStats(p.basePool.Load().Stat())
+		p.hooks.ExportStats(p.basePool.Load().pool.Stat())
 	}
 }
 
 // Reset resets the current shared pool.
 func (p *ReplicaPool) Reset() {
-	p.basePool.Load().Reset()
+	p.basePool.Load().pool.Reset()
 }
 
 // ClosePools closes the current pool and host adapters.
 func (p *ReplicaPool) ClosePools() {
 	p.closeOnce.Do(func() {
 		p.cancel()
-		if current := p.basePool.Load(); current != nil {
-			current.Close()
+		p.mu.Lock()
+		p.closed = true
+		current := p.basePool.Load()
+		p.mu.Unlock()
+		if current != nil && current.pool != nil {
+			current.pool.Close()
 		}
 		if p.hooks.Close != nil {
 			p.hooks.Close()

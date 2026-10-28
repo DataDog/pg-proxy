@@ -1,4 +1,4 @@
-// Command pg-proxy runs a local, single-backend PostgreSQL transaction pooler.
+// Command pg-proxy runs the OSS PostgreSQL transaction pooler.
 package main
 
 import (
@@ -7,10 +7,12 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net"
 	"net/netip"
 	"os"
 	"os/signal"
+	"slices"
 	"sync"
 	"syscall"
 	"time"
@@ -28,24 +30,23 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
-// config is the minimal starting point for building and running the standalone
-// binary. It is not the final configuration design for multiple backends and users.
+// config holds validated startup settings for the OSS binary.
 type config struct {
-	listenAddress string
-	database      string
-	backendURL    string
-	maxSessions   int
+	listenAddress     string
+	messageBufferSize int
+	databases         map[string]*pgxpool.Config
+	clusters          map[string]string
+	logicalDatabases  map[string]topology.LogicalDatabase
 }
 
 func main() {
-	var cfg config
-	flag.StringVar(&cfg.backendURL, "backend-url", "", "PostgreSQL backend URL (defaults to PG_PROXY_BACKEND_URL)")
-	flag.StringVar(&cfg.listenAddress, "listen", "127.0.0.1:15432", "loopback IP address and port")
-	flag.StringVar(&cfg.database, "database", "local_db", "logical database exposed to clients")
-	flag.IntVar(&cfg.maxSessions, "max-sessions", 100, "maximum concurrent client sessions")
-	flag.Parse()
-	if cfg.backendURL == "" {
-		cfg.backendURL = os.Getenv("PG_PROXY_BACKEND_URL")
+	cfg, err := parseConfig(os.Args[1:])
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
+	if err != nil {
+		slog.Error("invalid configuration", "error", err)
+		os.Exit(1)
 	}
 	pgproxy.Bootstrap(pgproxy.Dependencies{LogHandler: slog.NewTextHandler(os.Stderr, nil)})
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -59,16 +60,30 @@ func main() {
 func (c config) validate() error {
 	address, err := netip.ParseAddrPort(c.listenAddress)
 	if err != nil || !address.Addr().IsLoopback() {
-		return errors.New("-listen must use a loopback IP: this local reference binary does not authenticate clients")
+		return errors.New("proxy.listener_address must use a loopback IP: the OSS binary does not authenticate clients")
 	}
-	if c.database == "" {
-		return errors.New("-database must not be empty")
+	if c.messageBufferSize < 0 {
+		return errors.New("postgres_msg_buffer_size must not be negative")
 	}
-	if c.backendURL == "" {
-		return errors.New("-backend-url or PG_PROXY_BACKEND_URL is required")
+	if len(c.databases) == 0 || len(c.clusters) == 0 || len(c.logicalDatabases) == 0 {
+		return errors.New("databases, clusters, and logical_databases must not be empty")
 	}
-	if c.maxSessions < 1 || c.maxSessions > 1<<31-1 {
-		return errors.New("-max-sessions must be between 1 and 2147483647")
+	usedDatabases := make(map[string]bool, len(c.databases))
+	for name, primary := range c.clusters {
+		if name == "" || c.databases[primary] == nil {
+			return errors.New("each cluster must have a name and refer to a configured primary database")
+		}
+		usedDatabases[primary] = true
+	}
+	for name, logical := range c.logicalDatabases {
+		if _, exists := c.clusters[logical.Cluster]; name == "" || !exists {
+			return errors.New("each logical database must have a name and refer to a configured cluster")
+		}
+	}
+	for name := range c.databases {
+		if !usedDatabases[name] {
+			return errors.New("each database must be used by a cluster")
+		}
 	}
 	return nil
 }
@@ -80,59 +95,77 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	slog.Info("local proxy ready; clients are trusted", "address", proxy.server.Addr(), "database", cfg.database)
-	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.backend.Close, 5*time.Second)
+	slog.Info("local proxy ready; clients are trusted", "address", proxy.server.Addr(), "clusters", len(cfg.clusters))
+	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
 }
 
 type localProxy struct {
-	server   *server.Server
-	sessions *sessionRegistry
-	backend  *singleBackend
+	server    *server.Server
+	sessions  *sessionRegistry
+	inventory *staticInventory
 }
 
 func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	// Parse errors can contain the connection string, including its password.
-	poolConfig, err := pgxpool.ParseConfig(cfg.backendURL)
-	if err != nil {
-		return nil, errors.New("invalid backend URL")
+	if cfg.messageBufferSize == 0 {
+		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
-	pgxPool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-	if err != nil {
-		return nil, errors.New("could not create backend pool")
+	// TODO(OSQQUERY-714): support configuration refresh through the library Warden.
+	// File changes currently require a restart.
+	inventory := &staticInventory{
+		logicalDatabases: cfg.logicalDatabases,
+		backends:         make(map[string]*clusterBackend, len(cfg.clusters)),
 	}
-	primary := pool.NewPGXPool(pgxPool, pool.PGXHooks{})
-	parameters, err := backend.RetrieveParameterStatuses(primary, cfg.database)
-	if err != nil {
-		primary.Close()
-		return nil, fmt.Errorf("connect to backend: %w", err)
+	ready := false
+	defer func() {
+		if !ready {
+			inventory.Close()
+		}
+	}()
+	for _, name := range slices.Sorted(maps.Keys(cfg.clusters)) {
+		settings := cfg.databases[cfg.clusters[name]]
+		pgxPool, err := pgxpool.NewWithConfig(ctx, settings)
+		if err != nil {
+			return nil, errors.New("could not create backend pool")
+		}
+		primary := pool.NewPGXPool(pgxPool, pool.PGXHooks{})
+		parameters, err := backend.RetrieveParameterStatuses(primary, name)
+		if err != nil {
+			primary.Close()
+			return nil, fmt.Errorf("connect to backend %q: %w", name, err)
+		}
+		inventory.backends[name] = &clusterBackend{backend.New(backend.Config{
+			ClusterName: name, PrimaryDatabaseName: settings.ConnConfig.Database,
+			Primary: primary, ParameterStatuses: parameters,
+		})}
 	}
-	upstream := &singleBackend{backend.New(backend.Config{
-		ClusterName: cfg.database, PrimaryDatabaseName: poolConfig.ConnConfig.Database,
-		Primary: primary, ParameterStatuses: parameters,
-	})}
+	users := make(map[string]string, len(cfg.logicalDatabases))
+	for name, logical := range cfg.logicalDatabases {
+		users[name] = cfg.databases[cfg.clusters[logical.Cluster]].ConnConfig.User
+	}
 	sessions := newSessionRegistry()
 	proxy, err := server.NewServer(ctx, server.Config{
 		ListenAddress: cfg.listenAddress,
+		// TODO(OSQQUERY-713): configure session admission limits independently of backend pool sizes.
 		Admission: limiter.New(limiter.Params{
-			GlobalLimit: int32(cfg.maxSessions), DefaultServiceMax: int32(cfg.maxSessions),
+			GlobalLimit: 100, DefaultServiceMax: 100,
 		}),
-		Authenticate: localUser(poolConfig.ConnConfig.User),
+		Authenticate: localUser(users),
 		Sessions:     sessions,
 		Runtime: server.RuntimeConfig{
-			Inventory: staticInventory{database: cfg.database, backend: upstream},
+			Inventory: inventory,
 			Settings: topology.RuntimeConfig{
-				PostgresMessageBufferSize: topology.DefaultPostgresMessageBufferSize,
+				PostgresMessageBufferSize: cfg.messageBufferSize,
 			},
 		},
 	})
 	if err != nil {
-		upstream.Close()
 		return nil, err
 	}
-	return &localProxy{server: proxy, sessions: sessions, backend: upstream}, nil
+	ready = true
+	return &localProxy{server: proxy, sessions: sessions, inventory: inventory}, nil
 }
 
 // Explicitly close the socket to wake Accept, then drain sessions before pools.
@@ -171,34 +204,43 @@ func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, s
 	return runErr
 }
 
-// This command deliberately supports only local trust and one backend identity.
-func localUser(user string) func(context.Context, listener.StartupRequest, listener.StartupResult[server.ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error) {
+// Local trust requires the username configured for the selected database.
+func localUser(users map[string]string) func(context.Context, listener.StartupRequest, listener.StartupResult[server.ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error) {
 	return func(_ context.Context, request listener.StartupRequest, _ listener.StartupResult[server.ResolvedStartup], _ protocol.Exchange) (listener.AuthenticationResult, error) {
-		if request.User != user {
+		user, exists := users[request.Database]
+		if !exists || request.User != user {
 			return listener.AuthenticationResult{}, errors.New("client user must match the configured backend user")
 		}
 		if request.Options.PassthroughUser {
-			return listener.AuthenticationResult{}, errors.New("passthrough_user is not supported by the local reference binary")
+			return listener.AuthenticationResult{}, errors.New("passthrough_user is not supported by the OSS binary")
 		}
 		return listener.AuthenticationResult{Service: user}, nil
 	}
 }
 
-type singleBackend struct{ *backend.Runtime }
+type clusterBackend struct{ *backend.Runtime }
 
-func (b *singleBackend) SessionBackend() session.Backend { return b.Runtime }
+func (b *clusterBackend) SessionBackend() session.Backend { return b.Runtime }
 
 type staticInventory struct {
-	database string
-	backend  server.Backend
+	logicalDatabases map[string]topology.LogicalDatabase
+	backends         map[string]*clusterBackend
 }
 
-func (i staticInventory) GetLogicalDatabase(name string) (topology.LogicalDatabase, bool) {
-	return topology.LogicalDatabase{Cluster: i.database}, name == i.database
+func (i *staticInventory) GetLogicalDatabase(name string) (topology.LogicalDatabase, bool) {
+	database, exists := i.logicalDatabases[name]
+	return database, exists
 }
 
-func (i staticInventory) GetBackend(name string) (server.Backend, bool) {
-	return i.backend, name == i.database
+func (i *staticInventory) GetBackend(name string) (server.Backend, bool) {
+	backend, exists := i.backends[name]
+	return backend, exists
+}
+
+func (i *staticInventory) Close() {
+	for _, backend := range i.backends {
+		backend.Close()
+	}
 }
 
 type sessionRegistry struct {

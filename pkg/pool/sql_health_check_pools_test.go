@@ -146,3 +146,19 @@ func TestSQLHealthCheckPoolsRemoveIP(t *testing.T) {
 	_, err = second.Acquire(context.Background())
 	require.ErrorIs(t, err, puddle.ErrClosedPool)
 }
+
+func TestSQLHealthCheckConfigPreservesConnectionSettings(t *testing.T) {
+	source, err := pgxpool.ParseConfig("host=localhost dbname=orders user=service sslmode=require")
+	require.NoError(t, err)
+	source.ConnConfig.RuntimeParams["options"] = "-c search_path=custom"
+	source.ConnConfig.RuntimeParams["application_name"] = "serving"
+	source.MaxConns = 20
+	probe := SQLHealthCheckConfig(source, SQLHealthCheckPoolsConfig{ApplicationName: "probe"})
+	assert.Equal(t, source.ConnConfig.TLSConfig, probe.ConnConfig.TLSConfig)
+	assert.Equal(t, source.ConnConfig.Fallbacks, probe.ConnConfig.Fallbacks)
+	assert.Equal(t, "-c search_path=custom", probe.ConnConfig.RuntimeParams["options"])
+	assert.Equal(t, "probe", probe.ConnConfig.RuntimeParams["application_name"])
+	assert.Equal(t, "serving", source.ConnConfig.RuntimeParams["application_name"])
+	assert.EqualValues(t, 1, probe.MaxConns)
+	assert.EqualValues(t, 20, source.MaxConns)
+}

@@ -4,6 +4,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -36,11 +37,9 @@ func TestProxyAgainstPostgres(t *testing.T) {
 			url, err := pg.ConnectionString(ctx, "sslmode=disable", "pool_max_conns=3",
 				minimum, "pool_health_check_period=1h", "application_name="+name)
 			require.NoError(t, err)
-			proxy, err := newProxy(ctx, config{
-				listenAddress: "127.0.0.1:0", database: "local_db", backendURL: url, maxSessions: 10,
-			})
+			proxy, err := newProxy(ctx, backendConfig(t, url))
 			require.NoError(t, err)
-			defer proxy.backend.Close()
+			defer proxy.inventory.Close()
 			defer proxy.server.Close()
 			require.Eventually(t, func() bool {
 				var connections int
@@ -49,17 +48,67 @@ func TestProxyAgainstPostgres(t *testing.T) {
 			}, 5*time.Second, 10*time.Millisecond)
 		})
 	}
+	t.Run("startup failure closes earlier pools", func(t *testing.T) {
+		url, err := pg.ConnectionString(ctx, "sslmode=disable", "application_name=pg-proxy-partial-startup")
+		require.NoError(t, err)
+		cfg := backendConfig(t, url)
+		unreachable := cfg.databases["primary"].Copy()
+		unreachable.ConnConfig.Port = 1
+		unreachable.ConnConfig.ConnectTimeout = time.Second
+		cfg.databases["unreachable"] = unreachable
+		cfg.clusters["zz-failure"] = "unreachable"
+		_, err = newProxy(ctx, cfg)
+		require.Error(t, err)
+		require.Eventually(t, func() bool {
+			var connections int
+			err := admin.QueryRow(ctx, "select count(*) from pg_stat_activity where application_name = 'pg-proxy-partial-startup'").Scan(&connections)
+			return err == nil && connections == 0
+		}, 5*time.Second, 10*time.Millisecond)
+	})
+	_, err = admin.Exec(ctx, "CREATE ROLE reports_user LOGIN PASSWORD 'reports-password'")
+	require.NoError(t, err)
+	_, err = admin.Exec(ctx, "CREATE DATABASE reports OWNER reports_user")
+	require.NoError(t, err)
 	url, err := pg.ConnectionString(ctx, "sslmode=disable", "pool_max_conns=1")
 	require.NoError(t, err)
 	proxyCtx, stop := context.WithCancel(ctx)
-	proxy, err := newProxy(proxyCtx, config{
-		listenAddress: "127.0.0.1:0", database: "local_db", backendURL: url, maxSessions: 10,
-	})
+	connection, err := pgx.ParseConfig(url)
+	require.NoError(t, err)
+	path := writeConfig(t, "yaml", fmt.Sprintf(`databases:
+- name: primary
+  host: %s
+  port: %d
+  dbname: postgres
+  username: postgres
+  password: postgres
+  sslmode: disable
+  max_conns: 1
+- name: reports-primary
+  host: %s
+  port: %d
+  dbname: reports
+  username: reports_user
+  password: reports-password
+  sslmode: disable
+  max_conns: 1
+clusters:
+  orders: {primary: primary}
+  reports: {primary: reports-primary}
+logical_databases:
+  local_db: {cluster: orders}
+  reports_db: {cluster: reports}
+proxy:
+  listener_address: '127.0.0.1:0'
+  postgres_msg_buffer_size: 4096
+`, connection.Host, connection.Port, connection.Host, connection.Port))
+	cfg, err := parseConfig([]string{"-config", path})
+	require.NoError(t, err)
+	proxy, err := newProxy(proxyCtx, cfg)
 	require.NoError(t, err)
 	done := make(chan struct{})
 	var serveErr error
 	go func() {
-		serveErr = serve(proxyCtx, stop, proxy.server, proxy.sessions, proxy.backend.Close, 5*time.Second)
+		serveErr = serve(proxyCtx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
 		close(done)
 	}()
 	t.Cleanup(func() {
@@ -78,6 +127,18 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	other, err := pgx.Connect(ctx, proxyURL)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = other.Close(context.Background()) })
+
+	reports, err := pgx.Connect(ctx, "postgres://reports_user@"+proxy.server.Addr().String()+"/reports_db?sslmode=disable")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = reports.Close(context.Background()) })
+	for connection, expected := range map[*pgx.Conn][]string{
+		client:  {"postgres", "postgres"},
+		reports: {"reports", "reports_user"},
+	} {
+		var database, user string
+		require.NoError(t, connection.QueryRow(ctx, "select current_database(), current_user", pgx.QueryExecModeSimpleProtocol).Scan(&database, &user))
+		require.Equal(t, expected, []string{database, user})
+	}
 
 	// Two frontend sessions share one backend connection across transactions.
 	var firstPID, secondPID int
@@ -98,6 +159,8 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	for _, connectionString := range []string{
 		"postgres://postgres@" + proxy.server.Addr().String() + "/unknown?sslmode=disable",
 		"postgres://unknown@" + proxy.server.Addr().String() + "/local_db?sslmode=disable",
+		"postgres://postgres@" + proxy.server.Addr().String() + "/reports_db?sslmode=disable",
+		"postgres://reports_user@" + proxy.server.Addr().String() + "/local_db?sslmode=disable",
 		proxyURL + "&options=-c%20pg_proxy.passthrough_user%3Dtrue",
 	} {
 		connection, err := pgx.Connect(ctx, connectionString)

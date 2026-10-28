@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"sync"
 	"testing"
@@ -16,12 +17,9 @@ import (
 
 type testAdmission struct{}
 
-func (testAdmission) RegisterSession(string) error          { return nil }
-func (testAdmission) DeregisterSession(string) error        { return nil }
-func (testAdmission) GetGlobalCount() int32                 { return 0 }
-func (testAdmission) EffectiveGlobalLimit() (int32, string) { return 0, "" }
-func (testAdmission) GetErrorType(error) string             { return "" }
-func (testAdmission) GetCapMode(error) string               { return "" }
+func (testAdmission) RegisterSession(string) error   { return nil }
+func (testAdmission) DeregisterSession(string) error { return nil }
+func (testAdmission) GetErrorType(error) string      { return "" }
 
 type testSessions struct {
 	mu         sync.Mutex
@@ -244,5 +242,21 @@ func TestServerWithRuntime(t *testing.T) {
 		assert.Equal(t, id, deleted)
 	case <-ctx.Done():
 		t.Fatal("finished session was not removed")
+	}
+}
+
+func TestServerForwardsTLSConfig(t *testing.T) {
+	for _, tlsConfig := range []*tls.Config{nil, {}} {
+		server, err := NewServer(t.Context(), Config{
+			Sessions: &testSessions{}, Runtime: RuntimeConfig{Inventory: newInventoryForTest()},
+			ListenAddress: "127.0.0.1:0", Admission: testAdmission{},
+			RequireTLS: true, TLSConfig: tlsConfig,
+		})
+		if tlsConfig == nil {
+			require.EqualError(t, err, "listener requires TLS but TLS configuration is missing")
+		} else {
+			require.NoError(t, err)
+			require.NoError(t, server.Close())
+		}
 	}
 }

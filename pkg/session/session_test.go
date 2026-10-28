@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -123,6 +124,10 @@ func (c *blockingWriteConn) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Keep this literal independent of drainMessage to catch changes to the
+// prefix that deployed OrgStore clients recognize.
+const orgstoreClientDrainPrefix = "Pg-proxy session has been terminated"
+
 func TestRunDrainsCanceledIdleSession(t *testing.T) {
 	metrics := &recordingMetrics{}
 	restore := pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics})
@@ -155,6 +160,7 @@ func TestRunDrainsCanceledIdleSession(t *testing.T) {
 	response, ok := client.sent[0].(*pgproto3.ErrorResponse)
 	require.True(t, ok)
 	require.Equal(t, "57P01", response.Code)
+	require.True(t, strings.HasPrefix(response.Message, orgstoreClientDrainPrefix), response.Message)
 }
 
 func TestProtocolErrorResponsesRemainStable(t *testing.T) {

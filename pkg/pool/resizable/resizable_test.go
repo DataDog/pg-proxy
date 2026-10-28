@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -234,8 +235,7 @@ func TestResizeLogsLimitChangeAndReset(t *testing.T) {
 	assert.Contains(t, logs, "old_limit=2")
 	assert.Contains(t, logs, "new_limit=1")
 	assert.Contains(t, logs, "total_open_connections=2")
-	assert.Contains(t, logs, "reset_required=true")
-	assert.Contains(t, logs, "resetting resizable connection pool after downsize")
+	assert.Contains(t, logs, "retirement_required=true")
 	require.Len(t, metrics.counts, 1)
 	assert.Equal(t, resizeMetricCall{
 		name:  poolResizeMetric,
@@ -316,4 +316,180 @@ func testConfig(t *testing.T, maxConns int32) *pgxpool.Config {
 	config.MinConns = 0
 	config.MinIdleConns = 0
 	return config
+}
+
+func TestReconciliationRetiresLateIdleConnections(t *testing.T) {
+	for _, publication := range []string{"after_release", "canceled_constructor"} {
+		t.Run(publication, func(t *testing.T) {
+			gate, err := newResizableGate(2)
+			require.NoError(t, err)
+			require.True(t, gate.tryReserve())
+			require.True(t, gate.tryReserve())
+			config := testConfig(t, 2)
+			installHooks(config, gate)
+			if publication == "after_release" {
+				// Both hooks decided to keep under the old limit. Puddle has
+				// not published either resource idle yet.
+				require.True(t, config.AfterRelease(nil))
+				require.True(t, config.AfterRelease(nil))
+			}
+			require.NoError(t, gate.resize(1))
+
+			var idle atomic.Bool
+			swept := make(chan struct{}, 1)
+			retired := make(chan struct{}, 2)
+			r := startTestReconciler(t, gate, func() {
+				if !idle.CompareAndSwap(true, false) {
+					select {
+					case swept <- struct{}{}:
+					default:
+					}
+					return
+				}
+				// Releasing the newly idle resources reruns the actual hook.
+				for i := 0; i < 2; i++ {
+					if !config.AfterRelease(nil) {
+						retired <- struct{}{}
+					}
+				}
+			})
+			r.requestReconciliation()
+			select {
+			case <-swept:
+			case <-time.After(time.Second):
+				t.Fatal("initial sweep did not run")
+			}
+			// Publish after the first sweep, with no further resize, client
+			// acquisition, or notification. Canceled constructors bypass the
+			// release hook entirely when publishing idle.
+			idle.Store(true)
+			select {
+			case <-retired:
+			case <-time.After(time.Second):
+				t.Fatal("late idle connection was not retired")
+			}
+			assert.EqualValues(t, 1, gate.getNumConnsRetiring())
+			assert.EqualValues(t, 2, gate.getTotalOpenConns())
+			assert.Never(t, func() bool { return len(retired) > 0 },
+				3*retirementRetryInterval, time.Millisecond)
+			gate.retiringConnClosed()
+			assert.EqualValues(t, 1, gate.getTotalOpenConns())
+		})
+	}
+}
+
+func TestReconciliationWaitsForAlreadySelectedClosures(t *testing.T) {
+	gate, err := newResizableGate(4)
+	require.NoError(t, err)
+	for i := 0; i < 4; i++ {
+		require.True(t, gate.tryReserve())
+	}
+	require.NoError(t, gate.resize(2))
+	require.True(t, gate.tryRetireExcessConnection())
+	require.True(t, gate.tryRetireExcessConnection())
+
+	var sweeps atomic.Int32
+	r := startTestReconciler(t, gate, func() {
+		sweeps.Add(1)
+		for i := 0; i < 4; i++ {
+			gate.tryRetireExcessConnection()
+		}
+	})
+	r.requestReconciliation()
+	assert.Never(t, func() bool { return sweeps.Load() > 0 },
+		3*retirementRetryInterval, time.Millisecond)
+	assert.EqualValues(t, 4, gate.getTotalOpenConns())
+
+	// A further downsize needs exactly one additional retirement even while
+	// the previous two connections are still physically open.
+	require.NoError(t, gate.resize(1))
+	r.requestReconciliation()
+	assert.Eventually(t, func() bool { return gate.getNumConnsRetiring() == 3 },
+		time.Second, time.Millisecond)
+	require.False(t, gate.tryRetireExcessConnection())
+	assert.EqualValues(t, 4, gate.getTotalOpenConns())
+}
+
+func TestReconciliationUsesLatestLimit(t *testing.T) {
+	gate, err := newResizableGate(2)
+	require.NoError(t, err)
+	require.True(t, gate.tryReserve())
+	require.True(t, gate.tryReserve())
+	require.NoError(t, gate.resize(1))
+	var sweeps atomic.Int32
+	firstSweep := make(chan struct{})
+	resumeSweep := make(chan struct{})
+	r := startTestReconciler(t, gate, func() {
+		if sweeps.Add(1) == 1 {
+			close(firstSweep)
+			<-resumeSweep
+		}
+		gate.tryRetireExcessConnection()
+	})
+	// Unblock the sweep even if the test fails.
+	t.Cleanup(func() {
+		if !channelClosed(resumeSweep) {
+			close(resumeSweep)
+		}
+	})
+	r.requestReconciliation()
+	select {
+	case <-firstSweep:
+	case <-time.After(time.Second):
+		t.Fatal("initial sweep did not run")
+	}
+	require.NoError(t, gate.resize(2))
+	r.requestReconciliation()
+	close(resumeSweep)
+	assert.Never(t, func() bool { return sweeps.Load() > 1 },
+		3*retirementRetryInterval, time.Millisecond)
+	assert.Zero(t, gate.getNumConnsRetiring())
+
+	require.NoError(t, gate.resize(1))
+	r.requestReconciliation()
+	assert.Eventually(t, func() bool { return gate.getNumConnsRetiring() == 1 },
+		time.Second, time.Millisecond)
+}
+
+func TestCloseStopsReconciliationWithExcessConnections(t *testing.T) {
+	r, err := New(context.Background(), testConfig(t, 2), 2)
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+	// Simulate outstanding constructors with no idle resources to sweep.
+	require.True(t, r.gate.tryReserve())
+	require.True(t, r.gate.tryReserve())
+	require.NoError(t, r.Resize(1))
+	require.NoError(t, r.Resize(1)) // Same-limit requests are also safe.
+	closed := make(chan struct{})
+	go func() {
+		r.Close()
+		r.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close waited for reconciliation to reach the target")
+	}
+	assert.True(t, channelClosed(r.reconcileDone))
+}
+
+func startTestReconciler(t *testing.T, gate *resizableGate, sweep func()) *Resizable {
+	t.Helper()
+	r := &Resizable{
+		gate:          gate,
+		reconcileWake: make(chan struct{}, 1),
+		reconcileStop: make(chan struct{}),
+		reconcileDone: make(chan struct{}),
+	}
+	go r.reconcileConnections(sweep)
+	t.Cleanup(func() {
+		close(r.reconcileStop)
+		select {
+		case <-r.reconcileDone:
+		case <-time.After(time.Second):
+			t.Error("reconciliation worker did not stop")
+		}
+	})
+	return r
 }

@@ -35,7 +35,8 @@ func TestRefresherAppliesOnlyNewerVersions(t *testing.T) {
 	require.NoError(t, refresher.Refresh())
 
 	assert.Equal(t, []string{"first", "second"}, applied)
-	assert.Contains(t, telemetry.logs(), logEvent{slog.LevelInfo, "skipping configuration update: version 1 is not newer than latest observed version 1"})
+	assert.Contains(t, telemetry.logs(), logEvent{slog.LevelDebug, "skipping configuration update based on source change counters: source_revision=1 latest_applied_source_revision=1"})
+	assert.NotContains(t, telemetry.logs(), logEvent{slog.LevelInfo, "skipping configuration update based on source change counters: source_revision=1 latest_applied_source_revision=1"})
 }
 
 func TestRefresherWrapsSourceAndApplyErrors(t *testing.T) {
@@ -116,8 +117,8 @@ func TestRefresherSerializesConcurrentApplications(t *testing.T) {
 				want = 1
 			}
 			assert.Equal(t, want, latest)
-			assert.Equal(t, want, refresher.latestVersion)
-			assert.True(t, refresher.hasVersion)
+			assert.Equal(t, want, refresher.latestAppliedSourceRevision)
+			assert.True(t, refresher.hasAppliedSourceRevision)
 		})
 	}
 }
