@@ -18,8 +18,6 @@
 #   login-trigger        Login event triggers fire when the proxy opens a backend connection,
 #                        not when a client connects.
 #   depends-on-skipped   Uses objects that a skipped test creates.
-#   switchover-hint      pg-proxy appends a leader switchover hint to read-only transaction
-#                        errors.
 #   statement-names      pg-proxy renames named prepared statements on backend connections,
 #                        which pg_prepared_statements and some error messages show.
 skip aggregates                   # backend-reuse: relation "t1" already exists
@@ -116,5 +114,5 @@ fail amutils                      # depends-on-skipped: indexes from skipped tes
 fail create_index                 # session-reset: column b.relkind does not exist (runs: later tests use its objects)
 fail float8                       # session-reset: output differs (runs: later tests use its objects)
 fail rangetypes                   # session-reset: output differs (runs: later tests use its objects)
-fail sequence                     # switchover-hint: read-only transaction errors
-fail transactions                 # session-reset and switchover-hint: SET SESSION CHARACTERISTICS, read-only errors
+fail sequence                     # backend-reuse: relation "t1" already exists
+fail transactions                 # session-reset: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY

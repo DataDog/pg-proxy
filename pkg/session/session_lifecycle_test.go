@@ -594,10 +594,10 @@ func TestFailedForceCloseDoesNotCountBackendDestroyed(t *testing.T) {
 	backendLink.assertCalls(t, testLinkCalls{forceClose: 1})
 }
 
-// TestFatal57P03_SessionReceivesSwitchoverHint verifies the end-to-end FATAL path:
+// TestFatal57P03_SessionForwardsBackendError verifies the end-to-end FATAL path:
 // the fake PG backend sends a FATAL 57P03, and the client side of the session
-// receives a FATAL ErrorResponse with the switchover hint appended exactly once.
-func TestFatal57P03_SessionReceivesSwitchoverHint(t *testing.T) {
+// receives a FATAL ErrorResponse with the backend's code and message unchanged.
+func TestFatal57P03_SessionForwardsBackendError(t *testing.T) {
 	t.Run("reused_buffer", func(t *testing.T) {
 		_, fakeClient, fakePG, closer := newRunningTestSession(t)
 		defer closer()
@@ -618,10 +618,7 @@ func TestFatal57P03_SessionReceivesSwitchoverHint(t *testing.T) {
 		})
 		require.NoError(t, fakePG.Flush())
 
-		// The client should receive an ErrorResponse with:
-		// 1. FATAL severity
-		// 2. Original message preserved
-		// 3. Switchover hint appended exactly once
+		// The client should receive the backend's FATAL error unchanged.
 		msg, err := fakeClient.Receive()
 		require.NoError(t, err)
 		errResp, ok := msg.(*pgproto3.ErrorResponse)
@@ -629,9 +626,8 @@ func TestFatal57P03_SessionReceivesSwitchoverHint(t *testing.T) {
 			return
 		}
 		assert.Equal(t, "FATAL", errResp.Severity)
-		assert.Contains(t, errResp.Message, "the database system is shutting down", "original message must be preserved")
-		assert.Contains(t, errResp.Message, query.LeaderSwitchoverHint)
-		assert.Equal(t, 1, strings.Count(errResp.Message, query.LeaderSwitchoverHint), "hint must be appended exactly once")
+		assert.Equal(t, "57P03", errResp.Code)
+		assert.Equal(t, "the database system is shutting down", errResp.Message)
 	})
 }
 

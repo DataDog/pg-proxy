@@ -404,49 +404,49 @@ func TestPgMessageActions(t *testing.T) {
 	}
 }
 
-func TestAnnotateIfSwitchoverError(t *testing.T) {
+func TestIsSwitchoverSignature(t *testing.T) {
 	tests := []struct {
 		name             string
 		in               *pgproto3.ErrorResponse
 		expectSwitchover bool
 	}{
 		{
-			name:             "25006 cannot execute INSERT — annotated",
+			name:             "25006 cannot execute INSERT — matches",
 			in:               &pgproto3.ErrorResponse{Code: "25006", Message: "cannot execute INSERT in a read-only transaction"},
 			expectSwitchover: true,
 		},
 		{
-			name:             "25006 cannot execute UPDATE — annotated",
+			name:             "25006 cannot execute UPDATE — matches",
 			in:               &pgproto3.ErrorResponse{Code: "25006", Message: "cannot execute UPDATE in a read-only transaction"},
 			expectSwitchover: true,
 		},
 		{
-			name:             "57P03 shutting down — annotated",
+			name:             "57P03 shutting down — matches",
 			in:               &pgproto3.ErrorResponse{Code: "57P03", Message: "the database system is shutting down"},
 			expectSwitchover: true,
 		},
 		{
-			name:             "57P03 starting up — NOT annotated (steady-state standby, not switchover)",
+			name:             "57P03 starting up — does not match (steady-state standby, not switchover)",
 			in:               &pgproto3.ErrorResponse{Code: "57P03", Message: "the database system is starting up"},
 			expectSwitchover: false,
 		},
 		{
-			name:             "57P01 admin shutdown — annotated",
+			name:             "57P01 admin shutdown — matches",
 			in:               &pgproto3.ErrorResponse{Code: "57P01", Message: "terminating connection due to administrator command"},
 			expectSwitchover: true,
 		},
 		{
-			name:             "57P01 with unrelated message — NOT annotated",
+			name:             "57P01 with unrelated message — does not match",
 			in:               &pgproto3.ErrorResponse{Code: "57P01", Message: "some other admin shutdown reason"},
 			expectSwitchover: false,
 		},
 		{
-			name:             "25006 with unrelated message — NOT annotated",
+			name:             "25006 with unrelated message — does not match",
 			in:               &pgproto3.ErrorResponse{Code: "25006", Message: "some other read-only problem"},
 			expectSwitchover: false,
 		},
 		{
-			name:             "different SQLSTATE — NOT annotated",
+			name:             "different SQLSTATE — does not match",
 			in:               &pgproto3.ErrorResponse{Code: "42501", Message: "permission denied"},
 			expectSwitchover: false,
 		},
@@ -454,14 +454,7 @@ func TestAnnotateIfSwitchoverError(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			originalMessage := tc.in.Message
-			annotateIfSwitchoverError(tc.in)
-			assert.Contains(t, tc.in.Message, originalMessage, "original message must be preserved")
-			if tc.expectSwitchover {
-				assert.Contains(t, tc.in.Message, LeaderSwitchoverHint)
-			} else {
-				assert.NotContains(t, tc.in.Message, LeaderSwitchoverHint)
-			}
+			assert.Equal(t, tc.expectSwitchover, IsSwitchoverSignature(tc.in.Code, tc.in.Message))
 		})
 	}
 }
