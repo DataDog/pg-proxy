@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"net/url"
-	"os"
 	"strconv"
 	"time"
 
@@ -17,9 +16,6 @@ import (
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
-
-// DefaultPostgresImage is the public PostgreSQL image pinned by digest.
-const DefaultPostgresImage = "postgres:14-bookworm@sha256:5a05f61a534e50e679d27fb45953afec7821f2ffc2aa6c738b94515ca0891ac2"
 
 // Superuser credentials of every container started by StartPostgres.
 const (
@@ -58,10 +54,7 @@ func WithContainerOptions(customizers ...testcontainers.ContainerCustomizer) Pos
 // StartPostgres starts a PostgreSQL container and waits until it accepts
 // connections. Callers must Terminate it.
 func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, error) {
-	options := postgresOptions{image: DefaultPostgresImage}
-	if override := os.Getenv("PG_PROXY_ITEST_POSTGRES_IMAGE"); override != "" {
-		options.image = override
-	}
+	options := postgresOptions{image: PostgresImage()}
 	for _, opt := range opts {
 		opt(&options)
 	}

@@ -6,7 +6,9 @@
 //
 // Files are built only with the integration tag. Environment variables:
 //
-//   - PG_PROXY_ITEST_POSTGRES_IMAGE overrides DefaultPostgresImage.
+//   - PG_PROXY_ITEST_PUBLIC_IMAGES=true pulls images from Docker Hub instead of
+//     registry.ddbuild.io (see images.go).
+//   - PG_PROXY_ITEST_POSTGRES_IMAGE overrides PostgresImage.
 //   - PG_PROXY_ITEST_BINARY uses a prebuilt pg-proxy binary instead of building one.
 //   - PG_PROXY_ITEST_BUILD_FLAGS adds go build flags; -race is added automatically
 //     when the tests themselves run with -race.

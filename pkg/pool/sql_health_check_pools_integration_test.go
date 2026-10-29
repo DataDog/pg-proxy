@@ -13,15 +13,16 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-)
 
-const sqlHealthCheckIntegrationPostgresImage = "postgres:14-bookworm@sha256:5a05f61a534e50e679d27fb45953afec7821f2ffc2aa6c738b94515ca0891ac2"
+	"github.com/DataDog/pg-proxy/internal/itest"
+)
 
 func TestSQLHealthCheckPoolAgainstPostgres(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
-	postgresContainer, err := postgres.Run(ctx, sqlHealthCheckIntegrationPostgresImage,
+	itest.UseImageRegistry()
+	postgresContainer, err := postgres.Run(ctx, itest.PostgresImage(),
 		postgres.WithDatabase("sql_health_check_integration"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),

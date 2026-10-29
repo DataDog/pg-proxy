@@ -27,9 +27,12 @@ go vet ./...
 go test -tags=integration ./...
 ```
 
-Integration tests use the public PostgreSQL 14 image pinned by digest in the test
-sources and Testcontainers' versioned public Ryuk image. They fail if Docker is
-unavailable. Docker tests cover multiple backends and usernames, transaction
+Integration tests pull their images, pinned by digest in
+[`internal/itest/images.go`](internal/itest/images.go), from Datadog's internal
+registry, `registry.ddbuild.io`, as dd-source's tests do: PostgreSQL 14, and
+Testcontainers' Ryuk through the registry's Docker Hub mirror. Without access to
+it, set `PG_PROXY_ITEST_PUBLIC_IMAGES=true` to use the public Docker Hub images
+instead, as GitHub CI does. The tests fail if Docker is unavailable. Docker tests cover multiple backends and usernames, transaction
 pooling, startup cleanup, cancellation, shutdown, and SQL health-check connection
 reuse.
 
@@ -56,6 +59,7 @@ Running with `-race` also builds the proxy binary with `-race`. Other settings:
 
 | Variable | Effect |
 | --- | --- |
+| `PG_PROXY_ITEST_PUBLIC_IMAGES` | `true` pulls public Docker Hub images instead of `registry.ddbuild.io` ones |
 | `PG_PROXY_ITEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
 | `PG_PROXY_ITEST_BINARY` | Prebuilt pg-proxy binary instead of building one |
 | `PG_PROXY_ITEST_BUILD_FLAGS` | Extra `go build` flags for the binary, such as `-cover` |
@@ -65,7 +69,7 @@ on Linux `POLLRDHUP`, so that test is skipped on other platforms. To run the
 full suite from macOS, run it in a Linux container that uses the host's Docker:
 
 ```sh
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock -e PG_PROXY_ITEST_PUBLIC_IMAGES=true golang:1.26-bookworm go test -tags=integration -race ./test/integration
 ```
 
 ### PostgreSQL regression suite
@@ -76,7 +80,8 @@ through pg-proxy for every supported PostgreSQL major version.
 release of each and its source checksum; update it when a release comes out or
 a major version reaches end of life, and add a baseline file for a new major.
 [`image/Dockerfile`](test/regress/image/Dockerfile) builds that release from
-source together with its test programs.
+source together with its test programs, on the Debian image selected the same
+way as the integration tests' images.
 
 One container from the image is the backend and another runs `pg_regress`; it
 reaches the proxy on the host through Testcontainers' host port forwarding, so
@@ -128,7 +133,7 @@ manual runs after the workflow reaches the default branch.
 | --- | --- |
 | Go (minimum) | Exact Go version from `go.mod`; formatting, module tidiness, build, vet, and unit tests |
 | Go (stable) | Current stable Go release; build, vet, and unit tests with race detection |
-| PostgreSQL integration | Current stable Go release; Docker-backed tests with race detection using the pinned public PostgreSQL image |
+| PostgreSQL integration | Current stable Go release; Docker-backed tests with race detection using the pinned public images (`PG_PROXY_ITEST_PUBLIC_IMAGES`) |
 | PostgreSQL regression ([separate workflow](.github/workflows/regress.yml)) | One job per version in `test/regress/versions.json`: PostgreSQL's regression suite through pg-proxy against its baseline; uploads `pg_regress` output |
 
 Jobs use GitHub-hosted Ubuntu 24.04 runners, CGO, public module downloads, and a

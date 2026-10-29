@@ -12,8 +12,10 @@ import (
 
 // Main runs a package's tests around shared fixtures. Call it from TestMain:
 // setup starts fixtures such as a Postgres container and returns their teardown.
-// Main builds the pg-proxy binary first so a build failure is reported once.
+// Main builds the pg-proxy binary first so a build failure is reported once, and
+// selects the image registry (see UseImageRegistry).
 func Main(m *testing.M, setup func(context.Context) (teardown func(), err error)) int {
+	UseImageRegistry()
 	defer removeBinary()
 	if _, err := Binary(); err != nil {
 		fmt.Fprintln(os.Stderr, "build pg-proxy:", err)

@@ -50,6 +50,12 @@ type pgVersion struct {
 var versions []*pgVersion
 
 func TestMain(m *testing.M) {
+	// testcontainers/sshd, which forwards the proxy's port on the host to the
+	// pg_regress container, is not in registry.ddbuild.io's Docker Hub mirror, so
+	// Testcontainers' own images come from Docker Hub here.
+	if _, set := os.LookupEnv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX"); !set {
+		_ = os.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "")
+	}
 	os.Exit(itest.Main(m, func(context.Context) (func(), error) {
 		var err error
 		if versions, err = selectVersions(os.Getenv("PG_PROXY_REGRESS_PG_MAJORS")); err != nil {
@@ -101,10 +107,12 @@ func selectVersions(majors string) ([]*pgVersion, error) {
 
 // buildImage builds image/ for v with the Docker CLI. Testcontainers' builder is
 // not used because it queries every configured credential helper, which fails
-// on machines with helpers for unreachable registries.
+// on machines with helpers for unreachable registries. The tag names a registry
+// host so that Testcontainers does not prefix it with the Docker Hub mirror; the
+// image is never pushed.
 func buildImage(ctx context.Context, v *pgVersion) (string, error) {
-	tag := "pg-proxy-regress:" + v.Version
-	cmd := exec.CommandContext(ctx, "docker", "build", "--tag", tag,
+	tag := "pg-proxy.localhost/regress:" + v.Version
+	cmd := exec.CommandContext(ctx, "docker", "build", "--tag", tag, "--build-arg", "DEBIAN_IMAGE="+itest.DebianImage(),
 		"--build-arg", "PG_VERSION="+v.Version, "--build-arg", "PG_SHA256="+v.SHA256, "image")
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output

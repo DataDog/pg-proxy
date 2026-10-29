@@ -1,8 +1,8 @@
 # PostgreSQL built from source with its regression suite. The same image runs
 # the server and the pg_regress client, so the paths that tests hand to the
 # server (regress.so, data files, results/) exist on both sides. PG_VERSION and
-# PG_SHA256 come from ../versions.json.
-ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3
+# PG_SHA256 come from ../versions.json; DEBIAN_IMAGE from internal/itest/images.go.
+ARG DEBIAN_IMAGE
 
 FROM ${DEBIAN_IMAGE} AS build
 ARG PG_VERSION
