@@ -45,6 +45,14 @@ func (g *resizableGate) tryReserve() bool {
 	return true
 }
 
+// hasCapacity is only an acquisition hint. BeforeConnect still reserves capacity
+// atomically, since another caller can consume it before construction starts.
+func (g *resizableGate) hasCapacity() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.totalOpenConns < g.limit
+}
+
 // connConstructionFailed removes capacity reserved for a connection
 // that failed to finish construction.
 func (g *resizableGate) connConstructionFailed() {

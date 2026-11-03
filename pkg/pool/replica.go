@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"slices"
 	"sync"
@@ -79,6 +80,13 @@ func NewReplicaPool(cfg ReplicaPoolConfig) (*ReplicaPool, error) {
 		cancel()
 		return nil, err
 	}
+	if pool.isResizable {
+		if err := resizeConnectionPool(base, pool.resizableVirtualLimit); err != nil {
+			base.Close()
+			cancel()
+			return nil, err
+		}
+	}
 	pool.basePool.Store(&physicalPoolRef{pool: base})
 	if cfg.InitializeSnapshot {
 		pool.RefreshSnapshot()
@@ -154,6 +162,16 @@ func (p *ReplicaPool) Swap(source string) {
 		}
 		return
 	}
+	if p.isResizable {
+		if err := resizeConnectionPool(next, p.resizableVirtualLimit); err != nil {
+			p.mu.Unlock()
+			next.Close()
+			if p.hooks.SwapFailed != nil {
+				p.hooks.SwapFailed(source, err)
+			}
+			return
+		}
+	}
 	previous := p.basePool.Swap(&physicalPoolRef{pool: next})
 	p.mu.Unlock()
 	if previous != nil && previous.pool != nil {
@@ -205,4 +223,40 @@ func (p *ReplicaPool) runSnapshotRefresh(ctx context.Context) {
 			p.RefreshSnapshot()
 		}
 	}
+}
+
+// IsResizablePool reports whether the shared pool was configured for resizing.
+func (p *ReplicaPool) IsResizablePool() bool { return p.isResizable }
+
+// MaxConns returns the current resize limit, or zero when resizing is disabled.
+func (p *ReplicaPool) MaxConns() int32 {
+	if !p.isResizable {
+		return 0
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.resizableVirtualLimit
+}
+
+// PhysicalMaxConns returns the fixed physical ceiling selected at startup.
+func (p *ReplicaPool) PhysicalMaxConns() int32 { return p.physicalMaxConns }
+
+// ResizeMaxConns updates both the current pool and the limit applied to replacements.
+func (p *ReplicaPool) ResizeMaxConns(limit int32) error {
+	if !p.isResizable {
+		return fmt.Errorf("dynamic resizing is disabled")
+	}
+	if limit <= 0 || limit > p.physicalMaxConns {
+		return fmt.Errorf("connection limit %d must be between 1 and %d", limit, p.physicalMaxConns)
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return fmt.Errorf("replica pool is closed")
+	}
+	if err := resizeConnectionPool(p.basePool.Load().pool, limit); err != nil {
+		return err
+	}
+	p.resizableVirtualLimit = limit
+	return nil
 }

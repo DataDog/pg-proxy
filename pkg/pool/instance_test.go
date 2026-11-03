@@ -261,6 +261,153 @@ func TestInstanceRetriesFailedInitialization(t *testing.T) {
 	assert.Equal(t, 2, attempts)
 }
 
+// instanceTestPool isolates the Instance lifecycle from actual PostgreSQL I/O.
+type instanceTestPool struct {
+	ConnectionPool
+	limit     int32
+	resizeErr error
+	closed    bool
+}
+
+func (p *instanceTestPool) Resize(limit int32) error {
+	if p.resizeErr != nil {
+		return p.resizeErr
+	}
+	p.limit = limit
+	return nil
+}
+
+func (p *instanceTestPool) Close() { p.closed = true }
+
+func newResizableTestInstance(factory func(context.Context, string) (ConnectionPool, error)) *Instance {
+	return NewInstance(InstanceConfig{
+		IsResizable:           true,
+		ResizableVirtualLimit: 50,
+		PhysicalMaxConns:      100,
+		PoolFactory:           factory,
+	})
+}
+
+func TestInstanceAppliesResizeBeforeInitialization(t *testing.T) {
+	pool := &instanceTestPool{limit: 50}
+	instance := newResizableTestInstance(func(context.Context, string) (ConnectionPool, error) {
+		return pool, nil
+	})
+	require.NoError(t, instance.ResizeMaxConns(10))
+	require.Nil(t, instance.Pool())
+	require.True(t, instance.EnsurePool(context.Background()))
+	assert.Same(t, pool, instance.Pool())
+	assert.EqualValues(t, 10, pool.limit)
+
+	// A downsize does not lower the startup ceiling for subsequent growth.
+	require.NoError(t, instance.ResizeMaxConns(80))
+	assert.EqualValues(t, 80, pool.limit)
+}
+
+func TestInstanceAppliesResizeDuringInitialization(t *testing.T) {
+	pool := &instanceTestPool{limit: 50}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseFactory := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseFactory()
+	instance := newResizableTestInstance(func(context.Context, string) (ConnectionPool, error) {
+		close(started)
+		<-release
+		return pool, nil
+	})
+	initialized := make(chan bool, 1)
+	go func() { initialized <- instance.EnsurePool(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("pool construction did not start")
+	}
+	resized := make(chan error, 1)
+	go func() { resized <- instance.ResizeMaxConns(10) }()
+	select {
+	case err := <-resized:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("resize blocked behind connection establishment")
+	}
+	require.Nil(t, instance.Pool())
+	releaseFactory()
+	select {
+	case ok := <-initialized:
+		require.True(t, ok)
+	case <-time.After(time.Second):
+		t.Fatal("pool initialization did not complete")
+	}
+	assert.EqualValues(t, 10, pool.limit)
+}
+
+func TestInstanceValidatesResizeBeforeAndAfterInitialization(t *testing.T) {
+	for _, initialized := range []bool{false, true} {
+		name := "before_initialization"
+		if initialized {
+			name = "after_initialization"
+		}
+		t.Run(name, func(t *testing.T) {
+			pool := &instanceTestPool{limit: 50}
+			instance := newResizableTestInstance(func(context.Context, string) (ConnectionPool, error) {
+				return pool, nil
+			})
+			require.NoError(t, instance.ResizeMaxConns(10))
+			if initialized {
+				require.True(t, instance.EnsurePool(context.Background()))
+			}
+			for _, limit := range []int32{-1, 0, 101} {
+				require.Error(t, instance.ResizeMaxConns(limit))
+			}
+			require.True(t, instance.EnsurePool(context.Background()))
+			assert.EqualValues(t, 10, pool.limit, "invalid requests must not replace the accepted limit")
+		})
+	}
+}
+
+func TestInstanceRetainsResizeAcrossConstructionFailure(t *testing.T) {
+	pool := &instanceTestPool{limit: 50}
+	attempts := 0
+	instance := newResizableTestInstance(func(context.Context, string) (ConnectionPool, error) {
+		attempts++
+		if attempts == 1 {
+			return nil, errors.New("unavailable")
+		}
+		return pool, nil
+	})
+	require.NoError(t, instance.ResizeMaxConns(10))
+	require.False(t, instance.EnsurePool(context.Background()))
+	require.NoError(t, instance.ResizeMaxConns(5))
+	require.True(t, instance.EnsurePool(context.Background()))
+	assert.EqualValues(t, 5, pool.limit)
+}
+
+func TestInstanceClosesUnpublishedPoolWhenResizeFails(t *testing.T) {
+	expected := errors.New("resize failed")
+	pool := &instanceTestPool{resizeErr: expected}
+	instance := newResizableTestInstance(func(context.Context, string) (ConnectionPool, error) {
+		return pool, nil
+	})
+	var reported error
+	instance.hooks.PoolCreateError = func(_, _ string, err error) { reported = err }
+	require.False(t, instance.EnsurePool(context.Background()))
+	assert.Nil(t, instance.Pool())
+	assert.True(t, pool.closed)
+	assert.ErrorIs(t, reported, expected)
+}
+
+func TestInstanceRegularPoolDoesNotResize(t *testing.T) {
+	pool := &instanceTestPool{resizeErr: errors.New("unexpected resize")}
+	instance := NewInstance(InstanceConfig{
+		PoolFactory: func(context.Context, string) (ConnectionPool, error) { return pool, nil },
+	})
+	assert.False(t, instance.IsResizablePool())
+	require.EqualError(t, instance.ResizeMaxConns(10), "dynamic resizing is disabled")
+	require.True(t, instance.EnsurePool(context.Background()))
+	assert.Same(t, pool, instance.Pool())
+}
+
 func TestTraditionalInstanceIgnoresResizableVirtualLimit(t *testing.T) {
 	instance := NewInstance(InstanceConfig{ResizableVirtualLimit: 50})
 	assert.False(t, instance.isResizable)

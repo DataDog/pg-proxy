@@ -68,19 +68,35 @@ func New(ctx context.Context, config *pgxpool.Config, limit int32) (*Resizable, 
 }
 
 func (r *Resizable) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
-	return acquireWithGate(ctx, r.gate, r.pgx.Acquire)
+	return acquireWithGate(ctx, r.gate, func() bool {
+		select {
+		case <-r.reconcileStop:
+			// Let pgx return its closed-pool error rather than waiting on capacity.
+			return true
+		default:
+			return r.pgx.Stat().IdleConns() > 0
+		}
+	}, r.pgx.Acquire)
 }
 
 func acquireWithGate(
 	ctx context.Context,
 	gate *resizableGate,
+	idleAvailable func() bool,
 	acquire func(context.Context) (*pgxpool.Conn, error),
 ) (*pgxpool.Conn, error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		signal := gate.getAvailabilitySignal()
-		conn, err := acquire(ctx)
-		if !errors.Is(err, errVirtualConnectionLimit) {
-			return conn, err
+		// Do not invoke pgx's constructor merely to have BeforeConnect reject it.
+		// Availability is a hint: competing acquisitions can still win the race.
+		if gate.hasCapacity() || idleAvailable() {
+			conn, err := acquire(ctx)
+			if !errors.Is(err, errVirtualConnectionLimit) {
+				return conn, err
+			}
 		}
 		if err := gate.wait(ctx, signal); err != nil {
 			return nil, err

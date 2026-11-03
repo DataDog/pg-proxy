@@ -1,6 +1,7 @@
 package pool
 
 import (
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -175,6 +176,109 @@ func TestReplicaPoolCloseAfterSwap(t *testing.T) {
 	assert.EqualValues(t, 1, next.closeCount.Load())
 }
 
+func TestReplicaPoolResizeDuringReplacement(t *testing.T) {
+	current, next := &instanceTestPool{}, &instanceTestPool{}
+	started, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	unblock := func() { releaseOnce.Do(func() { close(release) }) }
+	defer unblock()
+	attempts := 0
+	runtime, err := NewReplicaPool(ReplicaPoolConfig{
+		IsResizable:           true,
+		ResizableVirtualLimit: 20, PhysicalMaxConns: 100,
+		NewBasePool: func() (ConnectionPool, error) {
+			attempts++
+			if attempts == 1 {
+				return current, nil
+			}
+			close(started)
+			<-release
+			return next, nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(runtime.ClosePools)
+	done := make(chan struct{})
+	go func() { runtime.Swap("test"); close(done) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not start")
+	}
+	resized := make(chan error, 1)
+	go func() { resized <- runtime.ResizeMaxConns(30) }()
+	select {
+	case err := <-resized:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("resize blocked behind construction")
+	}
+	assert.EqualValues(t, 30, current.limit)
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("replacement did not complete")
+	}
+	assert.Same(t, next, runtime.basePool.Load().pool)
+	assert.EqualValues(t, 30, next.limit)
+	assert.EqualValues(t, 30, runtime.MaxConns())
+	require.NoError(t, runtime.ResizeMaxConns(80))
+	assert.EqualValues(t, 80, next.limit)
+}
+
+func TestReplicaPoolFailedResizeDoesNotChangeSavedLimit(t *testing.T) {
+	current, next := &instanceTestPool{}, &instanceTestPool{}
+	attempts := 0
+	runtime, err := NewReplicaPool(ReplicaPoolConfig{
+		IsResizable:           true,
+		ResizableVirtualLimit: 20, PhysicalMaxConns: 100,
+		NewBasePool: func() (ConnectionPool, error) {
+			attempts++
+			if attempts == 1 {
+				return current, nil
+			}
+			return next, nil
+		},
+	})
+	require.NoError(t, err)
+	t.Cleanup(runtime.ClosePools)
+	require.NoError(t, runtime.ResizeMaxConns(30))
+	for _, limit := range []int32{-1, 0, 101} {
+		require.Error(t, runtime.ResizeMaxConns(limit))
+	}
+	current.resizeErr = errors.New("failed")
+	require.Error(t, runtime.ResizeMaxConns(40))
+	assert.EqualValues(t, 30, runtime.MaxConns())
+	runtime.Swap("test")
+	assert.EqualValues(t, 30, next.limit)
+}
+
+func TestReplicaPoolRejectsFailedReplacement(t *testing.T) {
+	current := &instanceTestPool{}
+	next := &instanceTestPool{resizeErr: errors.New("failed")}
+	attempts := 0
+	var reported error
+	runtime, err := NewReplicaPool(ReplicaPoolConfig{
+		IsResizable:           true,
+		ResizableVirtualLimit: 20, PhysicalMaxConns: 100,
+		NewBasePool: func() (ConnectionPool, error) {
+			attempts++
+			if attempts == 1 {
+				return current, nil
+			}
+			return next, nil
+		},
+		Hooks: ReplicaPoolHooks{SwapFailed: func(_ string, err error) { reported = err }},
+	})
+	require.NoError(t, err)
+	t.Cleanup(runtime.ClosePools)
+	runtime.Swap("test")
+	assert.Same(t, current, runtime.basePool.Load().pool)
+	assert.True(t, next.closed)
+	assert.ErrorIs(t, reported, next.resizeErr)
+}
+
 func TestTraditionalReplicaPoolIgnoresResizableVirtualLimit(t *testing.T) {
 	runtime, err := NewReplicaPool(ReplicaPoolConfig{
 		ResizableVirtualLimit: 50,
@@ -183,4 +287,8 @@ func TestTraditionalReplicaPoolIgnoresResizableVirtualLimit(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, runtime.isResizable)
 	assert.Zero(t, runtime.resizableVirtualLimit)
+	runtime.resizableVirtualLimit = 50
+	assert.False(t, runtime.IsResizablePool())
+	assert.Zero(t, runtime.MaxConns())
+	assert.Error(t, runtime.ResizeMaxConns(10))
 }

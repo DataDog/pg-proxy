@@ -92,7 +92,7 @@ func TestAcquireWithGateRetriesAfterVirtualLimit(t *testing.T) {
 		return nil, nil
 	}
 
-	conn, err := acquireWithGate(context.Background(), gate, acquire)
+	conn, err := acquireWithGate(context.Background(), gate, func() bool { return false }, acquire)
 	require.NoError(t, err)
 	assert.Nil(t, conn)
 	assert.Equal(t, 2, acquisitions)
@@ -119,7 +119,7 @@ func TestAcquireWithGateRetriesAfterEarlyReleaseNotification(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	conn, err := acquireWithGate(ctx, gate, acquire)
+	conn, err := acquireWithGate(ctx, gate, func() bool { return false }, acquire)
 	require.NoError(t, err)
 	assert.Nil(t, conn)
 	assert.Equal(t, 3, acquisitions)
@@ -136,7 +136,7 @@ func TestAcquireWithGateDoesNotBlockIdleAcquireBehindConstruction(t *testing.T) 
 	firstResult := make(chan error, 1)
 	firstAcquisitions := 0
 	go func() {
-		_, err := acquireWithGate(ctx, gate, func(context.Context) (*pgxpool.Conn, error) {
+		_, err := acquireWithGate(ctx, gate, func() bool { return false }, func(context.Context) (*pgxpool.Conn, error) {
 			firstAcquisitions++
 			if firstAcquisitions == 1 {
 				return nil, errVirtualConnectionLimit
@@ -152,7 +152,7 @@ func TestAcquireWithGateDoesNotBlockIdleAcquireBehindConstruction(t *testing.T) 
 	secondResult := make(chan error, 1)
 	secondAcquisitions := 0
 	go func() {
-		_, err := acquireWithGate(ctx, gate, func(context.Context) (*pgxpool.Conn, error) {
+		_, err := acquireWithGate(ctx, gate, func() bool { return false }, func(context.Context) (*pgxpool.Conn, error) {
 			secondAcquisitions++
 			if secondAcquisitions == 1 {
 				return nil, errVirtualConnectionLimit
@@ -181,7 +181,7 @@ func TestAcquireWithGateHonorsCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err = acquireWithGate(ctx, gate, func(context.Context) (*pgxpool.Conn, error) {
+	_, err = acquireWithGate(ctx, gate, func() bool { return false }, func(context.Context) (*pgxpool.Conn, error) {
 		return nil, errVirtualConnectionLimit
 	})
 	require.ErrorIs(t, err, context.Canceled)
@@ -192,7 +192,7 @@ func TestAcquireWithGateReturnsOtherErrors(t *testing.T) {
 	require.NoError(t, err)
 	expected := errors.New("database unavailable")
 
-	_, err = acquireWithGate(context.Background(), gate, func(context.Context) (*pgxpool.Conn, error) {
+	_, err = acquireWithGate(context.Background(), gate, func() bool { return false }, func(context.Context) (*pgxpool.Conn, error) {
 		return nil, expected
 	})
 	require.ErrorIs(t, err, expected)
@@ -491,4 +491,98 @@ func startTestReconciler(t *testing.T, gate *resizableGate, sweep func()) *Resiz
 		}
 	})
 	return r
+}
+
+// Every waiter observes several retry intervals while the pool remains full.
+// A retry must inspect availability without invoking pgx's constructor path.
+func TestSaturatedAcquireSkipsConstruction(t *testing.T) {
+	gate, err := newResizableGate(20)
+	require.NoError(t, err)
+	for i := 0; i < 20; i++ {
+		require.True(t, gate.tryReserve())
+	}
+	var attempts atomic.Int32
+	results := make(chan error, 200)
+	for i := 0; i < cap(results); i++ {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			checks := 0
+			_, err := acquireWithGate(ctx, gate, func() bool {
+				checks++
+				if checks == 4 {
+					cancel()
+				}
+				return false
+			}, func(context.Context) (*pgxpool.Conn, error) {
+				attempts.Add(1)
+				return nil, errVirtualConnectionLimit
+			})
+			results <- err
+		}()
+	}
+	var unexpectedErr error
+	for i := 0; i < cap(results); i++ {
+		select {
+		case err := <-results:
+			if !errors.Is(err, context.Canceled) {
+				unexpectedErr = err
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("saturated acquisition did not stop")
+		}
+	}
+	assert.NoError(t, unexpectedErr)
+	assert.Zero(t, attempts.Load(), "saturated waiters must not invoke pgx Acquire")
+}
+
+func TestSaturatedAcquireResumesWhenAvailable(t *testing.T) {
+	for _, event := range []string{"late_idle", "grow", "closed_connection"} {
+		t.Run(event, func(t *testing.T) {
+			gate, err := newResizableGate(1)
+			require.NoError(t, err)
+			require.True(t, gate.tryReserve())
+			checks, attempts := 0, 0
+			idle := false
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			_, err = acquireWithGate(ctx, gate, func() bool {
+				checks++
+				if checks == 1 {
+					// AfterRelease can notify before pgx publishes the connection idle.
+					gate.notifyIdleConnAvailability()
+				}
+				if checks == 3 {
+					switch event {
+					case "late_idle":
+						idle = true // No second notification when pgx publishes the connection.
+					case "grow":
+						require.NoError(t, gate.resize(2))
+					case "closed_connection":
+						gate.connClosed()
+					}
+				}
+				return idle
+			}, func(context.Context) (*pgxpool.Conn, error) {
+				attempts++
+				return nil, nil
+			})
+			require.NoError(t, err)
+			assert.GreaterOrEqual(t, checks, 3)
+			assert.Equal(t, 1, attempts)
+		})
+	}
+}
+
+func TestSaturatedAcquireReturnsAfterPoolClose(t *testing.T) {
+	r, err := New(context.Background(), testConfig(t, 2), 1)
+	require.NoError(t, err)
+	t.Cleanup(r.Close)
+	require.True(t, r.gate.tryReserve()) // Simulate occupied physical capacity.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	r.Close()
+	_, err = r.Acquire(ctx)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, context.DeadlineExceeded)
 }

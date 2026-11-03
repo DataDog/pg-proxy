@@ -168,6 +168,39 @@ func (i *Instance) Reset() {
 	}
 }
 
+// IsResizablePool reports whether this instance was configured for resizing.
+func (i *Instance) IsResizablePool() bool { return i.isResizable }
+
+// ResizeMaxConns updates an existing pool or saves the limit for initialization.
+func (i *Instance) ResizeMaxConns(limit int32) error {
+	if !i.isResizable {
+		return fmt.Errorf("dynamic resizing is disabled")
+	}
+	if limit <= 0 {
+		return fmt.Errorf("connection limit must be positive: %d", limit)
+	}
+	if limit > i.physicalMaxConns {
+		return fmt.Errorf("connection limit %d exceeds physical ceiling %d", limit, i.physicalMaxConns)
+	}
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pool != nil {
+		if err := resizeConnectionPool(i.pool, limit); err != nil {
+			return err
+		}
+	}
+	i.resizableVirtualLimit = limit
+	return nil
+}
+
+func resizeConnectionPool(pool ConnectionPool, limit int32) error {
+	resizable, ok := pool.(interface{ Resize(int32) error })
+	if !ok {
+		return fmt.Errorf("connection pool does not support dynamic resizing")
+	}
+	return resizable.Resize(limit)
+}
+
 // EnsurePool initializes the pool if necessary, unless the instance is closed.
 func (i *Instance) EnsurePool(ctx context.Context) bool {
 	i.initMu.Lock()
@@ -195,6 +228,17 @@ func (i *Instance) EnsurePool(ctx context.Context) bool {
 		i.mu.Unlock()
 		pool.Close()
 		return false
+	}
+	// Apply the latest limit before publishing, including resizes received during construction.
+	if i.isResizable {
+		if err := resizeConnectionPool(pool, i.resizableVirtualLimit); err != nil {
+			i.mu.Unlock()
+			pool.Close()
+			if i.hooks.PoolCreateError != nil {
+				i.hooks.PoolCreateError(i.address, i.database, err)
+			}
+			return false
+		}
 	}
 	i.pool = pool
 	i.mu.Unlock()
