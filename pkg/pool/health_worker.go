@@ -1,0 +1,882 @@
+package pool
+
+import (
+	"context"
+	"crypto/sha256"
+	"errors"
+	"slices"
+	"sync"
+	"time"
+)
+
+var (
+	// ErrSQLHealthUpdatesUnsupported reports that a health subscription has no SQL checker.
+	ErrSQLHealthUpdatesUnsupported = errors.New("pool does not publish SQL health updates")
+	// ErrSQLHealthCheckMissed reports that the previous SQL check was still running at the next tick.
+	ErrSQLHealthCheckMissed = errors.New("SQL health check missed its scheduled interval")
+)
+
+// HealthChecker centralizes health probing across pools. Pools targeting the same host and role
+// share discovery, probes, and Patroni state. SQL-enabled subscriptions retain independent
+// database- and credential-specific targets under that shared host snapshot.
+type HealthChecker interface {
+	// Subscribe registers host for periodic probing and returns a channel that
+	// receives the shared snapshot after each completed health check. The first Subscribe for a new
+	// key runs an inline DNS + probe pass before returning, so an initial snapshot is ready for the
+	// caller to receive. Each subscriber gets its own channel so every subscriber observes updates.
+	// SQL is nil for subscriptions that do not need centralized SQL health checks.
+	Subscribe(host string, isReadReplica bool, dbName string, tags []string, sql *SQLHealthConfig) HealthUpdates
+	// Unsubscribe drops a subscription. When the last subscriber for a key
+	// unsubscribes the entry is removed and the worker stops probing it.
+	Unsubscribe(HealthUpdates)
+}
+
+// HealthUpdates delivers the latest shared health snapshot for a subscribed
+// host. Updates are coalesced while a consumer is still processing the previous
+// notification.
+type HealthUpdates <-chan *PoolHealth
+
+// SQLHealthConfig enables centralized SQL checks for one health subscription.
+type SQLHealthConfig struct {
+	ConnStringForIP func(ip string) string
+	// ChecksEnabled is evaluated before each SQL snapshot. When it returns false, the snapshot is
+	// skipped and existing dedicated probe pools are released. Nil preserves enabled behavior.
+	ChecksEnabled func(context.Context) bool
+}
+
+// SQLHealthObservation reports a client-facing SQL availability result. A writable observation may
+// be published as soon as the first healthy primary responds, before the complete routing snapshot
+// finishes. Disabled reports a feature-gated check without classifying it as a database failure.
+type SQLHealthObservation struct {
+	// ScheduledAt identifies the refresh interval this observation belongs to. Consumers use it
+	// to prevent a late completion from an older interval from replacing newer availability state.
+	ScheduledAt time.Time
+	// ObservedAt is when the SQL result became known. For a missed interval it equals ScheduledAt.
+	ObservedAt time.Time
+	Writable   bool
+	Err        error
+	Disabled   bool
+}
+
+var errNoSQLHealthCheckResults = errors.New("SQL health check returned no results")
+
+func newSQLHealthObservation(scheduledAt, observedAt time.Time, outcome SQLHealthCheckOutcome) SQLHealthObservation {
+	observation := SQLHealthObservation{
+		ScheduledAt: scheduledAt,
+		ObservedAt:  observedAt,
+		Writable:    len(outcome.PrimaryIPs) > 0,
+	}
+	errs := make([]error, 0, len(outcome.Results))
+	for _, result := range outcome.Results {
+		if result.Err != nil {
+			errs = append(errs, result.Err)
+		}
+	}
+	if len(outcome.Results) == 0 {
+		errs = append(errs, errNoSQLHealthCheckResults)
+	}
+	observation.Err = errors.Join(errs...)
+	return observation
+}
+
+func sqlHealthObservationScheduledAt(observation SQLHealthObservation) time.Time {
+	if !observation.ScheduledAt.IsZero() {
+		return observation.ScheduledAt
+	}
+	// Preserve ordering for callers that construct observations without ScheduledAt.
+	return observation.ObservedAt
+}
+
+// SQLHealthUpdates is an independent subscription to SQL observations for one PoolHealth.
+type SQLHealthUpdates interface {
+	Updates() <-chan SQLHealthObservation
+	Done() <-chan struct{}
+	Close()
+}
+
+// HealthProber supplies discovery and health policy. Its methods may run concurrently.
+type HealthProber interface {
+	Lookup(host string, tags []string) []string
+	Probe(ip, host, dbName string, isReadReplica bool, tags []string) (healthy bool, systemID string, err error)
+}
+
+// HealthWorkerHooks reports subscription counts and refresh activity.
+// Callbacks may run concurrently across hosts. Evicted must not read the snapshot.
+type HealthWorkerHooks struct {
+	Subscriptions  func(count int, tags []string)
+	CheckStarted   func(tags []string)
+	CheckFinished  func(elapsed time.Duration, tags []string)
+	SQLCheckMissed func(tags []string)
+	Evicted        func(ip string, tags []string)
+}
+
+// HealthWorkerConfig supplies the application policy for a shared worker.
+type HealthWorkerConfig struct {
+	Interval         time.Duration
+	SQLInterval      time.Duration
+	AbsenceThreshold int
+	Prober           HealthProber
+	NewSQLChecker    func(context.Context) *SQLHealthChecker
+	Hooks            HealthWorkerHooks
+}
+
+// NewHealthWorker constructs a worker without starting periodic refreshes.
+// Prober is required. Interval must be positive when Run is used.
+func NewHealthWorker(cfg HealthWorkerConfig) *HealthWorker {
+	return &HealthWorker{
+		interval:         cfg.Interval,
+		sqlInterval:      cfg.SQLInterval,
+		absenceThreshold: cfg.AbsenceThreshold,
+		prober:           cfg.Prober,
+		hooks:            cfg.Hooks,
+		newSQLChecker:    cfg.NewSQLChecker,
+		hosts:            make(map[string]*PoolHealth),
+		subscriptions:    make(map[HealthUpdates]*healthSubscription),
+	}
+}
+
+// HealthWorker shares health checks and snapshots among pools targeting the same host.
+type HealthWorker struct {
+	interval         time.Duration
+	sqlInterval      time.Duration
+	prober           HealthProber
+	absenceThreshold int
+	hooks            HealthWorkerHooks
+	newSQLChecker    func(context.Context) *SQLHealthChecker
+
+	mu            sync.Mutex
+	hosts         map[string]*PoolHealth
+	subscriptions map[HealthUpdates]*healthSubscription
+}
+
+// PoolHealth is a shared snapshot for a subscribed host.
+type PoolHealth struct {
+	host          string
+	isReadReplica bool
+	dbName        string
+	tags          []string
+	patroniTags   []string
+
+	mu sync.RWMutex
+	// Keep probing until the last pool unsubscribes.
+	refcount    int
+	subscribers map[HealthUpdates]chan *PoolHealth
+	// ready closes after the first inline health check finishes. Concurrent
+	// subscribers wait for it instead of observing an empty snapshot.
+	ready chan struct{}
+	state *HealthState
+
+	sqlMu          sync.RWMutex
+	sqlHealthState *HealthState
+	// subscriptionTargets associates each pool subscription with its SQL connection string.
+	subscriptionTargets map[HealthUpdates]*sqlHealthTarget
+}
+
+type healthSubscription struct {
+	poolHealth *PoolHealth
+	sqlTarget  *sqlHealthTarget
+}
+
+type sqlHealthRoundState struct {
+	scheduledAt       time.Time
+	running           bool
+	writablePublished bool
+}
+
+// sqlHealthTarget contains the SQL-specific state for one connection string.
+type sqlHealthTarget struct {
+	poolHealth           *PoolHealth
+	connectionStringHash [sha256.Size]byte
+	database             string
+	tags                 []string
+	connStringForIP      func(string) string
+	checksEnabled        func(context.Context) bool
+	checker              *SQLHealthChecker
+	refcount             int
+
+	// sqlCheckMu serializes all operations that access or mutate checker state: SQL probes,
+	// independently discovered probe-pool reconciliation, feature-flag pool release, subscription
+	// setup, and shutdown. It also protects sqlClosed. Observation publication must happen after
+	// this lock is released so consumers cannot block checker cleanup.
+	sqlCheckMu sync.Mutex
+	sqlClosed  bool
+
+	// sqlRoundMu protects the active round separately from sqlCheckMu so the scheduler can decide
+	// whether a missed tick represents unavailability while a SQL probe is still running.
+	sqlRoundMu sync.Mutex
+	sqlRound   sqlHealthRoundState
+
+	subscriberMu   sync.RWMutex
+	sqlSubscribers map[*sqlHealthUpdates]struct{}
+}
+
+func (t *sqlHealthTarget) tryStartSQLRound(scheduledAt time.Time) bool {
+	t.sqlRoundMu.Lock()
+	defer t.sqlRoundMu.Unlock()
+
+	if t.sqlRound.running {
+		return false
+	}
+	t.sqlRound = sqlHealthRoundState{scheduledAt: scheduledAt, running: true}
+	return true
+}
+
+func (t *sqlHealthTarget) finishSQLRound(scheduledAt time.Time) {
+	t.sqlRoundMu.Lock()
+	defer t.sqlRoundMu.Unlock()
+
+	if !t.sqlRound.running || !t.sqlRound.scheduledAt.Equal(scheduledAt) {
+		return
+	}
+	t.sqlRound = sqlHealthRoundState{}
+}
+
+func (t *sqlHealthTarget) markSQLRoundWritable(scheduledAt time.Time) bool {
+	t.sqlRoundMu.Lock()
+	defer t.sqlRoundMu.Unlock()
+
+	if !t.sqlRound.running ||
+		!t.sqlRound.scheduledAt.Equal(scheduledAt) ||
+		t.sqlRound.writablePublished {
+		return false
+	}
+	t.sqlRound.writablePublished = true
+	return true
+}
+
+func (t *sqlHealthTarget) activeSQLRoundPublishedWritable() bool {
+	t.sqlRoundMu.Lock()
+	defer t.sqlRoundMu.Unlock()
+	return t.sqlRound.running && t.sqlRound.writablePublished
+}
+
+func (t *sqlHealthTarget) sqlRoundRunning() bool {
+	t.sqlRoundMu.Lock()
+	defer t.sqlRoundMu.Unlock()
+	return t.sqlRound.running
+}
+
+type sqlHealthUpdates struct {
+	source    *sqlHealthTarget
+	updates   chan SQLHealthObservation
+	done      chan struct{}
+	once      sync.Once
+	publishMu sync.Mutex
+}
+
+func sqlConnectionStringHash(host string, sql *SQLHealthConfig) [sha256.Size]byte {
+	return sha256.Sum256([]byte(sql.ConnStringForIP(host)))
+}
+
+func (w *HealthWorker) Subscribe(host string, isReadReplica bool, dbName string, tags []string, sql *SQLHealthConfig) HealthUpdates {
+	updates := make(chan *PoolHealth, 1)
+	subscription := HealthUpdates(updates)
+	sqlEnabled := sql != nil && sql.ConnStringForIP != nil && !isReadReplica && w.newSQLChecker != nil
+
+	w.mu.Lock()
+	poolHealth, existed := w.hosts[host]
+	if !existed {
+		healthTags := slices.Clone(tags)
+		if hostTag := "postgres_host:" + host; !slices.Contains(healthTags, hostTag) {
+			healthTags = append(healthTags, hostTag)
+		}
+		poolHealth = &PoolHealth{
+			host:                host,
+			isReadReplica:       isReadReplica,
+			dbName:              dbName,
+			tags:                healthTags,
+			patroniTags:         patroniHealthTags(host, isReadReplica),
+			state:               NewHealthState(),
+			sqlHealthState:      NewHealthState(),
+			subscribers:         make(map[HealthUpdates]chan *PoolHealth),
+			ready:               make(chan struct{}),
+			subscriptionTargets: make(map[HealthUpdates]*sqlHealthTarget),
+		}
+		w.hosts[host] = poolHealth
+	}
+	var target *sqlHealthTarget
+	if sqlEnabled {
+		connectionStringHash := sqlConnectionStringHash(host, sql)
+		poolHealth.sqlMu.Lock()
+		for _, existing := range poolHealth.subscriptionTargets {
+			if existing.connectionStringHash == connectionStringHash {
+				target = existing
+				break
+			}
+		}
+		if target == nil {
+			targetTags := slices.Clone(tags)
+			if hostTag := "postgres_host:" + host; !slices.Contains(targetTags, hostTag) {
+				targetTags = append(targetTags, hostTag)
+			}
+			target = &sqlHealthTarget{
+				poolHealth:           poolHealth,
+				connectionStringHash: connectionStringHash,
+				database:             dbName,
+				tags:                 targetTags,
+				connStringForIP:      sql.ConnStringForIP,
+				checksEnabled:        sql.ChecksEnabled,
+				checker:              w.newSQLChecker(context.Background()),
+				sqlSubscribers:       make(map[*sqlHealthUpdates]struct{}),
+			}
+		}
+		target.refcount++
+		poolHealth.sqlMu.Unlock()
+	}
+	poolHealth.mu.Lock()
+	poolHealth.refcount++
+	poolHealth.subscribers[subscription] = updates
+	subscriptionCount := poolHealth.refcount
+	poolHealth.mu.Unlock()
+	if target != nil {
+		poolHealth.sqlMu.Lock()
+		poolHealth.subscriptionTargets[subscription] = target
+		poolHealth.sqlMu.Unlock()
+	}
+	w.subscriptions[subscription] = &healthSubscription{poolHealth: poolHealth, sqlTarget: target}
+	w.mu.Unlock()
+
+	if w.hooks.Subscriptions != nil {
+		w.hooks.Subscriptions(subscriptionCount, tags)
+	}
+
+	if !existed {
+		w.checkPoolHealth(poolHealth)
+		close(poolHealth.ready)
+		return subscription
+	}
+
+	<-poolHealth.ready
+	poolHealth.mu.Lock()
+	select {
+	case updates <- poolHealth:
+	default:
+	}
+	poolHealth.mu.Unlock()
+	return subscription
+}
+
+func (w *HealthWorker) Unsubscribe(subscription HealthUpdates) {
+	if subscription == nil {
+		return
+	}
+
+	w.mu.Lock()
+	record, ok := w.subscriptions[subscription]
+	if !ok {
+		w.mu.Unlock()
+		return
+	}
+	delete(w.subscriptions, subscription)
+	poolHealth := record.poolHealth
+	poolHealth.mu.Lock()
+	updates := poolHealth.subscribers[subscription]
+	delete(poolHealth.subscribers, subscription)
+	poolHealth.refcount--
+	if poolHealth.refcount <= 0 {
+		if current, ok := w.hosts[poolHealth.host]; ok && current == poolHealth {
+			delete(w.hosts, poolHealth.host)
+		}
+	}
+	subscriptionCount := poolHealth.refcount
+	poolHealth.mu.Unlock()
+	close(updates)
+	w.mu.Unlock()
+	if record.sqlTarget != nil {
+		poolHealth.sqlMu.Lock()
+		delete(poolHealth.subscriptionTargets, subscription)
+		poolHealth.sqlMu.Unlock()
+		poolHealth.removeSQLTarget(record.sqlTarget)
+	}
+	if w.hooks.Subscriptions != nil {
+		w.hooks.Subscriptions(subscriptionCount, poolHealth.tags)
+	}
+}
+
+// Run executes the Patroni and centralized SQL health loops. Both operate on the same PoolHealth,
+// while Patroni and SQL retain independent address state on their respective cadences.
+func (w *HealthWorker) Run() {
+	if w.sqlInterval > 0 {
+		go w.runCentralizedSQLChecks()
+	}
+	w.runPatroniChecks()
+}
+
+func (w *HealthWorker) runPatroniChecks() {
+	ticker := time.NewTicker(w.interval)
+	defer ticker.Stop()
+	for range ticker.C {
+		w.Refresh()
+	}
+}
+
+func (w *HealthWorker) runCentralizedSQLChecks() {
+	ticker := time.NewTicker(w.sqlInterval)
+	defer ticker.Stop()
+	for tickAt := range ticker.C {
+		w.scheduleSQLRefresh(tickAt)
+	}
+}
+
+func (s *PoolHealth) trackNewIPs(ips []string) []string {
+	return s.state.Track(ips)
+}
+
+func (w *HealthWorker) updateHealthAndCleanup(s *PoolHealth, pghealth map[string]bool, systemIDs map[string]string, ips []string) {
+	s.state.Update(pghealth, systemIDs, ips, w.absenceThreshold, func(ip string) {
+		if w.hooks.Evicted != nil {
+			w.hooks.Evicted(ip, s.tags)
+		}
+	})
+	s.notifySubscribers()
+}
+
+func (s *PoolHealth) notifySubscribers() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, updates := range s.subscribers {
+		select {
+		case updates <- s:
+		default:
+		}
+	}
+}
+
+func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
+	start := time.Now()
+	if w.hooks.CheckStarted != nil {
+		w.hooks.CheckStarted(poolHealth.patroniTags)
+	}
+	ips := w.prober.Lookup(poolHealth.host, poolHealth.patroniTags)
+	tracked := poolHealth.trackNewIPs(ips)
+
+	pghealth := make(map[string]bool, len(tracked))
+	systemIDs := make(map[string]string, len(tracked))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, ip := range tracked {
+		wg.Add(1)
+		go func(ip string) {
+			defer wg.Done()
+			ok, systemID, err := w.prober.Probe(
+				ip,
+				poolHealth.host,
+				poolHealth.dbName,
+				poolHealth.isReadReplica,
+				poolHealth.patroniTags,
+			)
+			mu.Lock()
+			pghealth[ip] = err == nil && ok
+			systemIDs[ip] = systemID
+			mu.Unlock()
+		}(ip)
+	}
+	wg.Wait()
+
+	if w.hooks.CheckFinished != nil {
+		w.hooks.CheckFinished(time.Since(start), poolHealth.patroniTags)
+	}
+	w.updateHealthAndCleanup(poolHealth, pghealth, systemIDs, ips)
+}
+
+func patroniHealthTags(host string, isReadReplica bool) []string {
+	role := "primary"
+	if isReadReplica {
+		role = "replica"
+	}
+	return []string{
+		"postgres_host:" + host,
+		"pool_role:" + role,
+	}
+}
+
+// Refresh checks all subscribed hosts in parallel and waits for their snapshots.
+// Call it serially; Run already does this on each tick.
+func (w *HealthWorker) Refresh() {
+	w.mu.Lock()
+	allPoolHealths := make([]*PoolHealth, 0, len(w.hosts))
+	for _, s := range w.hosts {
+		allPoolHealths = append(allPoolHealths, s)
+	}
+	w.mu.Unlock()
+	var wg sync.WaitGroup
+	for _, poolHealth := range allPoolHealths {
+		wg.Add(1)
+		go func(poolHealth *PoolHealth) {
+			defer wg.Done()
+			w.checkPoolHealth(poolHealth)
+		}(poolHealth)
+	}
+	wg.Wait()
+}
+
+type sqlHealthGroup struct {
+	poolHealth *PoolHealth
+	targets    []*sqlHealthTarget
+}
+
+func (w *HealthWorker) sqlHealthGroups() []sqlHealthGroup {
+	w.mu.Lock()
+	groups := make([]sqlHealthGroup, 0, len(w.hosts))
+	for _, poolHealth := range w.hosts {
+		select {
+		case <-poolHealth.ready:
+			targets := make([]*sqlHealthTarget, 0)
+			targetsForPool := poolHealth.sqlTargetValues()
+			for _, target := range targetsForPool {
+				if target.checker != nil {
+					targets = append(targets, target)
+				}
+			}
+			if len(targets) > 0 {
+				groups = append(groups, sqlHealthGroup{poolHealth: poolHealth, targets: targets})
+			}
+		default:
+			// The initial Patroni discovery and probe have not completed yet.
+		}
+	}
+	w.mu.Unlock()
+	return groups
+}
+
+// scheduleSQLRefresh starts one refresh per host without waiting for it to finish. Each refresh
+// resolves the host once, then checks its credential-specific targets independently.
+func (w *HealthWorker) scheduleSQLRefresh(scheduledAt time.Time) {
+	for _, group := range w.sqlHealthGroups() {
+		go w.checkSQLHealthGroup(group, scheduledAt)
+	}
+}
+
+// RefreshSQL resolves each subscribed host once, checks its SQL targets in parallel, and waits for
+// the checks it starts.
+// It is intended for explicit refreshes and tests; Run uses scheduleSQLRefresh so a slow target
+// cannot delay the next interval for unrelated targets.
+func (w *HealthWorker) RefreshSQL() {
+	scheduledAt := time.Now()
+	var wg sync.WaitGroup
+	for _, group := range w.sqlHealthGroups() {
+		wg.Add(1)
+		go func(group sqlHealthGroup) {
+			defer wg.Done()
+			w.checkSQLHealthGroup(group, scheduledAt)
+		}(group)
+	}
+	wg.Wait()
+}
+
+type sqlHealthCheckPlan struct {
+	target  *sqlHealthTarget
+	enabled bool
+}
+
+func (w *HealthWorker) checkSQLHealthGroup(group sqlHealthGroup, scheduledAt time.Time) {
+	ctx := context.Background()
+	plans := make([]sqlHealthCheckPlan, 0, len(group.targets))
+	checksEnabled := false
+	for _, target := range group.targets {
+		if !target.tryStartSQLRound(scheduledAt) {
+			w.recordSQLCheckMissed(target, scheduledAt)
+			continue
+		}
+		enabled := target.checksEnabled == nil || target.checksEnabled(ctx)
+		checksEnabled = checksEnabled || enabled
+		plans = append(plans, sqlHealthCheckPlan{target: target, enabled: enabled})
+	}
+	if len(plans) == 0 {
+		return
+	}
+
+	var toProbe []string
+	resolvedSet := make(map[string]struct{})
+	if checksEnabled {
+		resolved := w.prober.Lookup(group.poolHealth.host, group.poolHealth.patroniTags)
+		for _, ip := range resolved {
+			resolvedSet[ip] = struct{}{}
+		}
+		toProbe = group.poolHealth.sqlHealthState.RefreshResolved(
+			resolved,
+			w.absenceThreshold,
+			nil,
+		)
+	}
+
+	var wg sync.WaitGroup
+	for _, plan := range plans {
+		wg.Add(1)
+		go func(plan sqlHealthCheckPlan) {
+			defer wg.Done()
+			defer plan.target.finishSQLRound(scheduledAt)
+			w.checkSQLHealth(plan.target, toProbe, resolvedSet, plan.enabled, scheduledAt)
+		}(plan)
+	}
+	wg.Wait()
+}
+
+func (w *HealthWorker) recordSQLCheckMissed(target *sqlHealthTarget, scheduledAt time.Time) {
+	// The active round already produced this interval's availability observation. It is still
+	// finishing its remaining probes, but neither an outcome:missed metric nor an unavailable
+	// observation should overwrite the early writable result.
+	if target.activeSQLRoundPublishedWritable() {
+		return
+	}
+	if w.hooks.SQLCheckMissed != nil {
+		w.hooks.SQLCheckMissed(target.tags)
+	}
+	target.publishSQLHealth(SQLHealthObservation{
+		ScheduledAt: scheduledAt,
+		ObservedAt:  scheduledAt,
+		Err:         ErrSQLHealthCheckMissed,
+	})
+}
+
+func (w *HealthWorker) checkSQLHealth(
+	target *sqlHealthTarget,
+	toProbe []string,
+	resolvedSet map[string]struct{},
+	checksEnabled bool,
+	scheduledAt time.Time,
+) {
+	poolHealth := target.poolHealth
+	ctx := context.Background()
+	writablePublished := false
+	observation, ok := func() (SQLHealthObservation, bool) {
+		target.sqlCheckMu.Lock()
+		defer target.sqlCheckMu.Unlock()
+		if target.sqlClosed || target.checker == nil || target.connStringForIP == nil {
+			return SQLHealthObservation{}, false
+		}
+		if !checksEnabled {
+			target.checker.ReleasePools()
+			return SQLHealthObservation{
+				ScheduledAt: scheduledAt,
+				ObservedAt:  time.Now(),
+				Disabled:    true,
+			}, true
+		}
+
+		patroniHealth := make(map[string]bool, len(toProbe))
+		for _, ip := range toProbe {
+			patroniHealth[ip] = poolHealth.IsHealthy(ip)
+		}
+		outcome := target.checker.Check(
+			ctx,
+			toProbe,
+			target.connStringForIP,
+			patroniHealth,
+			target.tags,
+			func(result SQLHealthCheckResult) {
+				// Availability is optimistic: publish as soon as any IP is confirmed writable.
+				// The full round still detects and reports multiple primaries separately.
+				if !result.HealthyPrimary() ||
+					!target.markSQLRoundWritable(scheduledAt) {
+					return
+				}
+				writablePublished = true
+				target.publishSQLHealth(SQLHealthObservation{
+					ScheduledAt: scheduledAt,
+					ObservedAt:  time.Now(),
+					Writable:    true,
+				})
+			},
+		)
+		sqlHealth := make(map[string]bool, len(outcome.Results))
+		for _, result := range outcome.Results {
+			if _, resolved := resolvedSet[result.IP]; resolved {
+				sqlHealth[result.IP] = result.HealthyPrimary()
+			}
+		}
+		poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, sqlHealth)
+		// Reconcile dedicated pools against the current SQL discovery snapshot. Patroni refresh never
+		// waits for a slow SQL check to release sqlCheckMu.
+		target.checker.RetainIPs(toProbe)
+		if writablePublished {
+			return SQLHealthObservation{}, false
+		}
+		return newSQLHealthObservation(scheduledAt, time.Now(), outcome), true
+	}()
+	if ok {
+		target.publishSQLHealth(observation)
+	}
+}
+
+func (s *PoolHealth) removeSQLTarget(target *sqlHealthTarget) {
+	s.sqlMu.Lock()
+	if target.refcount > 0 {
+		target.refcount--
+	}
+	if target.refcount > 0 {
+		s.sqlMu.Unlock()
+		return
+	}
+	s.sqlMu.Unlock()
+	target.closeSQL()
+}
+
+func (s *PoolHealth) closeSQL() {
+	targets := s.sqlTargetValues()
+	for _, target := range targets {
+		target.closeSQL()
+	}
+}
+
+// sqlTargetValues returns each SQL target once, even when multiple pool subscriptions share it.
+func (s *PoolHealth) sqlTargetValues() []*sqlHealthTarget {
+	s.sqlMu.RLock()
+	defer s.sqlMu.RUnlock()
+	seen := make(map[*sqlHealthTarget]struct{})
+	targets := make([]*sqlHealthTarget, 0, len(s.subscriptionTargets))
+	for _, target := range s.subscriptionTargets {
+		if _, ok := seen[target]; ok {
+			continue
+		}
+		seen[target] = struct{}{}
+		targets = append(targets, target)
+	}
+	return targets
+}
+
+// SubscribeSQLHealth subscribes to SQL observations for the connection string associated with
+// the health snapshot subscription.
+func (s *PoolHealth) SubscribeSQLHealth(healthUpdates ...HealthUpdates) (SQLHealthUpdates, error) {
+	if s == nil {
+		return nil, ErrSQLHealthUpdatesUnsupported
+	}
+	var target *sqlHealthTarget
+	s.sqlMu.RLock()
+	if len(healthUpdates) > 0 {
+		target = s.subscriptionTargets[healthUpdates[0]]
+	}
+	s.sqlMu.RUnlock()
+	if len(healthUpdates) == 0 {
+		if targets := s.sqlTargetValues(); len(targets) == 1 {
+			target = targets[0]
+		}
+	}
+	if target == nil {
+		return nil, ErrSQLHealthUpdatesUnsupported
+	}
+	target.sqlCheckMu.Lock()
+	defer target.sqlCheckMu.Unlock()
+	if target.sqlClosed || target.checker == nil {
+		return nil, ErrSQLHealthUpdatesUnsupported
+	}
+	subscription := &sqlHealthUpdates{
+		source:  target,
+		updates: make(chan SQLHealthObservation, 1),
+		done:    make(chan struct{}),
+	}
+	target.subscriberMu.Lock()
+	target.sqlSubscribers[subscription] = struct{}{}
+	target.subscriberMu.Unlock()
+	return subscription, nil
+}
+
+func (s *sqlHealthUpdates) Updates() <-chan SQLHealthObservation { return s.updates }
+func (s *sqlHealthUpdates) Done() <-chan struct{}                { return s.done }
+
+func (s *sqlHealthUpdates) Close() {
+	if s == nil {
+		return
+	}
+	s.once.Do(func() {
+		s.publishMu.Lock()
+		defer s.publishMu.Unlock()
+
+		close(s.done)
+		if s.source != nil {
+			s.source.subscriberMu.Lock()
+			delete(s.source.sqlSubscribers, s)
+			s.source.subscriberMu.Unlock()
+		}
+	})
+}
+
+func (s *sqlHealthUpdates) publish(observation SQLHealthObservation) {
+	s.publishMu.Lock()
+	defer s.publishMu.Unlock()
+
+	// Stop immediately when the subscription has been closed. The default keeps this check
+	// nonblocking while the subscription is still active.
+	select {
+	case <-s.done:
+		return
+	default:
+	}
+
+	// Use the fast path when the one-element buffer has room. If it is full, continue below and
+	// coalesce its stale observation instead of blocking the SQL refresh.
+	select {
+	case s.updates <- observation:
+		return
+	default:
+	}
+
+	// Remove the buffered observation so it can be replaced. Preserve it when its scheduled
+	// interval is newer, even if an older check completed later in wall-clock time.
+	select {
+	case buffered := <-s.updates:
+		if sqlHealthObservationScheduledAt(buffered).After(sqlHealthObservationScheduledAt(observation)) {
+			observation = buffered
+		}
+	default:
+	}
+	// Put the selected newest observation back without blocking. The default is a defensive
+	// fallback that keeps publication best-effort if the channel cannot accept the value.
+	select {
+	case s.updates <- observation:
+	default:
+	}
+}
+
+func (s *sqlHealthTarget) closeSQL() {
+	s.sqlCheckMu.Lock()
+	if s.sqlClosed {
+		s.sqlCheckMu.Unlock()
+		return
+	}
+	s.sqlClosed = true
+	subscribers := s.sqlSubscriberValues()
+	for _, subscriber := range subscribers {
+		subscriber.Close()
+	}
+	if s.checker != nil {
+		s.checker.Close()
+	}
+	s.sqlCheckMu.Unlock()
+}
+
+func (s *sqlHealthTarget) publishSQLHealth(observation SQLHealthObservation) {
+	subscribers := s.sqlSubscriberValues()
+	for _, subscriber := range subscribers {
+		subscriber.publish(observation)
+	}
+}
+
+func (s *sqlHealthTarget) sqlSubscriberValues() []*sqlHealthUpdates {
+	s.subscriberMu.RLock()
+	defer s.subscriberMu.RUnlock()
+	subscribers := make([]*sqlHealthUpdates, 0, len(s.sqlSubscribers))
+	for subscriber := range s.sqlSubscribers {
+		subscribers = append(subscribers, subscriber)
+	}
+	return subscribers
+}
+
+// publishSQLHealth is retained for tests and callers that construct a single-target PoolHealth.
+func (s *PoolHealth) publishSQLHealth(observation SQLHealthObservation) {
+	targets := s.sqlTargetValues()
+	for _, target := range targets {
+		target.publishSQLHealth(observation)
+	}
+}
+
+// Resolved returns a copy of the currently tracked IPs for the host.
+func (s *PoolHealth) Resolved() []string {
+	return s.state.Resolved()
+}
+
+// IsHealthy returns whether ip passed its most recent probe. Unknown
+// IPs report false.
+func (s *PoolHealth) IsHealthy(ip string) bool {
+	return s.state.IsHealthy(ip)
+}
