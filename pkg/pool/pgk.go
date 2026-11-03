@@ -2,6 +2,7 @@ package pool
 
 import (
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 )
@@ -12,8 +13,10 @@ type PGKPoolConfig struct {
 	// Discover returns retained addresses after the discovery source has applied
 	// its policy for transient lookup failures. HealthState supplies that policy
 	// for the application's shared health worker.
-	Discover          func() []string
-	NewInstance       func(string) PostgresInstance
+	Discover    func() []string
+	NewInstance func(string) PostgresInstance
+	// RegisterInstance optionally prepares and publishes an instance atomically with resizing.
+	RegisterInstance  func(string, PostgresInstance) error
 	HealthUpdates     HealthUpdates
 	ReadReplica       bool
 	RunSetupWithRetry func(func() error)
@@ -36,6 +39,7 @@ type PGKPool struct {
 	*DirectRuntime
 	discover          func() []string
 	newInstance       func(string) PostgresInstance
+	registerInstance  func(string, PostgresInstance) error
 	healthUpdates     HealthUpdates
 	readReplica       bool
 	runSetupWithRetry func(func() error)
@@ -55,6 +59,7 @@ func NewPGKPool(cfg PGKPoolConfig) *PGKPool {
 		DirectRuntime:     cfg.Direct,
 		discover:          cfg.Discover,
 		newInstance:       cfg.NewInstance,
+		registerInstance:  cfg.RegisterInstance,
 		healthUpdates:     cfg.HealthUpdates,
 		readReplica:       cfg.ReadReplica,
 		runSetupWithRetry: cfg.RunSetupWithRetry,
@@ -83,7 +88,15 @@ func (p *PGKPool) Setup() error {
 			p.resolved(address)
 		}
 		if _, ok := p.State().Load(address); !ok {
-			p.State().Store(address, p.newInstance(address))
+			instance := p.newInstance(address)
+			if p.registerInstance != nil {
+				if err := p.registerInstance(address, instance); err != nil {
+					instance.Close()
+					return fmt.Errorf("register instance %s: %w", address, err)
+				}
+			} else {
+				p.State().Store(address, instance)
+			}
 		}
 	}
 
