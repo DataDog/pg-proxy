@@ -1,0 +1,1411 @@
+package pool
+
+import (
+	"context"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/jackc/puddle/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+const maxFailedHostLookups = 5
+
+type mockProber struct {
+	mu sync.Mutex
+
+	ipsByHost      map[string][]string
+	healthyIPs     map[string]bool
+	probeErrors    map[string]error
+	lookupCalls    int
+	probeCalls     int
+	recordLookup   func(host string, tags []string)
+	recordCall     func(ip, host, dbName string, isReadReplica bool, tags []string)
+	mockHealthPing func(ip string) (bool, error)
+}
+
+type blockingLookupProber struct {
+	lookupStarted chan struct{}
+	releaseLookup chan struct{}
+	startedOnce   sync.Once
+}
+
+func (p *blockingLookupProber) Lookup(string, []string) []string {
+	p.startedOnce.Do(func() { close(p.lookupStarted) })
+	<-p.releaseLookup
+	return []string{"10.0.0.1"}
+}
+
+func (*blockingLookupProber) Probe(string, string, string, bool, []string) (bool, string, error) {
+	return true, "", nil
+}
+
+type poolCreatingSQLHealthProber struct {
+	mu    sync.Mutex
+	pools *SQLHealthCheckPools
+	calls int
+}
+
+func (p *poolCreatingSQLHealthProber) Probe(_ context.Context, ip, connString string, _ []string) (bool, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	_, err := p.pools.GetOrAdd(ip, connString)
+	return false, err
+}
+
+func (p *poolCreatingSQLHealthProber) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+type blockingPoolCreatingSQLHealthProber struct {
+	pools   *SQLHealthCheckPools
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (p *blockingPoolCreatingSQLHealthProber) Probe(_ context.Context, ip, connString string, _ []string) (bool, error) {
+	if _, err := p.pools.GetOrAdd(ip, connString); err != nil {
+		return false, err
+	}
+	p.once.Do(func() { close(p.started) })
+	<-p.release
+	return false, nil
+}
+
+type blockingRetrySQLHealthProber struct {
+	mu           sync.Mutex
+	calls        int
+	retryStarted chan struct{}
+	releaseRetry chan struct{}
+	startedOnce  sync.Once
+}
+
+func (p *blockingRetrySQLHealthProber) Probe(context.Context, string, string, []string) (bool, error) {
+	p.mu.Lock()
+	p.calls++
+	call := p.calls
+	p.mu.Unlock()
+	if call == 1 {
+		return false, errors.New("temporary")
+	}
+	p.startedOnce.Do(func() { close(p.retryStarted) })
+	<-p.releaseRetry
+	return false, nil
+}
+
+func (p *blockingRetrySQLHealthProber) callCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
+}
+
+type partiallyBlockingSQLHealthProber struct {
+	blockingIP       string
+	blockingRecovery bool
+	blocked          chan struct{}
+	release          chan struct{}
+	blockedOnce      sync.Once
+}
+
+func (p *partiallyBlockingSQLHealthProber) Probe(_ context.Context, ip, _ string, _ []string) (bool, error) {
+	if ip != p.blockingIP {
+		return false, nil
+	}
+	p.blockedOnce.Do(func() { close(p.blocked) })
+	<-p.release
+	return p.blockingRecovery, nil
+}
+
+func (p *mockProber) Lookup(host string, tags []string) []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lookupCalls++
+	if p.recordLookup != nil {
+		p.recordLookup(host, tags)
+	}
+	ips, ok := p.ipsByHost[host]
+	if !ok {
+		return nil
+	}
+	out := make([]string, len(ips))
+	copy(out, ips)
+	return out
+}
+
+func (p *mockProber) Probe(ip, host, dbName string, isReadReplica bool, tags []string) (bool, string, error) {
+	p.mu.Lock()
+	p.probeCalls++
+	if p.recordCall != nil {
+		p.recordCall(ip, host, dbName, isReadReplica, tags)
+	}
+	hook := p.mockHealthPing
+	p.mu.Unlock()
+
+	if hook != nil {
+		healthy, err := hook(ip)
+		return healthy, "", err
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.healthyIPs[ip], "", p.probeErrors[ip]
+}
+
+func newTestWorker(p *mockProber) *HealthWorker {
+	w := NewHealthWorker(HealthWorkerConfig{Interval: time.Second, AbsenceThreshold: maxFailedHostLookups, Prober: p})
+	return w
+}
+
+func newMockProber(ipsByHost map[string][]string, healthyIPs ...string) *mockProber {
+	hset := make(map[string]bool, len(healthyIPs))
+	for _, ip := range healthyIPs {
+		hset[ip] = true
+	}
+	return &mockProber{ipsByHost: ipsByHost, healthyIPs: hset, probeErrors: map[string]error{}}
+}
+
+func receivePoolHealth(t *testing.T, updates HealthUpdates) *PoolHealth {
+	t.Helper()
+	select {
+	case poolHealth, ok := <-updates:
+		assert.True(t, ok, "health update channel closed unexpectedly")
+		return poolHealth
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for health update")
+		return nil
+	}
+}
+
+func TestSubscribe_RegisterNewPoolNewHost(t *testing.T) {
+	p := newMockProber(
+		map[string][]string{"primary.local": {"10.0.0.1", "10.0.0.2", "10.0.0.3"}},
+		"10.0.0.1", "10.0.0.3", // 0.2 is unhealthy
+	)
+	w := newTestWorker(p)
+
+	poolHealth := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", []string{"tag:value"}, nil))
+
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, poolHealth.Resolved())
+	assert.True(t, poolHealth.IsHealthy("10.0.0.1"))
+	assert.False(t, poolHealth.IsHealthy("10.0.0.2"))
+	assert.True(t, poolHealth.IsHealthy("10.0.0.3"))
+	assert.False(t, poolHealth.IsHealthy("10.0.0.99"), "unknown IPs report false")
+}
+
+func TestSubscribe_RegisterNewPoolReusesPoolHealth(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+
+	u1 := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	s1 := receivePoolHealth(t, u1)
+	u2 := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	s2 := receivePoolHealth(t, u2)
+	assert.Same(t, s1, s2, "same key returns same poolHealth")
+
+	s1.mu.RLock()
+	assert.Equal(t, 2, s1.refcount, "refcount incremented")
+	s1.mu.RUnlock()
+}
+
+func TestSubscribe_BroadcastsUpdatesToEverySubscriber(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+
+	u1 := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	u2 := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	poolHealth := receivePoolHealth(t, u1)
+	assert.Same(t, poolHealth, receivePoolHealth(t, u2))
+
+	p.mu.Lock()
+	p.ipsByHost["primary.local"] = []string{"10.0.0.1", "10.0.0.2"}
+	p.healthyIPs["10.0.0.2"] = true
+	p.mu.Unlock()
+	w.Refresh()
+
+	assert.Same(t, poolHealth, receivePoolHealth(t, u1))
+	assert.Same(t, poolHealth, receivePoolHealth(t, u2))
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved())
+}
+
+func TestSubscribe_DifferentHosts_SeparatePoolHealths(t *testing.T) {
+	p := newMockProber(
+		map[string][]string{
+			"primary-a.local": {"10.0.0.1"},
+			"primary-b.local": {"10.0.0.2"},
+		},
+		"10.0.0.1", "10.0.0.2",
+	)
+	w := newTestWorker(p)
+
+	a := receivePoolHealth(t, w.Subscribe("primary-a.local", false, "db_a", nil, nil))
+	b := receivePoolHealth(t, w.Subscribe("primary-b.local", false, "db_b", nil, nil))
+
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, a.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.2"}, b.Resolved())
+}
+
+func TestSubscribe_SQLConnectionStringsShareHostStateWhenSQLDisabled(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+
+	firstUpdates := w.Subscribe("primary.local", false, "first", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "user=first password=secret dbname=first" },
+	})
+	first := receivePoolHealth(t, firstUpdates)
+	secondUpdates := w.Subscribe("primary.local", false, "second", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "user=second password=secret dbname=second" },
+	})
+	second := receivePoolHealth(t, secondUpdates)
+
+	assert.Same(t, first, second, "disabled SQL checking must preserve host-level Patroni sharing")
+	assert.Equal(t, 1, p.probeCalls, "only the first host subscriber should probe inline")
+	assert.Len(t, w.hosts, 1)
+	w.Unsubscribe(firstUpdates)
+	w.Unsubscribe(secondUpdates)
+}
+
+func TestSubscribe_SQLConnectionStringsSharePatroniStateWhenSQLCheckingEnabled(t *testing.T) {
+	const (
+		firstConnString  = "user=first password=secret dbname=first"
+		secondConnString = "user=second password=secret dbname=second"
+	)
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{
+			firstConnString:  {{}},
+			secondConnString: {{}},
+		},
+		calls: make(map[string]int),
+	}
+	w.newSQLChecker = func(ctx context.Context) *SQLHealthChecker {
+		return NewSQLHealthChecker(ctx, SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
+			Prober: sqlProber,
+		})
+	}
+
+	firstUpdates := w.Subscribe("primary.local", false, "first", []string{
+		"database:first",
+		"database_host:first.proxy",
+	}, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return firstConnString },
+	})
+	first := receivePoolHealth(t, firstUpdates)
+	secondUpdates := w.Subscribe("primary.local", false, "second", []string{
+		"database:second",
+		"database_host:second.proxy",
+	}, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return secondConnString },
+	})
+	second := receivePoolHealth(t, secondUpdates)
+
+	assert.Same(t, first, second, "SQL connection strings must share the host-level Patroni snapshot")
+	assert.Equal(t, 1, p.probeCalls, "only the first host subscriber should probe inline")
+	assert.Len(t, w.hosts, 1)
+	assert.Len(t, first.sqlTargetValues(), 2, "SQL connection strings retain independent targets")
+
+	p.mu.Lock()
+	p.lookupCalls = 0
+	p.probeCalls = 0
+	sharedTags := []string{"postgres_host:primary.local", "pool_role:primary"}
+	p.recordLookup = func(host string, tags []string) {
+		assert.Equal(t, "primary.local", host)
+		assert.Equal(t, sharedTags, tags)
+	}
+	p.recordCall = func(ip, host, dbName string, isReadReplica bool, tags []string) {
+		assert.Equal(t, "10.0.0.1", ip)
+		assert.Equal(t, "primary.local", host)
+		assert.Equal(t, "first", dbName, "the deterministic representative remains log context only")
+		assert.False(t, isReadReplica)
+		assert.Equal(t, sharedTags, tags)
+	}
+	p.mu.Unlock()
+	w.hooks.CheckStarted = func(tags []string) {
+		assert.Equal(t, sharedTags, tags)
+	}
+	w.hooks.CheckFinished = func(_ time.Duration, tags []string) {
+		assert.Equal(t, sharedTags, tags)
+	}
+	w.Refresh()
+	p.mu.Lock()
+	assert.Equal(t, 1, p.lookupCalls, "periodic DNS lookups must be shared by host")
+	assert.Equal(t, 1, p.probeCalls, "periodic Patroni checks must be shared by host")
+	p.mu.Unlock()
+	assert.Same(t, first, receivePoolHealth(t, firstUpdates))
+	assert.Same(t, second, receivePoolHealth(t, secondUpdates))
+
+	p.mu.Lock()
+	p.lookupCalls = 0
+	p.mu.Unlock()
+	w.RefreshSQL()
+	p.mu.Lock()
+	assert.Equal(t, 1, p.lookupCalls, "SQL DNS lookup must be shared across credential targets")
+	p.mu.Unlock()
+	assert.Equal(t, 1, sqlProber.callCount(firstConnString))
+	assert.Equal(t, 1, sqlProber.callCount(secondConnString))
+
+	w.Unsubscribe(firstUpdates)
+	w.Unsubscribe(secondUpdates)
+}
+
+func TestUnsubscribe_RefcountAboveZero_KeepsPoolHealth(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+
+	u1 := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	s := receivePoolHealth(t, u1)
+	u2 := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	_ = receivePoolHealth(t, u2)
+
+	w.Unsubscribe(u1)
+
+	w.mu.Lock()
+	_, present := w.hosts[s.host]
+	w.mu.Unlock()
+	assert.True(t, present, "poolHealth still in map while refcount > 0")
+
+	s.mu.RLock()
+	assert.Equal(t, 1, s.refcount)
+	s.mu.RUnlock()
+}
+
+func TestUnsubscribe_RefcountZero_RemovesPoolHealth(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+
+	updates := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	s := receivePoolHealth(t, updates)
+	w.Unsubscribe(updates)
+
+	w.mu.Lock()
+	_, present := w.hosts[s.host]
+	w.mu.Unlock()
+	assert.False(t, present, "poolHealth removed from map at refcount 0")
+	_, ok := <-updates
+	assert.False(t, ok, "subscriber channel should close on unsubscribe")
+}
+
+func TestCentralizedSQLHealthCheckPublishesWithoutChangingPatroniRouting(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{
+			"10.0.0.1": {
+				{inRecovery: false},
+				{inRecovery: true},
+			},
+		},
+		calls: make(map[string]int),
+	}
+	checker := newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return checker
+	}
+	updates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+	})
+	health := receivePoolHealth(t, updates)
+	p.mu.Lock()
+	lookupCallsAfterSubscribe := p.lookupCalls
+	p.mu.Unlock()
+	sqlUpdates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+
+	firstStartedAt := time.Now()
+	w.RefreshSQL()
+	firstFinishedAt := time.Now()
+	first := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.False(t, first.ObservedAt.Before(firstStartedAt))
+	assert.False(t, first.ObservedAt.After(firstFinishedAt))
+	assert.True(t, first.Writable)
+	assert.NoError(t, first.Err)
+
+	secondStartedAt := time.Now()
+	w.RefreshSQL()
+	secondFinishedAt := time.Now()
+	second := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.False(t, second.ObservedAt.Before(secondStartedAt))
+	assert.False(t, second.ObservedAt.After(secondFinishedAt))
+	assert.False(t, second.Writable)
+	assert.NoError(t, second.Err)
+
+	assert.Equal(t, 2, sqlProber.callCount("10.0.0.1"), "shadow SQL checks must continue running")
+	assert.True(t, health.IsHealthy("10.0.0.1"), "SQL observations must not alter routing in this PR")
+	p.mu.Lock()
+	assert.Equal(t, lookupCallsAfterSubscribe+2, p.lookupCalls, "each SQL refresh must run its own discovery")
+	p.mu.Unlock()
+
+	w.Unsubscribe(updates)
+	select {
+	case <-sqlUpdates.Done():
+	case <-time.After(time.Second):
+		t.Fatal("SQL health subscription was not closed")
+	}
+	w.RefreshSQL()
+	assert.Equal(t, 2, sqlProber.callCount("10.0.0.1"), "unsubscribed SQL target still ran")
+}
+
+func TestCentralizedSQLHealthCheckDiscoversNewIPBeforePatroniRefresh(t *testing.T) {
+	const (
+		patroniIP = "10.0.0.1"
+		newSQLIP  = "10.0.0.2"
+	)
+	patroniProber := newMockProber(map[string][]string{"primary.local": {patroniIP}}, patroniIP)
+	w := newTestWorker(patroniProber)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{
+			newSQLIP: {{inRecovery: false}},
+		},
+		calls: make(map[string]int),
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	health := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+	}))
+	sqlUpdates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+
+	// DNS changes after the initial Patroni snapshot, but no Patroni refresh runs.
+	patroniProber.mu.Lock()
+	patroniProber.ipsByHost["primary.local"] = []string{newSQLIP}
+	patroniProber.mu.Unlock()
+	w.RefreshSQL()
+
+	observation := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.True(t, observation.Writable)
+	assert.NoError(t, observation.Err)
+	assert.Equal(t, 1, sqlProber.callCount(newSQLIP))
+	assert.Equal(t, []string{patroniIP}, health.Resolved(), "SQL discovery must not mutate Patroni routing state")
+}
+
+func TestRefreshSQLPublishesWritableBeforeReportingMultiplePrimaries(t *testing.T) {
+	const (
+		writableIP = "10.0.0.1"
+		blockingIP = "10.0.0.2"
+	)
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {writableIP, blockingIP}},
+		writableIP,
+		blockingIP,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &partiallyBlockingSQLHealthProber{
+		blockingIP:       blockingIP,
+		blockingRecovery: false,
+		blocked:          make(chan struct{}),
+		release:          make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(sqlProber.release) }) }
+	t.Cleanup(release)
+	multiplePrimaries := make(chan []string, 1)
+	checker := newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{
+		MultiplePrimaries: func(primaryIPs []string, _ []string) {
+			multiplePrimaries <- primaryIPs
+		},
+	})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	healthUpdates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+	})
+	health := receivePoolHealth(t, healthUpdates)
+	health.sqlMu.RLock()
+	target := health.subscriptionTargets[healthUpdates]
+	health.sqlMu.RUnlock()
+	updates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(updates.Close)
+	missedMetric := make(chan []string, 1)
+	w.hooks.SQLCheckMissed = func(tags []string) {
+		missedMetric <- append([]string(nil), tags...)
+	}
+
+	refreshDone := make(chan struct{})
+	go func() {
+		w.RefreshSQL()
+		close(refreshDone)
+	}()
+
+	select {
+	case <-sqlProber.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("slow SQL probe did not start")
+	}
+	select {
+	case observation := <-updates.Updates():
+		assert.True(t, observation.Writable)
+		assert.NoError(t, observation.Err)
+	case <-time.After(time.Second):
+		t.Fatal("writable SQL result was not published while the other instance was still blocked")
+	}
+
+	// The round already published availability, so a scheduler tick while its second probe is still
+	// blocked is not a missed availability observation.
+	w.checkSQLHealthGroup(sqlHealthGroup{poolHealth: health, targets: []*sqlHealthTarget{target}}, time.Now())
+	select {
+	case tags := <-missedMetric:
+		t.Fatalf("early writable result unexpectedly emitted missed metric with tags %v", tags)
+	default:
+	}
+	select {
+	case observation := <-updates.Updates():
+		t.Fatalf("early writable result was overwritten by missed observation: %+v", observation)
+	default:
+	}
+
+	release()
+	select {
+	case primaryIPs := <-multiplePrimaries:
+		assert.ElementsMatch(t, []string{writableIP, blockingIP}, primaryIPs)
+	case <-time.After(time.Second):
+		t.Fatal("completed SQL round did not report multiple primaries")
+	}
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("full SQL round did not finish after the slow probe was released")
+	}
+}
+
+func TestRefreshSQLTimestampsObservationAfterSuccessfulRetry(t *testing.T) {
+	const ip = "10.0.0.1"
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	sqlProber := &blockingRetrySQLHealthProber{
+		retryStarted: make(chan struct{}),
+		releaseRetry: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseRetry := func() { releaseOnce.Do(func() { close(sqlProber.releaseRetry) }) }
+	t.Cleanup(releaseRetry)
+	checker := newTestSQLHealthChecker(t, sqlProber, 2, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	health := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "conn" },
+	}))
+	updates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(updates.Close)
+
+	refreshStartedAt := time.Now()
+	refreshDone := make(chan struct{})
+	go func() {
+		w.RefreshSQL()
+		close(refreshDone)
+	}()
+	select {
+	case <-sqlProber.retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not start its retry")
+	}
+
+	retryReleasedAt := time.Now()
+	releaseRetry()
+	observation := receiveSQLHealthObservation(t, updates)
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("SQL refresh did not finish after the retry was released")
+	}
+	assert.Equal(t, 2, sqlProber.callCount())
+	assert.True(t, observation.Writable)
+	assert.False(t, observation.ScheduledAt.Before(refreshStartedAt))
+	assert.False(t, observation.ScheduledAt.After(retryReleasedAt))
+	assert.False(t, observation.ObservedAt.Before(retryReleasedAt), "successful retry must not be backdated")
+}
+
+func TestScheduleSQLRefreshPublishesUnavailableObservationForMissedInterval(t *testing.T) {
+	const ip = "10.0.0.1"
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	sqlProber := &blockingRetrySQLHealthProber{
+		retryStarted: make(chan struct{}),
+		releaseRetry: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseRetry := func() { releaseOnce.Do(func() { close(sqlProber.releaseRetry) }) }
+	t.Cleanup(releaseRetry)
+	checker := newTestSQLHealthChecker(t, sqlProber, 2, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	missedMetric := make(chan []string, 1)
+	w.hooks.SQLCheckMissed = func(tags []string) {
+		missedMetric <- append([]string(nil), tags...)
+	}
+	healthUpdates := w.Subscribe("primary.local", false, "mydb", []string{"database:mydb"}, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "conn" },
+	})
+	health := receivePoolHealth(t, healthUpdates)
+	health.sqlMu.RLock()
+	target := health.subscriptionTargets[healthUpdates]
+	health.sqlMu.RUnlock()
+	t.Cleanup(func() { w.Unsubscribe(healthUpdates) })
+	sqlUpdates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+
+	firstScheduledAt := time.Now()
+	w.scheduleSQLRefresh(firstScheduledAt)
+	select {
+	case <-sqlProber.retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not start its retry")
+	}
+
+	missedAt := time.Now()
+	w.scheduleSQLRefresh(missedAt)
+	select {
+	case tags := <-missedMetric:
+		assert.Contains(t, tags, "database:mydb")
+	case <-time.After(time.Second):
+		t.Fatal("missed-observation metric hook was not called")
+	}
+	assert.Equal(t, 2, sqlProber.callCount(), "missed interval must not start an overlapping check")
+	missed := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.Equal(t, missedAt, missed.ScheduledAt)
+	assert.Equal(t, missedAt, missed.ObservedAt)
+	assert.False(t, missed.Writable)
+	assert.ErrorIs(t, missed.Err, ErrSQLHealthCheckMissed)
+
+	retryReleasedAt := time.Now()
+	releaseRetry()
+	assert.Eventually(t, func() bool { return !target.sqlRoundRunning() }, time.Second, time.Millisecond)
+	late := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.Equal(t, firstScheduledAt, late.ScheduledAt)
+	assert.False(t, late.ObservedAt.Before(retryReleasedAt))
+	assert.True(t, late.Writable)
+
+	nextScheduledAt := time.Now()
+	w.scheduleSQLRefresh(nextScheduledAt)
+	next := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.Equal(t, nextScheduledAt, next.ScheduledAt)
+	assert.True(t, next.Writable)
+}
+
+func TestSQLHealthRoundRejectsStaleWritableResult(t *testing.T) {
+	target := &sqlHealthTarget{}
+	oldRound := time.Now()
+	newRound := oldRound.Add(time.Second)
+
+	require.True(t, target.tryStartSQLRound(oldRound))
+	target.finishSQLRound(oldRound)
+	require.True(t, target.tryStartSQLRound(newRound))
+
+	assert.False(t, target.markSQLRoundWritable(oldRound))
+	assert.False(t, target.activeSQLRoundPublishedWritable())
+}
+
+func TestSQLHealthPublicationReplacesStaleObservation(t *testing.T) {
+	target := &sqlHealthTarget{sqlSubscribers: make(map[*sqlHealthUpdates]struct{})}
+	updates := &sqlHealthUpdates{
+		source:  target,
+		updates: make(chan SQLHealthObservation, 1),
+		done:    make(chan struct{}),
+	}
+	target.sqlSubscribers[updates] = struct{}{}
+	t.Cleanup(updates.Close)
+
+	staleRound := time.Now()
+	latestRound := staleRound.Add(time.Second)
+	stale := SQLHealthObservation{ScheduledAt: staleRound, ObservedAt: latestRound.Add(time.Second)}
+	latest := SQLHealthObservation{ScheduledAt: latestRound, ObservedAt: latestRound, Writable: true}
+	target.publishSQLHealth(stale)
+	target.publishSQLHealth(latest)
+
+	assert.Equal(t, latest, receiveSQLHealthObservation(t, updates))
+}
+
+func TestSQLHealthPublicationRetainsNewerBufferedObservation(t *testing.T) {
+	target := &sqlHealthTarget{sqlSubscribers: make(map[*sqlHealthUpdates]struct{})}
+	updates := &sqlHealthUpdates{
+		source:  target,
+		updates: make(chan SQLHealthObservation, 1),
+		done:    make(chan struct{}),
+	}
+	target.sqlSubscribers[updates] = struct{}{}
+	t.Cleanup(updates.Close)
+
+	olderRound := time.Now()
+	newerRound := olderRound.Add(time.Second)
+	older := SQLHealthObservation{ScheduledAt: olderRound, ObservedAt: newerRound.Add(time.Second)}
+	newer := SQLHealthObservation{ScheduledAt: newerRound, ObservedAt: newerRound, Writable: true}
+	target.publishSQLHealth(newer)
+	target.publishSQLHealth(older)
+
+	assert.Equal(t, newer, receiveSQLHealthObservation(t, updates))
+}
+
+func TestRefreshSQLDoesNotBlockOnFullSubscription(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{"10.0.0.1": {{}}},
+		calls:     make(map[string]int),
+	}
+	checker := newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	health := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+	}))
+	updates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(updates.Close)
+
+	w.RefreshSQL()
+	latestStartedAt := time.Now()
+	refreshDone := make(chan struct{})
+	go func() {
+		w.RefreshSQL()
+		close(refreshDone)
+	}()
+
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("SQL refresh blocked on a full subscriber")
+	}
+	assert.False(t, receiveSQLHealthObservation(t, updates).ObservedAt.Before(latestStartedAt))
+}
+
+func TestRefreshSQL_ReplacesPoolWhenConnectionStringChanges(t *testing.T) {
+	const ip = "127.0.0.1"
+	firstConnString := "host=127.0.0.1 port=1 user=probeuser password=first dbname=probedb"
+	secondConnString := "host=127.0.0.1 port=1 user=probeuser password=second dbname=probedb"
+	connString := firstConnString
+
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	var pools *SQLHealthCheckPools
+	w.newSQLChecker = func(ctx context.Context) *SQLHealthChecker {
+		pools = NewSQLHealthCheckPools(ctx, SQLHealthCheckPoolsConfig{})
+		return NewSQLHealthChecker(ctx, SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
+			Pools:  pools,
+			Prober: &poolCreatingSQLHealthProber{pools: pools},
+		})
+	}
+
+	updates := w.Subscribe("primary.local", false, "probedb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return connString },
+	})
+	receivePoolHealth(t, updates)
+	t.Cleanup(func() { w.Unsubscribe(updates) })
+
+	w.RefreshSQL()
+	pools.mu.Lock()
+	firstPool := pools.pools[ip].pool
+	pools.mu.Unlock()
+	require.NotNil(t, firstPool)
+
+	connString = secondConnString
+	w.RefreshSQL()
+	pools.mu.Lock()
+	secondPool := pools.pools[ip].pool
+	installedConnString := pools.pools[ip].connString
+	pools.mu.Unlock()
+
+	require.NotNil(t, secondPool)
+	assert.NotSame(t, firstPool, secondPool)
+	assert.Equal(t, secondConnString, installedConnString)
+	assert.Equal(t, 1, pools.Len(), "credential rotation must replace, not accumulate, the pool for an IP")
+	_, err := firstPool.Acquire(context.Background())
+	require.ErrorIs(t, err, puddle.ErrClosedPool, "the pool using stale credentials must be closed")
+}
+
+func TestRefreshSQLWaitsForInitialPatroniCheck(t *testing.T) {
+	patroniProber := &blockingLookupProber{
+		lookupStarted: make(chan struct{}),
+		releaseLookup: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseLookup := func() { releaseOnce.Do(func() { close(patroniProber.releaseLookup) }) }
+	t.Cleanup(releaseLookup)
+	w := NewHealthWorker(HealthWorkerConfig{
+		Interval:         time.Second,
+		AbsenceThreshold: maxFailedHostLookups,
+		Prober:           patroniProber,
+	})
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{"10.0.0.1": {{}}},
+		calls:     make(map[string]int),
+	}
+	checker := newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+
+	updatesReady := make(chan HealthUpdates, 1)
+	go func() {
+		updatesReady <- w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+			ConnStringForIP: func(ip string) string { return ip },
+		})
+	}()
+
+	select {
+	case <-patroniProber.lookupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("initial Patroni lookup did not start")
+	}
+
+	w.RefreshSQL()
+	assert.Zero(t, sqlProber.callCount("10.0.0.1"), "SQL check ran before initial Patroni check completed")
+
+	releaseLookup()
+	var updates HealthUpdates
+	select {
+	case updates = <-updatesReady:
+	case <-time.After(time.Second):
+		t.Fatal("subscription did not finish after Patroni lookup completed")
+	}
+	_ = receivePoolHealth(t, updates)
+	t.Cleanup(func() { w.Unsubscribe(updates) })
+
+	w.RefreshSQL()
+	assert.Equal(t, 1, sqlProber.callCount("10.0.0.1"), "SQL check did not run after initial Patroni check completed")
+}
+
+func TestRefreshSQLFeatureFlagReleasesAndRecreatesPools(t *testing.T) {
+	const ip = "127.0.0.1"
+	enabled := true
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	pools := NewSQLHealthCheckPools(context.Background(), SQLHealthCheckPoolsConfig{})
+	sqlProber := &poolCreatingSQLHealthProber{pools: pools}
+	checker := NewSQLHealthChecker(context.Background(), SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
+		Pools:  pools,
+		Prober: sqlProber,
+	})
+	t.Cleanup(checker.Close)
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+
+	updates := w.Subscribe("primary.local", false, "probedb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return testSQLHealthCheckConnString },
+		ChecksEnabled:   func(context.Context) bool { return enabled },
+	})
+	receivePoolHealth(t, updates)
+	t.Cleanup(func() { w.Unsubscribe(updates) })
+
+	w.RefreshSQL()
+	require.Equal(t, 1, pools.Len())
+	assert.Equal(t, 1, sqlProber.callCount())
+	pools.mu.Lock()
+	firstPool := pools.pools[ip].pool
+	pools.mu.Unlock()
+	require.NotNil(t, firstPool)
+
+	enabled = false
+	w.RefreshSQL()
+	assert.Zero(t, pools.Len(), "disabling SQL checks must release existing probe pools")
+	assert.Equal(t, 1, sqlProber.callCount(), "disabled SQL checks must not reach GetOrAdd")
+	_, err := firstPool.Acquire(context.Background())
+	require.ErrorIs(t, err, puddle.ErrClosedPool)
+
+	enabled = true
+	w.RefreshSQL()
+	require.Equal(t, 1, pools.Len())
+	assert.Equal(t, 2, sqlProber.callCount())
+	pools.mu.Lock()
+	secondPool := pools.pools[ip].pool
+	pools.mu.Unlock()
+	assert.NotSame(t, firstPool, secondPool, "re-enabling must create a fresh probe pool")
+}
+
+func TestNewSQLHealthObservation(t *testing.T) {
+	scheduledAt := time.Now()
+	observedAt := scheduledAt.Add(250 * time.Millisecond)
+	probeErr := errors.New("probe failed")
+	tests := map[string]struct {
+		outcome  SQLHealthCheckOutcome
+		writable bool
+		wantErr  error
+	}{
+		"writable result": {
+			outcome: SQLHealthCheckOutcome{
+				Results:    []SQLHealthCheckResult{{IP: "10.0.0.1"}},
+				PrimaryIPs: []string{"10.0.0.1"},
+			},
+			writable: true,
+		},
+		"writable result preserves another error": {
+			outcome: SQLHealthCheckOutcome{
+				Results:    []SQLHealthCheckResult{{IP: "10.0.0.1"}, {IP: "10.0.0.2", Err: probeErr}},
+				PrimaryIPs: []string{"10.0.0.1"},
+			},
+			writable: true,
+			wantErr:  probeErr,
+		},
+		"multiple primaries remain writable": {
+			outcome: SQLHealthCheckOutcome{
+				Results:    []SQLHealthCheckResult{{IP: "10.0.0.1"}, {IP: "10.0.0.2"}},
+				PrimaryIPs: []string{"10.0.0.1", "10.0.0.2"},
+			},
+			writable: true,
+		},
+		"read-only result": {
+			outcome: SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "10.0.0.1", InRecovery: true}}},
+		},
+		"probe error": {
+			outcome: SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "10.0.0.1", Err: probeErr}}},
+			wantErr: probeErr,
+		},
+		"no results": {wantErr: errNoSQLHealthCheckResults},
+	}
+
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			observation := newSQLHealthObservation(scheduledAt, observedAt, test.outcome)
+			assert.Equal(t, scheduledAt, observation.ScheduledAt)
+			assert.Equal(t, observedAt, observation.ObservedAt)
+			assert.Equal(t, test.writable, observation.Writable)
+			if test.wantErr == nil {
+				assert.NoError(t, observation.Err)
+			} else {
+				assert.ErrorIs(t, observation.Err, test.wantErr)
+			}
+		})
+	}
+}
+
+func TestSubscribeSQLHealthConcurrentClose(t *testing.T) {
+	for range 100 {
+		checker := NewSQLHealthChecker(context.Background(), SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
+			Prober: &fakeSQLHealthProber{},
+		})
+		health := &PoolHealth{
+			subscriptionTargets: make(map[HealthUpdates]*sqlHealthTarget),
+		}
+		healthTarget := &sqlHealthTarget{checker: checker, sqlSubscribers: make(map[*sqlHealthUpdates]struct{})}
+		healthSubscription := HealthUpdates(make(chan *PoolHealth))
+		health.subscriptionTargets[healthSubscription] = healthTarget
+		start := make(chan struct{})
+		var updates SQLHealthUpdates
+		var err error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			updates, err = health.SubscribeSQLHealth(healthSubscription)
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			health.closeSQL()
+		}()
+		close(start)
+		wg.Wait()
+
+		if err != nil {
+			require.ErrorIs(t, err, ErrSQLHealthUpdatesUnsupported)
+			continue
+		}
+		select {
+		case <-updates.Done():
+		default:
+			t.Fatal("subscription that raced with close remained open")
+		}
+	}
+}
+
+func receiveSQLHealthObservation(t *testing.T, updates SQLHealthUpdates) SQLHealthObservation {
+	t.Helper()
+	select {
+	case observation := <-updates.Updates():
+		return observation
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for SQL health observation")
+		return SQLHealthObservation{}
+	}
+}
+
+func TestTickOne_EmptyDNS_LeavesResolvedEmpty(t *testing.T) {
+	p := newMockProber(nil) // every host resolves to nothing
+	w := newTestWorker(p)
+
+	poolHealth := receivePoolHealth(t, w.Subscribe("nowhere.local", false, "mydb", nil, nil))
+
+	assert.Empty(t, poolHealth.Resolved())
+	assert.False(t, poolHealth.IsHealthy("anything"))
+}
+
+// TestTickOne_AllUnhealthy verifies that when every probe returns false, the
+// snapshot still has the IPs in Resolved but IsHealthy returns false for
+// each of them.
+// In this case, it is up to the pgInstance logic to handle pool selection (like during leader failover)
+func TestTickOne_AllUnhealthy(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1", "10.0.0.2"}})
+	// no healthy IPs in the prober
+	w := newTestWorker(p)
+
+	poolHealth := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", nil, nil))
+
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved())
+	assert.False(t, poolHealth.IsHealthy("10.0.0.1"))
+	assert.False(t, poolHealth.IsHealthy("10.0.0.2"))
+}
+
+func TestProbeErrorPublishesInstanceAsUnhealthy(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+	updates := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	poolHealth := receivePoolHealth(t, updates)
+	assert.True(t, poolHealth.IsHealthy("10.0.0.1"))
+
+	p.mu.Lock()
+	p.probeErrors["10.0.0.1"] = errors.New("probe failed")
+	p.mu.Unlock()
+	w.Refresh()
+
+	assert.Same(t, poolHealth, receivePoolHealth(t, updates))
+	assert.False(t, poolHealth.IsHealthy("10.0.0.1"), "probe errors must override the boolean result")
+}
+
+func newTestPoolHealth(ips ...string) *PoolHealth {
+	state := NewHealthState()
+	state.Track(ips)
+	return &PoolHealth{state: state}
+}
+
+func TestTrackNewIPs_AddsNewAndDedupes(t *testing.T) {
+	s := newTestPoolHealth()
+
+	got := s.trackNewIPs([]string{"10.0.0.1", "10.0.0.2"})
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, got)
+
+	got = s.trackNewIPs([]string{"10.0.0.2", "10.0.0.3"})
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, got, "existing IPs not duplicated")
+}
+
+func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
+	w := newTestWorker(nil)
+	s := newTestPoolHealth("10.0.0.1", "10.0.0.2")
+
+	// both IPs healthy, both in DNS
+	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"})
+	assert.True(t, s.IsHealthy("10.0.0.1"))
+	assert.True(t, s.IsHealthy("10.0.0.2"))
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved())
+
+	// 10.0.0.2 leaves DNS but stays healthy — grace window, not evicted
+	for i := 0; i < maxFailedHostLookups-1; i++ {
+		w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"})
+	}
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved(), "still in grace window")
+
+	// 10.0.0.2 now unhealthy and absent from DNS — eligible for eviction
+	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": false}, nil, []string{"10.0.0.1"})
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, s.Resolved(), "evicted after grace window and unhealthy")
+	assert.False(t, s.IsHealthy("10.0.0.2"), "evicted IP must not stay healthy")
+
+	// verify lastKnownPgHealth protects an IP that is still healthy
+	s2 := newTestPoolHealth("10.0.0.1", "10.0.0.2")
+	w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"})
+	for i := 0; i < maxFailedHostLookups+1; i++ {
+		w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"})
+	}
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s2.Resolved(), "last known healthy IP never evicted")
+}
+
+func TestPatroniRefreshDoesNotWaitForBlockedSQLCheckToCleanUpEvictedPool(t *testing.T) {
+	const (
+		ip            = "10.0.0.1"
+		replacementIP = "10.0.0.2"
+	)
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	w.absenceThreshold = 1
+
+	pools := newTestSQLHealthCheckPools(t)
+	sqlProber := &blockingPoolCreatingSQLHealthProber{
+		pools:   pools,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseSQL := func() { releaseOnce.Do(func() { close(sqlProber.release) }) }
+	t.Cleanup(releaseSQL)
+	checker := NewSQLHealthChecker(context.Background(), SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
+		Pools:  pools,
+		Prober: sqlProber,
+	})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	healthUpdates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return testSQLHealthCheckConnString },
+	})
+	health := receivePoolHealth(t, healthUpdates)
+
+	sqlRefreshDone := make(chan struct{})
+	go func() {
+		w.RefreshSQL()
+		close(sqlRefreshDone)
+	}()
+	select {
+	case <-sqlProber.started:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not start")
+	}
+	require.Equal(t, 1, pools.Len())
+
+	patroniProber.mu.Lock()
+	patroniProber.ipsByHost["primary.local"] = []string{replacementIP}
+	patroniProber.healthyIPs[ip] = false
+	patroniProber.healthyIPs[replacementIP] = true
+	patroniProber.mu.Unlock()
+	patroniRefreshDone := make(chan struct{})
+	go func() {
+		w.Refresh()
+		close(patroniRefreshDone)
+	}()
+
+	select {
+	case <-patroniRefreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("Patroni refresh waited for the blocked SQL health check")
+	}
+	assert.Same(t, health, receivePoolHealth(t, healthUpdates))
+	assert.Equal(t, []string{replacementIP}, health.Resolved())
+	assert.Equal(t, 1, pools.Len(), "the pool must remain open while its SQL probe is using it")
+
+	releaseSQL()
+	select {
+	case <-sqlRefreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not finish after it was released")
+	}
+	assert.Equal(t, 1, pools.Len(), "the first SQL round must retain the IP that it independently discovered")
+
+	// The SQL loop observes the DNS replacement without involving the Patroni refresh path. It keeps
+	// the absent pool only through the configured DNS grace window.
+	for range maxFailedHostLookups {
+		w.RefreshSQL()
+	}
+	assert.Equal(t, 1, pools.Len(), "the SQL loop must replace the stale IP pool with the newly discovered one")
+	pools.mu.Lock()
+	_, retainedOldIP := pools.pools[ip]
+	_, discoveredNewIP := pools.pools[replacementIP]
+	pools.mu.Unlock()
+	assert.False(t, retainedOldIP)
+	assert.True(t, discoveredNewIP)
+}
+
+func TestRefreshSQLRetainsIndependentlyDiscoveredPrimaryWhenDNSReturnsNoAddresses(t *testing.T) {
+	const (
+		patroniIP = "127.0.0.1"
+		sqlIP     = "127.0.0.2"
+	)
+	patroniProber := newMockProber(map[string][]string{"primary.local": {patroniIP}}, patroniIP)
+	w := newTestWorker(patroniProber)
+	pools := newTestSQLHealthCheckPools(t)
+	sqlProber := &poolCreatingSQLHealthProber{pools: pools}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return NewSQLHealthChecker(context.Background(), SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
+			Pools:  pools,
+			Prober: sqlProber,
+		})
+	}
+
+	healthUpdates := w.Subscribe("primary.local", false, "probedb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return testSQLHealthCheckConnString },
+	})
+	health := receivePoolHealth(t, healthUpdates)
+	t.Cleanup(func() { w.Unsubscribe(healthUpdates) })
+	sqlUpdates, err := health.SubscribeSQLHealth(healthUpdates)
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+
+	// SQL discovers the replacement before the slower Patroni loop observes it.
+	patroniProber.mu.Lock()
+	patroniProber.ipsByHost["primary.local"] = []string{sqlIP}
+	patroniProber.mu.Unlock()
+	w.RefreshSQL()
+	first := receiveSQLHealthObservation(t, sqlUpdates)
+	require.True(t, first.Writable)
+	require.NoError(t, first.Err)
+	require.Equal(t, 1, pools.Len())
+
+	// Empty DNS results retain the independently discovered last-known-writable primary and its warm
+	// probe pool, matching the Patroni path's protection during simultaneous discovery disruption.
+	patroniProber.mu.Lock()
+	patroniProber.ipsByHost["primary.local"] = nil
+	patroniProber.mu.Unlock()
+	for range maxFailedHostLookups + 1 {
+		w.RefreshSQL()
+		observation := receiveSQLHealthObservation(t, sqlUpdates)
+		assert.True(t, observation.Writable)
+		assert.NoError(t, observation.Err)
+		assert.Equal(t, 1, pools.Len())
+	}
+	assert.Equal(t, []string{sqlIP}, health.sqlHealthState.Resolved())
+	assert.Equal(t, []string{patroniIP}, health.Resolved())
+	pools.mu.Lock()
+	_, retainedSQLIP := pools.pools[sqlIP]
+	pools.mu.Unlock()
+	assert.True(t, retainedSQLIP)
+}
+func TestTick_IpRotation(t *testing.T) {
+	// only 10.0.0.1 is healthy; 10.0.0.2 is not
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}}, "10.0.0.1")
+	w := newTestWorker(p)
+
+	updates := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	poolHealth := receivePoolHealth(t, updates)
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, poolHealth.Resolved())
+
+	p.mu.Lock()
+	p.ipsByHost["primary.local"] = []string{"10.0.0.1", "10.0.0.2"}
+	p.mu.Unlock()
+	w.Refresh()
+	assert.Same(t, poolHealth, receivePoolHealth(t, updates))
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved())
+
+	// Both IPs leave DNS. 10.0.0.1 remains healthy so lastKnownPgHealth
+	// protects it from eviction. 10.0.0.2 is unhealthy and gets evicted.
+	p.mu.Lock()
+	p.ipsByHost["primary.local"] = nil
+	p.mu.Unlock()
+
+	for i := 0; i < maxFailedHostLookups-1; i++ {
+		w.Refresh()
+		assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved(), "tick %d: IPs should still be tracked", i+1)
+	}
+	w.Refresh()
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, poolHealth.Resolved(), "10.0.0.2 evicted; 10.0.0.1 protected by lastKnownPgHealth")
+}
+
+func TestHealthWorkerPreservesSubscriptionMetadataAndHooks(t *testing.T) {
+	p := newMockProber(map[string][]string{"primary.local": {"10.0.0.1"}})
+	w := newTestWorker(p)
+	w.absenceThreshold = 1
+	var counts []int
+	var subscriptionTags [][]string
+	var events []string
+	hostTags := []string{"db:first", "postgres_host:primary.local"}
+	sharedTags := []string{"postgres_host:primary.local", "pool_role:replica"}
+	w.hooks = HealthWorkerHooks{
+		Subscriptions: func(count int, tags []string) {
+			counts = append(counts, count)
+			subscriptionTags = append(subscriptionTags, append([]string(nil), tags...))
+		},
+		CheckStarted: func(tags []string) {
+			assert.Equal(t, sharedTags, tags)
+			events = append(events, "start")
+		},
+		CheckFinished: func(elapsed time.Duration, tags []string) {
+			assert.Equal(t, sharedTags, tags)
+			assert.GreaterOrEqual(t, elapsed, time.Duration(0))
+			events = append(events, "finish")
+		},
+		Evicted: func(ip string, tags []string) {
+			assert.Equal(t, "10.0.0.1", ip)
+			assert.Equal(t, hostTags, tags)
+			events = append(events, "evict")
+		},
+	}
+	p.recordCall = func(ip, host, dbName string, isReadReplica bool, tags []string) {
+		assert.Equal(t, "10.0.0.1", ip)
+		assert.Equal(t, "primary.local", host)
+		assert.Equal(t, "first", dbName)
+		assert.True(t, isReadReplica)
+		assert.Equal(t, sharedTags, tags)
+	}
+	tags := []string{"db:first"}
+	firstUpdates := w.Subscribe("primary.local", true, "first", tags, nil)
+	first := receivePoolHealth(t, firstUpdates)
+	tags[0] = "changed"
+	secondUpdates := w.Subscribe("primary.local", true, "second", []string{"db:second"}, nil)
+	second := receivePoolHealth(t, secondUpdates)
+	assert.Same(t, first, second, "host alone is the subscription key")
+	assert.Equal(t, 1, p.probeCalls, "only the first subscriber refreshes inline")
+	assert.Equal(t, []string{"start", "finish"}, events)
+
+	p.ipsByHost["primary.local"] = nil
+	events = nil
+	w.Refresh()
+	assert.Equal(t, []string{"start", "finish", "evict"}, events, "timing is reported before cleanup")
+	assert.Empty(t, first.Resolved())
+
+	w.Unsubscribe(firstUpdates)
+	w.Unsubscribe(secondUpdates)
+	w.Unsubscribe(nil)
+	assert.Equal(t, []int{1, 2, 1, 0}, counts)
+	assert.Equal(t, [][]string{{"db:first"}, {"db:second"}, hostTags, hostTags}, subscriptionTags)
+}
+
+func TestUnsubscribeOldSnapshotDoesNotRemoveReplacement(t *testing.T) {
+	w := newTestWorker(newMockProber(nil))
+	oldUpdates := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	old := receivePoolHealth(t, oldUpdates)
+	w.Unsubscribe(oldUpdates)
+	currentUpdates := w.Subscribe("primary.local", false, "mydb", nil, nil)
+	current := receivePoolHealth(t, currentUpdates)
+	w.Unsubscribe(oldUpdates)
+	assert.Same(t, current, w.hosts["primary.local"])
+	assert.NotSame(t, old, current)
+}
+
+func TestHealthWorkerChecksHostsAndIPsConcurrentlyBeforePublishing(t *testing.T) {
+	p := newMockProber(map[string][]string{
+		"a.local": {"10.0.0.1", "10.0.0.2"},
+		"b.local": {"10.0.0.3", "10.0.0.4"},
+	}, "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4")
+	w := newTestWorker(p)
+	a := receivePoolHealth(t, w.Subscribe("a.local", false, "mydb", nil, nil))
+	b := receivePoolHealth(t, w.Subscribe("b.local", false, "mydb", nil, nil))
+	started := make(chan string, 4)
+	release := make(chan struct{})
+	done := make(chan struct{})
+	p.mockHealthPing = func(ip string) (bool, error) {
+		started <- ip
+		<-release
+		return false, nil
+	}
+	go func() { w.Refresh(); close(done) }()
+	// Always release the probes, even if the concurrency assertion fails.
+	defer func() {
+		close(release)
+		<-done
+		assert.False(t, a.IsHealthy("10.0.0.1"))
+		assert.False(t, b.IsHealthy("10.0.0.3"))
+	}()
+	var ips []string
+	for range 4 {
+		select {
+		case ip := <-started:
+			ips = append(ips, ip)
+		case <-time.After(5 * time.Second):
+			t.Fatal("all hosts and IPs must be probed concurrently")
+		}
+	}
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"}, ips)
+	assert.True(t, a.IsHealthy("10.0.0.1"), "old health remains visible until probes finish")
+	assert.True(t, b.IsHealthy("10.0.0.3"))
+	select {
+	case <-done:
+		t.Fatal("refresh returned before probes finished")
+	default:
+	}
+}
+
+func TestSubscribePreservesSubscriptionTags(t *testing.T) {
+	for _, hasHost := range []bool{false, true} {
+		tags := make([]string, 2, 8)
+		copy(tags, []string{"database:configured_pool", "database_cluster:cluster-a"})
+		if hasHost {
+			tags = append(tags, "postgres_host:primary.local")
+		}
+		w := newTestWorker(newMockProber(nil))
+		health := receivePoolHealth(t, w.Subscribe("primary.local", false, "physical_db", tags, nil))
+		assert.ElementsMatch(t, []string{"database:configured_pool", "database_cluster:cluster-a", "postgres_host:primary.local"}, health.tags)
+		for _, tag := range tags[len(tags):cap(tags)] {
+			assert.Empty(t, tag)
+		}
+		tags[0] = "database:changed"
+		assert.Contains(t, health.tags, "database:configured_pool")
+	}
+}
