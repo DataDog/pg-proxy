@@ -6,8 +6,6 @@ on:
   push:
     branches:
       - main
-      # Exercise CI before the initial migration reaches main.
-      - jonathan.hinds/initial-oss-pg-proxy-sync
   workflow_dispatch:
 
 permissions:
