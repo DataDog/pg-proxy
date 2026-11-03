@@ -503,6 +503,13 @@ func TestRunReturnsOnCancellationWhileIdle(t *testing.T) {
 	default:
 		t.Fatal("Run returned without waiting for sessions")
 	}
+	// Let the session handler finish before another test installs global metrics.
+	for {
+		if _, err := frontend.Receive(); err != nil {
+			require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+			break
+		}
+	}
 }
 
 // TestShouldReportError verifies that shouldReportError suppresses the errors that
