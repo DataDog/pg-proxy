@@ -172,24 +172,25 @@ func (l *Listener[T]) Close() error { return l.ln.Close() }
 // Run serves connections until shutdown or an accept error.
 func (l *Listener[T]) Run() error {
 	pgproxy.Logger().Info("Listening", "address", l.cfg.ListenAddress)
+	// Accept blocks until a client connects, so an idle listener would never
+	// observe cancellation. Closing the socket wakes Accept with an error.
+	stop := context.AfterFunc(l.ctx, func() { _ = l.ln.Close() })
+	defer stop()
 	for {
-		select {
-		case <-l.ctx.Done():
-			_ = l.ln.Close()
+		conn, err := l.ln.Accept()
+		if err != nil {
+			if l.ctx.Err() == nil {
+				return err
+			}
 			// The listener is now closed but some sessions might still be running.
 			// We need to wait for them here, as the process will halt after exiting this function.
 			if l.cfg.Hooks.Lifecycle.WaitAll != nil {
 				l.cfg.Hooks.Lifecycle.WaitAll()
 			}
 			return nil
-		default:
-			conn, err := l.ln.Accept()
-			if err != nil {
-				return err
-			}
-			configureKeepalive(conn)
-			go l.handleConnWithLoadShedding(conn)
 		}
+		configureKeepalive(conn)
+		go l.handleConnWithLoadShedding(conn)
 	}
 }
 

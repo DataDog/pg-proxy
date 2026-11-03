@@ -459,6 +459,52 @@ func TestStartDrainWatcher(t *testing.T) {
 	}
 }
 
+// Run must observe cancellation while blocked in Accept, not only when the next
+// client connects, and wait for active sessions before returning.
+func TestRunReturnsOnCancellationWhileIdle(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine, _, _, err := newTestListener(ctx)
+	require.NoError(t, err)
+	defer engine.Close()
+	waited := make(chan struct{})
+	engine.cfg.Hooks.Lifecycle.WaitAll = func() { close(waited) }
+	done := make(chan error, 1)
+	go func() { done <- engine.Run() }()
+
+	// Complete one startup so Run is back in Accept with no connection pending.
+	conn, err := net.Dial("tcp", engine.Addr().String())
+	require.NoError(t, err)
+	defer conn.Close()
+	require.NoError(t, conn.SetDeadline(time.Now().Add(2*time.Second)))
+	frontend := pgproto3.NewFrontend(conn, conn)
+	frontend.Send(&pgproto3.StartupMessage{
+		ProtocolVersion: pgproto3.ProtocolVersionNumber,
+		Parameters:      map[string]string{"user": "testuser", "database": "testdb"},
+	})
+	require.NoError(t, frontend.Flush())
+	for {
+		message, err := frontend.Receive()
+		require.NoError(t, err)
+		if _, ok := message.(*pgproto3.ReadyForQuery); ok {
+			break
+		}
+	}
+
+	cancel()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return after cancellation")
+	}
+	select {
+	case <-waited:
+	default:
+		t.Fatal("Run returned without waiting for sessions")
+	}
+}
+
 // TestShouldReportError verifies that shouldReportError suppresses the errors that
 // already notified the client (or are expected disconnects) and reports everything
 // else. The client-notified case is the session-limit rejection path added alongside
