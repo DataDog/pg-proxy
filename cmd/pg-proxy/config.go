@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
+	"crypto"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"flag"
 	"fmt"
@@ -296,13 +300,77 @@ func clientTLSConfig(proxy pgconfig.Proxy) (*tls.Config, error) {
 	if proxy.TLSCertFile == "" || proxy.TLSKeyFile == "" {
 		return nil, errors.New("proxy.tls_cert_file and tls_key_file must be configured together")
 	}
-	certificate, err := tls.LoadX509KeyPair(proxy.TLSCertFile, proxy.TLSKeyFile)
+	certPEM, err := readTLSFile(proxy.TLSCertFile, "proxy.tls_cert_file")
 	if err != nil {
-		// Do not include file contents, paths, or private-key parser errors.
-		return nil, errors.New("could not load proxy TLS certificate/key pair: check PEM files and matching keys")
+		return nil, err
+	}
+	keyPEM, err := readTLSFile(proxy.TLSKeyFile, "proxy.tls_key_file")
+	if err != nil {
+		return nil, err
+	}
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		return nil, tlsKeyPairError(certPEM, keyPEM)
 	}
 	return &tls.Config{
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{certificate},
 	}, nil
+}
+
+func readTLSFile(path, setting string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err == nil {
+		return data, nil
+	}
+	reason := "could not read file"
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		reason = "file not found"
+	case errors.Is(err, os.ErrPermission):
+		reason = "permission denied"
+	}
+	return nil, fmt.Errorf("%s: %s", setting, reason)
+}
+
+// Classify a failed pair without returning parser errors that can contain PEM
+// labels or other file data. tls.X509KeyPair remains the authority on valid pairs.
+func tlsKeyPairError(certPEM, keyPEM []byte) error {
+	certificate, err := x509.ParseCertificate(tlsPEMBlock(certPEM, "CERTIFICATE"))
+	if err != nil {
+		return errors.New("proxy.tls_cert_file: invalid PEM certificate")
+	}
+	keyDER := tlsPEMBlock(keyPEM, "PRIVATE KEY")
+	key, err := x509.ParsePKCS8PrivateKey(keyDER)
+	if err != nil {
+		key, err = x509.ParsePKCS1PrivateKey(keyDER)
+	}
+	if err != nil {
+		key, err = x509.ParseECPrivateKey(keyDER)
+	}
+	signer, ok := key.(crypto.Signer)
+	if err != nil || !ok {
+		return errors.New("proxy.tls_key_file: invalid or unsupported PEM private key")
+	}
+	publicKey, err := x509.MarshalPKIXPublicKey(signer.Public())
+	if err != nil {
+		return errors.New("proxy.tls_key_file: invalid or unsupported PEM private key")
+	}
+	if !bytes.Equal(publicKey, certificate.RawSubjectPublicKeyInfo) {
+		return errors.New("proxy.tls_key_file: private key does not match proxy.tls_cert_file")
+	}
+	return errors.New("proxy.tls_cert_file and proxy.tls_key_file: unsupported TLS certificate/key pair")
+}
+
+func tlsPEMBlock(data []byte, kind string) []byte {
+	for {
+		var block *pem.Block
+		block, data = pem.Decode(data)
+		if block == nil {
+			return nil
+		}
+		if block.Type == kind || (kind == "PRIVATE KEY" && strings.HasSuffix(block.Type, " PRIVATE KEY")) {
+			return block.Bytes
+		}
+	}
 }

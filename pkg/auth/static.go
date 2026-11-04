@@ -54,14 +54,14 @@ func NewStatic(users []StaticUser) (*Static, error) {
 	return &Static{users: credentials, access: access, mockKey: mockKey, mockTemplates: templates}, nil
 }
 
-func (s *Static) Verify(ctx context.Context, request Request, ex protocol.Exchange) (Identity, error) {
+func (s *Static) Verify(ctx context.Context, request Request, ex protocol.Exchange) (Identity[struct{}], error) {
 	if err := ctx.Err(); err != nil {
-		return Identity{}, err
+		return Identity[struct{}]{}, err
 	}
 	verifier, exists := s.users[request.User]
 	if !exists {
 		if len(s.mockTemplates) == 0 {
-			return Identity{}, listener.ErrInvalidCredentials
+			return Identity[struct{}]{}, listener.ErrInvalidCredentials
 		}
 		// Give each unknown username stable fake credentials without retaining
 		// attacker-controlled names. Match a configured salt length and iteration
@@ -72,23 +72,23 @@ func (s *Static) Verify(ctx context.Context, request Request, ex protocol.Exchan
 		var err error
 		verifier, err = scram.NewMockVerifier(request.User, s.mockKey, s.mockTemplates[index])
 		if err != nil {
-			return Identity{}, err
+			return Identity[struct{}]{}, err
 		}
 	}
 	err := scram.AuthenticateVerifier(ex, request.User, verifier)
 	if err != nil {
 		var failed *scram.AuthFailedError
 		if errors.As(err, &failed) {
-			return Identity{}, listener.ErrInvalidCredentials
+			return Identity[struct{}]{}, listener.ErrInvalidCredentials
 		}
-		return Identity{}, err
+		return Identity[struct{}]{}, err
 	}
 	if !exists {
-		return Identity{}, listener.ErrInvalidCredentials
+		return Identity[struct{}]{}, listener.ErrInvalidCredentials
 	}
-	return Identity{Service: request.User}, nil
+	return Identity[struct{}]{Service: request.User}, nil
 }
 
-func (s *Static) Authorize(ctx context.Context, identity Identity, request Request) error {
+func (s *Static) Authorize(ctx context.Context, identity Identity[struct{}], request Request) error {
 	return s.access.Authorize(ctx, identity, request)
 }

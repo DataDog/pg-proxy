@@ -14,6 +14,13 @@ Their fake salts are stable per username and derived from a provider-owned
 random secret. Fake salt lengths and iteration counts match configured users;
 unknown usernames are never cached.
 
+`Identity[P]` also carries the provider's verified principal to authorization.
+For example, dd-source can supply verified service identity and group membership,
+then apply its own access policy. Keep JWT verification, Vault access, credential
+rotation, and Datadog policy in app callbacks. The shared hook handles ordering,
+resolved database selection, passthrough rejection, and the session identity.
+The hook never logs the principal. Callbacks must respect context cancellation.
+
 Proxy usernames identify clients. Backend pools retain their configured login
 credentials and SQL permissions. Multiple proxy users may share a backend pool.
 No PostgreSQL roles are created or selected by this package.

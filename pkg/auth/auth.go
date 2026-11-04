@@ -14,8 +14,11 @@ import (
 
 // Identity contains only verified identity data. Service is the nonempty session
 // accounting key; it must distinguish principals even when they share a backend.
-type Identity struct {
+type Identity[P any] struct {
 	Service string
+	// Principal carries verified provider data to authorization. The hook never
+	// logs it. Providers must not put passwords, tokens, or SCRAM proofs here.
+	Principal P
 }
 
 // Request names a proxy login and the logical database resolved by the server.
@@ -24,19 +27,22 @@ type Request struct {
 	User, LogicalDatabase string
 }
 
-type Verifier func(context.Context, Request, protocol.Exchange) (Identity, error)
-type Authorizer func(context.Context, Identity, Request) error
+type Verifier[P any] func(context.Context, Request, protocol.Exchange) (Identity[P], error)
+type Authorizer[P any] func(context.Context, Identity[P], Request) error
 
 // Hook verifies a client, authorizes the complete request, then returns its
 // accounting identity. Failures are returned to the listener, which alone owns
 // terminal errors and successful startup messages. Passthrough is unsupported.
-func Hook[T any](verify Verifier, authorize Authorizer) (func(context.Context, listener.StartupRequest, listener.StartupResult[T], protocol.Exchange) (listener.AuthenticationResult, error), error) {
+func Hook[T, P any](verify Verifier[P], authorize Authorizer[P]) (func(context.Context, listener.StartupRequest, listener.StartupResult[T], protocol.Exchange) (listener.AuthenticationResult, error), error) {
 	if verify == nil || authorize == nil {
 		return nil, errors.New("authentication requires a verifier and authorizer")
 	}
 	return func(ctx context.Context, startup listener.StartupRequest, resolved listener.StartupResult[T], ex protocol.Exchange) (listener.AuthenticationResult, error) {
 		if startup.Options.PassthroughUser {
 			return listener.AuthenticationResult{}, listener.ErrUnsupportedAuthOption
+		}
+		if err := ctx.Err(); err != nil {
+			return listener.AuthenticationResult{}, err
 		}
 		request := Request{User: startup.User, LogicalDatabase: resolved.LogicalDatabase}
 		if request.User == "" || request.LogicalDatabase == "" {
@@ -50,6 +56,9 @@ func Hook[T any](verify Verifier, authorize Authorizer) (func(context.Context, l
 			return listener.AuthenticationResult{}, listener.ErrAuthenticationFailed
 		}
 		if err := authorize(ctx, identity, request); err != nil {
+			return listener.AuthenticationResult{}, err
+		}
+		if err := ctx.Err(); err != nil {
 			return listener.AuthenticationResult{}, err
 		}
 		pgproxy.LoggerFromContext(ctx).Info("client authenticated",
@@ -89,7 +98,7 @@ func NewDatabaseAccess(grants map[string][]string) (*DatabaseAccess, error) {
 	return access, nil
 }
 
-func (a *DatabaseAccess) Authorize(_ context.Context, _ Identity, request Request) error {
+func (a *DatabaseAccess) Authorize(_ context.Context, _ Identity[struct{}], request Request) error {
 	if a != nil {
 		if _, ok := a.users[request.User][request.LogicalDatabase]; ok {
 			return nil
