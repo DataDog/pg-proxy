@@ -123,8 +123,8 @@ func AuthenticateVerifier(ex protocol.Exchange, verifier *Verifier) error {
 	}
 
 	// Step 5: Send the server-final-message
-	state.ServerFinalMessage = &serverFinalMessage{ServerSignature: string(encodeB64(hmacSHA256(verifier.serverKey, []byte(state.authMessage()))))}
-	if err := ex.Send(&pgproto3.AuthenticationSASLFinal{Data: state.ServerFinalMessage.Encode()}); err != nil {
+	serverFinal := []byte("v=" + state.serverSignature(verifier))
+	if err := ex.Send(&pgproto3.AuthenticationSASLFinal{Data: serverFinal}); err != nil {
 		return fmt.Errorf("error sending AuthenticationSASLFinal message to client: %w", err)
 	}
 

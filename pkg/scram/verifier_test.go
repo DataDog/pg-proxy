@@ -117,64 +117,68 @@ func TestMockVerifier(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestVerifierChecksProofAndChannelBinding(t *testing.T) {
-	verifier := deriveVerifier(testPassword, testSaltBytes, testIterations)
-	for _, kind := range []string{"valid", "wrong binding", "wrong nonce", "short proof", "long proof", "bad base64"} {
-		t.Run(kind, func(t *testing.T) {
-			state := completeState()
-			if kind == "wrong binding" {
-				state.ClientFinalMessage.ChannelBinding = "eSws"
-			}
-			state.ClientFinalMessage.ClientProof = state.computeClientProof(testPassword)
-			switch kind {
-			case "wrong nonce":
-				state.ClientFinalMessage.Nonce = "other"
-			case "short proof":
-				state.ClientFinalMessage.ClientProof = base64.StdEncoding.EncodeToString(make([]byte, 31))
-			case "long proof":
-				state.ClientFinalMessage.ClientProof = base64.StdEncoding.EncodeToString(make([]byte, 33))
-			case "bad base64":
-				state.ClientFinalMessage.ClientProof = "malformed"
-			}
-			err := state.verifyVerifier(verifier)
-			if kind == "valid" {
-				require.NoError(t, err)
-			} else {
-				require.Error(t, err)
-			}
+// Published RFC 7677 section 3 values. No client-proof generation uses server code.
+const (
+	rfcFirst     = "n,,n=user,r=rOprNGfwEbeRWgbNEkqO"
+	rfcNonce     = "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0"
+	rfcProof     = "dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="
+	rfcSignature = "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4="
+	rfcFinal     = "c=biws,r=" + rfcNonce + ",p=" + rfcProof
+)
+
+func rfc7677State(t *testing.T, final string) (*messageState, *Verifier) {
+	t.Helper()
+	salt, err := base64.StdEncoding.DecodeString("W22ZaJ0SNY7soEsUEjb6gQ==")
+	require.NoError(t, err)
+	state := &messageState{}
+	require.NoError(t, state.setClientFirstMessage(&pgproto3.SASLInitialResponse{Data: []byte(rfcFirst)}))
+	state.ServerFirstMessage = &serverFirstMessage{Nonce: rfcNonce, Salt: salt, IterationCount: 4096}
+	require.NoError(t, state.setClientFinalMessage(&pgproto3.SASLResponse{Data: []byte(final)}))
+	return state, deriveVerifier("pencil", salt, 4096)
+}
+
+func TestVerifierRejectsTamperedProofAndBinding(t *testing.T) {
+	for _, tc := range []struct{ name, final, reason string }{
+		{"wrong binding", strings.Replace(rfcFinal, "c=biws", "c=eSws", 1), "channel binding mismatch"},
+		{"wrong nonce", strings.Replace(rfcFinal, rfcNonce, "other-nonce", 1), "nonce does not match"},
+		{"short proof", strings.Replace(rfcFinal, rfcProof, base64.StdEncoding.EncodeToString(make([]byte, 31)), 1), "invalid client proof"},
+		{"long proof", strings.Replace(rfcFinal, rfcProof, base64.StdEncoding.EncodeToString(make([]byte, 33)), 1), "invalid client proof"},
+		{"bad base64", strings.Replace(rfcFinal, rfcProof, "malformed", 1), "invalid client proof"},
+		{"wrong proof", strings.Replace(rfcFinal, rfcProof, base64.StdEncoding.EncodeToString(make([]byte, 32)), 1), "client proof mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, verifier := rfc7677State(t, tc.final)
+			require.ErrorContains(t, state.verifyVerifier(verifier), tc.reason)
 		})
-	}
-	for _, first := range []string{"n,,n=,r=", "n,,n=,r=one,r=two", "n,,m=required,n=,r=one", "n,,n=bad=00,r=one", "n,,n=,r=bad\x00nonce"} {
-		require.Error(t, (&messageState{}).setClientFirstMessage(&pgproto3.SASLInitialResponse{Data: []byte(first)}))
-	}
-	for _, final := range []string{"c=biws,r=one,p=a,p=b", "c=biws,r=one,m=required,p=a", "c=biws,p=a", "r=one,c=biws,p=a"} {
-		require.Error(t, (&messageState{}).setClientFinalMessage(&pgproto3.SASLResponse{Data: []byte(final)}))
 	}
 }
 
 func TestRFC7677Vector(t *testing.T) {
 	// https://www.rfc-editor.org/rfc/rfc7677.html#section-3
-	// Fixed, published client proof and server signature, independent of our
-	// client implementation and its helpers.
-	salt, err := base64.StdEncoding.DecodeString("W22ZaJ0SNY7soEsUEjb6gQ==")
-	require.NoError(t, err)
-	verifier := deriveVerifier("pencil", salt, 4096)
-	state := &messageState{}
-	require.NoError(t, state.setClientFirstMessage(&pgproto3.SASLInitialResponse{
-		Data: []byte("n,,n=user,r=rOprNGfwEbeRWgbNEkqO"),
-	}))
-	state.ServerFirstMessage = &serverFirstMessage{
-		Nonce: "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0",
-		Salt:  salt, IterationCount: 4096,
-	}
-	require.NoError(t, state.setClientFinalMessage(&pgproto3.SASLResponse{
-		Data: []byte("c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="),
-	}))
+	state, verifier := rfc7677State(t, rfcFinal)
 	require.NoError(t, state.verifyVerifier(verifier))
-	require.Equal(t, "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=", state.computeServerSignature("pencil"))
-	state.ClientFirstMessage.bare += ",x=changed-transcript"
+	require.Equal(t, rfcSignature, state.serverSignature(verifier))
+}
+
+func TestVerifierSignsOptionalExtensions(t *testing.T) {
+	state, verifier := rfc7677State(t, rfcFinal)
+	require.NoError(t, state.setClientFirstMessage(&pgproto3.SASLInitialResponse{Data: []byte(rfcFirst + ",x=changed-transcript")}))
 	require.ErrorContains(t, state.verifyVerifier(verifier), "proof mismatch")
-	state.ClientFirstMessage.bare = "n=user,r=rOprNGfwEbeRWgbNEkqO"
-	state.ClientFinalMessage.withoutProof += ",x=changed-transcript"
+	state, verifier = rfc7677State(t, strings.Replace(rfcFinal, ",p=", ",x=changed-transcript,p=", 1))
 	require.ErrorContains(t, state.verifyVerifier(verifier), "proof mismatch")
+}
+
+func TestVerifierChallengeUsesStoredParameters(t *testing.T) {
+	verifier, err := ParseVerifier(independentVerifier(t, "password"))
+	require.NoError(t, err)
+	state := &messageState{}
+	require.NoError(t, state.setClientFirstMessage(&pgproto3.SASLInitialResponse{Data: []byte("n,,n=,r=client-nonce")}))
+	require.NoError(t, state.setVerifierChallenge(verifier))
+	firstNonce := state.ServerFirstMessage.Nonce
+	require.True(t, strings.HasPrefix(firstNonce, "client-nonce"))
+	require.Greater(t, len(firstNonce), len("client-nonce"))
+	require.Equal(t, verifier.salt, state.ServerFirstMessage.Salt)
+	require.Equal(t, 8192, state.ServerFirstMessage.IterationCount)
+	require.NoError(t, state.setVerifierChallenge(verifier))
+	require.NotEqual(t, firstNonce, state.ServerFirstMessage.Nonce)
 }

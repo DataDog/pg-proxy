@@ -132,11 +132,14 @@ func (s *messageState) verifyVerifier(v *Verifier) error {
 	if err != nil || len(proof) != 32 {
 		return errors.New("invalid client proof")
 	}
+	// The proof masks ClientKey with the transcript signature. Recover ClientKey
+	// and compare its hash with StoredKey without timing-dependent equality.
 	signature := hmacSHA256(v.storedKey, []byte(s.authMessage()))
-	for i := range proof {
-		proof[i] ^= signature[i]
+	clientKey := proof
+	for i := range clientKey {
+		clientKey[i] ^= signature[i]
 	}
-	if !hmac.Equal(hash(string(proof)), v.storedKey) {
+	if !hmac.Equal(hash(string(clientKey)), v.storedKey) {
 		return errors.New("client proof mismatch")
 	}
 	return nil
@@ -149,4 +152,8 @@ func (s *messageState) setVerifierChallenge(v *Verifier) error {
 	}
 	s.ServerFirstMessage = &serverFirstMessage{Nonce: s.ClientFirstMessage.Nonce + string(encodeB64(nonce)), Salt: v.salt, IterationCount: v.iterations}
 	return nil
+}
+
+func (s *messageState) serverSignature(v *Verifier) string {
+	return base64.StdEncoding.EncodeToString(hmacSHA256(v.serverKey, []byte(s.authMessage())))
 }
