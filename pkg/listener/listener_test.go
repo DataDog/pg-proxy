@@ -185,7 +185,7 @@ func TestHandleStartupPassesSessionOptions(t *testing.T) {
 			"user":     "testuser",
 			"database": "testdb",
 			"options": url.QueryEscape(
-				"-c pg_proxy.dynamic_routing=true -c pg_proxy.auto_cached_prepared_statements=true",
+				"-c pg_proxy.dynamic_routing=true -c pg_proxy.auto_cached_prepared_statements=true -c pg_proxy.passthrough_user=true",
 			),
 		}})
 		done <- startupErr
@@ -195,6 +195,7 @@ func TestHandleStartupPassesSessionOptions(t *testing.T) {
 	assert.Equal(t, SessionOptions{
 		DynamicRoutingEnabled:        true,
 		AutoCachedPreparedStatements: true,
+		PassthroughUser:              true,
 	}, got.Request.Options)
 }
 

@@ -475,9 +475,6 @@ func (l *Listener[T]) handleStartup(ctx, startupCtx context.Context, conn net.Co
 	if err != nil {
 		return nil, startupErrorAt("startup_options", err)
 	}
-	if options.PassthroughUser {
-		return nil, startupErrorAt("authenticate", ErrUnsupportedAuthOption)
-	}
 	if err := startupCtx.Err(); err != nil {
 		return nil, startupErrorAt("authenticate", err)
 	}

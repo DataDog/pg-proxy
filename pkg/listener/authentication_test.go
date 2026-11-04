@@ -15,14 +15,12 @@ func TestAuthenticationRejectsBeforeAdmission(t *testing.T) {
 	for _, tc := range []struct {
 		name             string
 		parameters       map[string]string
-		withoutHook      bool
 		wantResolution   bool
 		wantVerification bool
 	}{
 		{name: "missing user", parameters: map[string]string{"database": "testdb"}},
 		{name: "empty user", parameters: map[string]string{"user": "", "database": "testdb"}},
-		{name: "passthrough", parameters: map[string]string{"user": "alice", "database": "testdb", "options": "-c pg_proxy.passthrough_user=true"}},
-		{name: "trust passthrough", withoutHook: true, parameters: map[string]string{"user": "alice", "database": "testdb", "options": "-c pg_proxy.passthrough_user=true"}},
+		{name: "passthrough without identity", parameters: map[string]string{"user": "alice", "database": "testdb", "options": "-c pg_proxy.passthrough_user=true"}, wantResolution: true, wantVerification: true},
 		{name: "empty resolved database", parameters: map[string]string{"user": "alice", "database": ""}, wantResolution: true},
 		{name: "empty identity", parameters: map[string]string{"user": "alice", "database": "testdb"}, wantResolution: true, wantVerification: true},
 	} {
@@ -35,11 +33,9 @@ func TestAuthenticationRejectsBeforeAdmission(t *testing.T) {
 				resolved.Store(true)
 				return StartupResult[struct{}]{LogicalDatabase: request.Database}, nil
 			}
-			if !tc.withoutHook {
-				engine.cfg.Hooks.Authenticate = func(context.Context, StartupRequest, StartupResult[struct{}], protocol.Exchange) (AuthenticationResult, error) {
-					verified.Store(true)
-					return AuthenticationResult{}, nil
-				}
+			engine.cfg.Hooks.Authenticate = func(context.Context, StartupRequest, StartupResult[struct{}], protocol.Exchange) (AuthenticationResult, error) {
+				verified.Store(true)
+				return AuthenticationResult{}, nil
 			}
 			engine.cfg.Hooks.NewSession = func(SessionConfig[struct{}]) (Session, error) {
 				panic("rejected login reached session construction")

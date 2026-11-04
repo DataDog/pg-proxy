@@ -50,9 +50,10 @@ integration tests remain in the app.
 Authentication uses the existing `Config.Authenticate` callback. Verify credentials
 and check access to `resolved.LogicalDatabase` before returning a nonempty
 `listener.AuthenticationResult.Service`. The listener checks cancellation and
-rejects empty identities before admission. Client passthrough requests are
-rejected before resolution or authentication. Credential sources and access policy
-remain application-owned; no additional authentication wrapper is required.
+rejects empty identities before admission. Passthrough policy belongs to the
+application's authentication callback. The standalone command rejects it;
+embedders can retain their existing role handling after authentication.
+Credential sources and access policy remain application-owned.
 
 Set `MaxPendingConnections` to bound concurrent TLS/startup handlers. The listener
 closes excess connections before creating a handler and releases each slot after
