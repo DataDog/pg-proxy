@@ -1,7 +1,9 @@
 package scram
 
 import (
+	"crypto/hkdf"
 	"crypto/hmac"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"strconv"
@@ -80,6 +82,28 @@ func NewVerifier(password string) (*Verifier, error) {
 		return nil, errors.New("could not generate SCRAM salt")
 	}
 	return deriveVerifier(password, salt, DefaultIterations), nil
+}
+
+// NewMockVerifier creates stable fake credentials for an unknown username.
+// secret must be a server-owned random key reused across login attempts.
+// Only template's iteration count and salt length are used; its credentials
+// remain unchanged. No password derivation or per-username storage is needed.
+// The caller must always reject the login, even if the exchange succeeds.
+func NewMockVerifier(username string, secret [32]byte, template *Verifier) (*Verifier, error) {
+	if err := template.Validate(); err != nil {
+		return nil, err
+	}
+	saltSize := len(template.salt)
+	material, err := hkdf.Key(sha256.New, secret[:], nil, "pg-proxy mock SCRAM\x00"+username, saltSize+2*sha256.Size)
+	if err != nil {
+		return nil, errors.New("could not generate mock SCRAM credentials")
+	}
+	return &Verifier{
+		iterations: template.iterations,
+		salt:       material[:saltSize],
+		storedKey:  material[saltSize : saltSize+sha256.Size],
+		serverKey:  material[saltSize+sha256.Size:],
+	}, nil
 }
 
 func deriveVerifier(password string, salt []byte, iterations int) *Verifier {

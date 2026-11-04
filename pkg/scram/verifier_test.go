@@ -80,6 +80,43 @@ func TestVerifierValidationAndRedaction(t *testing.T) {
 	require.Error(t, AuthenticateVerifier(nil, "alice", nil))
 }
 
+func TestMockVerifier(t *testing.T) {
+	key := [32]byte{1}
+	for _, saltSize := range []int{1, 16, 18, maxSaltSize} {
+		t.Run(fmt.Sprint(saltSize), func(t *testing.T) {
+			encoded := independentVerifier(t, "password")
+			parts := strings.Split(encoded, "$")
+			parts[1] = "8192:" + base64.StdEncoding.EncodeToString(make([]byte, saltSize))
+			template, err := ParseVerifier(strings.Join(parts, "$"))
+			require.NoError(t, err)
+			before := template.Encode()
+			mock, err := NewMockVerifier("unknown", key, template)
+			require.NoError(t, err)
+			require.NoError(t, mock.Validate())
+			require.Equal(t, template.iterations, mock.iterations)
+			require.Len(t, mock.salt, saltSize)
+			repeated, err := NewMockVerifier("unknown", key, template)
+			require.NoError(t, err)
+			require.Equal(t, mock.Encode(), repeated.Encode())
+			other, err := NewMockVerifier("other", key, template)
+			require.NoError(t, err)
+			require.NotEqual(t, mock.storedKey, other.storedKey)
+			require.NotEqual(t, mock.serverKey, other.serverKey)
+			other, err = NewMockVerifier("unknown", [32]byte{2}, template)
+			require.NoError(t, err)
+			require.NotEqual(t, mock.Encode(), other.Encode())
+			mock.salt[0] ^= 0xff
+			mock.storedKey[0] ^= 0xff
+			mock.serverKey[0] ^= 0xff
+			require.Equal(t, before, template.Encode(), "fake credentials must not share template storage")
+		})
+	}
+	_, err := NewMockVerifier("unknown", key, nil)
+	require.Error(t, err)
+	_, err = NewMockVerifier("unknown", key, &Verifier{})
+	require.Error(t, err)
+}
+
 func TestVerifierChecksProofAndChannelBinding(t *testing.T) {
 	verifier := deriveVerifier(testPassword, testSaltBytes, testIterations)
 	for _, kind := range []string{"valid", "wrong binding", "wrong nonce", "short proof", "long proof", "bad base64"} {

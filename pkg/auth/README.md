@@ -10,6 +10,9 @@ allowlist for username/database pairs. Passthrough requests are rejected.
 from unique `StaticUser` entries. Supply a parsed or newly derived `scram.Verifier`
 and explicit database grants, then compose `static.Verify` and `static.Authorize`
 with `Hook`. Unknown usernames perform a dummy exchange and are always rejected.
+Their fake salts are stable per username and derived from a provider-owned
+random secret. Fake salt lengths and iteration counts match configured users;
+unknown usernames are never cached.
 
 Proxy usernames identify clients. Backend pools retain their configured login
 credentials and SQL permissions. Multiple proxy users may share a backend pool.
