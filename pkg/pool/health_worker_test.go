@@ -1736,7 +1736,8 @@ func TestSQLPatroniHealthSnapshotMatchesIndependentMapOrder(t *testing.T) {
 func TestSQLPatroniHealthSnapshotIgnoresUnknownSQLIP(t *testing.T) {
 	now := time.Now()
 	snapshot := SQLPatroniHealthSnapshot{
-		SQLHealth: map[string]bool{},
+		SQLHealth:      map[string]bool{},
+		SQLRetainedIPs: []string{"10.0.0.1"},
 		SQLResults: []SQLHealthResultsSnapshot{{
 			ScheduledAt:  now,
 			ObservedAt:   now,
@@ -1752,6 +1753,28 @@ func TestSQLPatroniHealthSnapshotIgnoresUnknownSQLIP(t *testing.T) {
 
 	assert.True(t, snapshot.Matches())
 	assert.ErrorIs(t, snapshot.SQLResults[0].Results[0].Err, context.DeadlineExceeded)
+}
+
+func TestSQLPatroniHealthSnapshotDoesNotIgnoreEvictedCandidateIP(t *testing.T) {
+	const (
+		oldIP = "10.0.0.1"
+		newIP = "10.0.0.2"
+	)
+	snapshot := SQLPatroniHealthSnapshot{
+		SQLHealth:      map[string]bool{newIP: true},
+		SQLRetainedIPs: []string{newIP},
+		SQLResults: []SQLHealthResultsSnapshot{{
+			CandidateIPs: []string{oldIP, newIP},
+			Results: []SQLHealthCheckResult{
+				{IP: oldIP, InRecovery: true},
+				{IP: newIP},
+			},
+		}},
+		PatroniHealth: map[string]bool{oldIP: false, newIP: true},
+	}
+
+	assert.False(t, snapshot.Matches(),
+		"an evicted IP in a historical raw snapshot must still count as a membership disagreement")
 }
 
 func TestSQLComparisonPublishesEachCredentialCompletionAndLastDeterminateRoleWins(t *testing.T) {
@@ -1848,9 +1871,10 @@ func TestSQLComparisonReportsErrorOnlyIPAsUnknown(t *testing.T) {
 	)
 	assert.Empty(t, snapshot.health)
 	assert.True(t, SQLPatroniHealthSnapshot{
-		SQLHealth:     snapshot.health,
-		SQLResults:    snapshot.results,
-		PatroniHealth: map[string]bool{ip: true},
+		SQLHealth:      snapshot.health,
+		SQLRetainedIPs: snapshot.retainedIPs,
+		SQLResults:     snapshot.results,
+		PatroniHealth:  map[string]bool{ip: true},
 	}.Matches(), "an IP with no determinate SQL result remains neutral")
 }
 

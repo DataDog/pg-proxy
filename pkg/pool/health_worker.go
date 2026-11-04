@@ -128,20 +128,19 @@ type SQLHealthResultsSnapshot struct {
 // comparison. SQL results may come from different scheduled polls when credentials finish at
 // different rates.
 type SQLPatroniHealthSnapshot struct {
-	SQLHealth     map[string]bool
-	SQLResults    []SQLHealthResultsSnapshot
-	PatroniHealth map[string]bool
+	SQLHealth      map[string]bool
+	SQLRetainedIPs []string
+	SQLResults     []SQLHealthResultsSnapshot
+	PatroniHealth  map[string]bool
 }
 
 // Matches reports whether every conclusive SQL finding agrees with Patroni and both snapshots have
 // the same conclusive address membership.
 func (s SQLPatroniHealthSnapshot) Matches() bool {
 	unknownIPs := make(map[string]struct{})
-	for _, targetSnapshot := range s.SQLResults {
-		for _, ip := range targetSnapshot.CandidateIPs {
-			if _, known := s.SQLHealth[ip]; !known {
-				unknownIPs[ip] = struct{}{}
-			}
+	for _, ip := range s.SQLRetainedIPs {
+		if _, known := s.SQLHealth[ip]; !known {
+			unknownIPs[ip] = struct{}{}
 		}
 	}
 	for ip, sqlHealthy := range s.SQLHealth {
@@ -244,8 +243,9 @@ type sqlHealthRoundState struct {
 }
 
 type sqlHealthComparisonSnapshot struct {
-	health  map[string]bool
-	results []SQLHealthResultsSnapshot
+	health      map[string]bool
+	retainedIPs []string
+	results     []SQLHealthResultsSnapshot
 }
 
 func (s *PoolHealth) forgetSQLComparisonTarget(target *sqlHealthTarget) {
@@ -315,18 +315,21 @@ func (s *PoolHealth) recordSQLComparisonPoll(
 		Results:      slices.Clone(outcome.Results),
 	}
 
-	snapshot := buildSQLHealthComparisonSnapshot(s.sqlComparisonRoles, s.sqlComparisonLatest)
+	snapshot := buildSQLHealthComparisonSnapshot(s.sqlComparisonRoles, retainedIPs, s.sqlComparisonLatest)
 	return &snapshot
 }
 
 func buildSQLHealthComparisonSnapshot(
 	roles map[string]*atomic.Bool,
+	retainedIPs map[string]struct{},
 	latest map[*sqlHealthTarget]SQLHealthResultsSnapshot,
 ) sqlHealthComparisonSnapshot {
 	snapshot := sqlHealthComparisonSnapshot{
-		health:  make(map[string]bool, len(roles)),
-		results: make([]SQLHealthResultsSnapshot, 0, len(latest)),
+		health:      make(map[string]bool, len(roles)),
+		retainedIPs: slices.Collect(maps.Keys(retainedIPs)),
+		results:     make([]SQLHealthResultsSnapshot, 0, len(latest)),
 	}
+	slices.Sort(snapshot.retainedIPs)
 	for ip, role := range roles {
 		snapshot.health[ip] = role.Load()
 	}
@@ -851,9 +854,10 @@ func (w *HealthWorker) reportSQLPatroniComparison(
 		return
 	}
 	comparison := SQLPatroniHealthSnapshot{
-		SQLHealth:     maps.Clone(snapshot.health),
-		SQLResults:    slices.Clone(snapshot.results),
-		PatroniHealth: poolHealth.state.Snapshot(),
+		SQLHealth:      maps.Clone(snapshot.health),
+		SQLRetainedIPs: slices.Clone(snapshot.retainedIPs),
+		SQLResults:     slices.Clone(snapshot.results),
+		PatroniHealth:  poolHealth.state.Snapshot(),
 	}
 	w.hooks.SQLPatroniCompared(comparison, poolHealth.patroniTags)
 }
