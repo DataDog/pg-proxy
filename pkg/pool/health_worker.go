@@ -248,9 +248,12 @@ type sqlHealthComparisonSnapshot struct {
 	results     []SQLHealthResultsSnapshot
 }
 
-func (s *PoolHealth) forgetSQLComparisonTarget(target *sqlHealthTarget) {
+func (s *PoolHealth) disableSQLComparisonTarget(target *sqlHealthTarget, scheduledAt time.Time) {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
+	if scheduledAt.After(target.sqlComparisonDisabledAt) {
+		target.sqlComparisonDisabledAt = scheduledAt
+	}
 	delete(s.sqlComparisonLatest, target)
 }
 
@@ -270,7 +273,8 @@ func (s *PoolHealth) recordSQLComparisonPoll(
 ) *sqlHealthComparisonSnapshot {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
-	if target.sqlComparisonRetired.Load() {
+	if target.sqlComparisonRetired.Load() ||
+		(!target.sqlComparisonDisabledAt.IsZero() && !scheduledAt.After(target.sqlComparisonDisabledAt)) {
 		return nil
 	}
 
@@ -381,6 +385,9 @@ type sqlHealthTarget struct {
 	// sqlComparisonRetired prevents a check that finishes after its last unsubscribe from restoring
 	// the target's raw result in the host-level comparison cache.
 	sqlComparisonRetired atomic.Bool
+	// sqlComparisonDisabledAt is protected by PoolHealth.sqlComparisonMu. A poll scheduled at or
+	// before this cutoff cannot restore comparison state after checks are disabled.
+	sqlComparisonDisabledAt time.Time
 
 	// sqlRoundMu protects the active round separately from sqlCheckMu so the scheduler can decide
 	// whether a missed tick represents unavailability while a SQL probe is still running.
@@ -778,14 +785,14 @@ func (w *HealthWorker) runSQLHealthGroup(
 					ObservedAt:  scheduledAt,
 					Disabled:    true,
 				})
-				group.poolHealth.forgetSQLComparisonTarget(plan.target)
+				group.poolHealth.disableSQLComparisonTarget(plan.target, scheduledAt)
 			}
 			continue
 		}
 		if plan.enabled {
 			checksEnabled = true
 		} else {
-			group.poolHealth.forgetSQLComparisonTarget(plan.target)
+			group.poolHealth.disableSQLComparisonTarget(plan.target, scheduledAt)
 		}
 		startedPlans = append(startedPlans, plan)
 	}

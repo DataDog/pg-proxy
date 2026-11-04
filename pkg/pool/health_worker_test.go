@@ -1908,3 +1908,46 @@ func TestSQLComparisonDoesNotRestoreRetiredTarget(t *testing.T) {
 	assert.Nil(t, late, "a completion after the last unsubscribe must not restore the target")
 	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
 }
+
+func TestSQLComparisonRejectsPollFromBeforeDisableCutoff(t *testing.T) {
+	const ip = "10.0.0.1"
+	state := NewHealthState()
+	state.Track([]string{ip})
+	poolHealth := &PoolHealth{sqlHealthState: state}
+	target := &sqlHealthTarget{tags: []string{"database:orders"}}
+	oldRound := time.Now()
+	disabledAt := oldRound.Add(time.Second)
+	newRound := disabledAt.Add(time.Second)
+
+	poolHealth.recordSQLComparisonPoll(
+		target,
+		oldRound,
+		oldRound.Add(100*time.Millisecond),
+		[]string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}},
+	)
+	poolHealth.disableSQLComparisonTarget(target, disabledAt)
+
+	late := poolHealth.recordSQLComparisonPoll(
+		target,
+		oldRound,
+		disabledAt.Add(100*time.Millisecond),
+		[]string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}},
+	)
+	assert.Nil(t, late, "a pre-disable completion must not restore comparison state")
+	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
+	assert.True(t, poolHealth.sqlComparisonRoles[ip].Load(),
+		"a pre-disable completion must not overwrite the last determinate role")
+
+	fresh := poolHealth.recordSQLComparisonPoll(
+		target,
+		newRound,
+		newRound.Add(100*time.Millisecond),
+		[]string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}},
+	)
+	require.NotNil(t, fresh)
+	assert.False(t, fresh.health[ip], "a poll scheduled after re-enabling may update comparison state")
+	assert.Contains(t, poolHealth.sqlComparisonLatest, target)
+}
