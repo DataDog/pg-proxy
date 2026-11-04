@@ -41,7 +41,6 @@ users:
     username: alice
     password: replace-with-client-password
   databases: [orders]
-  pg_roles: [reader]
 - static_credentials:
     username: bob
     scram_sha_256: 'SCRAM-SHA-256$4096:<base64-salt>$<base64-stored-key>:<base64-server-key>'
@@ -49,7 +48,7 @@ users:
 ```
 
 The verifier above shows the format, not a usable value. Supply a PostgreSQL
-SCRAM-SHA-256 stored verifier with a positive iteration count, base64 salt, and
+SCRAM-SHA-256 stored verifier with 1–1,000,000 iterations, a 1–1024-byte base64-decoded salt, and
 two 32-byte keys. JSON calls the field `scramSHA256`.
 A user may supply either a password or a verifier, never both.
 
@@ -57,8 +56,11 @@ The OSS binary uses `-config` for direct backend credentials, connection
 and pool settings, primary/logical routes, and loopback listener settings,
 including optional or required client TLS through `tls_cert_file`, `tls_key_file`,
 and `tls_required`. See [client TLS](../../docs/client-connections.md#standalone-tls).
-It rejects configured users, mirroring, and other unsupported options with
-explicit startup errors. TODO: wire client SCRAM support.
+Set `password_auth_enabled: true` (JSON: `passwordAuthEnabled`) with required TLS
+to enable static users and non-loopback listeners. Each user needs an explicit
+logical-database list. Proxy usernames are independent of backend accounts.
+See [client authentication](../../docs/client-authentication.md).
+It rejects JWT, mirroring, and other unsupported options with explicit startup errors.
 The library schema remains broader than this command.
 
 [`pool.PGXConfig`](../pool/config.go) consumes a `Database` and returns a pgx pool

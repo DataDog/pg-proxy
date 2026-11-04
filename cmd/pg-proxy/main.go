@@ -38,6 +38,7 @@ type config struct {
 	messageBufferSize int
 	tlsConfig         *tls.Config
 	requireTLS        bool
+	authenticate      authenticationHook
 	databases         map[string]*pgxpool.Config
 	clusters          map[string]string
 	logicalDatabases  map[string]topology.LogicalDatabase
@@ -60,7 +61,7 @@ func main() {
 }
 
 func (c config) validate() error {
-	if err := c.validateListener(false); err != nil {
+	if err := c.validateListener(c.authenticate != nil); err != nil {
 		return err
 	}
 	if c.messageBufferSize < 0 {
@@ -96,7 +97,7 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	pgproxy.Logger().Info("local proxy ready; clients are trusted", "address", proxy.server.Addr(), "clusters", len(cfg.clusters))
+	pgproxy.Logger().Info("proxy ready", "address", proxy.server.Addr(), "clusters", len(cfg.clusters), "client_authentication", cfg.authenticate != nil)
 	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
 }
 
@@ -147,15 +148,20 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 		users[name] = cfg.databases[cfg.clusters[logical.Cluster]].ConnConfig.User
 	}
 	sessions := newSessionRegistry()
+	authenticate := cfg.authenticate
+	if authenticate == nil {
+		authenticate = localUser(users)
+	}
 	proxy, err := server.NewServer(ctx, server.Config{
-		ListenAddress: cfg.listenAddress,
-		TLSConfig:     cfg.tlsConfig,
-		RequireTLS:    cfg.requireTLS,
+		ListenAddress:              cfg.listenAddress,
+		TLSConfig:                  cfg.tlsConfig,
+		RequireTLS:                 cfg.requireTLS,
+		AuthenticationMessageLimit: 16 << 10,
 		// TODO(OSQQUERY-713): configure session admission limits independently of backend pool sizes.
 		Admission: limiter.New(limiter.Params{
 			GlobalLimit: 100, DefaultServiceMax: 100,
 		}),
-		Authenticate: localUser(users),
+		Authenticate: authenticate,
 		Sessions:     sessions,
 		Runtime: server.RuntimeConfig{
 			Inventory:             inventory,

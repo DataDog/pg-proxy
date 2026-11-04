@@ -41,6 +41,7 @@ type messageState struct {
 //   - see: https://github.com/postgres/postgres/blob/167ed8082f40ee1f3f4cd18cf02bd6d17df57dab/src/backend/libpq/auth-scram.c#L970-L975
 //   - r=nonce is a random sequence of printable ASCII characters
 type clientFirstMessage struct {
+	bare               string // Exact transcript, including optional extensions.
 	ChannelBindingType string // "n", "y", or "p=tls-server-end-point"
 	AuthenticationID   string // Authentication identity (username, ignored and usually empty in postgres)
 	Nonce              string // Client-generated random nonce
@@ -51,6 +52,9 @@ type clientFirstMessage struct {
 // This is used in AuthMessage computation and should only include the
 // essential authentication data: "n=user,r=nonce"
 func (c *clientFirstMessage) ClientFirstMessageBare() string {
+	if c.bare != "" {
+		return c.bare
+	}
 	// The client-first-message-bare is used in AuthMessage computation
 	// It should NOT include the GS2 header, just "n=user,r=nonce"
 	// PostgreSQL clients typically send empty username: "n=,r=nonce"
@@ -107,6 +111,7 @@ func (s *serverFirstMessage) String() string {
 //   - r= contains the same nonce from server-first-message
 //   - p= contains the base64-encoded client proof
 type clientFinalMessage struct {
+	withoutProof   string // Exact transcript, including optional extensions.
 	Nonce          string // Combined nonce (must match server-first-message)
 	ClientProof    string // Base64-encoded cryptographic proof of password knowledge
 	ChannelBinding string // Base64-encoded channel binding data
@@ -121,6 +126,9 @@ type clientFinalMessage struct {
 //   - "biws" = base64("n,,") for no channel binding
 //   - "eSws" = base64("y,,") for channel binding not supported
 func (c *clientFinalMessage) ClientFinalMessageWithoutProof() string {
+	if c.withoutProof != "" {
+		return c.withoutProof
+	}
 	// For PostgreSQL compatibility, channel binding should be base64 encoded
 	// "biws" = base64("n,,") for no channel binding
 	// "eSws" = base64("y,,") for channel binding not supported
@@ -158,9 +166,9 @@ func (s *serverFinalMessage) String() string {
 // PostgreSQL SCRAM clients typically send empty username in SCRAM exchange
 // since the username was already provided in the startup message.
 func (s *messageState) validateUsername(expectedUsername string) error {
-	if s.ClientFirstMessage.AuthenticationID != "" && s.ClientFirstMessage.AuthenticationID != expectedUsername {
-		return fmt.Errorf("authentication identity %q does not match expected username %q",
-			s.ClientFirstMessage.AuthenticationID, expectedUsername)
+	name := strings.ReplaceAll(strings.ReplaceAll(s.ClientFirstMessage.AuthenticationID, "=2C", ","), "=3D", "=")
+	if name != "" && name != expectedUsername {
+		return fmt.Errorf("authentication identity does not match expected username")
 	}
 	return nil
 }
@@ -169,17 +177,7 @@ func (s *messageState) validateUsername(expectedUsername string) error {
 //
 // This includes nonce verification and client proof validation.
 func (s *messageState) verifyAuthentication(password string) error {
-	// Verify that the nonce is correct
-	if s.ClientFinalMessage.Nonce != s.ServerFirstMessage.Nonce {
-		return fmt.Errorf("client nonce does not match server nonce")
-	}
-
-	// Verify the client proof
-	if s.ClientFinalMessage.ClientProof != s.computeClientProof(password) {
-		return fmt.Errorf("client proof mismatch")
-	}
-
-	return nil
+	return s.verifyVerifier(deriveVerifier(password, s.ServerFirstMessage.Salt, s.ServerFirstMessage.IterationCount))
 }
 
 // setClientFirstMessage parses and stores the client's first message.
@@ -230,6 +228,11 @@ func (s *messageState) setClientFirstMessage(m *pgproto3.SASLInitialResponse) er
 	}
 
 	clientFirstMessageBare := parts[2]
+	attributes, err := scramAttributes(clientFirstMessageBare)
+	if err != nil || len(attributes) < 2 || !strings.HasPrefix(attributes[0], "n=") || !strings.HasPrefix(attributes[1], "r=") {
+		return fmt.Errorf("invalid SCRAM client-first attributes")
+	}
+	c.bare = clientFirstMessageBare
 
 	// Parse the client-first-message-bare: "n=user,r=clientnonce"
 	for _, section := range strings.Split(clientFirstMessageBare, ",") {
@@ -239,6 +242,16 @@ func (s *messageState) setClientFirstMessage(m *pgproto3.SASLInitialResponse) er
 		case strings.HasPrefix(section, "n="):
 			c.AuthenticationID = strings.TrimPrefix(section, "n=")
 		}
+	}
+	if !validNonce(c.Nonce) {
+		return fmt.Errorf("invalid SCRAM nonce")
+	}
+	for name := c.AuthenticationID; strings.Contains(name, "="); {
+		_, suffix, _ := strings.Cut(name, "=")
+		if !strings.HasPrefix(suffix, "2C") && !strings.HasPrefix(suffix, "3D") {
+			return fmt.Errorf("invalid SCRAM username encoding")
+		}
+		name = suffix[2:]
 	}
 
 	s.ClientFirstMessage = c
@@ -279,10 +292,15 @@ func (s *messageState) setServerFirstMessage() error {
 //
 // This method extracts the nonce, channel binding, and client proof from
 // the SASLResponse message for verification.
-func (s *messageState) setClientFinalMessage(m *pgproto3.SASLResponse) {
+func (s *messageState) setClientFinalMessage(m *pgproto3.SASLResponse) error {
 	data := string(m.Data)
+	attributes, err := scramAttributes(data)
+	if err != nil || len(attributes) < 3 || !strings.HasPrefix(attributes[0], "c=") || !strings.HasPrefix(attributes[1], "r=") || !strings.HasPrefix(attributes[len(attributes)-1], "p=") {
+		return fmt.Errorf("invalid SCRAM client-final attributes")
+	}
 
 	c := &clientFinalMessage{}
+	c.withoutProof = data[:strings.LastIndex(data, ",p=")]
 
 	for _, section := range strings.Split(data, ",") {
 		switch {
@@ -296,6 +314,31 @@ func (s *messageState) setClientFinalMessage(m *pgproto3.SASLResponse) {
 	}
 
 	s.ClientFinalMessage = c
+	return nil
+}
+
+func scramAttributes(data string) ([]string, error) {
+	parts := strings.Split(data, ",")
+	seen := make(map[byte]bool, len(parts))
+	for _, part := range parts {
+		if len(part) < 2 || part[1] != '=' || !(part[0] >= 'a' && part[0] <= 'z' || part[0] >= 'A' && part[0] <= 'Z') || part[0] == 'm' || seen[part[0]] {
+			return nil, fmt.Errorf("invalid or unsupported SCRAM attribute")
+		}
+		seen[part[0]] = true
+	}
+	return parts, nil
+}
+
+func validNonce(nonce string) bool {
+	if nonce == "" {
+		return false
+	}
+	for i := range nonce {
+		if nonce[i] < '!' || nonce[i] > '~' || nonce[i] == ',' {
+			return false
+		}
+	}
+	return true
 }
 
 // setServerFinalMessage generates and stores the server's final message.

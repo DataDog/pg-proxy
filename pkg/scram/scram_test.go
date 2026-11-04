@@ -26,7 +26,7 @@ func (*disconnectExchange) Send(pgproto3.BackendMessage) error { return nil }
 func (e *disconnectExchange) Receive() (pgproto3.FrontendMessage, error) {
 	if e.beforeFinal && !e.received {
 		e.received = true
-		return &pgproto3.SASLInitialResponse{Data: []byte("n,,n=,r=nonce")}, nil
+		return &pgproto3.SASLInitialResponse{AuthMechanism: mechanism, Data: []byte("n,,n=,r=nonce")}, nil
 	}
 	return nil, io.EOF
 }

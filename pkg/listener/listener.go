@@ -109,8 +109,11 @@ type Config[T any] struct {
 	ListenAddress string
 	TLSConfig     *tls.Config
 	RequireTLS    bool
-	Admission     Admission
-	Hooks         Hooks[T]
+	// AuthenticationMessageLimit bounds message bodies before authentication
+	// payloads are allocated. Zero retains the library's unbounded default.
+	AuthenticationMessageLimit int
+	Admission                  Admission
+	Hooks                      Hooks[T]
 
 	// Testing seams. Production leaves these nil.
 	Listen func(string, string) (net.Listener, error)
@@ -143,6 +146,9 @@ func (e *clientNotifiedError) Unwrap() error { return e.cause }
 
 // New creates and binds a listener.
 func New[T any](ctx context.Context, cfg Config[T]) (*Listener[T], error) {
+	if cfg.AuthenticationMessageLimit < 0 {
+		return nil, errors.New("authentication message limit must not be negative")
+	}
 	if cfg.RequireTLS && cfg.TLSConfig == nil {
 		return nil, errors.New("listener requires TLS but TLS configuration is missing")
 	}
@@ -243,6 +249,13 @@ func (l *Listener[T]) handleConnWithLoadShedding(conn net.Conn) {
 // handleConn accepts a network connection and adds it to the listener for tracking.
 func (l *Listener[T]) handleConn(conn net.Conn) {
 	ctx := pgproxy.ContextWithLogger(l.ctx, pgproxy.LoggerFromContext(l.ctx).With("connection_id", crypto_rand.Text()))
+	// Startup can block in TLS negotiation or an authentication exchange before
+	// there is a session/drain watcher. Interrupt reads on shutdown while keeping
+	// writes available for the existing terminal-error and session-drain paths;
+	// capturing it separately avoids racing with the TLS wrapper assignment.
+	startupConn := conn
+	stopStartup := context.AfterFunc(ctx, func() { _ = startupConn.SetReadDeadline(time.Now()) })
+	defer stopStartup()
 	processed, first, err := l.attemptTLSUpgrade(conn)
 	// If it is non-nil, processed is the connection that should be used for the rest
 	// of the session. It may be unchanged or TLS-wrapped. Override conn before
@@ -264,6 +277,7 @@ func (l *Listener[T]) handleConn(conn net.Conn) {
 			"requested_user", fmt.Sprintf("%.256s", user), "requested_database", fmt.Sprintf("%.256s", database)))
 	}
 	session, err := l.handleFirstMessage(ctx, conn, first)
+	stopStartup() // Established sessions use the existing drain watcher below.
 	if err != nil {
 		handleConnError(ctx, conn, err, "first_message_failure")
 		return
@@ -416,7 +430,9 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 	client := pgproto3.NewBackend(conn, conn)
 	auth := AuthenticationResult{Service: user}
 	if l.cfg.Hooks.Authenticate != nil {
+		client.SetMaxBodyLen(l.cfg.AuthenticationMessageLimit)
 		auth, err = l.cfg.Hooks.Authenticate(ctx, request, resolved, protocol.NewConnExchange(conn, client))
+		client.SetMaxBodyLen(0) // Authentication limits do not constrain SQL messages.
 		if err != nil {
 			return nil, startupErrorAt("authenticate", err)
 		}

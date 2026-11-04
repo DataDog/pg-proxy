@@ -307,8 +307,9 @@ func TestServerFinalMessage_String(t *testing.T) {
 func completeState() *messageState {
 	return &messageState{
 		ClientFirstMessage: &clientFirstMessage{
-			AuthenticationID: "",
-			Nonce:            testClientNonce,
+			ChannelBindingType: "n",
+			AuthenticationID:   "",
+			Nonce:              testClientNonce,
 		},
 		ServerFirstMessage: &serverFirstMessage{
 			Nonce:          testCombinedNonce,

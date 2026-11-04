@@ -6,6 +6,11 @@ for session accounting; authorization checks the resolved logical database and
 requested proxy username. `DatabaseAccess` supplies an exact, default-deny
 allowlist for username/database pairs. Passthrough requests are rejected.
 
+`NewStatic` constructs concurrent SCRAM verification and database authorization
+from unique `StaticUser` entries. Supply a parsed or newly derived `scram.Verifier`
+and explicit database grants, then compose `static.Verify` and `static.Authorize`
+with `Hook`. Unknown usernames perform a dummy exchange and are always rejected.
+
 Proxy usernames identify clients. Backend pools retain their configured login
 credentials and SQL permissions. Multiple proxy users may share a backend pool.
 No PostgreSQL roles are created or selected by this package.
