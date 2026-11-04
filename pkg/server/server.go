@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/DataDog/pg-proxy/pkg/listener"
 	"github.com/DataDog/pg-proxy/pkg/protocol"
@@ -29,6 +30,7 @@ type Config struct {
 	TLSConfig                  *tls.Config
 	RequireTLS                 bool
 	AuthenticationMessageLimit int
+	StartupTimeout             time.Duration
 	Admission                  listener.Admission
 	Authenticate               func(context.Context, listener.StartupRequest, listener.StartupResult[ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error)
 	LoadShedder                listener.LoadShedder
@@ -56,6 +58,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		TLSConfig:                  cfg.TLSConfig,
 		RequireTLS:                 cfg.RequireTLS,
 		AuthenticationMessageLimit: cfg.AuthenticationMessageLimit,
+		StartupTimeout:             cfg.StartupTimeout,
 		Admission:                  cfg.Admission,
 		Hooks: listener.Hooks[ResolvedStartup]{
 			ResolveStartup: runtime.ResolveStartup,

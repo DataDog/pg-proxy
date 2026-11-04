@@ -98,6 +98,8 @@ authentication fails startup. Enabling both password and JWT authentication fail
 Invalid credentials, grants, unsupported user settings, and missing TLS fail
 before backend pools or the listener open. Authentication failures receive one
 safe terminal error followed by closure, without a session or admission slot.
+TLS, startup, and authentication must finish within 10 seconds. The deadline is
+removed after startup and does not limit query or session duration.
 Authentication messages are limited to 16 KiB; SQL messages retain their existing
 limits. Passwords, stored verifiers, and authentication payloads are excluded from
 logs and client errors.

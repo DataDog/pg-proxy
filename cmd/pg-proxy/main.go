@@ -157,6 +157,7 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 		TLSConfig:                  cfg.tlsConfig,
 		RequireTLS:                 cfg.requireTLS,
 		AuthenticationMessageLimit: 16 << 10,
+		StartupTimeout:             10 * time.Second,
 		// TODO(OSQQUERY-713): configure session admission limits independently of backend pool sizes.
 		Admission: limiter.New(limiter.Params{
 			GlobalLimit: 100, DefaultServiceMax: 100,

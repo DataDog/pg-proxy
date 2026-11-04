@@ -33,3 +33,9 @@ Do not log passwords, tokens, authentication messages, or arbitrary provider err
 This package does not choose a transport policy. Standalone authentication modes
 require TLS; legacy trust remains restricted to loopback. Cancellation keeps its
 separate PID/secret exchange, including plaintext cancellation when TLS is required.
+
+Embedders should set `server.Config.StartupTimeout` and
+`AuthenticationMessageLimit` to bound unauthenticated connections. The command
+uses 10 seconds and 16 KiB. The timeout covers TLS, startup, and authentication;
+the same deadline reaches verification and authorization callbacks. It does not
+become the established session's context or limit SQL messages.

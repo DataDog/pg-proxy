@@ -43,9 +43,8 @@ func (e *AuthFailedError) Error() string {
 //
 // password is the one the client has to prove it knows; whether that credential
 // exists and may be used here is the caller's decision, made before calling.
-// username is only checked against the identity in the client-first-message,
-// which PostgreSQL clients leave empty because the startup message already
-// carried it.
+// username is retained for compatibility. As in PostgreSQL, the SCRAM message's
+// username is ignored. The caller must select credentials by startup username.
 //
 // A failure to prove the password is returned as *AuthFailedError, whose message
 // is safe to show the client. Every other error describes a protocol or internal
@@ -92,12 +91,6 @@ func AuthenticateVerifier(ex protocol.Exchange, username string, verifier *Verif
 	}
 	if err := state.setClientFirstMessage(initialResponse); err != nil {
 		return fmt.Errorf("error processing client first message: %w", err)
-	}
-
-	// Verify the username - PostgreSQL SCRAM clients send empty username in SCRAM exchange
-	// since the username was already provided in the startup message
-	if err := state.validateUsername(username); err != nil {
-		return err
 	}
 
 	// Step 3: Send the server-first-message

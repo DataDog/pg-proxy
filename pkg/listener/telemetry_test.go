@@ -83,7 +83,7 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 
 	admission.RegisterService("limited", 0)
 	rejected := newBufferConn(nil)
-	_, err = engine.handleStartup(t.Context(), rejected, &pgproto3.StartupMessage{Parameters: map[string]string{
+	_, err = engine.handleStartup(t.Context(), t.Context(), rejected, &pgproto3.StartupMessage{Parameters: map[string]string{
 		"user": "limited", "database": "testdb",
 	}})
 	require.Error(t, err)

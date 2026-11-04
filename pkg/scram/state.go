@@ -161,18 +161,6 @@ func (s *serverFinalMessage) String() string {
 	return "v=" + s.ServerSignature
 }
 
-// validateUsername validates that the client-provided username matches expectations.
-//
-// PostgreSQL SCRAM clients typically send empty username in SCRAM exchange
-// since the username was already provided in the startup message.
-func (s *messageState) validateUsername(expectedUsername string) error {
-	name := strings.ReplaceAll(strings.ReplaceAll(s.ClientFirstMessage.AuthenticationID, "=2C", ","), "=3D", "=")
-	if name != "" && name != expectedUsername {
-		return fmt.Errorf("authentication identity does not match expected username")
-	}
-	return nil
-}
-
 // verifyAuthentication performs the complete SCRAM authentication verification.
 //
 // This includes nonce verification and client proof validation.

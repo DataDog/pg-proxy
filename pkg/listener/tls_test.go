@@ -132,7 +132,7 @@ func TestRequireTLSRejectsIncompleteHandshake(t *testing.T) {
 	engine.cfg.RequireTLS = true
 	forbidStartupHooks(engine)
 	conn := tls.Server(newBufferConn(nil), &tls.Config{})
-	_, err = engine.handleStartup(t.Context(), conn, &pgproto3.StartupMessage{})
+	_, err = engine.handleStartup(t.Context(), t.Context(), conn, &pgproto3.StartupMessage{})
 	require.EqualError(t, err, "TLS is required")
 }
 

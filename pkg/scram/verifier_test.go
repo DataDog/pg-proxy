@@ -151,3 +151,30 @@ func TestVerifierChecksProofAndChannelBinding(t *testing.T) {
 		require.Error(t, (&messageState{}).setClientFinalMessage(&pgproto3.SASLResponse{Data: []byte(final)}))
 	}
 }
+
+func TestRFC7677Vector(t *testing.T) {
+	// https://www.rfc-editor.org/rfc/rfc7677.html#section-3
+	// Fixed, published client proof and server signature, independent of our
+	// client implementation and its helpers.
+	salt, err := base64.StdEncoding.DecodeString("W22ZaJ0SNY7soEsUEjb6gQ==")
+	require.NoError(t, err)
+	verifier := deriveVerifier("pencil", salt, 4096)
+	state := &messageState{}
+	require.NoError(t, state.setClientFirstMessage(&pgproto3.SASLInitialResponse{
+		Data: []byte("n,,n=user,r=rOprNGfwEbeRWgbNEkqO"),
+	}))
+	state.ServerFirstMessage = &serverFirstMessage{
+		Nonce: "rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0",
+		Salt:  salt, IterationCount: 4096,
+	}
+	require.NoError(t, state.setClientFinalMessage(&pgproto3.SASLResponse{
+		Data: []byte("c=biws,r=rOprNGfwEbeRWgbNEkqO%hvYDpWUa2RaTCAfuxFIlj)hNlF$k0,p=dHzbZapWIk4jUhN+Ute9ytag9zjfMHgsqmmiz7AndVQ="),
+	}))
+	require.NoError(t, state.verifyVerifier(verifier))
+	require.Equal(t, "6rriTRBi23WpRR/wtup+mMhUZUn/dB5nLTJRsjl95G4=", state.computeServerSignature("pencil"))
+	state.ClientFirstMessage.bare += ",x=changed-transcript"
+	require.ErrorContains(t, state.verifyVerifier(verifier), "proof mismatch")
+	state.ClientFirstMessage.bare = "n=user,r=rOprNGfwEbeRWgbNEkqO"
+	state.ClientFinalMessage.withoutProof += ",x=changed-transcript"
+	require.ErrorContains(t, state.verifyVerifier(verifier), "proof mismatch")
+}

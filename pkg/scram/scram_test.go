@@ -46,11 +46,12 @@ func TestAuthenticatePreservesDisconnect(t *testing.T) {
 type scramClient struct {
 	frontend  *pgproto3.Frontend
 	password  string
+	username  string
 	clientNon string
 }
 
 func (c *scramClient) run() (pgproto3.BackendMessage, error) {
-	client, err := xdgscram.SHA256.NewClientUnprepped("", c.password, "")
+	client, err := xdgscram.SHA256.NewClientUnprepped(c.username, c.password, "")
 	if err != nil {
 		return nil, err
 	}
@@ -220,24 +221,31 @@ func TestAuthenticate(t *testing.T) {
 		assert.NotContains(t, err.Error(), "client controlled")
 	})
 
-	t.Run("mismatched authentication identity is rejected", func(t *testing.T) {
-		frontend, errChan, cleanup := startScramServer(t, username, password)
-		defer cleanup()
-
-		_, err := frontend.Receive()
-		require.NoError(t, err)
-
-		// A client that names an identity has to name the one being authenticated;
-		// PostgreSQL clients leave it empty.
-		frontend.Send(&pgproto3.SASLInitialResponse{
-			AuthMechanism: "SCRAM-SHA-256",
-			Data:          []byte("n,,n=someone-else,r=Y2xpZW50bm9uY2VhYmNk"),
+	// PostgreSQL selects credentials from the startup username, ignoring the
+	// username inside SCRAM. A different SCRAM name cannot choose another account.
+	for _, tc := range []struct {
+		name, scramUser, password string
+		allowed                   bool
+	}{
+		{"different SCRAM name", "someone-else", password, true},
+		{"escaped SCRAM name", "comma,equals=user", password, true},
+		{"wrong password", username, "wrong-password", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			frontend, result, cleanup := startScramServer(t, username, password)
+			defer cleanup()
+			_, clientErr := (&scramClient{frontend: frontend, username: tc.scramUser, password: tc.password, clientNon: "client-nonce"}).run()
+			serverErr := <-result
+			if tc.allowed {
+				require.NoError(t, clientErr)
+				require.NoError(t, serverErr)
+			} else {
+				require.Error(t, clientErr)
+				var rejected *AuthFailedError
+				require.ErrorAs(t, serverErr, &rejected)
+			}
 		})
-		require.NoError(t, frontend.Flush())
-
-		err = <-errChan
-		assert.ErrorContains(t, err, "does not match expected username")
-	})
+	}
 }
 
 func TestAuthenticatePasswordNormalization(t *testing.T) {
