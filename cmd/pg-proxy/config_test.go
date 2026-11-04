@@ -126,9 +126,6 @@ func TestTelemetryEnvironmentConfig(t *testing.T) {
 
 func TestSharedConfigRejectsUnsupportedFeatures(t *testing.T) {
 	for name, modify := range map[string]func(*pgconfig.Config){
-		"TLS required":             func(c *pgconfig.Config) { c.Proxy.TLSRequired = true },
-		"TLS cert":                 func(c *pgconfig.Config) { c.Proxy.TLSCertFile = "certificate.pem" },
-		"TLS key":                  func(c *pgconfig.Config) { c.Proxy.TLSKeyFile = "key.pem" },
 		"JWT":                      func(c *pgconfig.Config) { c.Proxy.JWTAuthEnabled = true },
 		"users":                    func(c *pgconfig.Config) { c.Users = []pgconfig.User{{}} },
 		"mirroring":                func(c *pgconfig.Config) { c.Mirroring = &pgconfig.Mirroring{} },

@@ -90,10 +90,8 @@ type ProxySettings struct {
 	PostgresMsgBufferSize int32  `mapstructure:"postgres_msg_pg_size" json:"postgresMsgBufferSize" yaml:"postgres_msg_buffer_size"`
 }
 
-// Proxy retains the existing listener options. Certificate files replace the
-// application-owned Emissary certificate provider in a standalone deployment.
-// The reference command consumes listener address and message buffer size.
-// TODO: wire listener TLS; the command currently rejects requested TLS options.
+// Proxy contains listener settings and TLS certificate file paths.
+// The pg-proxy executable loads the certificate and key at startup.
 type Proxy struct {
 	ProxySettings `yaml:",inline" mapstructure:",squash"`
 	TLSCertFile   string `json:"tlsCertFile,omitempty" yaml:"tls_cert_file,omitempty"`

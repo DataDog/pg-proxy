@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +37,8 @@ type config struct {
 	telemetryWarnings []string
 	listenAddress     string
 	messageBufferSize int
+	tlsConfig         *tls.Config
+	requireTLS        bool
 	databases         map[string]*pgxpool.Config
 	clusters          map[string]string
 	logicalDatabases  map[string]topology.LogicalDatabase
@@ -64,6 +67,9 @@ func (c config) validate() error {
 	}
 	if c.messageBufferSize < 0 {
 		return errors.New("postgres_msg_buffer_size must not be negative")
+	}
+	if c.requireTLS && c.tlsConfig == nil {
+		return errors.New("proxy.tls_required requires tls_cert_file and tls_key_file")
 	}
 	if len(c.databases) == 0 || len(c.clusters) == 0 || len(c.logicalDatabases) == 0 {
 		return errors.New("databases, clusters, and logical_databases must not be empty")
@@ -148,6 +154,8 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	sessions := newSessionRegistry()
 	proxy, err := server.NewServer(ctx, server.Config{
 		ListenAddress: cfg.listenAddress,
+		TLSConfig:     cfg.tlsConfig,
+		RequireTLS:    cfg.requireTLS,
 		// TODO(OSQQUERY-713): configure session admission limits independently of backend pool sizes.
 		Admission: limiter.New(limiter.Params{
 			GlobalLimit: 100, DefaultServiceMax: 100,

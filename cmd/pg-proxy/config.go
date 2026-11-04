@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/tls"
 	"errors"
 	"flag"
 	"fmt"
@@ -220,10 +221,13 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if err := shared.ValidateCredentials(); err != nil {
 		return config{}, err
 	}
-	// TODO: wire library TLS and SCRAM support into the OSS binary.
-	if shared.Proxy.TLSRequired || shared.Proxy.TLSCertFile != "" || shared.Proxy.TLSKeyFile != "" {
-		return config{}, errors.New("listener TLS is not implemented by the OSS binary")
+	var err error
+	cfg.tlsConfig, err = clientTLSConfig(shared.Proxy)
+	if err != nil {
+		return config{}, err
 	}
+	cfg.requireTLS = shared.Proxy.TLSRequired
+	// TODO: wire library SCRAM support into the OSS binary.
 	if shared.Proxy.JWTAuthEnabled || len(shared.Users) > 0 {
 		return config{}, errors.New("configured client authentication is not implemented by the OSS binary")
 	}
@@ -268,4 +272,26 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
 	return cfg, cfg.validate()
+}
+
+// clientTLSConfig loads the certificate and key used to accept TLS client connections.
+func clientTLSConfig(proxy pgconfig.Proxy) (*tls.Config, error) {
+	if proxy.TLSCertFile == "" && proxy.TLSKeyFile == "" {
+		if proxy.TLSRequired {
+			return nil, errors.New("proxy.tls_required requires tls_cert_file and tls_key_file")
+		}
+		return nil, nil
+	}
+	if proxy.TLSCertFile == "" || proxy.TLSKeyFile == "" {
+		return nil, errors.New("proxy.tls_cert_file and tls_key_file must be configured together")
+	}
+	certificate, err := tls.LoadX509KeyPair(proxy.TLSCertFile, proxy.TLSKeyFile)
+	if err != nil {
+		// Do not include file contents, paths, or private-key parser errors.
+		return nil, errors.New("could not load proxy TLS certificate/key pair: check PEM files and matching keys")
+	}
+	return &tls.Config{
+		MinVersion:   tls.VersionTLS12,
+		Certificates: []tls.Certificate{certificate},
+	}, nil
 }

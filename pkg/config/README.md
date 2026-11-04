@@ -54,10 +54,12 @@ two 32-byte keys. JSON calls the field `scramSHA256`.
 A user may supply either a password or a verifier, never both.
 
 The OSS binary uses `-config` for direct backend credentials, connection
-and pool settings, primary/logical routes, and loopback listener settings.
-It rejects configured users, listener TLS, mirroring, and
-other unsupported options with explicit startup errors. TODO: wire client SCRAM
-and listener TLS support. The library schema remains broader than this command.
+and pool settings, primary/logical routes, and loopback listener settings,
+including optional or required client TLS through `tls_cert_file`, `tls_key_file`,
+and `tls_required`. See [client TLS](../../docs/client-connections.md#standalone-tls).
+It rejects configured users, mirroring, and other unsupported options with
+explicit startup errors. TODO: wire client SCRAM support.
+The library schema remains broader than this command.
 
 [`pool.PGXConfig`](../pool/config.go) consumes a `Database` and returns a pgx pool
 configuration without opening connections. It supports direct backends and takes
