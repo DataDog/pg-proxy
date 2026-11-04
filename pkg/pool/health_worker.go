@@ -261,7 +261,8 @@ type PoolHealth struct {
 	sqlRoundRunning atomic.Bool
 	// sqlComparisonMu protects the per-IP role cache and each credential's latest raw result. Each
 	// IP's atomic value is updated only by a completed primary or standby result; errors preserve
-	// the last determinate role.
+	// the last determinate role. It also serializes target invalidation with applying a complete
+	// SQL round to retention and hybrid policy state.
 	sqlComparisonMu     sync.Mutex
 	sqlComparisonRoles  map[string]*atomic.Bool
 	sqlComparisonLatest map[*sqlHealthTarget]SQLHealthResultsSnapshot
@@ -316,8 +317,7 @@ func (s *PoolHealth) recordSQLComparisonPoll(
 ) *sqlHealthComparisonSnapshot {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
-	if target.sqlComparisonRetired.Load() ||
-		(!target.sqlComparisonDisabledAt.IsZero() && !scheduledAt.After(target.sqlComparisonDisabledAt)) {
+	if !target.acceptsSQLRoundLocked(scheduledAt) {
 		return nil
 	}
 
@@ -439,6 +439,12 @@ type sqlHealthTarget struct {
 
 	subscriberMu   sync.RWMutex
 	sqlSubscribers map[*sqlHealthUpdates]struct{}
+}
+
+// acceptsSQLRoundLocked requires the owning PoolHealth.sqlComparisonMu to be held.
+func (t *sqlHealthTarget) acceptsSQLRoundLocked(scheduledAt time.Time) bool {
+	return !t.sqlComparisonRetired.Load() &&
+		(t.sqlComparisonDisabledAt.IsZero() || scheduledAt.After(t.sqlComparisonDisabledAt))
 }
 
 func (t *sqlHealthTarget) startSQLRound(scheduledAt time.Time) {
@@ -915,17 +921,30 @@ func (w *HealthWorker) checkSQLHealthGroup(group sqlHealthGroup, scheduledAt tim
 			sqlHealthForRetention[ip] = healthy
 		}
 	}
-	group.poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, sqlHealthForRetention)
-	if len(toProbe) == 0 {
-		return
-	}
 	policy, routingEnabledFn := group.poolHealth.routingPolicy()
-	if policy == nil {
+	// Evaluate external callbacks before taking the invalidation lock.
+	routingEnabled := policy != nil && len(toProbe) > 0 && routingEnabledFn != nil && routingEnabledFn(ctx).Enabled
+	decision, applied := func() (hybridRoutingDecision, bool) {
+		group.poolHealth.sqlComparisonMu.Lock()
+		defer group.poolHealth.sqlComparisonMu.Unlock()
+		// A target may be invalidated after its own probe finishes while a sibling is still
+		// running. Revalidate every outcome and discard the entire round if any is stale.
+		// Keep the lock through application so disable/retirement cannot race this check.
+		for _, check := range collectedCredentialChecks {
+			if !check.target.acceptsSQLRoundLocked(scheduledAt) {
+				return hybridRoutingDecision{}, false
+			}
+		}
+		group.poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, sqlHealthForRetention)
+		if len(toProbe) == 0 || policy == nil {
+			return hybridRoutingDecision{}, false
+		}
+		policy.setRoutingEnabled(routingEnabled)
+		return policy.observeSQL(toProbe, aggregation.Outcome, time.Now()), true
+	}()
+	if !applied {
 		return
 	}
-	routingEnabled := routingEnabledFn != nil && routingEnabledFn(ctx).Enabled
-	policy.setRoutingEnabled(routingEnabled)
-	decision := policy.observeSQL(toProbe, aggregation.Outcome, time.Now())
 	w.reportConclusiveErrors(collectedCredentialChecks, decision, policy)
 	w.reportHybridDecision(group.poolHealth, policy, decision, true)
 }

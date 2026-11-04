@@ -657,6 +657,111 @@ func TestHybridPolicyEvaluationDoesNotReplacePatroniRouting(t *testing.T) {
 	assert.False(t, health.IsHealthy(sqlPrimary), "shadow evaluation must not publish the SQL leader")
 }
 
+func TestHybridEvaluationRejectsInvalidatedSQLRound(t *testing.T) {
+	for _, invalidation := range []string{"disable", "unsubscribe"} {
+		for _, targetName := range []string{"fast", "slow"} {
+			t.Run(invalidation+"/"+targetName, func(t *testing.T) {
+				const ip, oldIP = "10.0.0.1", "10.0.0.2"
+				w := newTestWorker(newMockProber(map[string][]string{"primary.local": {ip}}, ip))
+				slow := &partiallyBlockingSQLHealthProber{
+					blockingIP: ip, blocked: make(chan struct{}), release: make(chan struct{}),
+				}
+				fast := &fakeSQLHealthProber{
+					responses: map[string][]fakeSQLHealthProbeResponse{"fast": {{inRecovery: false}}},
+					calls:     make(map[string]int),
+				}
+				w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+					return newTestSQLHealthChecker(t, fast, 1, SQLHealthCheckHooks{})
+				}
+				var enabled atomic.Bool
+				enabled.Store(true)
+				subscribe := func(name string) HealthUpdates {
+					return w.Subscribe("primary.local", false, name, nil, &SQLHealthConfig{
+						ConnStringForIP: func(string) string { return name },
+						ChecksEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
+							return validSQLHealthFeatureFlag(name != targetName || enabled.Load())
+						},
+						RoutingEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
+							return validSQLHealthFeatureFlag(true)
+						},
+					})
+				}
+				fastUpdates := subscribe("fast")
+				health := receivePoolHealth(t, fastUpdates)
+				t.Cleanup(func() { w.Unsubscribe(fastUpdates) })
+				w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+					return newTestSQLHealthChecker(t, slow, 1, SQLHealthCheckHooks{})
+				}
+				slowUpdates := subscribe("slow")
+				require.Same(t, health, receivePoolHealth(t, slowUpdates))
+				t.Cleanup(func() { w.Unsubscribe(slowUpdates) })
+
+				policy, _ := health.routingPolicy()
+				scheduledAt := time.Now()
+				policy.observePatroni(map[string]bool{oldIP: true}, scheduledAt.Add(-2*time.Second))
+				policy.observeSQL([]string{oldIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, scheduledAt.Add(-2*time.Second))
+				policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(-time.Second))
+				var iterations, comparisons int
+				w.sqlHooks.Iteration = func(SQLIteration, []string) { iterations++ }
+				w.sqlHooks.LeaderDetectionCompared = func(LeaderDetectionComparison, []string) { comparisons++ }
+				fastCompared := make(chan struct{})
+				var comparedOnce sync.Once
+				w.hooks.SQLPatroniCompared = func(SQLPatroniHealthSnapshot, []string) {
+					comparedOnce.Do(func() { close(fastCompared) })
+				}
+				group := w.sqlHealthGroups()[0]
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					w.checkSQLHealthGroup(group, scheduledAt)
+				}()
+				var releaseOnce sync.Once
+				release := func() { releaseOnce.Do(func() { close(slow.release) }) }
+				t.Cleanup(func() { release(); <-done })
+				select {
+				case <-slow.blocked:
+				case <-time.After(5 * time.Second):
+					t.Fatal("slow credential did not start")
+				}
+				select {
+				case <-fastCompared:
+				case <-time.After(5 * time.Second):
+					t.Fatal("fast credential did not complete its comparison")
+				}
+
+				if invalidation == "disable" {
+					enabled.Store(false)
+					// A later tick invalidates the target even though the host round is busy.
+					w.checkSQLHealthGroup(group, scheduledAt.Add(time.Second))
+				} else {
+					updates := fastUpdates
+					if targetName == "slow" {
+						updates = slowUpdates
+					}
+					target := health.subscriptionTargets[updates]
+					unsubscribed := make(chan struct{})
+					go func() { w.Unsubscribe(updates); close(unsubscribed) }()
+					t.Cleanup(func() { release(); <-unsubscribed })
+					require.Eventually(t, target.sqlComparisonRetired.Load, 5*time.Second, time.Millisecond)
+				}
+				release()
+				<-done
+				assert.Zero(t, iterations, "an invalidated round must not emit a hybrid decision")
+				assert.Zero(t, comparisons, "an invalidated round must not complete a timing comparison")
+				assert.Equal(t, map[string]struct{}{oldIP: {}}, policy.sqlLeaderObservation.primaryIPs)
+				assert.Empty(t, health.sqlHealthState.lastKnownHealthy, "an invalidated round must not change SQL retention")
+
+				// A fresh round after re-enable or removal still evaluates normally.
+				enabled.Store(true)
+				w.checkSQLHealthGroup(w.sqlHealthGroups()[0], scheduledAt.Add(2*time.Second))
+				assert.Equal(t, 1, iterations)
+				assert.Equal(t, 1, comparisons)
+				assert.Equal(t, map[string]struct{}{ip: {}}, policy.sqlLeaderObservation.primaryIPs)
+			})
+		}
+	}
+}
+
 func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T) {
 	const oldPrimary, newPrimary = "10.0.0.1", "10.0.0.2"
 	patroniProber := newMockProber(
