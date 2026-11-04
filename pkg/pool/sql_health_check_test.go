@@ -236,3 +236,40 @@ func TestIsSQLHealthCheckPasswordAuthenticationError(t *testing.T) {
 	}))
 	assert.False(t, IsSQLHealthCheckPasswordAuthenticationError(errors.New("temporary")))
 }
+
+func TestAggregateSQLHealthCheckOutcomesOptimisticallyAcrossCredentials(t *testing.T) {
+	timeoutErr := context.DeadlineExceeded
+	aggregation := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{
+		{
+			Results: []SQLHealthCheckResult{
+				{IP: "10.0.0.1", InRecovery: false},
+				{IP: "10.0.0.2", InRecovery: true},
+				{IP: "10.0.0.3", Err: timeoutErr},
+			},
+		},
+		{
+			Results: []SQLHealthCheckResult{
+				{IP: "10.0.0.1", InRecovery: true},
+				{IP: "10.0.0.2", Err: timeoutErr},
+				{IP: "10.0.0.3", InRecovery: false},
+			},
+		},
+	})
+
+	assert.Equal(t, map[string]bool{
+		"10.0.0.1": true,
+		"10.0.0.2": false,
+		"10.0.0.3": true,
+	}, aggregation.Health)
+	assert.Equal(t, []string{"10.0.0.1", "10.0.0.3"}, aggregation.Outcome.PrimaryIPs)
+	assert.Len(t, aggregation.Outcome.Results, 6, "raw results remain available to conservative routing policies")
+}
+
+func TestAggregateSQLHealthCheckOutcomesLeavesTimeoutOnlyIPUnknown(t *testing.T) {
+	aggregation := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{{
+		Results: []SQLHealthCheckResult{{IP: "10.0.0.1", Err: context.DeadlineExceeded}},
+	}})
+
+	assert.NotContains(t, aggregation.Health, "10.0.0.1")
+	assert.Len(t, aggregation.Outcome.Results, 1, "raw timeout remains available to routing policy")
+}

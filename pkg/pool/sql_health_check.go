@@ -3,6 +3,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"time"
@@ -46,6 +47,48 @@ func (r SQLHealthCheckResult) HealthyPrimary() bool {
 type SQLHealthCheckOutcome struct {
 	Results    []SQLHealthCheckResult
 	PrimaryIPs []string
+}
+
+// sqlHealthCheckAggregation summarizes one host-wide round across every credential target. Health
+// is optimistic per address: one conclusive primary result wins over another credential's standby
+// or error result. Outcome retains every raw result so a later routing policy can still treat
+// timeouts, conflicting roles, or multiple primary addresses conservatively.
+type sqlHealthCheckAggregation struct {
+	Outcome SQLHealthCheckOutcome
+	Health  map[string]bool
+}
+
+func aggregateSQLHealthCheckOutcomes(outcomes []SQLHealthCheckOutcome) sqlHealthCheckAggregation {
+	results := make([]SQLHealthCheckResult, 0)
+	for _, outcome := range outcomes {
+		results = append(results, outcome.Results...)
+	}
+	return aggregateSQLHealthCheckResults(results)
+}
+
+func aggregateSQLHealthCheckResults(results []SQLHealthCheckResult) sqlHealthCheckAggregation {
+	aggregation := sqlHealthCheckAggregation{
+		Outcome: SQLHealthCheckOutcome{Results: slices.Clone(results)},
+		Health:  make(map[string]bool),
+	}
+	primaryIPs := make(map[string]struct{})
+	for _, result := range results {
+		if result.HealthyPrimary() {
+			aggregation.Health[result.IP] = true
+			primaryIPs[result.IP] = struct{}{}
+		} else if sqlHealthTimeoutType(result.Err) == SQLHealthTimeoutNone {
+			// A completed determinate result is enough to classify the address as non-primary.
+			// Timeout-classified results remain unknown unless another credential supplies a
+			// determinate result for the same address before the comparison cutoff.
+			if _, recorded := aggregation.Health[result.IP]; recorded {
+				continue
+			}
+			aggregation.Health[result.IP] = false
+		}
+	}
+	aggregation.Outcome.PrimaryIPs = slices.Collect(maps.Keys(primaryIPs))
+	slices.Sort(aggregation.Outcome.PrimaryIPs)
+	return aggregation
 }
 
 // SQLHealthCheckRunner applies embedding-application retry policy around one instance probe.

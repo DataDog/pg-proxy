@@ -197,6 +197,13 @@ func (s *HealthState) IsHealthy(ip string) bool {
 	return s.health[ip]
 }
 
+// Snapshot returns a stable copy of the latest health map.
+func (s *HealthState) Snapshot() map[string]bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return maps.Clone(s.health)
+}
+
 // SetHealth replaces the health snapshot without changing DNS tracking.
 func (s *HealthState) SetHealth(health map[string]bool) {
 	s.mu.Lock()
