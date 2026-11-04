@@ -2,13 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"io"
 	"math/big"
 	"net"
@@ -95,25 +99,86 @@ func TestInvalidClientTLSConfiguration(t *testing.T) {
 	_, otherKey := clientTLSFiles(t)
 	invalid := filepath.Join(t.TempDir(), "private-test-value.pem")
 	require.NoError(t, os.WriteFile(invalid, []byte("private-test-value"), 0600))
+	badCertificate := filepath.Join(t.TempDir(), "private-test-value-cert.pem")
+	require.NoError(t, os.WriteFile(badCertificate, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("private-test-value")}), 0600))
+	badKey := filepath.Join(t.TempDir(), "private-test-value-key.pem")
+	require.NoError(t, os.WriteFile(badKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("private-test-value")}), 0600))
+	badLabel := filepath.Join(t.TempDir(), "private-test-value-label.pem")
+	require.NoError(t, os.WriteFile(badLabel, pem.EncodeToMemory(&pem.Block{Type: "private-test-value", Bytes: []byte("private-test-value")}), 0600))
 	for _, tc := range []struct {
 		name, cert, key, want string
 		required              bool
 	}{
-		{name: "required without pair", required: true, want: "requires tls_cert_file and tls_key_file"},
-		{name: "certificate only", cert: certFile, want: "must be configured together"},
-		{name: "key only", key: keyFile, want: "must be configured together"},
-		{name: "missing certificate", cert: invalid + ".missing", key: keyFile, want: "could not load"},
-		{name: "missing key", cert: certFile, key: invalid + ".missing", want: "could not load"},
-		{name: "malformed certificate", cert: invalid, key: keyFile, want: "could not load"},
-		{name: "malformed key", cert: certFile, key: invalid, want: "could not load"},
-		{name: "mismatched key", cert: certFile, key: otherKey, want: "could not load"},
+		{name: "required without pair", required: true, want: "proxy.tls_required requires tls_cert_file and tls_key_file"},
+		{name: "certificate only", cert: certFile, want: "proxy.tls_cert_file and tls_key_file must be configured together"},
+		{name: "key only", key: keyFile, want: "proxy.tls_cert_file and tls_key_file must be configured together"},
+		{name: "missing certificate", cert: invalid + ".missing", key: keyFile, want: "proxy.tls_cert_file: file not found"},
+		{name: "missing key", cert: certFile, key: invalid + ".missing", want: "proxy.tls_key_file: file not found"},
+		{name: "unreadable certificate", cert: t.TempDir(), key: keyFile, want: "proxy.tls_cert_file: could not read file"},
+		{name: "unreadable key", cert: certFile, key: t.TempDir(), want: "proxy.tls_key_file: could not read file"},
+		{name: "malformed certificate", cert: invalid, key: keyFile, want: "proxy.tls_cert_file: invalid PEM certificate"},
+		{name: "malformed key", cert: certFile, key: invalid, want: "proxy.tls_key_file: invalid or unsupported PEM private key"},
+		{name: "malformed certificate DER", cert: badCertificate, key: keyFile, want: "proxy.tls_cert_file: invalid PEM certificate"},
+		{name: "malformed key DER", cert: certFile, key: badKey, want: "proxy.tls_key_file: invalid or unsupported PEM private key"},
+		{name: "unexpected certificate PEM label", cert: badLabel, key: keyFile, want: "proxy.tls_cert_file: invalid PEM certificate"},
+		{name: "unexpected key PEM label", cert: certFile, key: badLabel, want: "proxy.tls_key_file: invalid or unsupported PEM private key"},
+		{name: "swapped files", cert: keyFile, key: certFile, want: "proxy.tls_cert_file: invalid PEM certificate"},
+		{name: "mismatched key", cert: certFile, key: otherKey, want: "proxy.tls_key_file: private key does not match proxy.tls_cert_file"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			shared := ossConfig()
 			shared.Proxy.TLSCertFile, shared.Proxy.TLSKeyFile, shared.Proxy.TLSRequired = tc.cert, tc.key, tc.required
 			_, err := (config{}).withSharedConfig(shared)
-			require.ErrorContains(t, err, tc.want)
+			require.EqualError(t, err, tc.want)
 			require.NotContains(t, err.Error(), "private-test-value")
+			require.NotContains(t, err.Error(), filepath.Dir(certFile))
+			require.NotContains(t, err.Error(), filepath.Dir(keyFile))
+		})
+	}
+}
+
+func TestClientTLSFilePermissionErrors(t *testing.T) {
+	certFile, keyFile := clientTLSFiles(t)
+	denied := filepath.Join(t.TempDir(), "private-test-value.pem")
+	require.NoError(t, os.WriteFile(denied, []byte("private-test-value"), 0000))
+	if _, err := os.ReadFile(denied); !errors.Is(err, os.ErrPermission) {
+		t.Skip("filesystem does not enforce the test file's read permissions")
+	}
+	for _, setting := range []string{"proxy.tls_cert_file", "proxy.tls_key_file"} {
+		t.Run(setting, func(t *testing.T) {
+			shared := ossConfig()
+			shared.Proxy.TLSCertFile, shared.Proxy.TLSKeyFile = certFile, keyFile
+			if setting == "proxy.tls_cert_file" {
+				shared.Proxy.TLSCertFile = denied
+			} else {
+				shared.Proxy.TLSKeyFile = denied
+			}
+			_, err := (config{}).withSharedConfig(shared)
+			require.EqualError(t, err, setting+": permission denied")
+			require.NotContains(t, err.Error(), "private-test-value")
+		})
+	}
+}
+
+func TestClientTLSKeyMismatchFormats(t *testing.T) {
+	certFile, _ := clientTLSFiles(t)
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	ecDER, err := x509.MarshalECPrivateKey(ecKey)
+	require.NoError(t, err)
+	for _, block := range []*pem.Block{
+		{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(rsaKey)},
+		{Type: "EC PRIVATE KEY", Bytes: ecDER},
+	} {
+		t.Run(block.Type, func(t *testing.T) {
+			keyFile := filepath.Join(t.TempDir(), "private-test-value.pem")
+			require.NoError(t, os.WriteFile(keyFile, pem.EncodeToMemory(block), 0600))
+			shared := ossConfig()
+			shared.Proxy.TLSCertFile, shared.Proxy.TLSKeyFile = certFile, keyFile
+			_, err := (config{}).withSharedConfig(shared)
+			require.EqualError(t, err, "proxy.tls_key_file: private key does not match proxy.tls_cert_file")
 		})
 	}
 }
