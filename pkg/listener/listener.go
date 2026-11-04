@@ -514,7 +514,7 @@ func (l *Listener[T]) handleStartup(ctx, startupCtx context.Context, conn net.Co
 		return nil, startupErrorAt("authenticate", err)
 	}
 	if l.cfg.Hooks.Authenticate != nil {
-		pgproxy.LoggerFromContext(ctx).Info("client authenticated",
+		pgproxy.LoggerFromContext(ctx).Debug("client authenticated",
 			"authenticated_user", fmt.Sprintf("%.256s", user),
 			"authenticated_service", fmt.Sprintf("%.256s", auth.Service),
 			"logical_database", fmt.Sprintf("%.256s", resolved.LogicalDatabase))
