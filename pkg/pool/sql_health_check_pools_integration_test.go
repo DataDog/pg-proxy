@@ -245,22 +245,15 @@ func TestSQLHealthWorkerHostWideRoundPreventsStaleCredentialOverlap(t *testing.T
 	case <-time.After(time.Second):
 		t.Fatal("slow credential did not finish and block its old-address query")
 	}
-	health.sqlMu.RLock()
-	fastTarget := health.subscriptionTargets[fastUpdates]
-	health.sqlMu.RUnlock()
-	require.Eventually(t, func() bool {
-		return !fastTarget.sqlRoundRunning()
-	}, time.Second, time.Millisecond, "fast credential did not finish the old round")
-
-	// DNS changes while the slow credential is still finishing its older round. The next refresh
-	// independently restarts the fast credential and records the replacement in the new snapshot.
+	// DNS changes while the slow credential still owns the host-wide round. The overlapping refresh
+	// must not restart only the fast credential and create a staggered replacement-address result.
 	patroniProber.setIPs(replacementIP)
 	w.RefreshSQL()
 	fastPools.mu.Lock()
 	_, fastReplacementCreated := fastPools.pools[replacementIP]
 	fastPools.mu.Unlock()
-	assert.True(t, fastReplacementCreated,
-		"an idle credential should probe the replacement without waiting for another credential")
+	assert.False(t, fastReplacementCreated,
+		"an overlapping tick must not restart the fast credential independently")
 
 	releaseSlow()
 	select {
@@ -268,12 +261,10 @@ func TestSQLHealthWorkerHostWideRoundPreventsStaleCredentialOverlap(t *testing.T
 	case <-time.After(time.Second):
 		t.Fatal("old SQL round did not finish after releasing the slow credential")
 	}
-	for _, target := range health.sqlTargetValues() {
-		assert.False(t, target.sqlRoundRunning())
-	}
+	assert.False(t, health.sqlRoundRunning.Load())
 
-	// The next round lets both credentials confirm the replacement. The following round applies DNS
-	// absence cleanup and closes both old probe pools.
+	// The next complete host-wide round discovers and records the replacement for both credentials.
+	// The following round applies DNS absence cleanup and closes both old probe pools.
 	w.RefreshSQL()
 	w.RefreshSQL()
 	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Resolved())
