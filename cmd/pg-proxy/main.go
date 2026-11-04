@@ -222,9 +222,6 @@ func localUser(users map[string]string) func(context.Context, listener.StartupRe
 		if !exists || request.User != user {
 			return listener.AuthenticationResult{}, errors.New("client user must match the configured backend user")
 		}
-		if request.Options.PassthroughUser {
-			return listener.AuthenticationResult{}, errors.New("passthrough_user is not supported by the OSS binary")
-		}
 		return listener.AuthenticationResult{Service: user}, nil
 	}
 }

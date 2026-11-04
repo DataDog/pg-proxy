@@ -47,7 +47,12 @@ func passwordAuthentication(shared pgconfig.Config) (authenticationHook, error) 
 	if err != nil {
 		return nil, err
 	}
-	return auth.Hook[server.ResolvedStartup](static.Verify, static.Authorize)
+	return func(ctx context.Context, request listener.StartupRequest, resolved listener.StartupResult[server.ResolvedStartup], ex protocol.Exchange) (listener.AuthenticationResult, error) {
+		if err := static.Authenticate(ctx, request.User, resolved.LogicalDatabase, ex); err != nil {
+			return listener.AuthenticationResult{}, err
+		}
+		return listener.AuthenticationResult{Service: request.User}, nil
+	}, nil
 }
 
 // Only a successfully constructed authentication method may enable remote

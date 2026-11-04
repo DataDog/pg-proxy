@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strconv"
@@ -18,7 +19,7 @@ func TestStaticRequiresUniqueCompleteUsers(t *testing.T) {
 	verifier, err := scram.NewVerifier("password")
 	require.NoError(t, err)
 	valid := StaticUser{Username: "alice", Verifier: verifier, Databases: []string{"orders"}}
-	for _, users := range [][]StaticUser{nil, {valid, valid}, {{Username: "alice", Databases: []string{"orders"}}}, {{Verifier: verifier, Databases: []string{"orders"}}}, {{Username: "alice", Verifier: verifier}}} {
+	for _, users := range [][]StaticUser{nil, {valid, valid}, {{Username: "alice", Databases: []string{"orders"}}}, {{Verifier: verifier, Databases: []string{"orders"}}}, {{Username: "alice", Verifier: verifier}}, {{Username: "alice", Verifier: verifier, Databases: []string{""}}}} {
 		_, err := NewStatic(users)
 		require.Error(t, err)
 	}
@@ -55,9 +56,8 @@ type staticChallenge struct {
 func failedStaticChallenge(t *testing.T, provider *Static, username string) staticChallenge {
 	t.Helper()
 	exchange := &staticChallengeExchange{}
-	identity, err := provider.Verify(t.Context(), Request{User: username, LogicalDatabase: "orders"}, exchange)
+	err := provider.Authenticate(t.Context(), username, "orders", exchange)
 	require.ErrorIs(t, err, listener.ErrInvalidCredentials)
-	require.Empty(t, identity.Service)
 	parts := strings.Split(exchange.challenge, ",")
 	require.Len(t, parts, 3)
 	iterations, err := strconv.Atoi(strings.TrimPrefix(parts[2], "i="))
@@ -134,6 +134,83 @@ func TestStaticConcurrentUnknownUsers(t *testing.T) {
 			t.Parallel()
 			challenge := failedStaticChallenge(t, provider, t.Name())
 			require.Equal(t, challenge, failedStaticChallenge(t, provider, t.Name()))
+		})
+	}
+}
+
+// A separate client implementation exercises real proofs and server signatures.
+type staticClientExchange struct {
+	conversation *xdgscram.ClientConversation
+	response     string
+	initial      bool
+	onFinal      func()
+}
+
+func (e *staticClientExchange) Send(message pgproto3.BackendMessage) (err error) {
+	switch msg := message.(type) {
+	case *pgproto3.AuthenticationSASL:
+		e.response, err = e.conversation.Step("")
+	case *pgproto3.AuthenticationSASLContinue:
+		e.response, err = e.conversation.Step(string(msg.Data))
+	case *pgproto3.AuthenticationSASLFinal:
+		_, err = e.conversation.Step(string(msg.Data))
+		if e.onFinal != nil {
+			e.onFinal()
+		}
+	}
+	return err
+}
+
+func (e *staticClientExchange) Receive() (pgproto3.FrontendMessage, error) {
+	if !e.initial {
+		e.initial = true
+		return &pgproto3.SASLInitialResponse{AuthMechanism: "SCRAM-SHA-256", Data: []byte(e.response)}, nil
+	}
+	return &pgproto3.SASLResponse{Data: []byte(e.response)}, nil
+}
+
+func TestStaticProofAndDatabaseGrant(t *testing.T) {
+	verifier, err := scram.NewVerifier("password")
+	require.NoError(t, err)
+	users := []StaticUser{{Username: "alice", Verifier: verifier, Databases: []string{"orders"}}}
+	provider, err := NewStatic(users)
+	require.NoError(t, err)
+	// Mutating caller-owned configuration cannot change an existing provider.
+	users[0].Databases[0] = "reports"
+	users[0].Username = "bob"
+	for _, tc := range []struct {
+		name, username, password, database string
+		cancelBefore, cancelAfter, allowed bool
+	}{
+		{name: "valid", username: "alice", password: "password", database: "orders", allowed: true},
+		{name: "wrong password", username: "alice", password: "wrong", database: "orders"},
+		{name: "unknown user", username: "bob", password: "password", database: "orders"},
+		{name: "denied database", username: "alice", password: "password", database: "reports"},
+		{name: "empty database", username: "alice", password: "password"},
+		{name: "canceled before proof", username: "alice", password: "password", database: "orders", cancelBefore: true},
+		{name: "canceled after proof", username: "alice", password: "password", database: "orders", cancelAfter: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, err := xdgscram.SHA256.NewClientUnprepped("", tc.password, "")
+			require.NoError(t, err)
+			ex := &staticClientExchange{conversation: client.NewConversation()}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tc.cancelBefore {
+				cancel()
+			}
+			if tc.cancelAfter {
+				ex.onFinal = cancel
+			}
+			err = provider.Authenticate(ctx, tc.username, tc.database, ex)
+			if tc.allowed {
+				require.NoError(t, err)
+				require.True(t, ex.conversation.Valid())
+			} else if tc.cancelBefore || tc.cancelAfter {
+				require.ErrorIs(t, err, context.Canceled)
+			} else {
+				require.ErrorIs(t, err, listener.ErrInvalidCredentials)
+			}
 		})
 	}
 }

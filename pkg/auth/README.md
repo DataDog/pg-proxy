@@ -1,41 +1,23 @@
-# Client authentication
+# Static client authentication
 
-`Hook` composes verification and authorization using the existing listener hook.
-Both callbacks are required. Verification returns a nonempty `Identity.Service`
-for session accounting; authorization checks the resolved logical database and
-requested proxy username. `DatabaseAccess` supplies an exact, default-deny
-allowlist for username/database pairs. Passthrough requests are rejected.
+`NewStatic` copies SCRAM credentials and explicit database grants for concurrent
+logins. Call `static.Authenticate(ctx, username, resolvedDatabase, exchange)` from
+the listener's existing authentication callback. It verifies the proof and then
+checks database access. Return `AuthenticationResult{Service: username}` only on
+success. Backend pools keep their configured PostgreSQL accounts.
 
-`NewStatic` constructs concurrent SCRAM verification and database authorization
-from unique `StaticUser` entries. Supply a parsed or newly derived `scram.Verifier`
-and explicit database grants, then compose `static.Verify` and `static.Authorize`
-with `Hook`. Unknown usernames perform a dummy exchange and are always rejected.
-Their fake salts are stable per username and derived from a provider-owned
-random secret. Fake salt lengths and iteration counts match configured users;
-unknown usernames are never cached.
+Unknown usernames receive fake challenges and are always rejected. Fake salts
+stay stable per username and match configured salt lengths and iteration counts.
+Unknown names are never cached.
 
-`Identity[P]` also carries the provider's verified principal to authorization.
-For example, dd-source can supply verified service identity and group membership,
-then apply its own access policy. Keep JWT verification, Vault access, credential
-rotation, and Datadog policy in app callbacks. The shared hook handles ordering,
-resolved database selection, passthrough rejection, and the session identity.
-The hook never logs the principal. Callbacks must respect context cancellation.
+Applications own TLS, credential loading, and rotation. Set `RequireTLS`,
+`StartupTimeout`, and `AuthenticationMessageLimit` on the server. The standalone
+command uses TLS, 10 seconds, and 16 KiB for password authentication. Established
+sessions and SQL messages do not inherit startup limits.
 
-Proxy usernames identify clients. Backend pools retain their configured login
-credentials and SQL permissions. Multiple proxy users may share a backend pool.
-No PostgreSQL roles are created or selected by this package.
+The listener rejects passthrough requests and empty identities before admission.
+Callbacks return errors to the listener, which sends startup responses and logs
+the accepted identity. Never log passwords, tokens, proofs, or provider payloads.
 
-Callbacks return failures to the listener and must not send terminal errors or
-successful startup messages. The listener authenticates before admission. Only
-successful verification and authorization produce an authenticated identity log.
-Do not log passwords, tokens, authentication messages, or arbitrary provider errors.
-
-This package does not choose a transport policy. Standalone authentication modes
-require TLS; legacy trust remains restricted to loopback. Cancellation keeps its
-separate PID/secret exchange, including plaintext cancellation when TLS is required.
-
-Embedders should set `server.Config.StartupTimeout` and
-`AuthenticationMessageLimit` to bound unauthenticated connections. The command
-uses 10 seconds and 16 KiB. The timeout covers TLS, startup, and authentication;
-the same deadline reaches verification and authorization callbacks. It does not
-become the established session's context or limit SQL messages.
+Datadog JWT and Vault policy stay in dd-source callbacks. They use the same
+listener checks and the library's protocol and SCRAM exchanges directly.
