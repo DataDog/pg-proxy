@@ -69,6 +69,7 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	require.NoError(t, err)
 	defer admin.Close(context.Background())
 	t.Run("exports traces metrics and logs", func(t *testing.T) { verifyProxyOTLP(t, adminURL) })
+	t.Run("client TLS", func(t *testing.T) { verifyProxyTLS(t, adminURL, admin) })
 
 	// Minimum connections must open during startup, before the periodic health check.
 	for _, minimum := range []string{"pool_min_conns=3", "pool_min_idle_conns=3"} {

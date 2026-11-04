@@ -132,7 +132,9 @@ With `RequireTLS=false`, both optional TLS and plaintext startup remain supporte
 Before rollout, check client TLS modes, trusted certificate authorities, server
 names, and certificate-provider configuration. Clients that previously connected
 in plaintext despite `RequireTLS=true` must enable TLS. The OSS binary
-continues to use loopback trust without TLS.
+uses loopback trust with optional or required TLS. See the
+[client TLS guide](docs/client-connections.md#standalone-tls) for certificate
+configuration and verified connections.
 
 ## Development
 
@@ -140,7 +142,7 @@ continues to use loopback trust without TLS.
 
 `cmd/pg-proxy` runs the portable library against configured PostgreSQL backends, with
 static routing and transaction pooling. It needs no COBS, Vault, or experiments
-service. Client connections use **local trust without TLS**: the command accepts
+service. Client connections use **local trust with optional or required TLS**: the command accepts
 only loopback IP listen addresses and the selected backend's username. Any local
 process using that username can access the backend with its configured privileges.
 Use a disposable development database. This is not a production server.
@@ -197,10 +199,14 @@ values and minimum connections above the maximum are rejected. Backend connectio
 parsing retains pgx environment defaults. `application_name` in connection options
 is overridden by a nonempty `application_name` database field.
 
-File mode rejects users/JWT, listener TLS options, mirroring sections, replicas,
-read clusters, and discovery/Envoy/load-balanced database
-options with explicit startup errors. **TODO:** wire client SCRAM and listener TLS
-support. Backend TLS is available through the database's `sslmode` setting.
+Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS. Set
+`proxy.tls_required: true` to reject plaintext startup. See the
+[client TLS guide](docs/client-connections.md#standalone-tls) for examples.
+
+File mode rejects users/JWT, mirroring sections, replicas, read clusters, and
+discovery/Envoy/load-balanced database options with explicit startup errors.
+**TODO:** wire client SCRAM support. Backend TLS is available through the
+database's `sslmode` setting.
 
 `-config` is required and accepts `.yaml`, `.yml`, or `.json` files. All database
 and listener settings come from that file. The OSS binary has no separate backend,
