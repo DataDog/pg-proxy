@@ -11,10 +11,10 @@ import (
 )
 
 func TestHookRequiresVerificationAndAuthorization(t *testing.T) {
-	verify := func(context.Context, Request, protocol.Exchange) (Identity, error) {
-		return Identity{Service: "alice"}, nil
+	verify := func(context.Context, Request, protocol.Exchange) (Identity[struct{}], error) {
+		return Identity[struct{}]{Service: "alice"}, nil
 	}
-	authorize := func(context.Context, Identity, Request) error { return nil }
+	authorize := func(context.Context, Identity[struct{}], Request) error { return nil }
 	_, err := Hook[struct{}](nil, authorize)
 	require.Error(t, err)
 	_, err = Hook[struct{}](verify, nil)
@@ -34,11 +34,11 @@ func TestHookRequiresVerificationAndAuthorization(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			verified, authorized := false, false
-			hook, err := Hook[struct{}](func(_ context.Context, request Request, _ protocol.Exchange) (Identity, error) {
+			hook, err := Hook[struct{}](func(_ context.Context, request Request, _ protocol.Exchange) (Identity[struct{}], error) {
 				verified = true
 				require.Equal(t, Request{User: "login", LogicalDatabase: "resolved"}, request)
-				return Identity{Service: tc.service}, tc.verifyErr
-			}, func(_ context.Context, identity Identity, request Request) error {
+				return Identity[struct{}]{Service: tc.service}, tc.verifyErr
+			}, func(_ context.Context, identity Identity[struct{}], request Request) error {
 				authorized = true
 				require.Equal(t, tc.service, identity.Service)
 				require.Equal(t, "resolved", request.LogicalDatabase)
@@ -66,13 +66,13 @@ func TestDatabaseAccessCopiesExactUserGrants(t *testing.T) {
 	grants["alice"][0] = "reports"
 	delete(grants, "bob")
 	for _, request := range []Request{{"alice", "orders"}, {"bob", "orders"}, {"bob", "reports"}} {
-		require.NoError(t, access.Authorize(t.Context(), Identity{}, request))
+		require.NoError(t, access.Authorize(t.Context(), Identity[struct{}]{}, request))
 	}
 	for _, request := range []Request{{"alice", "reports"}, {"Alice", "orders"}, {"bob", "Orders"}, {"unknown", "orders"}, {"alice", "*"}, {"", ""}} {
-		require.ErrorIs(t, access.Authorize(t.Context(), Identity{}, request), listener.ErrInvalidCredentials)
+		require.ErrorIs(t, access.Authorize(t.Context(), Identity[struct{}]{}, request), listener.ErrInvalidCredentials)
 	}
 	var missing *DatabaseAccess
-	require.Error(t, missing.Authorize(t.Context(), Identity{}, Request{"alice", "orders"}))
+	require.Error(t, missing.Authorize(t.Context(), Identity[struct{}]{}, Request{"alice", "orders"}))
 	for _, grants := range []map[string][]string{nil, {"": {"orders"}}, {"alice": nil}, {"alice": {""}}} {
 		_, err := NewDatabaseAccess(grants)
 		require.Error(t, err)
