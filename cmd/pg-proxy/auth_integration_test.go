@@ -37,7 +37,7 @@ func verifyProxyAuthentication(t *testing.T, backendURL string, observer *pgx.Co
 	ctx, stop := context.WithTimeout(t.Context(), 45*time.Second)
 	defer stop()
 	var logs authLogBuffer
-	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{LogHandler: slog.NewTextHandler(&logs, nil)}))
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{LogHandler: slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})}))
 	_, err := observer.Exec(ctx, "SET password_encryption = 'scram-sha-256'")
 	require.NoError(t, err)
 	// These fixture roles produce a real PostgreSQL verifier and a second backend.

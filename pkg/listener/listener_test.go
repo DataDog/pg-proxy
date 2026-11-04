@@ -388,7 +388,7 @@ func TestConnectionDrainingWatcherUnblocksIdleSession(t *testing.T) {
 	handleDone := make(chan struct{})
 	go func() {
 		defer close(handleDone)
-		engine.handleConn(server)
+		engine.handleConn(server, func() {})
 	}()
 	ready := make(chan struct{}, 1)
 	errorResponse := make(chan *pgproto3.ErrorResponse, 1)

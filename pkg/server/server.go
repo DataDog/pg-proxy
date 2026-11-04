@@ -31,6 +31,7 @@ type Config struct {
 	RequireTLS                 bool
 	AuthenticationMessageLimit int
 	StartupTimeout             time.Duration
+	MaxPendingConnections      int
 	Admission                  listener.Admission
 	Authenticate               func(context.Context, listener.StartupRequest, listener.StartupResult[ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error)
 	LoadShedder                listener.LoadShedder
@@ -59,6 +60,7 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 		RequireTLS:                 cfg.RequireTLS,
 		AuthenticationMessageLimit: cfg.AuthenticationMessageLimit,
 		StartupTimeout:             cfg.StartupTimeout,
+		MaxPendingConnections:      cfg.MaxPendingConnections,
 		Admission:                  cfg.Admission,
 		Hooks: listener.Hooks[ResolvedStartup]{
 			ResolveStartup: runtime.ResolveStartup,

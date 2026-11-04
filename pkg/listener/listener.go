@@ -117,8 +117,11 @@ type Config[T any] struct {
 	// StartupTimeout bounds TLS, startup, and authentication, including provider
 	// callbacks that respect their context. Zero disables this timeout.
 	StartupTimeout time.Duration
-	Admission      Admission
-	Hooks          Hooks[T]
+	// MaxPendingConnections bounds connections negotiating TLS or startup.
+	// Excess connections close immediately. Zero leaves the limit disabled.
+	MaxPendingConnections int
+	Admission             Admission
+	Hooks                 Hooks[T]
 
 	// Testing seams. Production leaves these nil.
 	Listen func(string, string) (net.Listener, error)
@@ -133,6 +136,7 @@ type Listener[T any] struct {
 	cfg       Config[T]
 	ln        net.Listener
 	connCount atomic.Uint32
+	pending   chan struct{}
 }
 
 // ClientNotified marks an error for which the client was already sent a fatal
@@ -151,6 +155,9 @@ func (e *clientNotifiedError) Unwrap() error { return e.cause }
 
 // New creates and binds a listener.
 func New[T any](ctx context.Context, cfg Config[T]) (*Listener[T], error) {
+	if cfg.MaxPendingConnections < 0 {
+		return nil, errors.New("maximum pending connections must not be negative")
+	}
 	if cfg.StartupTimeout < 0 {
 		return nil, errors.New("startup timeout must not be negative")
 	}
@@ -174,7 +181,11 @@ func New[T any](ctx context.Context, cfg Config[T]) (*Listener[T], error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Listener[T]{ctx: ctx, cfg: cfg, ln: ln}, nil
+	l := &Listener[T]{ctx: ctx, cfg: cfg, ln: ln}
+	if cfg.MaxPendingConnections > 0 {
+		l.pending = make(chan struct{}, cfg.MaxPendingConnections)
+	}
+	return l, nil
 }
 
 // Addr returns the bound listener address.
@@ -203,8 +214,18 @@ func (l *Listener[T]) Run() error {
 			}
 			return nil
 		}
+		releaseStartup := func() {}
+		if l.pending != nil {
+			select {
+			case l.pending <- struct{}{}:
+				releaseStartup = sync.OnceFunc(func() { <-l.pending })
+			default:
+				_ = conn.Close()
+				continue
+			}
+		}
 		configureKeepalive(conn)
-		go l.handleConnWithLoadShedding(conn)
+		go l.handleConnWithLoadShedding(conn, releaseStartup)
 	}
 }
 
@@ -243,19 +264,20 @@ func configureKeepalive(conn net.Conn) {
 }
 
 // handleConnWithLoadShedding wraps connection handling with load shedding.
-func (l *Listener[T]) handleConnWithLoadShedding(conn net.Conn) {
+func (l *Listener[T]) handleConnWithLoadShedding(conn net.Conn, releaseStartup func()) {
+	defer releaseStartup()
 	if l.cfg.Hooks.LoadShedder == nil {
-		l.handleConn(conn)
+		l.handleConn(conn, releaseStartup)
 		return
 	}
-	if err := l.cfg.Hooks.LoadShedder.Run(l.ctx, func() { l.handleConn(conn) }); err != nil {
+	if err := l.cfg.Hooks.LoadShedder.Run(l.ctx, func() { l.handleConn(conn, releaseStartup) }); err != nil {
 		// Send an error response to a connection rejected by the load shedder.
 		handleLoadSheddingRejection(conn)
 	}
 }
 
 // handleConn accepts a network connection and adds it to the listener for tracking.
-func (l *Listener[T]) handleConn(conn net.Conn) {
+func (l *Listener[T]) handleConn(conn net.Conn, releaseStartup func()) {
 	ctx := pgproxy.ContextWithLogger(l.ctx, pgproxy.LoggerFromContext(l.ctx).With("connection_id", crypto_rand.Text()))
 	// Startup can block in TLS negotiation or an authentication exchange before
 	// there is a session/drain watcher. Interrupt reads on shutdown while keeping
@@ -318,6 +340,7 @@ func (l *Listener[T]) handleConn(conn net.Conn) {
 		return
 	}
 
+	releaseStartup()
 	pgproxy.Logger().Debug("Opened connection", "remote", conn.RemoteAddr().String(), "user", session.User(), "database", session.Database())
 	tags := append(session.MetricTags(), "outcome:successful",
 		fmt.Sprintf("with_dynamic_routing:%t", session.DynamicRoutingEnabled()))

@@ -201,8 +201,8 @@ func TestStartupLogsBoundAndEncodeIdentities(t *testing.T) {
 	packet, err := (&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber,
 		Parameters: map[string]string{"user": requested, "database": "customer-db"}}).Encode(nil)
 	require.NoError(t, err)
-	engine.handleConn(newBufferConn(packet))
-	engine.handleConn(newBufferConn(packet))
+	engine.handleConn(newBufferConn(packet), func() {})
+	engine.handleConn(newBufferConn(packet), func() {})
 	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
 	require.Len(t, lines, 2, "identity must not create additional log records")
 	var first, second map[string]any

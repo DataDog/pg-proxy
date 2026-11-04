@@ -93,7 +93,7 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 		Parameters:      map[string]string{"user": "successful", "database": "testdb"},
 	}).Encode(nil)
 	require.NoError(t, err)
-	engine.handleConn(newBufferConn(startup))
+	engine.handleConn(newBufferConn(startup), func() {})
 
 	assert.Equal(t, []listenerMetricCall{
 		{

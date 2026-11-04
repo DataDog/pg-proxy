@@ -53,3 +53,8 @@ and check access to `resolved.LogicalDatabase` before returning a nonempty
 rejects empty identities before admission. Client passthrough requests are
 rejected before resolution or authentication. Credential sources and access policy
 remain application-owned; no additional authentication wrapper is required.
+
+Set `MaxPendingConnections` to bound concurrent TLS/startup handlers. The listener
+closes excess connections before creating a handler and releases each slot after
+startup or failure. Zero preserves the unbounded embedding default. Pair this
+with `StartupTimeout`; the command uses 100 pending connections and 10 seconds.

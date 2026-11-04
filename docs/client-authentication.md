@@ -20,7 +20,7 @@ nonzero `max_sessions` rather than ignoring them.
 
 Proxy users are independent of backend accounts. Alice and Bob may both connect
 to `orders`, sharing its configured pool and backend account. Their sessions and
-authentication logs retain their distinct proxy usernames. SQL permissions and
+authentication debug logs retain their distinct proxy usernames. SQL permissions and
 `current_user` belong to `orders_backend` in the example. Different SQL permissions
 require separate configured backend accounts/routes. The proxy does not create
 PostgreSQL roles or run `SET ROLE`; role passthrough remains rejected.
@@ -99,7 +99,9 @@ Invalid credentials, grants, unsupported user settings, and missing TLS fail
 before backend pools or the listener open. Authentication failures receive one
 safe terminal error followed by closure, without a session or admission slot.
 TLS, startup, and authentication must finish within 10 seconds. The deadline is
-removed after startup and does not limit query or session duration.
+removed after startup and does not limit query or session duration. At most 100
+connections may negotiate TLS/startup at once; excess connections close immediately.
+Established sessions do not consume these startup slots.
 Authentication messages are limited to 16 KiB; SQL messages retain their existing
 limits. Passwords, stored verifiers, and authentication payloads are excluded from
 logs and client errors.

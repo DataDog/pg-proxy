@@ -40,7 +40,7 @@ func testListenerConn(t *testing.T, engine *Listener[struct{}]) net.Conn {
 		conn, err := engine.ln.Accept()
 		if assert.NoError(t, err) {
 			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-			engine.handleConn(conn)
+			engine.handleConn(conn, func() {})
 		}
 	}()
 	conn, err := net.Dial("tcp", engine.Addr().String())
