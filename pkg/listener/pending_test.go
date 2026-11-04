@@ -39,7 +39,14 @@ func TestPendingConnectionsLimit(t *testing.T) {
 			require.NoError(t, err)
 			done := make(chan error, 1)
 			go func() { done <- engine.Run() }()
-			t.Cleanup(func() { cancel(); _ = engine.Close(); <-done })
+			t.Cleanup(func() {
+				cancel()
+				_ = engine.Close()
+				<-done
+				require.Eventually(t, func() bool {
+					return admission.GetGlobalCount() == 0 && len(engine.pending) == 0
+				}, time.Second, time.Millisecond, "startup handlers and sessions must finish before the next test")
+			})
 			dial := func() net.Conn {
 				conn, err := net.DialTimeout("tcp", engine.Addr().String(), time.Second)
 				require.NoError(t, err)
