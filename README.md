@@ -44,6 +44,7 @@ as prose — one-line rows keep each extraction PR's doc diff small.
 | `pkg/datadog` | Native Datadog tracing, DogStatsD metrics, and JSON log setup using public SDKs |
 | `pkg/otel` | OpenTelemetry trace, metric, and slog adapters using caller-owned providers |
 | `pkg/actions` | Portable frontend-message decision state machine |
+| `pkg/auth` | Client verification, explicit database access, and authenticated session identity |
 | `pkg/backend` | Within-cluster routing, connection checkout, and session-link construction |
 | `pkg/config` | Portable database, routing, listener, user, and mirroring configuration |
 | `pkg/classifier` | SQL read-routing classification and statement counting |

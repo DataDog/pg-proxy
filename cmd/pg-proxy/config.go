@@ -228,7 +228,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	}
 	cfg.requireTLS = shared.Proxy.TLSRequired
 	// TODO: wire library SCRAM support into the OSS binary.
-	if shared.Proxy.JWTAuthEnabled || len(shared.Users) > 0 {
+	if shared.Proxy.JWTAuthEnabled || shared.Proxy.PasswordAuthEnabled || len(shared.Users) > 0 {
 		return config{}, errors.New("configured client authentication is not implemented by the OSS binary")
 	}
 	// TODO(OSQQUERY-715): wire shared traffic mirroring settings into the OSS binary.
