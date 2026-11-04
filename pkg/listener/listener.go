@@ -404,9 +404,6 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 	if err != nil {
 		return nil, startupErrorAt("startup_options", err)
 	}
-	if options.PassthroughUser {
-		return nil, startupErrorAt("authenticate", ErrUnsupportedAuthOption)
-	}
 	if err := ctx.Err(); err != nil {
 		return nil, startupErrorAt("authenticate", err)
 	}
