@@ -48,6 +48,9 @@ func passwordAuthentication(shared pgconfig.Config) (authenticationHook, error) 
 		return nil, err
 	}
 	return func(ctx context.Context, request listener.StartupRequest, resolved listener.StartupResult[server.ResolvedStartup], ex protocol.Exchange) (listener.AuthenticationResult, error) {
+		if request.Options.PassthroughUser {
+			return listener.AuthenticationResult{}, listener.ErrUnsupportedAuthOption
+		}
 		if err := static.Authenticate(ctx, request.User, resolved.LogicalDatabase, ex); err != nil {
 			return listener.AuthenticationResult{}, err
 		}

@@ -15,7 +15,8 @@ Applications own TLS, credential loading, and rotation. Set `RequireTLS`,
 command uses TLS, 10 seconds, and 16 KiB for password authentication. Established
 sessions and SQL messages do not inherit startup limits.
 
-The listener rejects passthrough requests and empty identities before admission.
+The listener rejects empty identities before admission. Applications own
+passthrough policy; the standalone command rejects it before credential exchange.
 Callbacks return errors to the listener, which sends startup responses and logs
 the accepted identity. Never log passwords, tokens, proofs, or provider payloads.
 
