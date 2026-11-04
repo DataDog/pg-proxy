@@ -49,10 +49,10 @@ type SQLHealthCheckOutcome struct {
 	PrimaryIPs []string
 }
 
-// sqlHealthCheckAggregation summarizes one host-wide round across every credential target. Health
+// sqlHealthCheckAggregation summarizes completed SQL evidence across credential targets. Health
 // is optimistic per address: one conclusive primary result wins over another credential's standby
 // or error result. Outcome retains every raw result so a later routing policy can still treat
-// timeouts, conflicting roles, or multiple primary addresses conservatively.
+// indeterminate errors, conflicting roles, or multiple primary addresses conservatively.
 type sqlHealthCheckAggregation struct {
 	Outcome SQLHealthCheckOutcome
 	Health  map[string]bool
@@ -76,10 +76,10 @@ func aggregateSQLHealthCheckResults(results []SQLHealthCheckResult) sqlHealthChe
 		if result.HealthyPrimary() {
 			aggregation.Health[result.IP] = true
 			primaryIPs[result.IP] = struct{}{}
-		} else if sqlHealthTimeoutType(result.Err) == SQLHealthTimeoutNone {
+		} else if result.Err == nil || isConclusiveSQLUnroutableError(result.Err) {
 			// A completed determinate result is enough to classify the address as non-primary.
-			// Timeout-classified results remain unknown unless another credential supplies a
-			// determinate result for the same address before the comparison cutoff.
+			// Indeterminate results remain unknown unless another credential supplies
+			// determinate evidence for the same address.
 			if _, recorded := aggregation.Health[result.IP]; recorded {
 				continue
 			}

@@ -7,8 +7,10 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -24,6 +26,7 @@ const (
 	SQLHealthTimeoutMixed     = "mixed"
 
 	SQLHealthFallbackTimeout           = "timeout"
+	SQLHealthFallbackIndeterminate     = "indeterminate_error"
 	SQLHealthFallbackMultiplePrimaries = "multiple_primaries"
 	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
 )
@@ -187,11 +190,11 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	return decision
 }
 
-// observeSQL evaluates one complete SQL snapshot. Among routing-eligible IPs, timeout-classified
-// probe errors, multiple distinct primaries, or conflicting deterministic roles make the round
-// indeterminate, so routing falls back to the most recent Patroni snapshot. Non-timeout probe errors
-// conclusively make that candidate unavailable. candidateIPs includes every address retained for
-// this snapshot, not only addresses returned by its latest DNS lookup.
+// observeSQL evaluates one complete SQL snapshot. SQL routing is conclusive only when every IP has
+// a successful role or a narrowly classified unroutable result. Unknown errors, multiple distinct
+// primaries, or conflicting deterministic roles fall back to the most recent Patroni snapshot.
+// candidateIPs includes every address retained for this snapshot, not only addresses returned by
+// its latest DNS lookup.
 func (p *hybridHealthPolicy) observeSQL(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
@@ -252,41 +255,107 @@ func (p *hybridHealthPolicy) observeSQL(
 }
 
 func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {
-	timeoutType := SQLHealthTimeoutNone
-	deterministicRoles := make(map[string]bool)
+	type ipEvidence struct {
+		deterministicRole    bool
+		primary              bool
+		conclusiveUnroutable bool
+		indeterminate        bool
+		timeoutType          string
+	}
+
+	evidenceByIP := make(map[string]*ipEvidence)
 	conflictingRoles := false
 	for _, result := range outcome.Results {
-		resultTimeoutType := sqlHealthTimeoutType(result.Err)
-		if resultTimeoutType != SQLHealthTimeoutNone {
-			if timeoutType == SQLHealthTimeoutNone {
-				timeoutType = resultTimeoutType
-			} else if timeoutType != resultTimeoutType {
-				timeoutType = SQLHealthTimeoutMixed
+		evidence := evidenceByIP[result.IP]
+		if evidence == nil {
+			evidence = &ipEvidence{timeoutType: SQLHealthTimeoutNone}
+			evidenceByIP[result.IP] = evidence
+		}
+		if result.Err != nil {
+			if isConclusiveSQLUnroutableError(result.Err) {
+				evidence.conclusiveUnroutable = true
+				continue
+			}
+			evidence.indeterminate = true
+			resultTimeoutType := sqlHealthTimeoutType(result.Err)
+			if resultTimeoutType == SQLHealthTimeoutNone {
+				continue
+			}
+			if evidence.timeoutType == SQLHealthTimeoutNone {
+				evidence.timeoutType = resultTimeoutType
+			} else if evidence.timeoutType != resultTimeoutType {
+				evidence.timeoutType = SQLHealthTimeoutMixed
 			}
 			continue
 		}
-		if result.Err != nil {
-			// A completed non-timeout error means this credential cannot route to this address now.
-			// Leave the candidate unhealthy without making the host-wide SQL round indeterminate.
-			continue
-		}
+
 		primary := !result.InRecovery
-		if existing, ok := deterministicRoles[result.IP]; ok && existing != primary {
+		if evidence.deterministicRole && evidence.primary != primary {
 			conflictingRoles = true
 		} else {
-			deterministicRoles[result.IP] = primary
+			evidence.deterministicRole = true
+			evidence.primary = primary
 		}
 	}
 	if conflictingRoles {
-		return SQLHealthFallbackConflictingRoles, timeoutType
+		return SQLHealthFallbackConflictingRoles, SQLHealthTimeoutNone
 	}
 	if len(outcome.PrimaryIPs) > 1 {
-		return SQLHealthFallbackMultiplePrimaries, timeoutType
+		return SQLHealthFallbackMultiplePrimaries, SQLHealthTimeoutNone
+	}
+
+	timeoutType := SQLHealthTimeoutNone
+	hasIndeterminateError := false
+	for _, evidence := range evidenceByIP {
+		// Credential targets describe the same PostgreSQL instance. One successful role, or one
+		// result that conclusively makes the IP unroutable, resolves uncertainty from another
+		// credential on that IP. Uncertainty on a different IP still requires Patroni fallback.
+		if evidence.deterministicRole || evidence.conclusiveUnroutable {
+			continue
+		}
+		if !evidence.indeterminate {
+			continue
+		}
+		if evidence.timeoutType == SQLHealthTimeoutNone {
+			hasIndeterminateError = true
+			continue
+		}
+		if timeoutType == SQLHealthTimeoutNone {
+			timeoutType = evidence.timeoutType
+		} else if timeoutType != evidence.timeoutType {
+			timeoutType = SQLHealthTimeoutMixed
+		}
 	}
 	if timeoutType != SQLHealthTimeoutNone {
 		return SQLHealthFallbackTimeout, timeoutType
 	}
+	if hasIndeterminateError {
+		return SQLHealthFallbackIndeterminate, SQLHealthTimeoutNone
+	}
 	return "", ""
+}
+
+// isConclusiveSQLUnroutableError is intentionally an allowlist. New or ambiguous errors fall back
+// to Patroni unless SQL has already determined that same IP's role through another credential.
+func isConclusiveSQLUnroutableError(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+
+	var postgresErr *pgconn.PgError
+	if !errors.As(err, &postgresErr) {
+		return false
+	}
+	switch postgresErr.Code {
+	case pgerrcode.AdminShutdown,
+		pgerrcode.CrashShutdown,
+		pgerrcode.CannotConnectNow,
+		pgerrcode.DiskFull,
+		pgerrcode.OutOfMemory:
+		return true
+	default:
+		return pgerrcode.IsSystemError(postgresErr.Code) || pgerrcode.IsInternalError(postgresErr.Code)
+	}
 }
 
 func sqlHealthTimeoutType(err error) string {
