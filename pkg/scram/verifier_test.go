@@ -36,7 +36,7 @@ func TestStoredVerifierExchange(t *testing.T) {
 			done := make(chan error, 1)
 			go func() {
 				defer server.Close()
-				done <- AuthenticateVerifier(protocol.NewConnExchange(server, pgproto3.NewBackend(server, server)), "alice", verifier)
+				done <- AuthenticateVerifier(protocol.NewConnExchange(server, pgproto3.NewBackend(server, server)), verifier)
 			}()
 			_, clientErr := (&scramClient{frontend: pgproto3.NewFrontend(client, client), password: password, clientNon: "independent-client-nonce"}).run()
 			serverErr := <-done
@@ -77,7 +77,7 @@ func TestVerifierValidationAndRedaction(t *testing.T) {
 	var missing *Verifier
 	require.Error(t, missing.Validate())
 	require.Error(t, (&Verifier{}).Validate())
-	require.Error(t, AuthenticateVerifier(nil, "alice", nil))
+	require.Error(t, AuthenticateVerifier(nil, nil))
 }
 
 func TestMockVerifier(t *testing.T) {

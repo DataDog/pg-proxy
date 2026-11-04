@@ -49,18 +49,18 @@ func (e *AuthFailedError) Error() string {
 // A failure to prove the password is returned as *AuthFailedError, whose message
 // is safe to show the client. Every other error describes a protocol or internal
 // fault and is not a statement about the credential.
-func Authenticate(ex protocol.Exchange, username, password string) error {
+func Authenticate(ex protocol.Exchange, _ string, password string) error {
 	verifier, err := NewVerifier(password)
 	if err != nil {
 		return err
 	}
-	return AuthenticateVerifier(ex, username, verifier)
+	return AuthenticateVerifier(ex, verifier)
 }
 
 // AuthenticateVerifier runs the same PostgreSQL exchange using stored
 // credentials, without needing the plaintext password. verifier is immutable and
-// may be shared across connections. The caller selects it by startup username.
-func AuthenticateVerifier(ex protocol.Exchange, username string, verifier *Verifier) error {
+// may be shared across connections. The caller must select it by startup username.
+func AuthenticateVerifier(ex protocol.Exchange, verifier *Verifier) error {
 	if err := verifier.Validate(); err != nil {
 		return err
 	}

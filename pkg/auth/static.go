@@ -75,7 +75,7 @@ func (s *Static) Verify(ctx context.Context, request Request, ex protocol.Exchan
 			return Identity[struct{}]{}, err
 		}
 	}
-	err := scram.AuthenticateVerifier(ex, request.User, verifier)
+	err := scram.AuthenticateVerifier(ex, verifier)
 	if err != nil {
 		var failed *scram.AuthFailedError
 		if errors.As(err, &failed) {
