@@ -25,7 +25,7 @@ func TestSQLPotentialUsesCompletedComparisonSnapshot(t *testing.T) {
 	w.observePatroniPotential(s, leaderTimingIPs("A"), time.Now())
 	recordPotentialPoll(s, a, 0, leaderTimingAt(0), SQLHealthCheckResult{IP: "A"})
 	recordPotentialPoll(s, b, 0, leaderTimingAt(1), SQLHealthCheckResult{IP: "A", Err: context.DeadlineExceeded})
-	assert.True(t, s.potentialTiming.sqlLeaders["A"], "another credential still supplies a primary")
+	assert.True(t, s.potentialTiming.timing.sqlLeaders["A"], "another credential still supplies a primary")
 	// Conflicting successful roles are excluded using the exact mismatch-comparison aggregate.
 	snapshot := recordPotentialPoll(s, b, 0, leaderTimingAt(2), SQLHealthCheckResult{IP: "A", InRecovery: true})
 	require.Contains(t, snapshot.conflictingIPs, "A")
@@ -43,9 +43,9 @@ func TestSQLPotentialTargetInvalidationAndOptIn(t *testing.T) {
 			s.sqlHealthState.Track([]string{"A", "B"})
 			target := &sqlHealthTarget{}
 			recordPotentialPoll(s, target, 0, leaderTimingAt(0), SQLHealthCheckResult{IP: "A"})
-			s.potentialTiming.observe(false, leaderTimingIPs("A"), leaderTimingAt(0))
+			s.potentialTiming.timing.observe(false, leaderTimingIPs("A"), leaderTimingAt(0))
 			recordPotentialPoll(s, target, 0, leaderTimingAt(1), SQLHealthCheckResult{IP: "B"})
-			require.Contains(t, s.potentialTiming.pending, "B")
+			require.Contains(t, s.potentialTiming.timing.pending, "B")
 			switch invalidation {
 			case "disable":
 				s.disableSQLComparisonTarget(target)
@@ -54,15 +54,15 @@ func TestSQLPotentialTargetInvalidationAndOptIn(t *testing.T) {
 			}
 			late := recordPotentialPoll(s, target, 0, leaderTimingAt(2), SQLHealthCheckResult{IP: "B"})
 			assert.Nil(t, late)
-			assert.Empty(t, s.potentialTiming.pending)
-			assert.Empty(t, s.potentialTiming.observe(false, leaderTimingIPs("B"), leaderTimingAt(3)))
+			assert.Empty(t, s.potentialTiming.timing.pending)
+			assert.Empty(t, s.potentialTiming.timing.observe(false, leaderTimingIPs("B"), leaderTimingAt(3)))
 		})
 	}
 	for _, replica := range []bool{false, true} {
 		s := &PoolHealth{isReadReplica: replica, sqlHealthState: NewHealthState()}
 		s.sqlHealthState.Track([]string{"A"})
 		s.recordSQLComparisonPoll(replica, &sqlHealthTarget{}, 0, leaderTimingAt(0), leaderTimingAt(0), []string{"A"}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "A"}}})
-		assert.Nil(t, s.potentialTiming.sqlLeaders, "replicas and disabled hooks do not track timing")
+		assert.Nil(t, s.potentialTiming.timing.sqlLeaders, "replicas and disabled hooks do not track timing")
 	}
 }
 
@@ -91,8 +91,8 @@ func TestSQLPotentialWorkerWaitsForCompleteSnapshot(t *testing.T) {
 			completed := make(chan SQLPatroniHealthSnapshot, 1)
 			w.hooks.SQLPotentialCompared = func(c SQLPotentialComparison, _ []string) { comparisons <- c }
 			w.hooks.SQLPatroniCompared = func(c SQLPatroniHealthSnapshot, _ []string) { completed <- c }
-			s.potentialTiming.observe(true, leaderTimingIPs(oldIP), time.Now().Add(-time.Second))
-			s.potentialTiming.observe(false, leaderTimingIPs(oldIP), time.Now().Add(-time.Second))
+			s.potentialTiming.timing.observe(true, leaderTimingIPs(oldIP), time.Now().Add(-time.Second))
+			s.potentialTiming.timing.observe(false, leaderTimingIPs(oldIP), time.Now().Add(-time.Second))
 			if patroniFirst {
 				w.Refresh()
 			}
@@ -155,8 +155,8 @@ func TestSQLPotentialAggregateTimestampIncludesNewerEvidence(t *testing.T) {
 	s.sqlHealthState.Track([]string{"A", "B"})
 	early, later := &sqlHealthTarget{}, &sqlHealthTarget{}
 	recordPotentialPoll(s, early, 0, leaderTimingAt(0), SQLHealthCheckResult{IP: "A"}, SQLHealthCheckResult{IP: "B", InRecovery: true})
-	s.potentialTiming.observe(false, leaderTimingIPs("A"), leaderTimingAt(0))
-	require.Empty(t, s.potentialTiming.observe(false, leaderTimingIPs("B"), leaderTimingAt(4)))
+	s.potentialTiming.timing.observe(false, leaderTimingIPs("A"), leaderTimingAt(0))
+	require.Empty(t, s.potentialTiming.timing.observe(false, leaderTimingIPs("B"), leaderTimingAt(4)))
 	// Accepted first at 5s, but B is still conflicted with the other credential's old snapshot.
 	conflict := recordPotentialPoll(s, later, 0, leaderTimingAt(5), SQLHealthCheckResult{IP: "A", InRecovery: true}, SQLHealthCheckResult{IP: "B"})
 	require.Contains(t, conflict.conflictingIPs, "B")
@@ -187,13 +187,13 @@ func TestSQLPotentialDNSInvalidatesBeforeNextCompletion(t *testing.T) {
 	otherCredential := &sqlHealthTarget{}
 	s.sqlHealthState.Track([]string{"A", "B", "C"})
 	recordPotentialPoll(s, otherCredential, 0, leaderTimingAt(0), SQLHealthCheckResult{IP: "A"})
-	s.potentialTiming.observe(false, leaderTimingIPs("A"), leaderTimingAt(0))
+	s.potentialTiming.timing.observe(false, leaderTimingIPs("A"), leaderTimingAt(0))
 	recordPotentialPoll(s, otherCredential, 0, leaderTimingAt(1), SQLHealthCheckResult{IP: "B"})
 	recordPotentialPoll(s, target, 0, leaderTimingAt(2), SQLHealthCheckResult{IP: "C"})
 	// Another credential's latest successful C poll makes B eligible for DNS eviction, while
 	// the completed comparison cache still contains the independent credential's B success.
 	s.sqlHealthState.RecordHealthAt(leaderTimingAt(2), leaderTimingIPs("C"))
-	require.Contains(t, s.potentialTiming.pending, "B")
+	require.Contains(t, s.potentialTiming.timing.pending, "B")
 	comparisons := make(chan SQLPotentialComparison, 4)
 	w.hooks.SQLPotentialCompared = func(c SQLPotentialComparison, _ []string) { comparisons <- c }
 	done := make(chan struct{})
@@ -228,7 +228,7 @@ func TestSQLPotentialPatroniTimestampPrecedesCallbacks(t *testing.T) {
 	target := &sqlHealthTarget{}
 	baseline := time.Now().Add(-time.Second)
 	recordPotentialPoll(s, target, 0, baseline, SQLHealthCheckResult{IP: oldIP})
-	s.potentialTiming.observe(false, leaderTimingIPs(oldIP), baseline)
+	s.potentialTiming.timing.observe(false, leaderTimingIPs(oldIP), baseline)
 	var got []SQLPotentialComparison
 	var callbackAt, sqlAt time.Time
 	w.hooks.SQLPotentialCompared = func(c SQLPotentialComparison, _ []string) { got = append(got, c) }
@@ -266,7 +266,7 @@ func TestSQLPotentialEvictOldLeaderPreservesReplacement(t *testing.T) {
 			// A loses retention protection when SQL discovers B; evict A before the second observation.
 			s.sqlHealthState.RecordHealthAt(leaderTimingAt(3), leaderTimingIPs("B"))
 			require.Equal(t, []string{"B"}, s.refreshSQLResolved([]string{"B"}, 1))
-			require.Contains(t, s.potentialTiming.pending, "B", "evict only A's timing evidence")
+			require.Contains(t, s.potentialTiming.timing.pending, "B", "evict only A's timing evidence")
 			if sqlFirst {
 				w.observePatroniPotential(s, leaderTimingIPs("B"), leaderTimingAt(5))
 			} else {
@@ -301,12 +301,12 @@ func TestSQLPotentialEvictionRejectsDelayedPatroniEvidence(t *testing.T) {
 				}
 				w.observePatroniPotential(s, leaderTimingIPs("A"), baseline)
 				w.observePatroniPotential(s, leaderTimingIPs("B"), baseline.Add(time.Second))
-				require.Contains(t, s.potentialTiming.pending, "B")
+				require.Contains(t, s.potentialTiming.timing.pending, "B")
 
 				// The poll completed before eviction, but its callback has not run yet.
 				capturedAt := time.Now()
 				s.refreshSQLResolved([]string{"C"}, 1)
-				require.NotContains(t, s.potentialTiming.pending, "B")
+				require.NotContains(t, s.potentialTiming.timing.pending, "B")
 				afterEviction := time.Now()
 				recordPotentialPoll(s, target, 0, afterEviction, SQLHealthCheckResult{IP: "C"})
 
@@ -326,7 +326,7 @@ func TestSQLPotentialEvictionRejectsDelayedPatroniEvidence(t *testing.T) {
 					w.observePatroniPotential(s, leaderTimingIPs("B"), capturedAt)
 				}
 				if freshPatroniAt.IsZero() {
-					assert.NotContains(t, s.potentialTiming.pending, "B", "late Patroni evidence must not recreate the evicted timestamp")
+					assert.NotContains(t, s.potentialTiming.timing.pending, "B", "late Patroni evidence must not recreate the evicted timestamp")
 				}
 				sqlAt := time.Now()
 				snapshot := recordPotentialPoll(s, target, 0, sqlAt, SQLHealthCheckResult{IP: "B"})

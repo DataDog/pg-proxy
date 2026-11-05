@@ -2066,7 +2066,7 @@ func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
 	}
 	assert.Zero(t, prober.callCount("conn"), "stale enabled flag must not start a SQL check")
 	assert.Empty(t, health.sqlComparisonLatest, "stale tick must not restore SQL evidence")
-	assert.Empty(t, health.potentialTiming.sqlLeaders, "stale tick must not restore timing evidence")
+	assert.Empty(t, health.potentialTiming.timing.sqlLeaders, "stale tick must not restore timing evidence")
 	assert.Zero(t, comparisons.Load(), "stale tick must not publish comparison telemetry")
 	assert.Zero(t, missed.Load(), "a stale flag evaluation is not a missed observation")
 	select {
