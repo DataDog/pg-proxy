@@ -73,6 +73,10 @@ or reduction percentages. PR9 retains its own downtime measurements.
 
 ## Comparing with PR9
 
+Both measurements use `leaderTiming` for baseline tracking, matching timestamps,
+and discarding superseded or already-agreed observations. Each caller selects its
+own eligibility rules; hybrid decisions and downtime accounting stay in PR9.
+
 For the same failover and the **same Patroni observation**:
 
 ```text
