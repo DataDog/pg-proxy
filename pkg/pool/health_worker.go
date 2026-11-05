@@ -262,7 +262,9 @@ type PoolHealth struct {
 	// sqlComparisonMu protects the per-IP role cache and each credential's latest raw result. Each
 	// IP's atomic value is updated only by a completed primary or standby result; errors preserve
 	// the last determinate role. It also serializes target invalidation with applying a completed
-	// credential poll to retention and hybrid policy state.
+	// credential poll to retention and hybrid policy state, including DNS retained-set changes.
+	// When both are needed, acquire sqlScheduleMu before sqlComparisonMu; DNS lookup itself
+	// runs outside sqlComparisonMu so it cannot delay completed polls or invalidation.
 	sqlComparisonMu     sync.Mutex
 	sqlComparisonRoles  map[string]*atomic.Bool
 	sqlComparisonLatest map[*sqlHealthTarget]SQLHealthResultsSnapshot
@@ -746,7 +748,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 		}
 		policy.setRoutingEnabled(routingEnabled)
 		decision := policy.observePatroni(poolHealth.state.Snapshot(), time.Now())
-		w.reportHybridDecision(poolHealth, policy, decision, false)
+		w.reportHybridDecision(poolHealth, decision, false)
 	}
 }
 
@@ -897,11 +899,13 @@ func (w *HealthWorker) runSQLHealthGroup(
 		for _, ip := range resolved {
 			resolvedSet[ip] = struct{}{}
 		}
+		group.poolHealth.sqlComparisonMu.Lock()
 		toProbe = group.poolHealth.sqlHealthState.RefreshResolved(
 			resolved,
 			w.absenceThreshold,
 			nil,
 		)
+		group.poolHealth.sqlComparisonMu.Unlock()
 		group.poolHealth.sqlScheduleMu.Unlock()
 	}
 
@@ -941,8 +945,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 	applied := func() bool {
 		poolHealth.sqlComparisonMu.Lock()
 		defer poolHealth.sqlComparisonMu.Unlock()
-		snapshot = poolHealth.recordSQLComparisonPollLocked(target, scheduledAt, time.Now(), candidateIPs, outcome)
-		if snapshot == nil {
+		if !target.acceptsSQLRoundLocked(scheduledAt) {
 			return false
 		}
 		// Preserve independent SQL retention updates, but reject late disabled/retired polls
@@ -955,6 +958,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			}
 		}
 		poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, retainedHealth)
+		// A delayed success can restore an IP evicted by DNS while the probe was running.
+		// Capture membership and roles only after that retention update.
+		snapshot = poolHealth.recordSQLComparisonPollLocked(target, scheduledAt, time.Now(), candidateIPs, outcome)
 		if policy == nil || len(snapshot.retainedIPs) == 0 {
 			return false
 		}
@@ -984,8 +990,8 @@ func (w *HealthWorker) completeSQLHealthCheck(
 	w.reportSQLPatroniComparison(poolHealth, snapshot)
 	if applied {
 		// Cached errors remain evidence for the decision, but are not new probe events.
-		w.reportConclusiveErrors([]completedSQLHealthCheck{{target: target, outcome: outcome}}, decision, policy)
-		w.reportHybridDecision(poolHealth, policy, decision, true)
+		w.reportConclusiveErrors([]completedSQLHealthCheck{{target: target, outcome: outcome}}, decision)
+		w.reportHybridDecision(poolHealth, decision, true)
 	}
 }
 
@@ -1005,17 +1011,16 @@ func (w *HealthWorker) reportSQLPatroniComparison(
 	w.hooks.SQLPatroniCompared(comparison, poolHealth.patroniTags)
 }
 
-func (w *HealthWorker) sqlRoutingTags(tags []string, policy *hybridHealthPolicy) []string {
+func (w *HealthWorker) sqlRoutingTags(tags []string, routingEnabled bool) []string {
 	return append(
 		slices.Clone(tags),
-		"sql_health_routing_enabled:"+strconv.FormatBool(policy.isRoutingEnabled()),
+		"sql_health_routing_enabled:"+strconv.FormatBool(routingEnabled),
 	)
 }
 
 func (w *HealthWorker) reportConclusiveErrors(
 	checks []completedSQLHealthCheck,
 	decision hybridRoutingDecision,
-	policy *hybridHealthPolicy,
 ) {
 	if decision.routingResult != SQLRoutingResultConclusive || w.sqlHooks.ConclusiveError == nil {
 		return
@@ -1025,18 +1030,17 @@ func (w *HealthWorker) reportConclusiveErrors(
 			if !isConclusiveSQLUnroutableError(result.Err) {
 				continue
 			}
-			w.sqlHooks.ConclusiveError(result, w.sqlRoutingTags(check.target.tags, policy))
+			w.sqlHooks.ConclusiveError(result, w.sqlRoutingTags(check.target.tags, decision.routingEnabled))
 		}
 	}
 }
 
 func (w *HealthWorker) reportHybridDecision(
 	poolHealth *PoolHealth,
-	policy *hybridHealthPolicy,
 	decision hybridRoutingDecision,
 	reportIteration bool,
 ) {
-	tags := w.sqlRoutingTags(poolHealth.patroniTags, policy)
+	tags := w.sqlRoutingTags(poolHealth.patroniTags, decision.routingEnabled)
 	if reportIteration && w.sqlHooks.Iteration != nil {
 		w.sqlHooks.Iteration(SQLIteration{
 			RoutingResult:  decision.routingResult,

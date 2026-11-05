@@ -52,9 +52,11 @@ type LeaderRoutingComparison struct {
 }
 
 type hybridRoutingDecision struct {
-	routingResult string
-	health        map[string]bool
-	publish       bool
+	// Capture the mode with the decision; hooks run after the policy lock is released.
+	routingEnabled bool
+	routingResult  string
+	health         map[string]bool
+	publish        bool
 
 	fallbackReason string
 	timeoutType    string
@@ -177,9 +179,10 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	p.patroniHealth = maps.Clone(health)
 	p.patroniUpdatedAt = observedAt
 	decision := hybridRoutingDecision{
-		routingResult: SQLRoutingResultShadow,
-		health:        maps.Clone(health),
-		publish:       !p.routingEnabled,
+		routingEnabled: p.routingEnabled,
+		routingResult:  SQLRoutingResultShadow,
+		health:         maps.Clone(health),
+		publish:        !p.routingEnabled,
 	}
 	decision.leaderDetection = p.observeLeaderLocked("patroni", healthyIPs(health), observedAt)
 	if p.routingEnabled {
@@ -202,7 +205,8 @@ func (p *hybridHealthPolicy) observeSQL(
 	defer p.mu.Unlock()
 
 	decision := hybridRoutingDecision{
-		routingResult: SQLRoutingResultShadow,
+		routingEnabled: p.routingEnabled,
+		routingResult:  SQLRoutingResultShadow,
 	}
 	fallbackReason, timeoutType := sqlHealthFallback(outcome)
 	if fallbackReason == "" {
