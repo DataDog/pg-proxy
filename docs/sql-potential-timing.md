@@ -38,12 +38,19 @@ policy: uncertainty on another IP does not automatically reject a primary here.
 Only primary pool subscriptions produce timing comparisons.
 
 Timing and snapshot acceptance share the same lock and lifecycle validation.
-Rejected completions cannot update timing. Disable or retirement resets timing continuity. DNS eviction removes only the
-evicted addresses from pending observations and baselines, preserving timing for
-retained replacement addresses; evicted results remain excluded from the aggregate. DNS eviction and timing invalidation hold that same
-lock together, so Patroni cannot match a pre-eviction timestamp before the next
-SQL completion. DNS lookup itself stays outside the timing lock. Callbacks run
-after releasing the lock.
+Rejected completions cannot update timing. Disable or retirement resets timing
+continuity. If no completed SQL evidence remains, reference timing pauses until a
+valid SQL completion establishes a fresh baseline. Patroni observations captured
+during the gap cannot be accepted later after resuming. Repeated disabled ticks
+do not reset an enabled sibling's timing.
+
+DNS eviction removes only the evicted addresses from pending observations and
+baselines, preserving timing for retained replacements; evicted results remain
+excluded from the aggregate. Eviction and timing invalidation hold the same lock,
+so Patroni cannot match a pre-eviction timestamp before the next SQL completion.
+Retention is tracked from the first discovery, including while initial SQL polls
+are unfinished. DNS lookup stays outside the timing lock. Callbacks run after
+releasing the lock.
 
 ## Signed speedup
 

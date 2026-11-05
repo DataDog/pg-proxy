@@ -239,6 +239,9 @@ type PoolHealth struct {
 	// Potential timing is telemetry-only and protected by sqlComparisonMu.
 	potentialTiming      potentialTiming
 	potentialRetainedIPs map[string]bool
+	// Pause reference timing when invalidation removes the last completed SQL evidence.
+	potentialPaused    bool
+	potentialResumedAt time.Time
 	// subscriptionTargets associates each pool subscription with its SQL connection string.
 	subscriptionTargets map[HealthUpdates]*sqlHealthTarget
 }
@@ -313,9 +316,7 @@ func (s *PoolHealth) refreshSQLResolved(resolved []string, absenceThreshold int)
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
 	retained := s.sqlHealthState.RefreshResolved(resolved, absenceThreshold, nil)
-	if s.potentialRetainedIPs != nil {
-		s.updateSQLPotentialRetainedLocked(retained)
-	}
+	s.updateSQLPotentialRetainedLocked(retained)
 	return retained
 }
 

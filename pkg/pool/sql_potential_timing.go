@@ -44,10 +44,16 @@ func (p *potentialTiming) observe(sql bool, healthy map[string]bool, at time.Tim
 }
 
 func (s *PoolHealth) resetSQLPotentialTargetLocked(target *sqlHealthTarget) {
-	if _, observed := s.sqlComparisonLatest[target]; observed {
-		// Reset before removing the completed snapshot. A change in the observation population
-		// breaks continuity; do not compare across disable or retirement gaps.
+	_, observed := s.sqlComparisonLatest[target]
+	if observed {
+		// Removing completed evidence changes the aggregate and breaks timing continuity.
 		s.potentialTiming = potentialTiming{}
+	}
+	if len(s.sqlComparisonLatest) == 0 || observed && len(s.sqlComparisonLatest) == 1 {
+		// This runs before deletion. With no completed sibling evidence left, suspend
+		// Patroni tracking until a valid SQL completion establishes a fresh baseline.
+		s.potentialTiming = potentialTiming{}
+		s.potentialPaused = true
 	}
 }
 
@@ -61,6 +67,11 @@ func (s *PoolHealth) observeSQLPotentialSnapshotLocked(snapshot sqlHealthCompari
 		if completed.ObservedAt.After(observedAt) {
 			observedAt = completed.ObservedAt
 		}
+	}
+	if s.potentialPaused {
+		s.potentialTiming = potentialTiming{}
+		s.potentialPaused = false
+		s.potentialResumedAt = observedAt
 	}
 	s.updateSQLPotentialRetainedLocked(snapshot.retainedIPs)
 	healthy := make(map[string]bool)
@@ -106,6 +117,11 @@ func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]
 		}
 	}
 	s.sqlComparisonMu.Lock()
+	if s.potentialPaused || observedAt.Before(s.potentialResumedAt) {
+		// A Patroni poll completed during the gap can be delayed by callbacks or this lock.
+		s.sqlComparisonMu.Unlock()
+		return
+	}
 	comparisons := s.potentialTiming.observe(false, healthy, observedAt)
 	s.sqlComparisonMu.Unlock()
 	w.reportSQLPotential(s, comparisons)
