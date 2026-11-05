@@ -188,11 +188,9 @@ type SQLFallback struct {
 // SQLHealthWorkerHooks reports shadow hybrid-routing decisions. The health worker continues to
 // publish Patroni routing while these callbacks describe what the hybrid policy would choose.
 type SQLHealthWorkerHooks struct {
-	Iteration               func(SQLIteration, []string)
-	ConclusiveError         func(SQLHealthCheckResult, []string)
-	CachedFallback          func(SQLFallback, []string)
-	LeaderDetectionCompared func(LeaderDetectionComparison, []string)
-	LeaderRoutingCompared   func(LeaderRoutingComparison, []string)
+	Iteration       func(SQLIteration, []string)
+	ConclusiveError func(SQLHealthCheckResult, []string)
+	CachedFallback  func(SQLFallback, []string)
 }
 
 // HealthWorkerConfig supplies the application policy for a shared worker.
@@ -1051,12 +1049,6 @@ func (w *HealthWorker) reportHybridDecision(
 			CachedPatroniAge: decision.cachedAge,
 			HasCachedPatroni: decision.hasCachedAge,
 		}, tags)
-	}
-	if decision.leaderDetection != nil && w.sqlHooks.LeaderDetectionCompared != nil {
-		w.sqlHooks.LeaderDetectionCompared(*decision.leaderDetection, tags)
-	}
-	if decision.routingComparison != nil && w.sqlHooks.LeaderRoutingCompared != nil {
-		w.sqlHooks.LeaderRoutingCompared(*decision.routingComparison, tags)
 	}
 }
 
