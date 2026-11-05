@@ -57,21 +57,6 @@ type hybridRoutingDecision struct {
 	routingComparison *LeaderRoutingComparison
 }
 
-type leaderObservation struct {
-	primaryIPs map[string]struct{}
-}
-
-type leaderDetectionPair struct {
-	sqlAt     time.Time
-	patroniAt time.Time
-}
-
-type leaderRoutingPair struct {
-	patroniAt    time.Time
-	hybridAt     time.Time
-	hybridSource string
-}
-
 // hybridHealthPolicy owns the state needed to choose between a complete SQL snapshot and the
 // latest Patroni snapshot. It deliberately does not schedule checks or mutate PoolHealth; the
 // health worker supplies observations and applies the returned decisions.
@@ -82,13 +67,8 @@ type hybridHealthPolicy struct {
 	patroniHealth    map[string]bool
 	patroniUpdatedAt time.Time
 
-	patroniLeaderObservation leaderObservation
-	sqlLeaderObservation     leaderObservation
-	pendingLeaderDetections  map[string]leaderDetectionPair
-
-	patroniRoutingLeaderIP string
-	hybridRoutingLeaderIP  string
-	pendingRouting         map[string]leaderRoutingPair
+	detectionTiming leaderTiming[struct{}]
+	routingTiming   leaderTiming[string]
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
@@ -234,74 +214,31 @@ func healthyIPs(health map[string]bool) []string {
 	return ips
 }
 
-func singleHealthyIP(health map[string]bool) (string, bool) {
-	leader := ""
-	for ip, healthy := range health {
-		if !healthy {
-			continue
-		}
-		if leader != "" {
-			return "", false
-		}
-		leader = ip
-	}
-	return leader, leader != ""
-}
-
 func (p *hybridHealthPolicy) observeLeaderLocked(
 	source string,
 	primaryIPs []string,
 	observedAt time.Time,
 ) *LeaderDetectionComparison {
-	if len(primaryIPs) == 0 {
-		return nil
-	}
-	current := make(map[string]struct{}, len(primaryIPs))
-	for _, ip := range primaryIPs {
-		current[ip] = struct{}{}
-	}
-	var observation *leaderObservation
+	side := referenceLeaderSource
 	switch source {
-	case "patroni":
-		observation = &p.patroniLeaderObservation
 	case "sql":
-		observation = &p.sqlLeaderObservation
+		side = candidateLeaderSource
+	case "patroni":
 	default:
 		return nil
 	}
-	if observation.primaryIPs == nil {
-		observation.primaryIPs = current
+	health := make(map[string]bool, len(primaryIPs))
+	for _, ip := range primaryIPs {
+		health[ip] = true
+	}
+	pairs := p.detectionTiming.observe(side, health, observedAt, struct{}{}, oneNewLeader)
+	if len(pairs) == 0 {
 		return nil
 	}
-	newLeaders := make([]string, 0, len(current))
-	for ip := range current {
-		if _, existed := observation.primaryIPs[ip]; !existed {
-			newLeaders = append(newLeaders, ip)
-		}
-	}
-	observation.primaryIPs = current
-	if len(newLeaders) != 1 {
-		return nil
-	}
-
-	leaderIP := newLeaders[0]
-	if p.pendingLeaderDetections == nil {
-		p.pendingLeaderDetections = make(map[string]leaderDetectionPair)
-	}
-	pair := p.pendingLeaderDetections[leaderIP]
-	if source == "sql" {
-		pair.sqlAt = observedAt
-	} else {
-		pair.patroniAt = observedAt
-	}
-	if pair.sqlAt.IsZero() || pair.patroniAt.IsZero() {
-		p.pendingLeaderDetections[leaderIP] = pair
-		return nil
-	}
-	delete(p.pendingLeaderDetections, leaderIP)
+	pair := pairs[0]
 	return &LeaderDetectionComparison{
-		NewLeaderIP:       leaderIP,
-		Speedup:           pair.patroniAt.Sub(pair.sqlAt),
+		NewLeaderIP:       pair.ip,
+		Speedup:           pair.speedup(),
 		SQLRoutingEnabled: p.routingEnabled,
 	}
 }
@@ -312,47 +249,22 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(
 	observedAt time.Time,
 	hybridSource string,
 ) *LeaderRoutingComparison {
-	leaderIP, unique := singleHealthyIP(health)
-	if !unique {
-		return nil
-	}
-	var previous *string
+	side := referenceLeaderSource
 	switch source {
-	case "patroni":
-		previous = &p.patroniRoutingLeaderIP
 	case "hybrid":
-		previous = &p.hybridRoutingLeaderIP
+		side = candidateLeaderSource
+	case "patroni":
 	default:
 		return nil
 	}
-	if *previous == "" {
-		*previous = leaderIP
+	pairs := p.routingTiming.observe(side, health, observedAt, hybridSource, oneHealthyLeader)
+	if len(pairs) == 0 {
 		return nil
 	}
-	if *previous == leaderIP {
-		return nil
-	}
-	*previous = leaderIP
-	if p.pendingRouting == nil {
-		p.pendingRouting = make(map[string]leaderRoutingPair)
-	}
-	pair := p.pendingRouting[leaderIP]
-	if source == "patroni" {
-		pair.patroniAt = observedAt
-	} else {
-		pair.hybridAt = observedAt
-		pair.hybridSource = hybridSource
-	}
-	if pair.patroniAt.IsZero() || pair.hybridAt.IsZero() {
-		p.pendingRouting[leaderIP] = pair
-		return nil
-	}
-	// Complete only this leader. Hybrid can advance again before Patroni catches up, leaving a
-	// newer leader comparison pending in the same map.
-	delete(p.pendingRouting, leaderIP)
+	pair := pairs[0]
 	return &LeaderRoutingComparison{
-		NewLeaderIP:  leaderIP,
-		Improvement:  pair.patroniAt.Sub(pair.hybridAt),
-		HybridSource: pair.hybridSource,
+		NewLeaderIP:  pair.ip,
+		Improvement:  pair.speedup(),
+		HybridSource: pair.candidate.data,
 	}
 }
