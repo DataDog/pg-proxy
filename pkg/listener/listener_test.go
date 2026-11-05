@@ -126,7 +126,7 @@ func TestListenerHandleStartup(t *testing.T) {
 	bytesChan := make(chan readOutcome, 1)
 	go func() {
 		defer client.Close()
-		session, startupErr := engine.handleStartup(t.Context(), client, &pgproto3.StartupMessage{Parameters: map[string]string{
+		session, startupErr := engine.handleStartup(t.Context(), t.Context(), client, &pgproto3.StartupMessage{Parameters: map[string]string{
 			"user": "testuser", "database": "testdb",
 		}})
 		sessionChan <- startupOutcome{session: session, err: startupErr}
@@ -181,11 +181,11 @@ func TestHandleStartupPassesSessionOptions(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		defer client.Close()
-		_, startupErr := engine.handleStartup(t.Context(), client, &pgproto3.StartupMessage{Parameters: map[string]string{
+		_, startupErr := engine.handleStartup(t.Context(), t.Context(), client, &pgproto3.StartupMessage{Parameters: map[string]string{
 			"user":     "testuser",
 			"database": "testdb",
 			"options": url.QueryEscape(
-				"-c pg_proxy.dynamic_routing=true -c pg_proxy.passthrough_user=true -c pg_proxy.auto_cached_prepared_statements=true",
+				"-c pg_proxy.dynamic_routing=true -c pg_proxy.auto_cached_prepared_statements=true -c pg_proxy.passthrough_user=true",
 			),
 		}})
 		done <- startupErr
@@ -194,8 +194,8 @@ func TestHandleStartupPassesSessionOptions(t *testing.T) {
 	require.NoError(t, <-done)
 	assert.Equal(t, SessionOptions{
 		DynamicRoutingEnabled:        true,
-		PassthroughUser:              true,
 		AutoCachedPreparedStatements: true,
+		PassthroughUser:              true,
 	}, got.Request.Options)
 }
 
@@ -389,7 +389,7 @@ func TestConnectionDrainingWatcherUnblocksIdleSession(t *testing.T) {
 	handleDone := make(chan struct{})
 	go func() {
 		defer close(handleDone)
-		engine.handleConn(server)
+		engine.handleConn(server, func() {})
 	}()
 	ready := make(chan struct{}, 1)
 	errorResponse := make(chan *pgproto3.ErrorResponse, 1)
@@ -594,7 +594,7 @@ func TestHandleStartupRejectsOverServiceLimit(t *testing.T) {
 	errChan := make(chan error, 1)
 	go func() {
 		defer client.Close()
-		_, startupErr := engine.handleStartup(t.Context(), client, &pgproto3.StartupMessage{Parameters: map[string]string{
+		_, startupErr := engine.handleStartup(t.Context(), t.Context(), client, &pgproto3.StartupMessage{Parameters: map[string]string{
 			"user": "limited", "database": "testdb",
 		}})
 		errChan <- startupErr
@@ -623,7 +623,7 @@ func TestHandleStartupRollsBackSlotOnPostRegisterFailure(t *testing.T) {
 	server, client := net.Pipe()
 	server.SetDeadline(time.Now().Add(3 * time.Second))
 	require.NoError(t, client.Close())
-	_, err = engine.handleStartup(t.Context(), server, &pgproto3.StartupMessage{Parameters: map[string]string{
+	_, err = engine.handleStartup(t.Context(), t.Context(), server, &pgproto3.StartupMessage{Parameters: map[string]string{
 		"user": "newservice", "database": "testdb",
 	}})
 	require.Error(t, err)

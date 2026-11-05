@@ -1,6 +1,7 @@
 package scram
 
 import (
+	"errors"
 	"fmt"
 
 	"github.com/DataDog/pg-proxy/pkg/protocol"
@@ -42,14 +43,27 @@ func (e *AuthFailedError) Error() string {
 //
 // password is the one the client has to prove it knows; whether that credential
 // exists and may be used here is the caller's decision, made before calling.
-// username is only checked against the identity in the client-first-message,
-// which PostgreSQL clients leave empty because the startup message already
-// carried it.
+// username is retained for compatibility. As in PostgreSQL, the SCRAM message's
+// username is ignored. The caller must select credentials by startup username.
 //
 // A failure to prove the password is returned as *AuthFailedError, whose message
 // is safe to show the client. Every other error describes a protocol or internal
 // fault and is not a statement about the credential.
-func Authenticate(ex protocol.Exchange, username, password string) error {
+func Authenticate(ex protocol.Exchange, _ string, password string) error {
+	verifier, err := NewVerifier(password)
+	if err != nil {
+		return err
+	}
+	return AuthenticateVerifier(ex, verifier)
+}
+
+// AuthenticateVerifier runs the same PostgreSQL exchange using stored
+// credentials, without needing the plaintext password. verifier is immutable and
+// may be shared across connections. The caller must select it by startup username.
+func AuthenticateVerifier(ex protocol.Exchange, verifier *Verifier) error {
+	if err := verifier.Validate(); err != nil {
+		return err
+	}
 	state := &messageState{}
 
 	// Step 1: Inform the client that we support the SCRAM-SHA-256 SASL mechanism
@@ -69,18 +83,18 @@ func Authenticate(ex protocol.Exchange, username, password string) error {
 		// attacker-controlled text of arbitrary length there.
 		return fmt.Errorf("expected client to send SASLInitialResponse request, but received: %T", encMsg)
 	}
+	if initialResponse.AuthMechanism != mechanism {
+		return errors.New("unsupported SCRAM mechanism")
+	}
+	if len(initialResponse.Data) > 16<<10 {
+		return errors.New("SCRAM message exceeds size limit")
+	}
 	if err := state.setClientFirstMessage(initialResponse); err != nil {
 		return fmt.Errorf("error processing client first message: %w", err)
 	}
 
-	// Verify the username - PostgreSQL SCRAM clients send empty username in SCRAM exchange
-	// since the username was already provided in the startup message
-	if err := state.validateUsername(username); err != nil {
-		return err
-	}
-
 	// Step 3: Send the server-first-message
-	if err := state.setServerFirstMessage(); err != nil {
+	if err := state.setVerifierChallenge(verifier); err != nil {
 		return fmt.Errorf("error generating server first message: %w", err)
 	}
 	if err := ex.Send(&pgproto3.AuthenticationSASLContinue{Data: state.ServerFirstMessage.Encode()}); err != nil {
@@ -96,16 +110,21 @@ func Authenticate(ex protocol.Exchange, username, password string) error {
 	if !ok {
 		return fmt.Errorf("expected client to send SASLResponse request, but received: %T", encMsg)
 	}
-	state.setClientFinalMessage(response)
+	if len(response.Data) > 16<<10 {
+		return errors.New("SCRAM message exceeds size limit")
+	}
+	if err := state.setClientFinalMessage(response); err != nil {
+		return err
+	}
 
 	// Verify the SCRAM authentication
-	if err := state.verifyAuthentication(password); err != nil {
+	if err := state.verifyVerifier(verifier); err != nil {
 		return &AuthFailedError{Reason: err}
 	}
 
 	// Step 5: Send the server-final-message
-	state.setServerFinalMessage(password)
-	if err := ex.Send(&pgproto3.AuthenticationSASLFinal{Data: state.ServerFinalMessage.Encode()}); err != nil {
+	serverFinal := []byte("v=" + state.serverSignature(verifier))
+	if err := ex.Send(&pgproto3.AuthenticationSASLFinal{Data: serverFinal}); err != nil {
 		return fmt.Errorf("error sending AuthenticationSASLFinal message to client: %w", err)
 	}
 

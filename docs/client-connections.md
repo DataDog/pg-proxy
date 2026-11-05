@@ -54,10 +54,11 @@ For a CA-issued server certificate, use that CA's root bundle as `sslrootcert`.
 Client `sslmode=require` requests encryption without guaranteeing hostname
 verification; prefer `verify-full` when verifying the proxy's identity.
 
-The command still requires a loopback listener and trusts clients that use the
-configured backend username. TLS encrypts that connection and lets clients
-verify the proxy's identity. Client certificate authentication (mTLS) and
-password/JWT authentication are not implemented by the command.
+The command defaults to loopback trust using the configured backend username.
+Opt-in [password/SCRAM authentication](client-authentication.md) allows non-loopback
+listeners with required TLS and explicit database grants. TLS encrypts connections
+and lets clients verify the proxy's identity. Client certificate authentication
+(mTLS) and JWT authentication remain unsupported by the command.
 
 ### Other poolers
 

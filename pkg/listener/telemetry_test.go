@@ -83,7 +83,7 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 
 	admission.RegisterService("limited", 0)
 	rejected := newBufferConn(nil)
-	_, err = engine.handleStartup(t.Context(), rejected, &pgproto3.StartupMessage{Parameters: map[string]string{
+	_, err = engine.handleStartup(t.Context(), t.Context(), rejected, &pgproto3.StartupMessage{Parameters: map[string]string{
 		"user": "limited", "database": "testdb",
 	}})
 	require.Error(t, err)
@@ -93,7 +93,7 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 		Parameters:      map[string]string{"user": "successful", "database": "testdb"},
 	}).Encode(nil)
 	require.NoError(t, err)
-	engine.handleConn(newBufferConn(startup))
+	engine.handleConn(newBufferConn(startup), func() {})
 
 	assert.Equal(t, []listenerMetricCall{
 		{

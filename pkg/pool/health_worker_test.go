@@ -3,6 +3,8 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -731,14 +733,15 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	assert.NoError(t, health.sqlComparisonLatest[b].Results[0].Err)
 	assert.Empty(t, conclusiveErrors, "a timeout resolved by another credential is still an indeterminate error")
 
-	// Once all latest credential results are unknown, the remembered comparison role must
-	// not mask that uncertainty in hybrid evaluation.
+	// Once all latest credential results are unknown, comparison and hybrid evaluation must
+	// both stop relying on the previous successful observations.
 	complete(a, t0.Add(2*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	complete(b, t0.Add(2*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
 	assert.Equal(t, SQLHealthFallbackTimeout, iterations[len(iterations)-1].FallbackReason)
-	assert.True(t, health.sqlComparisonRoles[ip].Load(), "PR #6's remembered comparison role stays separate")
+	snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{ip: {}}, health.sqlComparisonLatest)
+	assert.Empty(t, snapshot.health, "comparison must derive roles from the latest credential results")
 
 	// Determinate shutdown evidence resolves the same-IP timeouts and is reported once.
 	shutdown := &pgconn.PgError{Code: "57P01"}
@@ -1092,6 +1095,15 @@ func TestScheduleSQLRefreshPublishesUnavailableObservationForMissedInterval(t *t
 	require.NoError(t, err)
 	t.Cleanup(sqlUpdates.Close)
 
+	comparisons := make(chan SQLPatroniHealthSnapshot, 2)
+	w.hooks.SQLPatroniCompared = func(snapshot SQLPatroniHealthSnapshot, _ []string) {
+		comparisons <- snapshot
+	}
+	target := health.sqlTargetValues()[0]
+	previousAt := time.Now().Add(-time.Second)
+	health.recordSQLComparisonPoll(target, 0, previousAt, previousAt, []string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
+
 	firstScheduledAt := time.Now()
 	w.scheduleSQLRefresh(firstScheduledAt)
 	select {
@@ -1115,13 +1127,33 @@ func TestScheduleSQLRefreshPublishesUnavailableObservationForMissedInterval(t *t
 	assert.False(t, missed.Writable)
 	assert.ErrorIs(t, missed.Err, ErrSQLHealthCheckMissed)
 
+	health.sqlComparisonMu.Lock()
+	assert.Equal(t, previousAt, health.sqlComparisonLatest[target].ScheduledAt,
+		"a missed tick must preserve the current credential result")
+	assert.Zero(t, target.sqlComparisonGeneration, "a missed tick must not invalidate the running poll")
+	health.sqlComparisonMu.Unlock()
+	select {
+	case <-comparisons:
+		t.Fatal("a missed tick must not publish a comparison")
+	default:
+	}
+
 	retryReleasedAt := time.Now()
 	releaseRetry()
-	assert.Eventually(t, func() bool { return !health.sqlTargetValues()[0].sqlRoundRunning() }, time.Second, time.Millisecond)
+	assert.Eventually(t, func() bool { return !target.sqlRoundRunning() }, time.Second, time.Millisecond)
 	late := receiveSQLHealthObservation(t, sqlUpdates)
 	assert.Equal(t, firstScheduledAt, late.ScheduledAt)
 	assert.False(t, late.ObservedAt.Before(retryReleasedAt))
 	assert.True(t, late.Writable)
+	select {
+	case comparison := <-comparisons:
+		assert.Equal(t, map[string]bool{ip: true}, comparison.SQLHealth)
+		require.Len(t, comparison.SQLResults, 1)
+		assert.Equal(t, firstScheduledAt, comparison.SQLResults[0].ScheduledAt,
+			"the running poll is accepted despite the newer missed interval")
+	case <-time.After(time.Second):
+		t.Fatal("completed poll did not publish its comparison")
+	}
 
 	nextScheduledAt := time.Now()
 	w.scheduleSQLRefresh(nextScheduledAt)
@@ -1192,6 +1224,151 @@ func TestScheduleSQLRefreshReportsMissedBeforeBlockedLookupCompletes(t *testing.
 		}
 		return true
 	}, time.Second, time.Millisecond)
+}
+
+func TestScheduleSQLRefreshPublishesDisabledObservationWhileRoundIsBusy(t *testing.T) {
+	const ip = "10.0.0.1"
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	sqlProber := &blockingRetrySQLHealthProber{
+		retryStarted: make(chan struct{}),
+		releaseRetry: make(chan struct{}),
+	}
+	var releaseOnce sync.Once
+	releaseRetry := func() { releaseOnce.Do(func() { close(sqlProber.releaseRetry) }) }
+	t.Cleanup(releaseRetry)
+	checker := newTestSQLHealthChecker(t, sqlProber, 2, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+
+	var checksEnabled atomic.Bool
+	checksEnabled.Store(true)
+	healthUpdates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "conn" },
+		ChecksEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
+			return validSQLHealthFeatureFlag(checksEnabled.Load())
+		},
+	})
+	health := receivePoolHealth(t, healthUpdates)
+	t.Cleanup(func() { w.Unsubscribe(healthUpdates) })
+	sqlUpdates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+
+	comparisons := make(chan SQLPatroniHealthSnapshot, 1)
+	w.hooks.SQLPatroniCompared = func(snapshot SQLPatroniHealthSnapshot, _ []string) {
+		comparisons <- snapshot
+	}
+
+	firstScheduledAt := time.Now()
+	w.scheduleSQLRefresh(firstScheduledAt)
+	select {
+	case <-sqlProber.retryStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not start its retry")
+	}
+
+	checksEnabled.Store(false)
+	disabledAt := time.Now()
+	w.scheduleSQLRefresh(disabledAt)
+	disabled := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.Equal(t, disabledAt, disabled.ScheduledAt)
+	assert.Equal(t, disabledAt, disabled.ObservedAt)
+	assert.True(t, disabled.Disabled)
+	assert.Equal(t, 2, sqlProber.callCount(), "disabled interval must not start another check")
+
+	checksEnabled.Store(true)
+	releaseRetry()
+	late := receiveSQLHealthObservation(t, sqlUpdates)
+	assert.Equal(t, firstScheduledAt, late.ScheduledAt)
+	assert.True(t, late.Writable)
+	target := health.sqlTargetValues()[0]
+	require.Eventually(t, func() bool { return !target.sqlRoundRunning() }, time.Second, time.Millisecond)
+	select {
+	case <-comparisons:
+		t.Fatal("pre-disable completion restored the comparison after re-enable")
+	default:
+	}
+	w.RefreshSQL()
+	select {
+	case comparison := <-comparisons:
+		assert.Equal(t, map[string]bool{ip: true}, comparison.SQLHealth)
+		require.Len(t, comparison.SQLResults, 1)
+		assert.True(t, comparison.SQLResults[0].ScheduledAt.After(disabledAt))
+	case <-time.After(time.Second):
+		t.Fatal("fresh poll after re-enable did not publish a comparison")
+	}
+}
+
+func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
+	const ip = "10.0.0.1"
+	w := newTestWorker(newMockProber(map[string][]string{"primary.local": {ip}}, ip))
+	prober := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{"conn": {{}}},
+		calls:     make(map[string]int),
+	}
+	checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	var enabled atomic.Bool
+	enabled.Store(true)
+	var evaluations atomic.Int32
+	flagRead := make(chan struct{})
+	releaseFlag := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFlag) }) }
+	defer release()
+	healthUpdates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "conn" },
+		ChecksEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
+			value := enabled.Load()
+			if evaluations.Add(1) == 1 {
+				close(flagRead)
+				<-releaseFlag
+			}
+			return validSQLHealthFeatureFlag(value)
+		},
+	})
+	health := receivePoolHealth(t, healthUpdates)
+	t.Cleanup(func() { w.Unsubscribe(healthUpdates) })
+	sqlUpdates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+	var comparisons, missed atomic.Int32
+	w.hooks.SQLPatroniCompared = func(SQLPatroniHealthSnapshot, []string) { comparisons.Add(1) }
+	w.hooks.SQLCheckMissed = func([]string) { missed.Add(1) }
+	group := w.sqlHealthGroups()[0]
+	oldAt := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.runSQLHealthGroup(group, oldAt, true)
+	}()
+	select {
+	case <-flagRead:
+	case <-time.After(time.Second):
+		t.Fatal("older tick did not evaluate the check flag")
+	}
+	enabled.Store(false)
+	w.runSQLHealthGroup(group, oldAt.Add(time.Second), true)
+	require.True(t, receiveSQLHealthObservation(t, sqlUpdates).Disabled)
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("older tick did not finish")
+	}
+	assert.Zero(t, prober.callCount("conn"), "stale enabled flag must not start a SQL check")
+	assert.Empty(t, health.sqlComparisonLatest, "stale tick must not restore SQL evidence")
+	assert.Zero(t, comparisons.Load(), "stale tick must not publish comparison telemetry")
+	assert.Zero(t, missed.Load(), "a stale flag evaluation is not a missed observation")
+	select {
+	case observation := <-sqlUpdates.Updates():
+		t.Fatalf("stale tick published an availability observation: %+v", observation)
+	default:
+	}
+	enabled.Store(true)
+	w.RefreshSQL()
+	assert.Equal(t, 1, prober.callCount("conn"), "a fresh enabled tick must still run")
+	assert.Equal(t, int32(1), comparisons.Load())
 }
 
 func TestSQLHealthRoundRejectsStaleWritableResult(t *testing.T) {
@@ -1913,58 +2090,6 @@ func TestSubscribePreservesSubscriptionTags(t *testing.T) {
 	}
 }
 
-func TestScheduleSQLRefreshPublishesDisabledObservationWhileRoundIsBusy(t *testing.T) {
-	const ip = "10.0.0.1"
-	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
-	w := newTestWorker(patroniProber)
-	sqlProber := &blockingRetrySQLHealthProber{
-		retryStarted: make(chan struct{}),
-		releaseRetry: make(chan struct{}),
-	}
-	var releaseOnce sync.Once
-	releaseRetry := func() { releaseOnce.Do(func() { close(sqlProber.releaseRetry) }) }
-	t.Cleanup(releaseRetry)
-	checker := newTestSQLHealthChecker(t, sqlProber, 2, SQLHealthCheckHooks{})
-	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
-
-	var checksEnabled atomic.Bool
-	checksEnabled.Store(true)
-	healthUpdates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
-		ConnStringForIP: func(string) string { return "conn" },
-		ChecksEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
-			return validSQLHealthFeatureFlag(checksEnabled.Load())
-		},
-	})
-	health := receivePoolHealth(t, healthUpdates)
-	t.Cleanup(func() { w.Unsubscribe(healthUpdates) })
-	sqlUpdates, err := health.SubscribeSQLHealth()
-	require.NoError(t, err)
-	t.Cleanup(sqlUpdates.Close)
-
-	firstScheduledAt := time.Now()
-	w.scheduleSQLRefresh(firstScheduledAt)
-	select {
-	case <-sqlProber.retryStarted:
-	case <-time.After(time.Second):
-		t.Fatal("SQL health check did not start its retry")
-	}
-
-	checksEnabled.Store(false)
-	disabledAt := time.Now()
-	w.scheduleSQLRefresh(disabledAt)
-	disabled := receiveSQLHealthObservation(t, sqlUpdates)
-	assert.Equal(t, disabledAt, disabled.ScheduledAt)
-	assert.Equal(t, disabledAt, disabled.ObservedAt)
-	assert.True(t, disabled.Disabled)
-	assert.Equal(t, 2, sqlProber.callCount(), "disabled interval must not start another check")
-
-	checksEnabled.Store(true)
-	releaseRetry()
-	late := receiveSQLHealthObservation(t, sqlUpdates)
-	assert.Equal(t, firstScheduledAt, late.ScheduledAt)
-	assert.True(t, late.Writable)
-}
-
 func TestSQLPatroniHealthSnapshotReportsAllFindings(t *testing.T) {
 	probeErr := errors.New("database is shutting down")
 	now := time.Now()
@@ -2061,111 +2186,100 @@ func TestSQLPatroniHealthSnapshotDoesNotIgnoreEvictedCandidateIP(t *testing.T) {
 		"an evicted IP in a historical raw snapshot must still count as a membership disagreement")
 }
 
-func TestSQLComparisonPublishesEachCredentialCompletionAndLastDeterminateRoleWins(t *testing.T) {
+func TestSQLComparisonDerivesConflictsIndependentOfCompletionOrder(t *testing.T) {
 	const ip = "10.0.0.1"
-	state := NewHealthState()
-	state.Track([]string{ip})
-	poolHealth := &PoolHealth{sqlHealthState: state}
-	primaryTarget := &sqlHealthTarget{tags: []string{"database:orders"}}
-	standbyTarget := &sqlHealthTarget{tags: []string{"database:billing"}}
-	roundOne := time.Now()
-	roundTwo := roundOne.Add(time.Second)
+	for _, primaryFirst := range []bool{true, false} {
+		t.Run(fmt.Sprintf("primaryFirst=%t", primaryFirst), func(t *testing.T) {
+			state := NewHealthState()
+			state.Track([]string{ip})
+			poolHealth := &PoolHealth{sqlHealthState: state, state: NewHealthState()}
+			primaryTarget := &sqlHealthTarget{tags: []string{"database:orders"}}
+			standbyTarget := &sqlHealthTarget{tags: []string{"database:billing"}}
+			targets := []*sqlHealthTarget{primaryTarget, standbyTarget}
+			if !primaryFirst {
+				slices.Reverse(targets)
+			}
+			now := time.Now()
+			var snapshot *sqlHealthComparisonSnapshot
+			for i, target := range targets {
+				snapshot = poolHealth.recordSQLComparisonPoll(target, 0, now, now.Add(time.Duration(i)*time.Second),
+					[]string{ip}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{
+						IP: ip, InRecovery: target == standbyTarget,
+					}}})
+				require.NotNil(t, snapshot)
+				assert.Len(t, snapshot.results, i+1, "each credential completion is published independently")
+			}
+			assert.Empty(t, snapshot.health)
+			assert.Equal(t, []string{ip}, snapshot.conflictingIPs)
+			w := &HealthWorker{hooks: HealthWorkerHooks{
+				SQLPatroniCompared: func(comparison SQLPatroniHealthSnapshot, _ []string) {
+					assert.Equal(t, []string{ip}, comparison.SQLConflictingIPs)
+					for _, patroniRole := range []bool{true, false} {
+						comparison.PatroniHealth = map[string]bool{ip: patroniRole}
+						assert.False(t, comparison.Matches(), "a conflict cannot match either Patroni role")
+					}
+				},
+			}}
+			w.reportSQLPatroniComparison(poolHealth, snapshot)
 
-	primarySnapshot := poolHealth.recordSQLComparisonPoll(
-		primaryTarget,
-		0,
-		roundOne,
-		roundOne.Add(100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}},
-	)
-	assert.Equal(t, map[string]bool{ip: true}, primarySnapshot.health)
-	require.Len(t, primarySnapshot.results, 1)
-
-	standbySnapshot := poolHealth.recordSQLComparisonPoll(
-		standbyTarget,
-		0,
-		roundTwo,
-		roundTwo.Add(100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}},
-	)
-	assert.Equal(t, map[string]bool{ip: false}, standbySnapshot.health,
-		"the later determinate result may overwrite the earlier role")
-	require.Len(t, standbySnapshot.results, 2)
+			// The standby credential's next poll agrees: only its latest observations contribute.
+			snapshot = poolHealth.recordSQLComparisonPoll(standbyTarget, 0, now.Add(time.Second), now.Add(2*time.Second),
+				[]string{ip}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
+			assert.Equal(t, map[string]bool{ip: true}, snapshot.health)
+			assert.Empty(t, snapshot.conflictingIPs)
+			assert.Len(t, snapshot.results, 2)
+		})
+	}
 }
 
-func TestSQLComparisonErrorsDoNotOverwriteLastDeterminateRole(t *testing.T) {
+func TestSQLComparisonInconclusivePollReplacesPreviousRoleWithUnknown(t *testing.T) {
 	const ip = "10.0.0.1"
-	state := NewHealthState()
-	state.Track([]string{ip})
-	poolHealth := &PoolHealth{sqlHealthState: state}
-	primaryTarget := &sqlHealthTarget{tags: []string{"database:orders"}}
-	timeoutTarget := &sqlHealthTarget{tags: []string{"database:billing"}}
-	shutdownTarget := &sqlHealthTarget{tags: []string{"database:inventory"}}
-	now := time.Now()
-	shutdownErr := errors.New("database is shutting down")
+	for _, inRecovery := range []bool{false, true} {
+		for _, probeErr := range []error{context.DeadlineExceeded, errors.New("database is shutting down")} {
+			t.Run(fmt.Sprintf("inRecovery=%t/%s", inRecovery, probeErr), func(t *testing.T) {
+				state := NewHealthState()
+				state.Track([]string{ip})
+				poolHealth := &PoolHealth{sqlHealthState: state}
+				target := &sqlHealthTarget{tags: []string{"database:orders"}}
+				now := time.Now()
+				poolHealth.recordSQLComparisonPoll(target, 0, now, now, []string{ip},
+					SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: inRecovery}}})
 
-	poolHealth.recordSQLComparisonPoll(
-		primaryTarget,
-		0,
-		now,
-		now.Add(100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}},
-	)
-	timeoutSnapshot := poolHealth.recordSQLComparisonPoll(
-		timeoutTarget,
-		0,
-		now.Add(time.Second),
-		now.Add(1100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{
-			IP: ip, Err: context.DeadlineExceeded, Stage: SQLHealthCheckAcquireStage,
-		}}},
-	)
-	assert.Equal(t, map[string]bool{ip: true}, timeoutSnapshot.health)
+				snapshot := poolHealth.recordSQLComparisonPoll(target, 0, now.Add(time.Second), now.Add(time.Second), []string{ip},
+					SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, Err: probeErr, Stage: SQLHealthCheckQueryStage}}})
+				assert.Empty(t, snapshot.health, "an error must not resurrect this target's previous successful role")
+				assert.Empty(t, snapshot.conflictingIPs)
+				require.Len(t, snapshot.results, 1)
+				assert.ErrorIs(t, snapshot.results[0].Results[0].Err, probeErr)
+				assert.Equal(t, SQLHealthCheckQueryStage, snapshot.results[0].Results[0].Stage)
+				assert.True(t, SQLPatroniHealthSnapshot{
+					SQLHealth: snapshot.health, SQLRetainedIPs: snapshot.retainedIPs, PatroniHealth: map[string]bool{ip: true},
+				}.Matches(), "unknown remains neutral under the comparison policy")
 
-	shutdownSnapshot := poolHealth.recordSQLComparisonPoll(
-		shutdownTarget,
-		0,
-		now.Add(2*time.Second),
-		now.Add(2100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{
-			IP: ip, Err: shutdownErr, Stage: SQLHealthCheckQueryStage,
-		}}},
-	)
-	assert.Equal(t, map[string]bool{ip: true}, shutdownSnapshot.health,
-		"neither timeout nor non-timeout errors may overwrite the determinate role")
-	require.Len(t, shutdownSnapshot.results, 3)
-	assert.ErrorIs(t, shutdownSnapshot.results[1].Results[0].Err, context.DeadlineExceeded)
-	assert.ErrorIs(t, shutdownSnapshot.results[2].Results[0].Err, shutdownErr)
+				// A different credential's current successful result can supply the unknown role.
+				otherTarget := &sqlHealthTarget{tags: []string{"database:billing"}}
+				snapshot = poolHealth.recordSQLComparisonPoll(otherTarget, 0, now.Add(time.Second), now.Add(time.Second), []string{ip},
+					SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
+				assert.Equal(t, map[string]bool{ip: false}, snapshot.health)
+				assert.Empty(t, snapshot.conflictingIPs)
+			})
+		}
+	}
 }
 
-func TestSQLComparisonReportsErrorOnlyIPAsUnknown(t *testing.T) {
+func TestSQLComparisonEmptyPollReplacesPreviousResults(t *testing.T) {
 	const ip = "10.0.0.1"
 	state := NewHealthState()
 	state.Track([]string{ip})
 	poolHealth := &PoolHealth{sqlHealthState: state}
-	target := &sqlHealthTarget{tags: []string{"database:orders"}}
+	target := &sqlHealthTarget{}
 	now := time.Now()
-
-	snapshot := poolHealth.recordSQLComparisonPoll(
-		target,
-		0,
-		now,
-		now.Add(100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, Err: context.DeadlineExceeded}}},
-	)
+	poolHealth.recordSQLComparisonPoll(target, 0, now, now, []string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
+	snapshot := poolHealth.recordSQLComparisonPoll(target, 0, now, now, []string{ip}, SQLHealthCheckOutcome{})
 	assert.Empty(t, snapshot.health)
-	assert.True(t, SQLPatroniHealthSnapshot{
-		SQLHealth:      snapshot.health,
-		SQLRetainedIPs: snapshot.retainedIPs,
-		SQLResults:     snapshot.results,
-		PatroniHealth:  map[string]bool{ip: true},
-	}.Matches(), "an IP with no determinate SQL result remains neutral")
+	require.Len(t, snapshot.results, 1)
+	assert.Empty(t, snapshot.results[0].Results)
 }
 
 func TestSQLComparisonDoesNotRestoreRetiredTarget(t *testing.T) {
@@ -2176,29 +2290,23 @@ func TestSQLComparisonDoesNotRestoreRetiredTarget(t *testing.T) {
 	target := &sqlHealthTarget{tags: []string{"database:orders"}}
 	now := time.Now()
 
-	initial := poolHealth.recordSQLComparisonPoll(
-		target,
-		0,
-		now,
-		now.Add(100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}},
-	)
+	initial := poolHealth.recordSQLComparisonPoll(target, 0, now, now, []string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
 	require.NotNil(t, initial)
-	require.Contains(t, poolHealth.sqlComparisonLatest, target)
-
 	poolHealth.retireSQLComparisonTarget(target)
-	late := poolHealth.recordSQLComparisonPoll(
-		target,
-		0,
-		now.Add(time.Second),
-		now.Add(1100*time.Millisecond),
-		[]string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}},
-	)
-
+	late := poolHealth.recordSQLComparisonPoll(target, 0, now, now, []string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
 	assert.Nil(t, late, "a completion after the last unsubscribe must not restore the target")
 	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
+	_, started, _ := poolHealth.reserveSQLComparisonPoll(target, now, 0, true)
+	assert.False(t, started, "a retired target cannot start another poll")
+
+	// A new subscription with the same tags has a distinct identity; the old role is gone.
+	replacement := &sqlHealthTarget{tags: slices.Clone(target.tags)}
+	snapshot := poolHealth.recordSQLComparisonPoll(replacement, 0, now, now, []string{ip},
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, Err: context.DeadlineExceeded}}})
+	assert.Empty(t, snapshot.health)
+	require.Len(t, snapshot.results, 1)
 }
 
 func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
@@ -2208,37 +2316,40 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	poolHealth := &PoolHealth{sqlHealthState: state}
 	target := &sqlHealthTarget{}
 	oldRound := time.Now()
-	generation, started := poolHealth.reserveSQLComparisonPoll(target, oldRound)
+	generation, started, _ := poolHealth.reserveSQLComparisonPoll(target, oldRound, 0, true)
 	require.True(t, started)
-	initial := poolHealth.recordSQLComparisonPoll(target, generation, oldRound, oldRound, []string{ip},
+	poolHealth.recordSQLComparisonPoll(target, generation, oldRound, oldRound, []string{ip},
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
-	require.NotNil(t, initial)
+	poolHealth.disableSQLComparisonTarget(target)
 	poolHealth.disableSQLComparisonTarget(target)
 	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
+	poolHealth.sqlComparisonMu.Lock()
+	current := buildSQLHealthComparisonSnapshot(map[string]struct{}{ip: {}}, poolHealth.sqlComparisonLatest)
+	poolHealth.sqlComparisonMu.Unlock()
+	assert.Empty(t, current.health, "disabling removes this credential's contribution to the aggregate")
 
-	// Re-enabling while the old check is busy must not admit its stale completion.
-	_, started = poolHealth.reserveSQLComparisonPoll(target, oldRound.Add(time.Second))
+	// Re-enabling while the old check is busy cannot start a competing check.
+	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, oldRound.Add(time.Second), poolHealth.currentSQLComparisonGeneration(target), true)
 	assert.False(t, started)
 	late := poolHealth.recordSQLComparisonPoll(target, generation, oldRound, oldRound.Add(time.Second), []string{ip},
-		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
-	assert.Nil(t, late)
-	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
-	assert.True(t, poolHealth.sqlComparisonRoles[ip].Load(), "a stale completion must not overwrite the role")
+		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
+	assert.Nil(t, late, "a pre-disable completion must not restore comparison state after re-enable")
 	target.finishSQLRound(oldRound)
 
-	// Even a regressed clock is valid in the new lifecycle: no timestamp cutoff applies.
+	// Even a regressed wall clock is valid in the new lifecycle: no timestamp cutoff applies.
 	newRound := oldRound.Add(-time.Second)
-	freshGeneration, started := poolHealth.reserveSQLComparisonPoll(target, newRound)
+	freshGeneration, started, _ := poolHealth.reserveSQLComparisonPoll(target, newRound, poolHealth.currentSQLComparisonGeneration(target), true)
 	require.True(t, started)
 	require.NotEqual(t, generation, freshGeneration)
 	fresh := poolHealth.recordSQLComparisonPoll(target, freshGeneration, newRound, newRound, []string{ip},
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
 	require.NotNil(t, fresh)
 	assert.Equal(t, map[string]bool{ip: false}, fresh.health)
+	assert.Contains(t, poolHealth.sqlComparisonLatest, target)
 	target.finishSQLRound(newRound)
 
 	poolHealth.retireSQLComparisonTarget(target)
-	_, started = poolHealth.reserveSQLComparisonPoll(target, newRound.Add(time.Second))
+	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, newRound.Add(time.Second), freshGeneration, true)
 	assert.False(t, started, "a retired target cannot start another poll")
 }
 
@@ -2379,4 +2490,20 @@ func TestHybridTelemetryUsesDecisionRoutingMode(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSQLComparisonIgnoresEvictedResultsButPreservesDiagnostics(t *testing.T) {
+	oldIP, newIP := "10.0.0.1", "10.0.0.2"
+	target := &sqlHealthTarget{}
+	snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{newIP: {}}, map[*sqlHealthTarget]SQLHealthResultsSnapshot{
+		target: {CandidateIPs: []string{oldIP, newIP}, Results: []SQLHealthCheckResult{{IP: oldIP}, {IP: newIP}}},
+	})
+	assert.Equal(t, map[string]bool{newIP: true}, snapshot.health)
+	assert.Equal(t, []string{newIP}, snapshot.retainedIPs)
+	require.Len(t, snapshot.results, 1)
+	assert.Len(t, snapshot.results[0].Results, 2)
+	assert.False(t, SQLPatroniHealthSnapshot{
+		SQLHealth: snapshot.health, SQLRetainedIPs: snapshot.retainedIPs,
+		PatroniHealth: map[string]bool{oldIP: false, newIP: true},
+	}.Matches())
 }
