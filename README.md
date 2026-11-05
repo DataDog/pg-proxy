@@ -235,10 +235,12 @@ authentication, TLS, and cancellation tests. See the
 
 The [protocol harness](docs/protocol-verification.md) compares deterministic raw
 PostgreSQL conversations through the proxy and two direct controls. It checks
-ordered wire responses, committed effects, COPY recovery, and prepared-statement
-isolation between simultaneous clients. Its dedicated
-CI job runs with Docker and a pinned public PostgreSQL image; it needs no
-Datadog account or private registry.
+ordered wire responses, committed effects, COPY framing, and prepared-statement
+isolation between simultaneous clients. Default CI executes 78 variants and
+visibly skips 16 retained reproducers for known COPY bugs. The guide includes
+the strict opt-in command and removal conditions. The dedicated CI job uses
+Docker and a pinned public PostgreSQL image; it needs no Datadog account or
+private registry.
 
 ```sh
 go test ./internal/protocoltest
