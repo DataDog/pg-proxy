@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/puddle/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -148,7 +149,7 @@ func TestSQLHealthCheckPoolAgainstPostgres(t *testing.T) {
 	assert.Equal(t, 1, healthCheckConnections)
 }
 
-func TestSQLHealthWorkerLateCredentialResultDoesNotReplaceNewPrimaryOrRetainOldConnections(t *testing.T) {
+func TestSQLHealthWorkerHostWideRoundPreventsStaleCredentialOverlap(t *testing.T) {
 	ctx, connString, connConfig := startSQLHealthCheckIntegrationPostgres(t)
 	oldIP := connConfig.Host
 	replacementIP := "127.0.0.1"
@@ -251,27 +252,40 @@ func TestSQLHealthWorkerLateCredentialResultDoesNotReplaceNewPrimaryOrRetainOldC
 		return !fastTarget.sqlRoundRunning()
 	}, time.Second, time.Millisecond, "fast credential did not finish the old round")
 
-	// A newer round resolves the replacement. The still-running slow target is skipped, while the
-	// fast target executes real queries and promotes the DNS-vouched replacement.
+	// DNS changes while the slow credential is still finishing its older round. The next refresh
+	// independently restarts the fast credential and records the replacement in the new snapshot.
 	patroniProber.setIPs(replacementIP)
 	w.RefreshSQL()
+	fastPools.mu.Lock()
+	_, fastReplacementCreated := fastPools.pools[replacementIP]
+	fastPools.mu.Unlock()
+	assert.True(t, fastReplacementCreated,
+		"an idle credential should probe the replacement without waiting for another credential")
+
 	releaseSlow()
 	select {
 	case <-oldRoundDone:
 	case <-time.After(time.Second):
 		t.Fatal("old SQL round did not finish after releasing the slow credential")
 	}
+	for _, target := range health.sqlTargetValues() {
+		assert.False(t, target.sqlRoundRunning())
+	}
 
-	// The delayed old result must not replace the newer address. The next refresh evicts the old
-	// address and closes both credential-specific pools while retaining live replacement pools.
+	// The next round lets both credentials confirm the replacement. The following round applies DNS
+	// absence cleanup and closes both old probe pools.
+	w.RefreshSQL()
 	w.RefreshSQL()
 	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Resolved())
 	assert.Equal(t, 1, slowPools.Len())
 	assert.Equal(t, 1, fastPools.Len())
-	_, err = slowOldPool.Acquire(context.Background())
-	assert.ErrorIs(t, err, puddle.ErrClosedPool)
-	_, err = fastOldPool.Acquire(context.Background())
-	assert.ErrorIs(t, err, puddle.ErrClosedPool)
+	for _, oldPool := range []*pgxpool.Pool{slowOldPool, fastOldPool} {
+		conn, acquireErr := oldPool.Acquire(context.Background())
+		if acquireErr == nil {
+			conn.Release()
+		}
+		assert.ErrorIs(t, acquireErr, puddle.ErrClosedPool)
+	}
 
 	for _, pools := range []*SQLHealthCheckPools{slowPools, fastPools} {
 		pools.mu.Lock()
