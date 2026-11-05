@@ -802,9 +802,9 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			policy.observePatroni(map[string]bool{oldIP: true}, scheduledAt.Add(-2*time.Second))
 			policy.observeSQL([]string{oldIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, scheduledAt.Add(-2*time.Second))
 			policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(-time.Second))
-			var iterations int
+			var iterations, comparisons int
 			w.sqlHooks.Iteration = func(SQLIteration, []string) { iterations++ }
-
+			w.sqlHooks.LeaderDetectionCompared = func(LeaderDetectionComparison, []string) { comparisons++ }
 			group := w.sqlHealthGroups()[0]
 			done := make(chan struct{})
 			go func() { defer close(done); w.checkSQLHealthGroup(group, scheduledAt) }()
@@ -830,12 +830,14 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			release()
 			<-done
 			assert.Zero(t, iterations)
+			assert.Zero(t, comparisons)
 			assert.Empty(t, health.sqlComparisonLatest)
 			assert.Empty(t, health.sqlHealthState.lastKnownHealthy)
 			assert.Equal(t, map[string]struct{}{oldIP: {}}, policy.sqlLeaderObservation.primaryIPs)
 			if invalidation == "disable" {
 				w.checkSQLHealthGroup(group, scheduledAt.Add(2*time.Second))
 				assert.Equal(t, 1, iterations)
+				assert.Equal(t, 1, comparisons)
 			}
 		})
 	}
@@ -853,6 +855,10 @@ func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T
 	}
 	checksEnabled := false
 	routingEnabled := true
+	var routingComparisons []LeaderRoutingComparison
+	w.sqlHooks.LeaderRoutingCompared = func(comparison LeaderRoutingComparison, _ []string) {
+		routingComparisons = append(routingComparisons, comparison)
+	}
 
 	updates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
 		ConnStringForIP: func(ip string) string { return ip },
@@ -868,7 +874,13 @@ func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T
 	policy, _ := poolHealth.routingPolicy()
 	require.NotNil(t, policy)
 
-	// Patroni refresh must apply a routing-mode change even when SQL checks are disabled.
+	started := time.Now()
+	policy.observeSQL([]string{oldPrimary}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldPrimary}}, started)
+	policy.observeSQL([]string{newPrimary}, SQLHealthCheckOutcome{PrimaryIPs: []string{newPrimary}}, started.Add(time.Second))
+	require.NotEmpty(t, policy.pendingRouting)
+
+	// The skipped SQL round cannot observe the routing flag transition. The next Patroni refresh
+	// must apply the disable before its new-primary observation can complete the stale comparison.
 	routingEnabled = false
 	w.RefreshSQL()
 	assert.True(t, policy.isRoutingEnabled())
@@ -879,6 +891,8 @@ func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T
 	w.checkPoolHealth(poolHealth)
 
 	assert.False(t, policy.isRoutingEnabled())
+	assert.Empty(t, policy.pendingRouting)
+	assert.Empty(t, routingComparisons)
 }
 
 func TestCentralizedSQLHealthCheckDiscoversNewIPBeforePatroniRefresh(t *testing.T) {
