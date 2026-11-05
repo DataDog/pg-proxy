@@ -121,13 +121,24 @@ session limits remain 100.
 
 ## Integration tests
 
-The standalone test runs against the existing Docker fixture, or an explicit
-`PG_PROXY_TEST_DATABASE_URL`. That URL must point to a disposable PostgreSQL
-instance with superuser access: the suite creates databases and fixture roles.
-GitHub Actions supplies a disposable local PostgreSQL instance and executes the
-suite with race detection:
+The standalone test uses the shared `internal/itest` PostgreSQL container fixture.
+GitHub Actions runs authentication, TLS, cancellation, and the other integration
+tests together with race detection. Set `PG_PROXY_ITEST_PUBLIC_IMAGES=true` to
+use public images without access to the internal registry:
+
+```sh
+PG_PROXY_ITEST_PUBLIC_IMAGES=true \
+  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+```
+
+Alternatively, set `PG_PROXY_TEST_DATABASE_URL` to use an external disposable
+PostgreSQL instance with superuser access. The suite creates databases and
+fixture roles, so never use a shared or production database:
 
 ```sh
 PG_PROXY_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' \
-  go test -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
 ```
+
+The `integration` build tag is required in both cases. The normal unit-test
+command does not execute these PostgreSQL-backed tests.

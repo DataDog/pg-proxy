@@ -238,11 +238,47 @@ transactions, pool reuse, startup cleanup, cancellation, and shutdown:
 go test -race -tags=integration -count=1 ./cmd/pg-proxy ./pkg/pool
 ```
 
-These tests require Docker and access to Datadog's container registry. They use
-the existing private PostgreSQL images. The standalone suite also accepts an
-explicit disposable PostgreSQL URL, which GitHub Actions uses to execute client
-authentication, TLS, and cancellation tests. See the
-[integration test instructions](docs/client-authentication.md#integration-tests).
+Integration tests pull images pinned by digest in
+[`internal/itest/images.go`](internal/itest/images.go) from `registry.ddbuild.io`.
+Set `PG_PROXY_ITEST_PUBLIC_IMAGES=true` to use public Docker Hub images instead,
+as GitHub CI does. Tests fail if Docker is unavailable.
+
+The standalone-command suite also accepts an explicit disposable PostgreSQL URL
+through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
+See the [client integration test instructions](docs/client-authentication.md#integration-tests).
+
+#### Black-box integration tests
+
+`test/integration` runs the `cmd/pg-proxy` binary as a black box. Each test starts
+a proxy process from a YAML configuration and connects to it with pgx, against
+a PostgreSQL container shared by the package. The harness lives in `internal/itest`:
+
+- `itest.Main` builds the binary once and starts shared fixtures from `TestMain`.
+- `itest.StartPostgres` starts a PostgreSQL container. `Postgres.Database`
+  returns a `pkg/config` database entry pointing at it.
+- `itest.StartProxy` / `itest.MustStartProxy` write a `pkg/config.Config` to a
+  file, start the binary on a free loopback port, and stop it with SIGTERM.
+  `MustStartProxy` fails the test if the process does not exit cleanly and logs
+  its output when the test fails.
+
+```sh
+go test -tags=integration ./test/integration
+```
+
+Running with `-race` also builds the proxy binary with `-race`. For custom build
+flags, build the binary separately and set `PG_PROXY_ITEST_BINARY`.
+
+| Variable | Effect |
+| --- | --- |
+| `PG_PROXY_ITEST_PUBLIC_IMAGES` | `true` pulls public Docker Hub images instead of `registry.ddbuild.io` ones |
+| `PG_PROXY_ITEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
+| `PG_PROXY_ITEST_BINARY` | Prebuilt pg-proxy binary instead of building one |
+
+Readiness uses a timed TCP port probe, not startup log parsing. Captured output
+is printed only for failure diagnostics.
+
+GitHub Actions runs unit tests on minimum and stable Go and Docker-backed
+integration tests with race detection.
 
 ### Telemetry
 
@@ -371,11 +407,11 @@ From the repository root, run the build, static checks, and unit tests:
 ```sh
 go build ./...
 go vet ./...
-go test -race -skip '^TestProxyAgainstPostgres$' -count=1 ./...
+go test -race -count=1 ./...
 ```
 
-The unit command excludes the Docker-backed CLI test. Run the Docker checks
-above when registry access is available. Format changed Go files with `gofmt -w`;
+Docker-backed tests require the `integration` build tag. Run the Docker checks
+above when needed. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
 
 ## License
