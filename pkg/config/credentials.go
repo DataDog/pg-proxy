@@ -1,11 +1,10 @@
 package config
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
-	"strconv"
-	"strings"
+
+	"github.com/DataDog/pg-proxy/pkg/scram"
 )
 
 // Secret holds an inline password or SCRAM verifier in the portable config, so
@@ -34,36 +33,11 @@ func (c StaticCredentials) validate() error {
 	return nil
 }
 
-// Validate the PostgreSQL stored-verifier form without deriving keys or exposing
-// the supplied verifier in errors. Authentication with it remains separate work.
+// Reuse the exchange's parser so configuration and authentication accept the
+// same stored-verifier format and bounds.
 func validSCRAMSHA256(value string) bool {
-	parts := strings.Split(value, "$")
-	if len(parts) != 3 || parts[0] != "SCRAM-SHA-256" {
-		return false
-	}
-	iterationText, saltText, ok := strings.Cut(parts[1], ":")
-	if !ok {
-		return false
-	}
-	iterations, err := strconv.ParseInt(iterationText, 10, 32)
-	if err != nil || iterations <= 0 {
-		return false
-	}
-	salt, err := base64.StdEncoding.DecodeString(saltText)
-	if err != nil || len(salt) == 0 {
-		return false
-	}
-	keys := strings.Split(parts[2], ":")
-	if len(keys) != 2 {
-		return false
-	}
-	for _, key := range keys {
-		decoded, err := base64.StdEncoding.DecodeString(key)
-		if err != nil || len(decoded) != 32 {
-			return false
-		}
-	}
-	return true
+	_, err := scram.ParseVerifier(value)
+	return err == nil
 }
 
 // ValidateCredentials checks credential sources only. Runtime defaults, topology

@@ -54,3 +54,8 @@ rejects empty identities before admission. Passthrough policy belongs to the
 application's authentication callback. The standalone command rejects it;
 embedders can retain their existing role handling after authentication.
 Credential sources and access policy remain application-owned.
+
+Set `MaxPendingConnections` to bound concurrent TLS/startup handlers. The listener
+closes excess connections before creating a handler and releases each slot after
+startup or failure. Zero preserves the unbounded embedding default. Pair this
+with `StartupTimeout`; the command uses 100 pending connections and 10 seconds.
