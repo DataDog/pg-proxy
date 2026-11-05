@@ -25,7 +25,7 @@ func TestSQLPotentialUsesCompletedComparisonSnapshot(t *testing.T) {
 	w.observePatroniPotential(s, leaderTimingIPs("A"), time.Now())
 	recordPotentialPoll(s, a, 0, leaderTimingAt(0), SQLHealthCheckResult{IP: "A"})
 	recordPotentialPoll(s, b, 0, leaderTimingAt(1), SQLHealthCheckResult{IP: "A", Err: context.DeadlineExceeded})
-	assert.True(t, s.potentialTiming.candidate.lastNonempty["A"], "another credential still supplies a primary")
+	assert.True(t, s.potentialTiming.sqlLeaders["A"], "another credential still supplies a primary")
 	// Conflicting successful roles are excluded using the exact mismatch-comparison aggregate.
 	snapshot := recordPotentialPoll(s, b, 0, leaderTimingAt(2), SQLHealthCheckResult{IP: "A", InRecovery: true})
 	require.Contains(t, snapshot.conflictingIPs, "A")
@@ -62,7 +62,7 @@ func TestSQLPotentialTargetInvalidationAndOptIn(t *testing.T) {
 		s := &PoolHealth{isReadReplica: replica, sqlHealthState: NewHealthState()}
 		s.sqlHealthState.Track([]string{"A"})
 		s.recordSQLComparisonPoll(replica, &sqlHealthTarget{}, 0, leaderTimingAt(0), leaderTimingAt(0), []string{"A"}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "A"}}})
-		assert.Nil(t, s.potentialTiming.candidate.lastNonempty, "replicas and disabled hooks do not track timing")
+		assert.Nil(t, s.potentialTiming.sqlLeaders, "replicas and disabled hooks do not track timing")
 	}
 }
 
@@ -400,4 +400,120 @@ func TestSQLPotentialDisabledSiblingPreservesActiveTiming(t *testing.T) {
 	w.observePatroniPotential(s, leaderTimingIPs("B"), leaderTimingAt(2))
 	require.Len(t, got, 1)
 	assert.Equal(t, time.Second, got[0].Speedup)
+}
+
+func baselinePotentialTiming(t *testing.T) *potentialTiming {
+	t.Helper()
+	p := &potentialTiming{}
+	require.Empty(t, p.observe(true, leaderTimingIPs("A"), leaderTimingAt(0)))
+	require.Empty(t, p.observe(false, leaderTimingIPs("A"), leaderTimingAt(0)))
+	return p
+}
+
+func TestSQLPotentialSignedTiming(t *testing.T) {
+	for _, tc := range []struct {
+		name                     string
+		sqlSecond, patroniSecond int
+	}{
+		{"SQL first", 2, 5},
+		{"Patroni first", 4, 2},
+		{"same time", 3, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := baselinePotentialTiming(t)
+			var got []SQLPotentialComparison
+			if tc.sqlSecond <= tc.patroniSecond {
+				require.Empty(t, p.observe(true, leaderTimingIPs("B"), leaderTimingAt(tc.sqlSecond)))
+				got = p.observe(false, leaderTimingIPs("B"), leaderTimingAt(tc.patroniSecond))
+			} else {
+				require.Empty(t, p.observe(false, leaderTimingIPs("B"), leaderTimingAt(tc.patroniSecond)))
+				got = p.observe(true, leaderTimingIPs("B"), leaderTimingAt(tc.sqlSecond))
+			}
+			require.Len(t, got, 1)
+			c := got[0]
+			assert.Equal(t, "B", c.NewLeaderIP)
+			assert.Equal(t, leaderTimingAt(tc.sqlSecond), c.SQLObservedAt)
+			assert.Equal(t, leaderTimingAt(tc.patroniSecond), c.PatroniObservedAt)
+			assert.Equal(t, time.Duration(tc.patroniSecond-tc.sqlSecond)*time.Second, c.Speedup)
+			require.Empty(t, p.observe(true, leaderTimingIPs("B"), leaderTimingAt(10)))
+			require.Empty(t, p.observe(false, leaderTimingIPs("B"), leaderTimingAt(11)))
+		})
+	}
+}
+
+func TestSQLPotentialPreservesFirstSnapshotTimestamp(t *testing.T) {
+	p := baselinePotentialTiming(t)
+	// Repeated completed snapshots do not move the first timestamp for B.
+	require.Empty(t, p.observe(true, leaderTimingIPs("A", "B"), leaderTimingAt(1)))
+	require.Empty(t, p.observe(true, leaderTimingIPs("A", "B"), leaderTimingAt(2)))
+	require.Empty(t, p.observe(false, leaderTimingIPs("A"), leaderTimingAt(3)))
+	require.Empty(t, p.observe(true, leaderTimingIPs("B"), leaderTimingAt(4)))
+	got := p.observe(false, leaderTimingIPs("B"), leaderTimingAt(5))
+	require.Len(t, got, 1)
+	assert.Equal(t, 4*time.Second, got[0].Speedup)
+}
+
+func TestSQLPotentialPreservesPendingAcrossLeaderChanges(t *testing.T) {
+	for _, sqlFirst := range []bool{true, false} {
+		for _, next := range []string{"", "A", "C"} {
+			t.Run(leaderTimingCase(sqlFirst, next), func(t *testing.T) {
+				p := baselinePotentialTiming(t)
+				require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("B"), leaderTimingAt(1)))
+				var following map[string]bool
+				if next != "" {
+					following = leaderTimingIPs(next)
+				}
+				require.Empty(t, p.observe(sqlFirst, following, leaderTimingAt(2)))
+				got := p.observe(!sqlFirst, leaderTimingIPs("B"), leaderTimingAt(5))
+				require.Len(t, got, 1, "match the pending B timestamp using the original hybrid policy")
+				want := 4 * time.Second
+				if !sqlFirst {
+					want = -want
+				}
+				assert.Equal(t, "B", got[0].NewLeaderIP)
+				assert.Equal(t, want, got[0].Speedup)
+			})
+		}
+	}
+}
+
+func TestSQLPotentialStartupAndSameLeaderRecovery(t *testing.T) {
+	p := &potentialTiming{}
+	require.Empty(t, p.observe(true, nil, leaderTimingAt(0)))
+	require.Empty(t, p.observe(true, leaderTimingIPs("A"), leaderTimingAt(1)))
+	require.Empty(t, p.observe(false, leaderTimingIPs("A"), leaderTimingAt(2)))
+	require.Empty(t, p.observe(true, nil, leaderTimingAt(3)))
+	require.Empty(t, p.observe(true, leaderTimingIPs("A"), leaderTimingAt(4)))
+	require.Empty(t, p.observe(false, leaderTimingIPs("A"), leaderTimingAt(5)))
+}
+
+func leaderTimingAt(seconds int) time.Time { return time.Unix(100+int64(seconds), 0) }
+func leaderTimingIPs(ips ...string) map[string]bool {
+	m := make(map[string]bool, len(ips))
+	for _, ip := range ips {
+		m[ip] = true
+	}
+	return m
+}
+
+func leaderTimingCase(sqlFirst bool, next string) string {
+	prefix := "Patroni"
+	if sqlFirst {
+		prefix = "SQL"
+	}
+	if next == "" {
+		next = "none"
+	}
+	return prefix + " leaves B for " + next
+}
+
+func TestSQLPotentialComparesEachNewPrimary(t *testing.T) {
+	p := baselinePotentialTiming(t)
+	require.Empty(t, p.observe(true, map[string]bool{"A": false, "B": true, "C": true}, leaderTimingAt(1)))
+	got := p.observe(false, leaderTimingIPs("B", "C"), leaderTimingAt(3))
+	require.Len(t, got, 2)
+	assert.ElementsMatch(t, []SQLPotentialComparison{
+		{NewLeaderIP: "B", SQLObservedAt: leaderTimingAt(1), PatroniObservedAt: leaderTimingAt(3), Speedup: 2 * time.Second},
+		{NewLeaderIP: "C", SQLObservedAt: leaderTimingAt(1), PatroniObservedAt: leaderTimingAt(3), Speedup: 2 * time.Second},
+	}, got)
 }

@@ -270,5 +270,5 @@ func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {
 		Improvement:  secondPatroniAt.Sub(secondHybridAt),
 		HybridSource: SQLRoutingResultConclusive,
 	}, *secondPatroni.routingComparison)
-	assert.Empty(t, policy.routingTiming.pending)
+	assert.Empty(t, policy.pendingRouting)
 }

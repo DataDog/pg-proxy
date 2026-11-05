@@ -19,24 +19,52 @@ type SQLPotentialComparison struct {
 	Speedup           time.Duration
 }
 
-// The snapshot adapter shares leader matching with hybrid detection and routing. Its caller
-// holds sqlComparisonMu; the generic tracker itself owns neither synchronization nor policy.
+// Snapshot timing tracks every newly reported primary independently. It shares
+// only timestamp pairing with hybrid timing; its caller holds sqlComparisonMu.
 type potentialTiming struct {
-	leaderTiming[struct{}]
+	sqlLeaders     map[string]bool
+	patroniLeaders map[string]bool
+	pending        map[string]leaderTimingPair
 }
 
 func (p *potentialTiming) observe(sql bool, healthy map[string]bool, at time.Time) []SQLPotentialComparison {
-	source := referenceLeaderSource
-	if sql {
-		source = candidateLeaderSource
+	current := make(map[string]bool)
+	for ip, primary := range healthy {
+		if primary {
+			current[ip] = true
+		}
 	}
-	pairs := p.leaderTiming.observe(source, healthy, at, struct{}{}, everyNewLeader)
+	if len(current) == 0 {
+		return nil
+	}
+	previous := p.patroniLeaders
+	if sql {
+		previous = p.sqlLeaders
+		p.sqlLeaders = current
+	} else {
+		p.patroniLeaders = current
+	}
+	if previous == nil {
+		return nil // The first nonempty snapshot establishes this source's baseline.
+	}
 	var comparisons []SQLPotentialComparison
-	for _, pair := range pairs {
+	for ip := range current {
+		if previous[ip] {
+			continue
+		}
+		if p.pending == nil {
+			p.pending = make(map[string]leaderTimingPair)
+		}
+		pair := p.pending[ip]
+		if !pair.observe(sql, at) {
+			p.pending[ip] = pair
+			continue
+		}
+		delete(p.pending, ip)
 		comparisons = append(comparisons, SQLPotentialComparison{
-			NewLeaderIP:       pair.ip,
-			SQLObservedAt:     pair.candidate.at,
-			PatroniObservedAt: pair.reference.at,
+			NewLeaderIP:       ip,
+			SQLObservedAt:     pair.candidateAt,
+			PatroniObservedAt: pair.patroniAt,
 			Speedup:           pair.speedup(),
 		})
 	}
@@ -106,8 +134,8 @@ func (s *PoolHealth) updateSQLPotentialRetainedLocked(ips []string, at time.Time
 			// Eviction invalidates only this address. A retained replacement can still
 			// pair with its pending observation, even if the old leader disappears.
 			delete(s.potentialTiming.pending, ip)
-			delete(s.potentialTiming.candidate.lastNonempty, ip)
-			delete(s.potentialTiming.reference.lastNonempty, ip)
+			delete(s.potentialTiming.sqlLeaders, ip)
+			delete(s.potentialTiming.patroniLeaders, ip)
 		}
 	}
 	s.potentialRetainedIPs = retained

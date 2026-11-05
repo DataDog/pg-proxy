@@ -86,13 +86,12 @@ or reduction percentages. PR9 retains its own downtime measurements.
 
 ## Comparing with PR9
 
-This PR moves the existing `hybrid_health.go` detection and routing comparisons
-onto `leaderTiming`, alongside snapshot timing. They share baseline tracking
-and the original per-IP timestamp matching policy.
-Hybrid detection uses `oneNewLeader`, routing uses `oneHealthyLeader`, and the
-snapshot signal uses `everyNewLeader`. Hybrid routing and timing behavior remain
-unchanged; the helper extracts the existing matching implementation.
-PR9 builds its downtime accounting on the same helper.
+Snapshot timing and `hybrid_health.go` keep their own leader selection, baselines,
+and pending observations. They share only `leaderTimingPair`, which records the
+two timestamps and calculates their signed difference. Hybrid detection still
+requires exactly one newly observed primary; hybrid routing requires one healthy
+primary. Snapshot timing compares each newly observed primary independently.
+Hybrid routing and timing behavior remain unchanged.
 
 For the same failover and the **same Patroni observation**:
 
