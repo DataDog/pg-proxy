@@ -26,15 +26,14 @@ func baselinePotential(t *testing.T) *potentialTiming {
 	return p
 }
 
-func TestSQLPotentialSignedTimingAndDowntime(t *testing.T) {
+func TestSQLPotentialSignedTiming(t *testing.T) {
 	for _, tc := range []struct {
 		name                     string
 		sqlSecond, patroniSecond int
-		reduction                float64
 	}{
-		{"SQL first", 2, 5, 75},
-		{"Patroni first", 4, 2, -200},
-		{"same time", 3, 3, 0},
+		{"SQL first", 2, 5},
+		{"Patroni first", 4, 2},
+		{"same time", 3, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := baselinePotential(t)
@@ -54,20 +53,15 @@ func TestSQLPotentialSignedTimingAndDowntime(t *testing.T) {
 			assert.Equal(t, potentialAt(tc.sqlSecond), c.SQLObservedAt)
 			assert.Equal(t, potentialAt(tc.patroniSecond), c.PatroniObservedAt)
 			assert.Equal(t, time.Duration(tc.patroniSecond-tc.sqlSecond)*time.Second, c.Speedup)
-			require.True(t, c.HasDowntimeComparison)
-			assert.Equal(t, potentialAt(1), c.DowntimeStartedAt)
-			assert.Equal(t, time.Duration(tc.sqlSecond-1)*time.Second, c.SQLDowntime)
-			assert.Equal(t, time.Duration(tc.patroniSecond-1)*time.Second, c.PatroniDowntime)
-			assert.Equal(t, tc.reduction, c.DowntimeReductionPercent)
 			require.Empty(t, p.observe(true, potentialIPs("B"), potentialAt(10)))
 			require.Empty(t, p.observe(false, potentialIPs("B"), potentialAt(11)))
 		})
 	}
 }
 
-func TestSQLPotentialPreservesEarliestSuccessWithoutWaitingForOtherIPs(t *testing.T) {
+func TestSQLPotentialPreservesFirstSnapshotTimestamp(t *testing.T) {
 	p := baselinePotential(t)
-	// A's previous success has not yet been replaced. This is deliberately optimistic.
+	// Repeated completed snapshots do not move the first timestamp for B.
 	require.Empty(t, p.observe(true, potentialIPs("A", "B"), potentialAt(1)))
 	require.Empty(t, p.observe(true, potentialIPs("A", "B"), potentialAt(2)))
 	require.Empty(t, p.observe(false, potentialIPs("A"), potentialAt(3)))
@@ -75,7 +69,6 @@ func TestSQLPotentialPreservesEarliestSuccessWithoutWaitingForOtherIPs(t *testin
 	got := p.observe(false, potentialIPs("B"), potentialAt(5))
 	require.Len(t, got, 1)
 	assert.Equal(t, 4*time.Second, got[0].Speedup)
-	assert.False(t, got[0].HasDowntimeComparison, "leader timing does not invent an availability gap")
 }
 
 func TestSQLPotentialSupersededAndInterruptedObservations(t *testing.T) {
@@ -112,164 +105,161 @@ func fmtPotentialCase(sqlFirst bool, next string) string {
 	return prefix + " leaves B for " + next
 }
 
-func TestSQLPotentialDowntimeEligibility(t *testing.T) {
-	t.Run("startup", func(t *testing.T) {
-		p := &potentialTiming{}
-		require.Empty(t, p.observe(true, nil, potentialAt(0)))
-		require.Empty(t, p.observe(true, potentialIPs("A"), potentialAt(1)))
-		require.Empty(t, p.observe(false, potentialIPs("A"), potentialAt(2)))
-		assert.True(t, p.downSince.IsZero())
-	})
-	t.Run("same leader recovers", func(t *testing.T) {
-		p := baselinePotential(t)
-		require.Empty(t, p.observe(true, nil, potentialAt(1)))
-		require.Empty(t, p.observe(true, potentialIPs("A"), potentialAt(2)))
-		assert.True(t, p.downSince.IsZero())
-		require.Empty(t, p.observe(true, potentialIPs("B"), potentialAt(3)))
-		got := p.observe(false, potentialIPs("B"), potentialAt(4))
-		require.Len(t, got, 1)
-		assert.False(t, got[0].HasDowntimeComparison)
-	})
-	t.Run("nonpositive Patroni denominator", func(t *testing.T) {
-		p := baselinePotential(t)
-		require.Empty(t, p.observe(false, potentialIPs("B"), potentialAt(1)))
-		require.Empty(t, p.observe(true, nil, potentialAt(2)))
-		got := p.observe(true, potentialIPs("B"), potentialAt(3))
-		require.Len(t, got, 1)
-		assert.Equal(t, -2*time.Second, got[0].Speedup)
-		assert.False(t, got[0].HasDowntimeComparison)
-	})
-	t.Run("old promotion window", func(t *testing.T) {
-		p := baselinePotential(t)
-		require.Empty(t, p.observe(true, nil, potentialAt(1)))
-		require.Empty(t, p.observe(true, potentialIPs("B"), potentialAt(2)))
-		require.Empty(t, p.observe(true, potentialIPs("C"), potentialAt(3)))
-		require.Len(t, p.observe(false, potentialIPs("C"), potentialAt(4)), 1)
-		require.Empty(t, p.observe(false, potentialIPs("B"), potentialAt(10)))
-		got := p.observe(true, potentialIPs("B"), potentialAt(11))
-		require.Len(t, got, 1)
-		assert.False(t, got[0].HasDowntimeComparison)
-	})
+func TestSQLPotentialStartupAndSameLeaderRecovery(t *testing.T) {
+	p := &potentialTiming{}
+	require.Empty(t, p.observe(true, nil, potentialAt(0)))
+	require.Empty(t, p.observe(true, potentialIPs("A"), potentialAt(1)))
+	require.Empty(t, p.observe(false, potentialIPs("A"), potentialAt(2)))
+	require.Empty(t, p.observe(true, nil, potentialAt(3)))
+	require.Empty(t, p.observe(true, potentialIPs("A"), potentialAt(4)))
+	require.Empty(t, p.observe(false, potentialIPs("A"), potentialAt(5)))
 }
 
-func TestSQLPotentialCredentialEvidenceAndInvalidation(t *testing.T) {
+func recordPotentialPoll(s *PoolHealth, target *sqlHealthTarget, generation uint64, at time.Time, results ...SQLHealthCheckResult) *sqlHealthComparisonSnapshot {
+	return s.recordSQLComparisonPoll(true, target, generation, at, at, s.sqlHealthState.Resolved(), SQLHealthCheckOutcome{Results: results})
+}
+
+func TestSQLPotentialUsesCompletedComparisonSnapshot(t *testing.T) {
+	s := &PoolHealth{sqlHealthState: NewHealthState()}
+	s.sqlHealthState.Track([]string{"A", "B"})
+	a, b := &sqlHealthTarget{}, &sqlHealthTarget{}
+	w := &HealthWorker{hooks: HealthWorkerHooks{SQLPotentialCompared: func(SQLPotentialComparison, []string) {
+		s.sqlComparisonMu.Lock()
+		s.sqlComparisonMu.Unlock()
+	}}}
+	w.observePatroniPotential(s, potentialIPs("A"))
+	recordPotentialPoll(s, a, 0, potentialAt(0), SQLHealthCheckResult{IP: "A"})
+	recordPotentialPoll(s, b, 0, potentialAt(1), SQLHealthCheckResult{IP: "A", Err: context.DeadlineExceeded})
+	assert.True(t, s.potentialTiming.sql.comparable["A"], "another credential still supplies a primary")
+	// Conflicting successful roles are excluded using the exact mismatch-comparison aggregate.
+	snapshot := recordPotentialPoll(s, b, 0, potentialAt(2), SQLHealthCheckResult{IP: "A", InRecovery: true})
+	require.Contains(t, snapshot.conflictingIPs, "A")
+	require.NotContains(t, snapshot.health, "A")
+	snapshot = recordPotentialPoll(s, a, 0, potentialAt(3), SQLHealthCheckResult{IP: "B"})
+	require.Empty(t, snapshot.potentialComparisons)
+	w.observePatroniPotential(s, potentialIPs("B")) // Callback can acquire the snapshot lock.
+	assert.Equal(t, potentialAt(3), s.sqlComparisonLatest[a].ObservedAt)
+}
+
+func TestSQLPotentialInvalidationAndOptIn(t *testing.T) {
 	for _, invalidation := range []string{"disable", "retire", "evict"} {
 		t.Run(invalidation, func(t *testing.T) {
-			s := &PoolHealth{}
-			a, b := &sqlHealthTarget{}, &sqlHealthTarget{}
-			var got []SQLPotentialComparison
-			w := &HealthWorker{hooks: HealthWorkerHooks{SQLPotentialCompared: func(c SQLPotentialComparison, _ []string) {
-				// The public callback must run after releasing the comparison lock.
-				s.sqlComparisonMu.Lock()
-				s.sqlComparisonMu.Unlock()
-				got = append(got, c)
-			}}}
-			w.observePatroniPotential(s, potentialIPs("A"))
-			w.observeSQLPotential(s, a, 0, SQLHealthCheckResult{IP: "A"})
-			w.observeSQLPotential(s, b, 0, SQLHealthCheckResult{IP: "A"})
-			w.observeSQLPotential(s, b, 0, SQLHealthCheckResult{IP: "A", Err: context.DeadlineExceeded})
-			assert.True(t, s.potentialTiming.downSince.IsZero(), "another credential still succeeds")
-			w.observeSQLPotential(s, a, 0, SQLHealthCheckResult{IP: "A", Err: context.DeadlineExceeded})
-			assert.False(t, s.potentialTiming.downSince.IsZero(), "only completed failures open the observed gap")
-			w.observeSQLPotential(s, a, 0, SQLHealthCheckResult{IP: "B"})
+			s := &PoolHealth{sqlHealthState: NewHealthState()}
+			s.sqlHealthState.Track([]string{"A", "B"})
+			target := &sqlHealthTarget{}
+			recordPotentialPoll(s, target, 0, potentialAt(0), SQLHealthCheckResult{IP: "A"})
+			s.potentialTiming.observe(false, potentialIPs("A"), potentialAt(0))
+			recordPotentialPoll(s, target, 0, potentialAt(1), SQLHealthCheckResult{IP: "B"})
+			require.Contains(t, s.potentialTiming.pending, "B")
 			switch invalidation {
 			case "disable":
-				s.disableSQLComparisonTarget(a)
+				s.disableSQLComparisonTarget(target)
 			case "retire":
-				s.retireSQLComparisonTarget(a)
+				s.retireSQLComparisonTarget(target)
 			case "evict":
-				w.prepareSQLPotential(s, a, 0, []string{"C"})
+				s.sqlHealthState = NewHealthState()
+				s.sqlHealthState.Track([]string{"C"})
 			}
-			if invalidation != "evict" {
-				w.observeSQLPotential(s, a, 0, SQLHealthCheckResult{IP: "B"})
-				assert.NotContains(t, s.potentialResults, a, "late result cannot restore retired/disabled evidence")
+			late := recordPotentialPoll(s, target, 0, potentialAt(2), SQLHealthCheckResult{IP: "B"})
+			if invalidation == "evict" {
+				require.NotNil(t, late)
+				assert.Empty(t, late.health, "evicted result remains diagnostic only")
+				assert.Empty(t, late.potentialComparisons)
+			} else {
+				assert.Nil(t, late)
 			}
-			w.observePatroniPotential(s, potentialIPs("B"))
-			assert.Empty(t, got, "population change resets pending comparisons")
+			assert.Empty(t, s.potentialTiming.pending)
+			assert.Empty(t, s.potentialTiming.observe(false, potentialIPs("B"), potentialAt(3)))
 		})
 	}
-}
-
-func TestSQLPotentialOptInAndReplicaIsolation(t *testing.T) {
 	for _, replica := range []bool{false, true} {
-		s := &PoolHealth{isReadReplica: replica}
-		w := &HealthWorker{}
-		if replica {
-			w.hooks.SQLPotentialCompared = func(SQLPotentialComparison, []string) { t.Fatal("replica emitted timing") }
+		s := &PoolHealth{isReadReplica: replica, sqlHealthState: NewHealthState()}
+		s.sqlHealthState.Track([]string{"A"})
+		s.recordSQLComparisonPoll(replica, &sqlHealthTarget{}, 0, potentialAt(0), potentialAt(0), []string{"A"}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "A"}}})
+		assert.Nil(t, s.potentialTiming.sql.comparable, "replicas and disabled hooks do not track timing")
+	}
+}
+
+func TestSQLPotentialWorkerWaitsForCompleteSnapshot(t *testing.T) {
+	for _, patroniFirst := range []bool{true, false} {
+		name := "SQL first"
+		if patroniFirst {
+			name = "Patroni first"
 		}
-		w.observeSQLPotential(s, &sqlHealthTarget{}, 0, SQLHealthCheckResult{IP: "A"})
-		w.observePatroniPotential(s, potentialIPs("A"))
-		assert.Nil(t, s.potentialResults)
-		assert.Nil(t, s.potentialTiming.patroni.comparable)
+		t.Run(name, func(t *testing.T) {
+			const oldIP, newIP = "10.0.0.1", "10.0.0.2"
+			w := newTestWorker(newMockProber(map[string][]string{"primary.local": {oldIP, newIP}}, newIP))
+			prober := &partiallyBlockingSQLHealthProber{blockingIP: oldIP, blockingRecovery: true, blocked: make(chan struct{}), release: make(chan struct{})}
+			var once sync.Once
+			release := func() { once.Do(func() { close(prober.release) }) }
+			defer release()
+			checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{})
+			w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+			updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{ConnStringForIP: func(ip string) string { return ip }})
+			s := receivePoolHealth(t, updates)
+			t.Cleanup(func() { w.Unsubscribe(updates) })
+			availability, err := s.SubscribeSQLHealth()
+			require.NoError(t, err)
+			t.Cleanup(availability.Close)
+			comparisons := make(chan SQLPotentialComparison, 1)
+			completed := make(chan SQLPatroniHealthSnapshot, 1)
+			w.hooks.SQLPotentialCompared = func(c SQLPotentialComparison, _ []string) { comparisons <- c }
+			w.hooks.SQLPatroniCompared = func(c SQLPatroniHealthSnapshot, _ []string) { completed <- c }
+			s.potentialTiming.observe(true, potentialIPs(oldIP), time.Now().Add(-time.Second))
+			s.potentialTiming.observe(false, potentialIPs(oldIP), time.Now().Add(-time.Second))
+			if patroniFirst {
+				w.Refresh()
+			}
+			done := make(chan struct{})
+			go func() { w.RefreshSQL(); close(done) }()
+			select {
+			case <-prober.blocked:
+			case <-time.After(time.Second):
+				t.Fatal("slow probe did not start")
+			}
+			require.True(t, receiveSQLHealthObservation(t, availability).Writable, "early availability remains independent")
+			select {
+			case <-comparisons:
+				t.Fatal("individual probe emitted timing before snapshot")
+			default:
+			}
+			select {
+			case <-completed:
+				t.Fatal("snapshot completed before slow IP")
+			default:
+			}
+			releasedAt := time.Now()
+			release()
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				t.Fatal("round did not finish")
+			}
+			require.Len(t, completed, 1, "completed poll must publish its comparison snapshot")
+			snapshot := <-completed
+			require.Len(t, snapshot.SQLResults, 1)
+			if !patroniFirst {
+				select {
+				case <-comparisons:
+					t.Fatal("pair emitted before Patroni snapshot")
+				default:
+				}
+				w.Refresh()
+			}
+			select {
+			case c := <-comparisons:
+				assert.Equal(t, newIP, c.NewLeaderIP)
+				assert.False(t, c.SQLObservedAt.Before(releasedAt), "timestamp must include waiting for the slow IP")
+				assert.Equal(t, snapshot.SQLResults[0].ObservedAt, c.SQLObservedAt)
+				if patroniFirst {
+					assert.Negative(t, c.Speedup)
+				} else {
+					assert.Positive(t, c.Speedup)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("completed snapshot did not emit timing")
+			}
+			assert.True(t, s.IsHealthy(newIP), "Patroni still owns routing")
+		})
 	}
-}
-
-func TestSQLPotentialWorkerReportsBeforeSlowProbeCompletes(t *testing.T) {
-	const oldIP, newIP = "10.0.0.1", "10.0.0.2"
-	patroni := newMockProber(map[string][]string{"primary.local": {oldIP, newIP}}, newIP)
-	w := newTestWorker(patroni)
-	prober := &partiallyBlockingSQLHealthProber{
-		blockingIP: oldIP, blockingRecovery: true,
-		blocked: make(chan struct{}), release: make(chan struct{}),
-	}
-	var once sync.Once
-	release := func() { once.Do(func() { close(prober.release) }) }
-	defer release()
-	checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{})
-	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
-	updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{ConnStringForIP: func(ip string) string { return ip }})
-	s := receivePoolHealth(t, updates)
-	t.Cleanup(func() { w.Unsubscribe(updates) })
-	comparisons := make(chan SQLPotentialComparison, 1)
-	completedSnapshots := make(chan struct{}, 1)
-	w.hooks.SQLPatroniCompared = func(SQLPatroniHealthSnapshot, []string) { completedSnapshots <- struct{}{} }
-	w.hooks.SQLPotentialCompared = func(c SQLPotentialComparison, _ []string) { comparisons <- c }
-	// A completed old-leader baseline, followed by Patroni observing the replacement.
-	s.potentialTiming.observe(true, potentialIPs(oldIP), time.Now().Add(-time.Second))
-	s.potentialTiming.observe(false, potentialIPs(oldIP), time.Now().Add(-time.Second))
-	w.Refresh()
-	done := make(chan struct{})
-	go func() { w.RefreshSQL(); close(done) }()
-	select {
-	case <-prober.blocked:
-	case <-time.After(time.Second):
-		t.Fatal("slow probe did not start")
-	}
-	select {
-	case c := <-comparisons:
-		assert.Equal(t, newIP, c.NewLeaderIP)
-		assert.LessOrEqual(t, c.Speedup, time.Duration(0), "Patroni was first")
-	case <-time.After(time.Second):
-		t.Fatal("timing waited for slow IP")
-	}
-	select {
-	case <-done:
-		t.Fatal("test did not exercise an incomplete round")
-	default:
-	}
-	select {
-	case <-completedSnapshots:
-		t.Fatal("completed comparison must still wait for the slow IP")
-	default:
-	}
-	assert.True(t, s.IsHealthy(newIP), "Patroni routing remains authoritative")
-	release()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("round did not complete")
-	}
-}
-
-func TestSQLPotentialRejectsLateResultForEvictedIP(t *testing.T) {
-	s := &PoolHealth{sqlHealthState: NewHealthState()}
-	s.sqlHealthState.Track([]string{"C"})
-	target := &sqlHealthTarget{}
-	s.potentialResults = map[*sqlHealthTarget]map[string]bool{target: {"B": true}}
-	w := &HealthWorker{hooks: HealthWorkerHooks{SQLPotentialCompared: func(SQLPotentialComparison, []string) { t.Fatal("evicted result emitted timing") }}}
-	// An older plan's candidates cannot override current discovery.
-	w.prepareSQLPotential(s, target, 0, []string{"B"})
-	require.NotContains(t, s.potentialResults[target], "B")
-	w.observeSQLPotential(s, target, 0, SQLHealthCheckResult{IP: "B"})
-	require.NotContains(t, s.potentialResults[target], "B")
 }

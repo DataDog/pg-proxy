@@ -59,10 +59,10 @@ Sheaf compatibility stays in the app until the Warden step. The later PRs use
 the pool contracts through the app backend factory; they do not require a
 second replica watcher or another PGK cleanup mode.
 
-## Optimistic SQL timing
+## SQL snapshot timing
 
-The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares the first
-successful SQL probe of a replacement primary with Patroni observation timing.
-It is separate from routing decisions and completed-snapshot mismatch comparison.
-See [SQL observation potential](../../docs/sql-potential-timing.md) for signed
-speedup, paired downtime, lifecycle rules, and how to compare it with hybrid timing.
+The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed
+SQL and Patroni snapshots for a replacement primary. It reports signed speedup,
+without downtime durations or percentages, using the completed-snapshot mismatch
+aggregate. See [SQL snapshot timing](../../docs/sql-potential-timing.md) for the
+snapshot boundary, lifecycle rules, and how to compare it with hybrid timing.

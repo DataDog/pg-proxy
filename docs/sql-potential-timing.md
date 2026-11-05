@@ -1,107 +1,86 @@
-# SQL observation potential versus hybrid routing timing
+# SQL snapshot timing versus hybrid routing timing
 
-Keep the two measurements. `HealthWorkerHooks.SQLPotentialCompared` measures an
-optimistic observed bound; the hybrid timing callbacks proposed in PR9 measure
-when the conservative policy can actually make its hypothetical selection.
-Neither changes Patroni-owned routing or measures end-to-end client recovery.
+`HealthWorkerHooks.SQLPotentialCompared` reports signed speedup between completed
+SQL and Patroni snapshots. Keep this alongside the hybrid timing callbacks in PR9:
+the snapshot signal describes when SQL reports a replacement primary, while the
+hybrid signal describes when the conservative policy can select it.
 
-| Measurement | SQL event | What it tells you |
+| Measurement | SQL event | Purpose |
 | --- | --- | --- |
-| SQL potential (this callback) | First successful primary result for an IP, from any credential, after retries | Earliest observed opportunity without waiting for other probes or resolving conflicting evidence |
-| Conclusive SQL detection (PR9) | Complete aggregated evidence supports the replacement leader | Cost of waiting for enough evidence |
-| Hybrid selection (PR9) | Policy selects the replacement via SQL or cached Patroni | Improvement the proposed routing policy can achieve |
+| SQL snapshot speedup (this callback) | A completed comparison snapshot reports the replacement IP as primary | Compare SQL observation timing with Patroni |
+| Conclusive SQL detection (PR9) | Complete aggregated evidence satisfies the hybrid policy | Measure when there is sufficient evidence for the policy |
+| Hybrid selection (PR9) | Policy selects the replacement via SQL or cached Patroni | Measure the proposed routing policy's improvement |
 
-A successful probe can finish while another IP is timing out, or while another
-credential still reports the old primary. The potential callback deliberately
-accepts that successful evidence immediately. It does not prove there is only
-one primary, or authorize routing to it. Only primary pool subscriptions produce
-these comparisons; replica health is not a leader signal.
+## Snapshot boundary
 
-## Per-event speedup
+Each credential must finish its full multi-IP poll before contributing new
+evidence or a timing observation. The worker uses the same aggregate as
+`SQLPatroniCompared`: this completed poll plus the other credentials' latest
+completed polls. Credentials remain independently scheduled; this does not wait
+for every credential to finish a synchronized round.
 
-The worker records individual post-retry SQL results and completed Patroni
-snapshots independently. For the same replacement IP:
+A successful individual probe can still publish early availability, but it does
+not update timing. `SQLObservedAt` is the completion timestamp recorded in that
+credential's snapshot, including time spent waiting for its slower probes.
+The timestamp is not backdated to the first successful primary response.
 
-```text
-potential speedup = PatroniObservedAt - SQLObservedAt
-```
+Completed polls replace their credential's entire previous evidence, including
+errors and empty results. Successful primary/standby conflicts on an IP exclude
+that IP from the aggregate. Unknown results do not erase another credential's
+successful role. Missed scheduler ticks do not replace completed snapshots, and
+there is no cache TTL. These comparison rules are not the full hybrid routing
+policy: uncertainty on another IP does not automatically reject a primary here.
+Only primary pool subscriptions produce timing comparisons.
 
-Positive means SQL was first; negative means Patroni was first. Repeated success
-for an address does not move its timestamp. Completed results from all current
-credentials contribute independently: a failed credential does not erase another
-credential's success on the same IP. There is no cache TTL and missed scheduler
-ticks are not probe results; a blocked credential retains its last evidence.
+Timing and snapshot acceptance share the same lock and lifecycle validation.
+Rejected completions cannot update timing. Recorded evidence removed by disable,
+retirement, or DNS eviction resets timing continuity; evicted results remain
+excluded from the aggregate. Callbacks run after releasing the lock.
 
-The first nonempty observation from each source establishes that source's
-baseline, not a failover sample. An unmatched observation is discarded when its
-source stops reporting that IP, preventing a later promotion from using its old
-timestamp. An interrupted observation may acquire a fresh timestamp when it
-returns. A disable, retirement, or DNS eviction that removes recorded evidence
-resets timing baselines and pending pairs rather than measuring across that gap.
-Late results from a disabled lifecycle or an evicted IP are ignored.
+## Signed speedup
 
-## Paired observed downtime
-
-After SQL has established a primary baseline, the first completed result that
-leaves **no successful primary evidence across the current credentials/IPs**
-opens an observed availability gap. This includes errors such as timeouts; it
-is not proof that PostgreSQL had no primary. Repeated failures preserve the
-start. The first successful replacement-primary probe closes the gap.
+For the same replacement IP:
 
 ```text
-t0: latest SQL evidence has no successful primary
-t1: first successful SQL probe of replacement B
-t2: completed Patroni snapshot reports B healthy
-
-SQLDowntime     = t1 - t0
-PatroniDowntime = t2 - t0
-Speedup         = t2 - t1
-Reduction (%)   = 100 * (PatroniDowntime - SQLDowntime) / PatroniDowntime
+speedup = PatroniObservedAt - SQLObservedAt
 ```
 
-For `t0=1s`, `t1=2s`, `t2=5s`, the durations are 1s and 4s, the speedup is 3s,
-and the reduction is 75%. If Patroni observes B at 2s and SQL at 4s, the paired
-durations are 3s and 1s: speedup is -2s and reduction is -200%. Values are never
-clamped to zero.
+If SQL completes at 2s and Patroni observes the replacement at 5s, speedup is 3s.
+If Patroni observes it at 2s and SQL completes at 4s, speedup is -2s. Negative
+values are preserved to expose regressions.
 
-`HasDowntimeComparison` is true only for a replacement leader with a matching
-stored gap, nonnegative SQL duration, and strictly positive Patroni duration.
-Startup, same-leader recovery, and a failover without an observed SQL gap do
-not produce downtime percentages. They do not invent a denominator.
+The first nonempty snapshot from each source establishes a baseline. Repeated
+snapshots do not move the first timestamp for a replacement IP. An unmatched
+observation is discarded when its source stops reporting that IP, so a later
+promotion cannot reuse its old timestamp. An interrupted observation may record
+a fresh timestamp when it returns.
 
-Both durations use the SQL-defined start. `PatroniDowntime` is not an independent
-measurement of a Patroni outage. This gap differs from PR9's **conclusive**
-no-leader interval and from the existing missed-tick availability SLI. Keep
-those series separate.
+This callback contains only signed speedup and the IP/timestamps needed to
+identify the event. It defines no outage start and emits no downtime durations
+or reduction percentages. PR9 retains its own downtime measurements.
 
-## Comparing and aggregating
+## Comparing with PR9
 
-Keep the signed per-event distribution, event count, and paired durations in
-addition to maxima. A maximum answers how much improvement was observed in the
-best sampled event; it cannot demonstrate absence of regressions. Poll cadence,
-retries, and cached credential evidence all affect the observed bound.
-
-For the same failover and the **same Patroni observation**, the remaining gap is:
+For the same failover and the **same Patroni observation**:
 
 ```text
-potential speedup - hybrid improvement = hybrid selection time - earliest SQL success
+snapshot speedup - hybrid improvement = hybrid selection time - SQL snapshot time
 ```
 
-Join by host, replacement IP, and the Patroni event timestamp, not merely IP:
-addresses can be promoted repeatedly. This callback exposes both observation
+For example, 3s snapshot speedup and 2s hybrid improvement leave a 1s delay between
+SQL's snapshot and the hybrid selection. An absolute duration is easier to
+interpret than a percentage when the denominator is small, zero, or negative.
+
+Join by host, replacement IP, and Patroni event timestamp, not merely IP: an
+address can be promoted repeatedly. This callback exposes both observation
 timestamps. PR9's consumer must also retain that event identity before producing
-a paired gap metric. Do not subtract maxima or percentiles of unmatched series,
-or compare downtime percentages with different starts. To compare downtime,
-recompute the hybrid duration from the same `DowntimeStartedAt` and event.
+a paired gap metric. Do not subtract maxima or percentiles from unmatched series.
 
-For an overall duration-weighted potential reduction, use the same eligible
-events for both sums:
-
-```text
-100 * (sum(PatroniDowntime) - sum(SQLDowntime)) / sum(PatroniDowntime)
-```
+Keep the signed distribution and sample count as well as maxima. A maximum alone
+can hide slower events. Poll cadence, retries, aggregation, and cached evidence
+affect these observations; they do not establish end-to-end client recovery.
 
 The portable library emits optional callbacks only. The embedding application
-owns metric names, units, distributions, event correlation, and dashboard queries.
-Leave the hook nil to disable this tracking. Callbacks execute outside the timing
-lock and must return promptly because they run on the observation path.
+owns metric names, units, event correlation, and dashboard queries. Leave the
+hook nil to disable tracking. Callbacks must return promptly and may run
+concurrently for different hosts.

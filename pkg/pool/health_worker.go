@@ -111,8 +111,8 @@ type HealthWorkerHooks struct {
 	CheckFinished      func(elapsed time.Duration, tags []string)
 	SQLCheckMissed     func(tags []string)
 	SQLPatroniCompared func(SQLPatroniHealthSnapshot, []string)
-	// SQLPotentialCompared reports optimistic observation timing, never a routing decision.
-	// It can run concurrently for different hosts and must not block probe completion.
+	// SQLPotentialCompared reports signed snapshot speedup, never a routing decision.
+	// It can run concurrently for different hosts and must return promptly.
 	SQLPotentialCompared func(SQLPotentialComparison, []string)
 	Evicted              func(ip string, tags []string)
 }
@@ -236,9 +236,9 @@ type PoolHealth struct {
 	// results. Aggregate roles are derived from those results, never cached independently.
 	sqlComparisonMu     sync.Mutex
 	sqlComparisonLatest map[*sqlHealthTarget]SQLHealthResultsSnapshot
-	// potentialTiming and potentialResults are telemetry-only and protected by sqlComparisonMu.
-	potentialTiming  potentialTiming
-	potentialResults map[*sqlHealthTarget]map[string]bool
+	// Potential timing is telemetry-only and protected by sqlComparisonMu.
+	potentialTiming      potentialTiming
+	potentialRetainedIPs map[string]bool
 	// subscriptionTargets associates each pool subscription with its SQL connection string.
 	subscriptionTargets map[HealthUpdates]*sqlHealthTarget
 }
@@ -255,26 +255,27 @@ type sqlHealthRoundState struct {
 }
 
 type sqlHealthComparisonSnapshot struct {
-	conflictingIPs []string
-	health         map[string]bool
-	retainedIPs    []string
-	results        []SQLHealthResultsSnapshot
+	potentialComparisons []SQLPotentialComparison
+	conflictingIPs       []string
+	health               map[string]bool
+	retainedIPs          []string
+	results              []SQLHealthResultsSnapshot
 }
 
 func (s *PoolHealth) disableSQLComparisonTarget(target *sqlHealthTarget) {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
 	target.sqlComparisonGeneration++
-	delete(s.sqlComparisonLatest, target)
 	s.resetSQLPotentialTargetLocked(target)
+	delete(s.sqlComparisonLatest, target)
 }
 
 func (s *PoolHealth) retireSQLComparisonTarget(target *sqlHealthTarget) {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
 	target.sqlComparisonRetired = true
-	delete(s.sqlComparisonLatest, target)
 	s.resetSQLPotentialTargetLocked(target)
+	delete(s.sqlComparisonLatest, target)
 }
 
 func (s *PoolHealth) currentSQLComparisonGeneration(target *sqlHealthTarget) uint64 {
@@ -299,13 +300,14 @@ func (s *PoolHealth) reserveSQLComparisonPoll(
 	}
 	if !enabled {
 		target.sqlComparisonGeneration++
-		delete(s.sqlComparisonLatest, target)
 		s.resetSQLPotentialTargetLocked(target)
+		delete(s.sqlComparisonLatest, target)
 	}
 	return target.sqlComparisonGeneration, target.tryStartSQLRound(scheduledAt), true
 }
 
 func (s *PoolHealth) recordSQLComparisonPoll(
+	trackPotential bool,
 	target *sqlHealthTarget,
 	generation uint64,
 	scheduledAt time.Time,
@@ -336,6 +338,9 @@ func (s *PoolHealth) recordSQLComparisonPoll(
 	}
 
 	snapshot := buildSQLHealthComparisonSnapshot(retainedIPs, s.sqlComparisonLatest)
+	if trackPotential && !s.isReadReplica {
+		snapshot.potentialComparisons = s.observeSQLPotentialSnapshotLocked(snapshot, observedAt)
+	}
 	return &snapshot
 }
 
@@ -863,12 +868,7 @@ func (w *HealthWorker) runSQLHealthGroup(
 		go func(plan sqlHealthCheckPlan) {
 			defer wg.Done()
 			defer plan.target.finishSQLRound(scheduledAt)
-			if plan.enabled {
-				w.prepareSQLPotential(group.poolHealth, plan.target, plan.generation, toProbe)
-			}
-			outcome, completed := w.checkSQLHealth(plan.target, toProbe, plan.enabled, scheduledAt, func(result SQLHealthCheckResult) {
-				w.observeSQLPotential(group.poolHealth, plan.target, plan.generation, result)
-			})
+			outcome, completed := w.checkSQLHealth(plan.target, toProbe, plan.enabled, scheduledAt)
 			if !plan.enabled || !completed {
 				return
 			}
@@ -882,6 +882,7 @@ func (w *HealthWorker) runSQLHealthGroup(
 			}
 			group.poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, retainedHealth)
 			snapshot := group.poolHealth.recordSQLComparisonPoll(
+				w.hooks.SQLPotentialCompared != nil,
 				plan.target,
 				plan.generation,
 				scheduledAt,
@@ -890,6 +891,9 @@ func (w *HealthWorker) runSQLHealthGroup(
 				outcome,
 			)
 			w.reportSQLPatroniComparison(group.poolHealth, snapshot)
+			if snapshot != nil {
+				w.reportSQLPotential(group.poolHealth, snapshot.potentialComparisons)
+			}
 		}(plan)
 	}
 	if !waitForStartedChecks {
@@ -945,7 +949,6 @@ func (w *HealthWorker) checkSQLHealth(
 	toProbe []string,
 	checksEnabled bool,
 	scheduledAt time.Time,
-	resultHooks ...func(SQLHealthCheckResult),
 ) (SQLHealthCheckOutcome, bool) {
 	poolHealth := target.poolHealth
 	ctx := context.Background()
@@ -977,9 +980,6 @@ func (w *HealthWorker) checkSQLHealth(
 			patroniHealth,
 			target.tags,
 			func(result SQLHealthCheckResult) {
-				for _, hook := range resultHooks {
-					hook(result)
-				}
 				// Availability is optimistic: publish as soon as any IP is confirmed writable.
 				// The full round still detects and reports multiple primaries separately.
 				if !result.HealthyPrimary() ||
