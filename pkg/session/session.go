@@ -1071,7 +1071,11 @@ func (s *Session) startMirrorWorker(tags []string) {
 		defer cancel()
 		return s.mirroring.AcquireShadow(ctx, shadowDB, req)
 	}
-	s.mirrorWorker = mirror.NewWorker(s.mirror, acquire, tags)
+	// Snapshot on the session goroutine: the worker must not read pStmtState itself.
+	// Confirmed-only is enough: this runs only with s.link == nil, and the release path
+	// invalidates pending stmts just before clearing the link. The backend-remap abort does
+	// not (OSQQUERY-558), so a stmt left pending there costs one batch, counted by catalog_miss.
+	s.mirrorWorker = mirror.NewWorker(s.mirror, acquire, tags, s.pStmtState.ListConfirmedNamedStmts())
 	go s.mirrorWorker.Run()
 }
 
@@ -1153,6 +1157,16 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 	}
 	// if the connection already has this pending named statement, can just send back ParseComplete
 	if preparedStatement.IsProxyNamedPreparedStmt() && s.link.HasExistingNamedPreparedStmt(preparedStatement) {
+		if m, ok := s.link.(mirror.StmtDefMirror); ok {
+			// No Parse is forwarded, but the shadow uses a different connection that may
+			// lack it. Must precede the flush below, or the batch can end on an
+			// unanswered ParseReply and release a non-idle shadow link.
+			m.MirrorParse(&pgproto3.Parse{
+				Name:          preparedStatement.GetProxyName(),
+				Query:         preparedStatement.GetSQLQuery(),
+				ParameterOIDs: preparedStatement.GetParamOIDs(),
+			})
+		}
 		// first flush all buffered messages to Postgres
 		s.link.Send(&pgproto3.Flush{}, query.NoReply)
 		discardedUntilSync, err := s.flushPostgres()

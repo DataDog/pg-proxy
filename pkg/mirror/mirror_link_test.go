@@ -114,3 +114,24 @@ func TestMirroringLink_DataLessPoisonedBatchEnqueuesNothing(t *testing.T) {
 
 	assert.Empty(t, queuedTypes(q), "a fully-dropped batch must not force control items past the cap")
 }
+
+// A Parse the session did not forward reaches the queue with the ParseReply
+// expectation the worker's drain needs. A plain link offers no such entry point.
+func TestMirroringLink_MirrorParseEnqueuesWithParseReply(t *testing.T) {
+	q := newMirrorQueue(1<<20, nil)
+	l := mirrorLinkOver(q)
+
+	m, ok := any(l).(StmtDefMirror)
+	assert.True(t, ok, "mirroringLink must satisfy StmtDefMirror")
+	_, plainIsMirror := any(&fakeShadowLink{}).(StmtDefMirror)
+	assert.False(t, plainIsMirror, "a plain link must not satisfy StmtDefMirror")
+
+	m.MirrorParse(&pgproto3.Parse{Name: "s1", Query: "select 1"})
+	assert.NoError(t, l.Flush())
+
+	assert.Equal(t, []mirrorItemType{mirrorMsg, mirrorFlush}, queuedTypes(q))
+	it, ok := q.dequeue()
+	assert.True(t, ok)
+	assert.Equal(t, query.ParseReply, it.expectation)
+	assert.IsType(t, &pgproto3.Parse{}, it.msg)
+}

@@ -4,8 +4,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
+
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/link"
+	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -30,6 +33,10 @@ type mirrorWorker struct {
 	q       *mirrorQueue
 	acquire func() (link.Link, error) // borrow a fresh shadow link from the shadow pool
 	tags    []string
+	// seed pre-fills the replay catalog. A client that prepared its statements before
+	// mirroring was enabled never sends Parse again, so without this the catalog
+	// stays empty for the session's life and every Bind reaches the shadow as 26000.
+	seed []prepared.PreparedStatement
 
 	done chan struct{}
 
@@ -37,16 +44,17 @@ type mirrorWorker struct {
 	curLink link.Link
 }
 
-func newMirrorWorker(q *mirrorQueue, acquire func() (link.Link, error), tags []string) *mirrorWorker {
-	return &mirrorWorker{q: q, acquire: acquire, tags: tags, done: make(chan struct{})}
+func newMirrorWorker(q *mirrorQueue, acquire func() (link.Link, error), tags []string, seed []prepared.PreparedStatement) *mirrorWorker {
+	return &mirrorWorker{q: q, acquire: acquire, tags: tags, seed: seed, done: make(chan struct{})}
 }
 
 // Worker asynchronously replays queued messages onto a shadow link.
 type Worker = mirrorWorker
 
-// NewWorker constructs a mirror replay worker.
-func NewWorker(q *Queue, acquire func() (link.Link, error), tags []string) *Worker {
-	return newMirrorWorker(q, acquire, tags)
+// NewWorker constructs a mirror replay worker. seed is the set of named prepared
+// statements the session's source connection already holds.
+func NewWorker(q *Queue, acquire func() (link.Link, error), tags []string, seed []prepared.PreparedStatement) *Worker {
+	return newMirrorWorker(q, acquire, tags, seed)
 }
 
 // Run drains the queue until it is closed.
@@ -82,9 +90,21 @@ func (w *mirrorWorker) run() {
 	// not be acquired, or a producer-side drop) until the next release sentinel, so
 	// we never replay a partial transaction or a Bind whose Parse was lost.
 	skipping := false
+	// Local to run(), so it is plainly single-goroutine and dies with the goroutine.
+	cat := newStmtCatalog()
+	for _, st := range w.seed {
+		if st.IsProxyNamedPreparedStmt() {
+			cat.put(st)
+		}
+	}
+	w.seed = nil // the catalog owns these now; the snapshot would outlive its use
 	// pending is budget for messages buffered on the shadow link but not yet flushed,
 	// so the cap bounds live data (queue + buffer). Released at flush/batch-end/exit.
 	pending := 0
+	// recorded tracks whether this batch claimed new statements on the shadow
+	// connection. The claim is written before Postgres answers, and a link exposes
+	// no way to retract one, so an error in such a batch costs us the connection.
+	recorded := false
 	release := func() {
 		w.q.releaseBudgetRaw(pending)
 		pending = 0
@@ -111,6 +131,15 @@ func (w *mirrorWorker) run() {
 		pending += it.size + mirrorItemStructOverhead
 		switch it.typ {
 		case mirrorMsg:
+			// Catalog before anything can skip the message: the client never re-sends a
+			// Parse, so a definition lost here is lost for the rest of the session.
+			var parsed prepared.PreparedStatement
+			if m, ok := it.msg.(*pgproto3.Parse); ok {
+				parsed = prepared.CreatePreparedStatement("", m.Name, m.Query, m.ParameterOIDs)
+				if parsed.IsProxyNamedPreparedStmt() {
+					cat.put(parsed)
+				}
+			}
 			if skipping {
 				break
 			}
@@ -123,22 +152,69 @@ func (w *mirrorWorker) run() {
 					break
 				}
 			}
-			link.Send(it.msg, it.expectation) // buffered; hits the network at the flush sentinel
+			// Shadow links are borrowed per batch, so a Bind can land on a connection that never saw its Parse.
+			switch m := it.msg.(type) {
+			case *pgproto3.Parse:
+				if link.HasExistingNamedPreparedStmt(parsed) {
+					_ = link.RecordExistingNamedPreparedStmtUsed(parsed)
+					w.count("mirror.replayed", "kind:parse_existing")
+					break // this connection already has it; sending again is 42P05
+				}
+				link.Send(m, it.expectation)
+				if link.RecordNewNamedPreparedStmt(parsed) == nil && parsed.IsProxyNamedPreparedStmt() {
+					recorded = true
+				}
+			case *pgproto3.Bind:
+				n, rec, admitted := w.reparseIfMissing(link, cat, m.PreparedStatement)
+				if !admitted {
+					skipping = true
+					break
+				}
+				pending += n
+				recorded = rec || recorded
+				link.Send(m, it.expectation)
+			case *pgproto3.Describe:
+				if m.ObjectType == 'S' { // 'S' = statement, 'P' = portal
+					n, rec, admitted := w.reparseIfMissing(link, cat, m.Name)
+					if !admitted {
+						skipping = true
+						break
+					}
+					pending += n
+					recorded = rec || recorded
+				}
+				link.Send(m, it.expectation)
+			default:
+				link.Send(it.msg, it.expectation) // buffered; hits the network at the flush sentinel
+			}
+			if skipping {
+				break // the budget refused an injected Parse; nothing was replayed
+			}
 			w.count("mirror.replayed", "kind:msg")
 		case mirrorFlush:
 			if link := w.getLink(); !skipping && link != nil {
-				if err := w.flushAndDrain(link); err != nil {
+				sawError, err := w.flushAndDrain(link)
+				switch {
+				case err != nil:
 					w.count("mirror.replay_errors", "op:flush")
 					w.reconnect()
 					skipping = true
-				} else {
+				case sawError && recorded:
+					// One of those statements may have been rejected. Discard the connection
+					// rather than hand a false claim back to the pool for another session to hit.
+					w.count("mirror.replay_errors", "op:stmt_rejected")
+					w.reconnect()
+					skipping = true
+				default:
 					w.count("mirror.replayed", "kind:flush")
 				}
 			}
+			recorded = false
 			release() // buffer flushed or batch dropped
 		case mirrorPoison:
 			skipping = true // a producer drop poisoned the batch; skip to release, RESET rolls back
 		case mirrorRelease:
+			recorded = false
 			release() // free budget before the (possibly slow) shadow RESET
 			w.releaseLink()
 			skipping = false // next batch starts clean
@@ -146,33 +222,71 @@ func (w *mirrorWorker) run() {
 	}
 }
 
+// reparseIfMissing sends the Parse when the shadow connection lacks the statement.
+// It reports the bytes injected, whether the connection was recorded as now holding
+// the statement, and whether the injection fit. A false admitted means the caller
+// must skip the batch, the same answer a dropped enqueue gives the producer.
+func (w *mirrorWorker) reparseIfMissing(link link.Link, cat *stmtCatalog, name string) (injected int, recorded, admitted bool) {
+	if !prepared.IsNamedPreparedStmt(name) {
+		return 0, false, true // the unnamed statement is re-parsed by the client every time
+	}
+	st, ok := cat.get(name)
+	if !ok {
+		w.count("mirror.catalog_miss")
+		return 0, false, true // continuing is never worse than skipping: a miss costs one batch either way
+	}
+	if link.HasExistingNamedPreparedStmt(st) {
+		return 0, false, true
+	}
+	parse := &pgproto3.Parse{
+		Name: st.GetProxyName(), Query: st.GetSQLQuery(), ParameterOIDs: st.GetParamOIDs(),
+	}
+	// This Parse never passed the enqueue door, so charge it here or the cap stops
+	// bounding live data.
+	size := sizeOfFrontendMessage(parse)
+	if !w.q.tryReserveRaw(size) {
+		w.count("mirror.replay_errors", "op:reparse_budget")
+		return 0, false, false
+	}
+	link.Send(parse, query.ParseReply)
+	w.count("mirror.shadow_reparse")
+	return size, link.RecordNewNamedPreparedStmt(st) == nil, true
+}
+
 // flushAndDrain flushes to the shadow, then reads and drops every reply until idle,
 // via DecidePgMessageAction (one expectation spans many wire messages). An error
 // (FATAL or a diverging reply) tells the caller to force-close and skip the batch.
-func (w *mirrorWorker) flushAndDrain(link link.Link) error {
+// sawError reports a non-FATAL ErrorResponse, which the drain itself tolerates.
+func (w *mirrorWorker) flushAndDrain(link link.Link) (sawError bool, err error) {
 	// Force-close if the flush or a read stalls, so a slow shadow can't pin this
 	// goroutine/pool conn. Re-armed per step, so it guards one stall, not a big drain.
 	timer := time.AfterFunc(mirrorShadowDrainTimeout, func() { link.ForceClose() })
 	defer timer.Stop()
 	if err := link.Flush(); err != nil {
-		return err
+		return sawError, err
 	}
 	timer.Reset(mirrorShadowDrainTimeout) // flush done; re-arm for the drain
 	traceState := &query.TraceState{}     // no root trace is started, so no spans are emitted
 	for {
 		expectation := link.NextExpectation()
 		if expectation == query.NoReply {
-			return nil
+			return sawError, nil
 		}
 		msg, err := link.Receive()
 		if err != nil {
-			return err
+			return sawError, err
 		}
 		timer.Reset(mirrorShadowDrainTimeout) // re-arm: this read made progress
+		if e, ok := msg.(*pgproto3.ErrorResponse); ok {
+			// Non-FATAL errors return no error from DecidePgMessageAction, so replay
+			// failures are otherwise invisible.
+			w.count("mirror.replay_error_response", "code:"+e.Code)
+			sawError = true
+		}
 
 		action, err := query.DecidePgMessageAction(msg, expectation, traceState)
 		if err != nil {
-			return err
+			return sawError, err
 		}
 		if action.ResolveReplyExpectation {
 			link.ResolveNextExpectation()

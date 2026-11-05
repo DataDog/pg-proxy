@@ -38,11 +38,24 @@ func NewLink(backend link.Link, q *Queue, tags []string) link.Link {
 	return newMirroringLink(backend, q, tags)
 }
 
-// Send forwards msg to the source, then queues a clone for the shadow. The clone
-// is deferred behind the byte-budget check so a message about to be dropped is
-// never copied. Never blocks the source path.
+// StmtDefMirror lets a session hand over a Parse it did not forward to the source.
+type StmtDefMirror interface {
+	MirrorParse(msg *pgproto3.Parse)
+}
+
+// Send forwards msg to the source, then queues a clone for the shadow.
 func (l *mirroringLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
 	l.Link.Send(msg, expectation)
+	l.enqueue(msg, expectation)
+}
+
+// MirrorParse queues a Parse the session did not forward to the source.
+func (l *mirroringLink) MirrorParse(msg *pgproto3.Parse) {
+	l.enqueue(msg, query.ParseReply) // Postgres replies ParseComplete; the drain must expect it
+}
+
+// enqueue queues a clone of msg for the shadow. Never blocks.
+func (l *mirroringLink) enqueue(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
 	// A poisoned batch is already doomed (the worker skips it), so stop cloning.
 	if l.poisoned || !canMirror(msg) {
 		return
