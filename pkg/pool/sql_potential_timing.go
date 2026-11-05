@@ -73,7 +73,7 @@ func (s *PoolHealth) observeSQLPotentialSnapshotLocked(snapshot sqlHealthCompari
 		s.potentialPaused = false
 		s.potentialResumedAt = observedAt
 	}
-	s.updateSQLPotentialRetainedLocked(snapshot.retainedIPs)
+	s.updateSQLPotentialRetainedLocked(snapshot.retainedIPs, observedAt)
 	healthy := make(map[string]bool)
 	for ip, primary := range snapshot.health {
 		if primary {
@@ -85,13 +85,24 @@ func (s *PoolHealth) observeSQLPotentialSnapshotLocked(snapshot sqlHealthCompari
 
 // Discovery calls this while holding the same lock as timing observations, before exposing the
 // changed retained set to them. Snapshot acceptance also calls it to keep its population current.
-func (s *PoolHealth) updateSQLPotentialRetainedLocked(ips []string) {
+func (s *PoolHealth) updateSQLPotentialRetainedLocked(ips []string, at time.Time) {
 	retained := make(map[string]bool, len(ips))
 	for _, ip := range ips {
 		retained[ip] = true
+		if cutoff, invalidated := s.potentialValidAfter[ip]; invalidated && !s.potentialRetainedIPs[ip] && at.After(cutoff) {
+			// Rediscovery starts another lifecycle. Observations captured while
+			// absent must not become eligible merely because their callback is late.
+			s.potentialValidAfter[ip] = at
+		}
 	}
 	for ip := range s.potentialRetainedIPs {
 		if !retained[ip] {
+			if s.potentialValidAfter == nil {
+				s.potentialValidAfter = make(map[string]time.Time)
+			}
+			if at.After(s.potentialValidAfter[ip]) {
+				s.potentialValidAfter[ip] = at
+			}
 			// Eviction invalidates only this address. A retained replacement can still
 			// pair with its pending observation, even if the old leader disappears.
 			delete(s.potentialTiming.pending, ip)
@@ -110,17 +121,26 @@ func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]
 	if w.hooks.SQLPotentialCompared == nil || s.isReadReplica {
 		return
 	}
+	s.sqlComparisonMu.Lock()
+	if s.potentialPaused || observedAt.Before(s.potentialResumedAt) || observedAt.Before(s.potentialPatroniObservedAt) {
+		// Callbacks can arrive after a lifecycle gap or after a newer Patroni poll.
+		// Reject the old snapshot rather than letting it interrupt current evidence.
+		s.sqlComparisonMu.Unlock()
+		return
+	}
+	s.potentialPatroniObservedAt = observedAt
 	healthy := make(map[string]bool)
 	for ip, primary := range health {
+		if cutoff, invalidated := s.potentialValidAfter[ip]; invalidated &&
+			(!s.potentialRetainedIPs[ip] || !observedAt.After(cutoff)) {
+			// A callback from before eviction or during absence cannot recreate a
+			// cleared timestamp after rediscovery. While absent, no evidence for
+			// this IP can participate. Other retained IPs remain comparable.
+			continue
+		}
 		if primary {
 			healthy[ip] = true
 		}
-	}
-	s.sqlComparisonMu.Lock()
-	if s.potentialPaused || observedAt.Before(s.potentialResumedAt) {
-		// A Patroni poll completed during the gap can be delayed by callbacks or this lock.
-		s.sqlComparisonMu.Unlock()
-		return
 	}
 	comparisons := s.potentialTiming.observe(false, healthy, observedAt)
 	s.sqlComparisonMu.Unlock()

@@ -239,6 +239,12 @@ type PoolHealth struct {
 	// Potential timing is telemetry-only and protected by sqlComparisonMu.
 	potentialTiming      potentialTiming
 	potentialRetainedIPs map[string]bool
+	// Latest eviction/rediscovery boundary for previously evicted IPs. Keep these
+	// cutoffs so delayed callbacks cannot restore an older timing lifecycle.
+	// Protected by sqlComparisonMu.
+	potentialValidAfter map[string]time.Time
+	// Late callbacks must not interrupt newer accepted reference evidence.
+	potentialPatroniObservedAt time.Time
 	// Pause reference timing when invalidation removes the last completed SQL evidence.
 	potentialPaused    bool
 	potentialResumedAt time.Time
@@ -316,7 +322,7 @@ func (s *PoolHealth) refreshSQLResolved(resolved []string, absenceThreshold int)
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
 	retained := s.sqlHealthState.RefreshResolved(resolved, absenceThreshold, nil)
-	s.updateSQLPotentialRetainedLocked(retained)
+	s.updateSQLPotentialRetainedLocked(retained, time.Now())
 	return retained
 }
 
