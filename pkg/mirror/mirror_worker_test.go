@@ -521,31 +521,3 @@ func TestMirrorWorker_HoldsBudgetUntilFlush(t *testing.T) {
 	q.close()
 	waitFor(t, func() bool { return budget.UsedBytes() == 0 }, "budget not fully released after flush + drain")
 }
-
-func TestMirrorWorkerCopyInputPausesAndResumesDrain(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
-	for _, item := range []mirrorItem{
-		{typ: mirrorMsg, msg: &pgproto3.Query{String: "COPY events FROM STDIN"}, expectation: query.QueryReply, size: 10},
-		{typ: mirrorFlush, size: mirrorItemOverhead},
-		{typ: mirrorMsg, msg: &pgproto3.CopyData{Data: []byte("1\n")}, size: 10},
-		{typ: mirrorFlush, size: mirrorItemOverhead},
-		{typ: mirrorMsg, msg: &pgproto3.CopyDone{}, size: 10},
-		{typ: mirrorFlush, size: mirrorItemOverhead},
-		{typ: mirrorRelease, size: mirrorItemOverhead},
-	} {
-		if !q.tryEnqueue(item) {
-			t.Fatal("could not enqueue COPY regression")
-		}
-	}
-	f := newLinkFactory(func(l *fakeShadowLink) {
-		l.replies = []pgproto3.BackendMessage{&pgproto3.CopyInResponse{}, &pgproto3.CommandComplete{CommandTag: []byte("COPY 1")}, &pgproto3.ReadyForQuery{TxStatus: 'I'}}
-	})
-	drainClosed(q, f.acquire)
-	if len(f.links) != 1 {
-		t.Fatalf("acquired %d links, want one COPY session", len(f.links))
-	}
-	l := f.links[0]
-	if len(l.replies) != 0 || len(l.expectations) != 0 || l.flushes != 3 || l.releases != 1 {
-		t.Fatalf("COPY did not drain through completion: replies=%d expectations=%d flushes=%d releases=%d", len(l.replies), len(l.expectations), l.flushes, l.releases)
-	}
-}

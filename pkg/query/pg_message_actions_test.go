@@ -5,7 +5,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestPgMessageActions(t *testing.T) {
@@ -339,10 +338,10 @@ func TestPgMessageActions(t *testing.T) {
 			wantErrContains: "expected a SyncReply",
 		},
 		{
-			name:        "simple copy in response",
-			msg:         &pgproto3.CopyInResponse{},
-			expectation: QueryReply,
-			wantAction:  PgMessageAction{ProxyMsgToClient: &pgproto3.CopyInResponse{}, ProxyMsgSize: getCopyInResponseByteSize(&pgproto3.CopyInResponse{}), WaitForCopyInput: true},
+			name:                "simple copy in response",
+			msg:                 &pgproto3.CopyInResponse{},
+			expectation:         QueryReply,
+			wantProxyAndResolve: true,
 		},
 		{
 			name:            "unexpected copy in response",
@@ -471,16 +470,5 @@ func TestAnnotateIfSwitchoverError(t *testing.T) {
 				assert.NotContains(t, tc.in.Message, LeaderSwitchoverHint)
 			}
 		})
-	}
-}
-
-func TestExtendedCopyRepliesKeepExecuteExpectation(t *testing.T) {
-	for _, msg := range []pgproto3.BackendMessage{&pgproto3.CopyInResponse{}, &pgproto3.CopyOutResponse{}, &pgproto3.CopyData{Data: []byte("1\n")}, &pgproto3.CopyDone{}} {
-		action, err := DecidePgMessageAction(msg, ExecuteReply, &TraceState{})
-		require.NoError(t, err)
-		require.False(t, action.ResolveReplyExpectation, "COPY resolves Execute only at CommandComplete/error")
-		require.Equal(t, msg, action.ProxyMsgToClient)
-		_, copyIn := msg.(*pgproto3.CopyInResponse)
-		require.Equal(t, copyIn, action.WaitForCopyInput)
 	}
 }

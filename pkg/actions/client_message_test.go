@@ -239,7 +239,7 @@ func TestClientMessageActions(t *testing.T) {
 			name:         "simple copy done",
 			msg:          &pgproto3.CopyDone{},
 			proxyMsgToPg: &pgproto3.CopyDone{},
-			wantExp:      query.NoReply,
+			wantExp:      query.QueryReply,
 			wantFlush:    true,
 		},
 		{
@@ -247,7 +247,6 @@ func TestClientMessageActions(t *testing.T) {
 			msg:          &pgproto3.CopyFail{},
 			proxyMsgToPg: &pgproto3.CopyFail{},
 			wantExp:      query.NoReply,
-			wantFlush:    true,
 		},
 		{
 			name:            "unexpected FunctionCall",

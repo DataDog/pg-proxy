@@ -137,7 +137,6 @@ type Session struct {
 	postgresMsgBufferSize        int       // The number of bytes the proxy buffers from PG before flushing to the client
 	passthroughUser              bool
 	priority                     Priority
-	copyIn                       bool // backend reads pause until frontend CopyDone/CopyFail
 	discardUntilSync             bool // whether the Session should discard all messages it receives until it gets a Sync message
 	pStmtState                   prepared.PreparedStatementState
 	AutoPreparedStmtsEnabled     bool
@@ -536,9 +535,6 @@ func (s *Session) ForceCloseBackendOnClientDisconnect(backendLink link.Link) {
 
 func (s *Session) setLink(backendLink link.Link) {
 	s.link = backendLink
-	if backendLink == nil {
-		s.copyIn = false
-	}
 	if backendLink == nil && s.hooks.RoutedLinkChanged != nil {
 		s.hooks.RoutedLinkChanged(nil)
 	}
@@ -937,10 +933,6 @@ func (s *Session) RemapReadStates(readStates []ReadStateConfig) {
 }
 
 func (s *Session) handleClientMessage(msg pgproto3.FrontendMessage) error {
-	switch msg.(type) {
-	case *pgproto3.CopyDone, *pgproto3.CopyFail:
-		s.copyIn = false
-	}
 	discardingWithoutLink := s.discardUntilSync && s.link == nil
 	// Start the root trace before dispatching ONLY when we're not in
 	// discard-until-sync mode. During a discard pipeline the messages
@@ -1001,11 +993,6 @@ func (s *Session) handleAction(action ClientMessageAction) error {
 	}
 
 	if action.FlushPostgres {
-		if _, done := action.ProxyMsgToPg.(*pgproto3.CopyDone); done && s.link != nil && s.link.NextExpectation() == query.ExecuteReply {
-			// Extended COPY completion does not force PostgreSQL to flush its
-			// CommandComplete. Request output without injecting a transaction Sync.
-			s.link.Send(&pgproto3.Flush{}, query.NoReply)
-		}
 		s.obsVals.traceState.FinishTrace()
 		pgDiscardedUntilSync, err := s.flushPostgres()
 		if err != nil {
@@ -1257,9 +1244,6 @@ func (s *Session) flushPostgres() (bool, error) {
 		return false, fmt.Errorf("error flushing messages to linked postgres conn: %w", err)
 	}
 	s.obsVals.traceState.FinishTrace(err)
-	if s.copyIn {
-		return false, nil
-	}
 
 	flushClient := false
 	bufferSize := 0
@@ -1355,10 +1339,6 @@ func (s *Session) flushPostgres() (bool, error) {
 					return discardedUntilSync, err
 				}
 			}
-		}
-		if action.WaitForCopyInput {
-			s.copyIn = true
-			break // flush CopyInResponse before reading more frontend messages
 		}
 		if action.ResolveReplyExpectation {
 			s.link.ResolveNextExpectation()

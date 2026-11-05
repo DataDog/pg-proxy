@@ -246,9 +246,9 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 	case *pgproto3.CopyData:
 		return ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.NoReply}, nil
 	case *pgproto3.CopyDone:
-		return ClientMessageAction{ProxyMsgToPg: m, FlushPostgres: true}, nil
+		return ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.QueryReply, FlushPostgres: true}, nil
 	case *pgproto3.CopyFail:
-		return ClientMessageAction{ProxyMsgToPg: m, FlushPostgres: true}, nil
+		return ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.NoReply}, nil
 	case *pgproto3.FunctionCall: // No plans to support, "a legacy feature that is probably best avoided in new code."
 		return ClientMessageAction{}, fmt.Errorf("received unsupported message from client: %#v", msg)
 	default:

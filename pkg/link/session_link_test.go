@@ -473,21 +473,3 @@ func (bb *blockingBuffer) Write(p []byte) (int, error) {
 	bb.ch <- cp
 	return len(p), nil
 }
-
-func TestCopyInIgnoresSyncExpectationsUntilInputEnds(t *testing.T) {
-	l, pg := newTestSessionLink()
-	l.Send(&pgproto3.Execute{}, query.ExecuteReply)
-	l.Send(&pgproto3.Sync{}, query.SyncReply)
-	pg.Send(&pgproto3.CopyInResponse{})
-	require.NoError(t, pg.Flush())
-	_, err := l.Receive()
-	require.NoError(t, err)
-	l.Send(&pgproto3.Sync{}, query.SyncReply) // ignored during COPY IN
-	l.Send(&pgproto3.CopyDone{}, query.NoReply)
-	l.Send(&pgproto3.Sync{}, query.SyncReply) // required after extended COPY
-	require.Equal(t, query.ExecuteReply, l.NextExpectation())
-	l.ResolveNextExpectation()
-	require.Equal(t, query.SyncReply, l.NextExpectation())
-	l.ResolveNextExpectation()
-	require.Equal(t, query.NoReply, l.NextExpectation(), "early Sync must not leave a stale reply expectation")
-}

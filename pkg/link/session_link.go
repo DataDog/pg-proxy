@@ -41,7 +41,6 @@ type SessionLink struct {
 
 	replyExpectations   []query.ReplyExpectation // expected replies from the linked pg conn
 	discardingUntilSync bool                     // if true, in an extended query error state where all messages will be discarded until a Sync
-	copyIn              bool                     // Sync is ignored until CopyDone/CopyFail
 	readyForQuery       bool                     // true after Postgres has sent ReadyForQuery for the latest request
 
 	namedPreparedStmtThreshold int
@@ -70,14 +69,6 @@ func (link *SessionLink) SetRoleToken(token string) {
 // a ReplyExpectation to the queue.
 func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
 	link.pgConn.Send(msg)
-	if link.copyIn {
-		switch msg.(type) {
-		case *pgproto3.Sync:
-			expectation = query.NoReply // PostgreSQL ignores Sync during COPY IN.
-		case *pgproto3.CopyDone, *pgproto3.CopyFail:
-			link.copyIn = false
-		}
-	}
 	if expectation != query.NoReply {
 		link.readyForQuery = false
 		if expectation == query.SyncReply {
@@ -96,14 +87,7 @@ func (link *SessionLink) Flush() error {
 
 // Receive blocks until the Postgres connection sends a message
 func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
-	msg, err := link.pgConn.Receive()
-	if _, ok := msg.(*pgproto3.CopyInResponse); ok && err == nil {
-		link.copyIn = true
-		// A Sync already flushed after Execute is ignored while PostgreSQL
-		// waits for COPY input. It cannot produce a ReadyForQuery later.
-		link.replyExpectations = slices.DeleteFunc(link.replyExpectations, func(e query.ReplyExpectation) bool { return e == query.SyncReply })
-	}
-	return msg, err
+	return link.pgConn.Receive()
 }
 
 // NextExpectation peeks at the next expectation in the queue, or NoReply if
