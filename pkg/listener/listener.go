@@ -13,6 +13,7 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -43,7 +44,8 @@ type StartupResult[T any] struct {
 	Data              T
 }
 
-// AuthenticationResult is the authenticated client identity.
+// AuthenticationResult is the client identity accepted by the application.
+// Authenticate hooks must return a nonempty Service for session accounting.
 type AuthenticationResult struct {
 	Service string
 }
@@ -109,8 +111,17 @@ type Config[T any] struct {
 	ListenAddress string
 	TLSConfig     *tls.Config
 	RequireTLS    bool
-	Admission     Admission
-	Hooks         Hooks[T]
+	// AuthenticationMessageLimit bounds message bodies before authentication
+	// payloads are allocated. Zero retains the library's unbounded default.
+	AuthenticationMessageLimit int
+	// StartupTimeout bounds TLS, startup, and authentication, including provider
+	// callbacks that respect their context. Zero disables this timeout.
+	StartupTimeout time.Duration
+	// MaxPendingConnections bounds connections negotiating TLS or startup.
+	// Excess connections close immediately. Zero leaves the limit disabled.
+	MaxPendingConnections int
+	Admission             Admission
+	Hooks                 Hooks[T]
 
 	// Testing seams. Production leaves these nil.
 	Listen func(string, string) (net.Listener, error)
@@ -125,6 +136,7 @@ type Listener[T any] struct {
 	cfg       Config[T]
 	ln        net.Listener
 	connCount atomic.Uint32
+	pending   chan struct{}
 }
 
 // ClientNotified marks an error for which the client was already sent a fatal
@@ -143,6 +155,15 @@ func (e *clientNotifiedError) Unwrap() error { return e.cause }
 
 // New creates and binds a listener.
 func New[T any](ctx context.Context, cfg Config[T]) (*Listener[T], error) {
+	if cfg.MaxPendingConnections < 0 {
+		return nil, errors.New("maximum pending connections must not be negative")
+	}
+	if cfg.StartupTimeout < 0 {
+		return nil, errors.New("startup timeout must not be negative")
+	}
+	if cfg.AuthenticationMessageLimit < 0 {
+		return nil, errors.New("authentication message limit must not be negative")
+	}
 	if cfg.RequireTLS && cfg.TLSConfig == nil {
 		return nil, errors.New("listener requires TLS but TLS configuration is missing")
 	}
@@ -160,7 +181,11 @@ func New[T any](ctx context.Context, cfg Config[T]) (*Listener[T], error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Listener[T]{ctx: ctx, cfg: cfg, ln: ln}, nil
+	l := &Listener[T]{ctx: ctx, cfg: cfg, ln: ln}
+	if cfg.MaxPendingConnections > 0 {
+		l.pending = make(chan struct{}, cfg.MaxPendingConnections)
+	}
+	return l, nil
 }
 
 // Addr returns the bound listener address.
@@ -189,8 +214,18 @@ func (l *Listener[T]) Run() error {
 			}
 			return nil
 		}
+		releaseStartup := func() {}
+		if l.pending != nil {
+			select {
+			case l.pending <- struct{}{}:
+				releaseStartup = sync.OnceFunc(func() { <-l.pending })
+			default:
+				_ = conn.Close()
+				continue
+			}
+		}
 		configureKeepalive(conn)
-		go l.handleConnWithLoadShedding(conn)
+		go l.handleConnWithLoadShedding(conn, releaseStartup)
 	}
 }
 
@@ -229,20 +264,49 @@ func configureKeepalive(conn net.Conn) {
 }
 
 // handleConnWithLoadShedding wraps connection handling with load shedding.
-func (l *Listener[T]) handleConnWithLoadShedding(conn net.Conn) {
+func (l *Listener[T]) handleConnWithLoadShedding(conn net.Conn, releaseStartup func()) {
+	defer releaseStartup()
 	if l.cfg.Hooks.LoadShedder == nil {
-		l.handleConn(conn)
+		l.handleConn(conn, releaseStartup)
 		return
 	}
-	if err := l.cfg.Hooks.LoadShedder.Run(l.ctx, func() { l.handleConn(conn) }); err != nil {
+	if err := l.cfg.Hooks.LoadShedder.Run(l.ctx, func() { l.handleConn(conn, releaseStartup) }); err != nil {
 		// Send an error response to a connection rejected by the load shedder.
 		handleLoadSheddingRejection(conn)
 	}
 }
 
 // handleConn accepts a network connection and adds it to the listener for tracking.
-func (l *Listener[T]) handleConn(conn net.Conn) {
+func (l *Listener[T]) handleConn(conn net.Conn, releaseStartup func()) {
 	ctx := pgproxy.ContextWithLogger(l.ctx, pgproxy.LoggerFromContext(l.ctx).With("connection_id", crypto_rand.Text()))
+	// Startup can block in TLS negotiation or an authentication exchange before
+	// there is a session/drain watcher. Interrupt reads on shutdown while keeping
+	// writes available for the existing terminal-error and session-drain paths;
+	// capturing it separately avoids racing with the TLS wrapper assignment.
+	startupConn := conn
+	startupCtx := ctx
+	cancelStartup := func() {}
+	if l.cfg.StartupTimeout > 0 {
+		startupCtx, cancelStartup = context.WithTimeout(ctx, l.cfg.StartupTimeout)
+		deadline, _ := startupCtx.Deadline()
+		if err := conn.SetDeadline(deadline); err != nil {
+			cancelStartup()
+			_ = conn.Close()
+			return
+		}
+	}
+	defer cancelStartup()
+	startupStopped := make(chan struct{})
+	stopStartup := context.AfterFunc(startupCtx, func() {
+		_ = startupConn.SetReadDeadline(time.Now())
+		close(startupStopped)
+	})
+	finishStartup := sync.OnceFunc(func() {
+		if !stopStartup() {
+			<-startupStopped
+		}
+	})
+	defer finishStartup()
 	processed, first, err := l.attemptTLSUpgrade(conn)
 	// If it is non-nil, processed is the connection that should be used for the rest
 	// of the session. It may be unchanged or TLS-wrapped. Override conn before
@@ -263,12 +327,20 @@ func (l *Listener[T]) handleConn(conn net.Conn) {
 		ctx = pgproxy.ContextWithLogger(ctx, pgproxy.LoggerFromContext(ctx).With(
 			"requested_user", fmt.Sprintf("%.256s", user), "requested_database", fmt.Sprintf("%.256s", database)))
 	}
-	session, err := l.handleFirstMessage(ctx, conn, first)
+	startupCtx = pgproxy.ContextWithLogger(startupCtx, pgproxy.LoggerFromContext(ctx))
+	session, err := l.handleFirstMessage(ctx, startupCtx, conn, first)
+	finishStartup()
+	cancelStartup()
+	if err == nil && l.cfg.StartupTimeout > 0 {
+		_ = conn.SetDeadline(time.Time{})
+	}
+	// Established sessions use the existing drain watcher below.
 	if err != nil {
 		handleConnError(ctx, conn, err, "first_message_failure")
 		return
 	}
 
+	releaseStartup()
 	pgproxy.Logger().Debug("Opened connection", "remote", conn.RemoteAddr().String(), "user", session.User(), "database", session.Database())
 	tags := append(session.MetricTags(), "outcome:successful",
 		fmt.Sprintf("with_dynamic_routing:%t", session.DynamicRoutingEnabled()))
@@ -367,10 +439,10 @@ func (l *Listener[T]) attemptTLSUpgrade(conn net.Conn) (net.Conn, pgproto3.Front
 
 // handleFirstMessage handles the first PostgreSQL message: a StartupMessage or
 // CancelRequest (an SSLRequest has already been consumed by attemptTLSUpgrade).
-func (l *Listener[T]) handleFirstMessage(ctx context.Context, conn net.Conn, message pgproto3.FrontendMessage) (Session, error) {
+func (l *Listener[T]) handleFirstMessage(ctx, startupCtx context.Context, conn net.Conn, message pgproto3.FrontendMessage) (Session, error) {
 	switch msg := message.(type) {
 	case *pgproto3.StartupMessage:
-		return l.handleStartup(ctx, conn, msg)
+		return l.handleStartup(ctx, startupCtx, conn, msg)
 	case *pgproto3.CancelRequest:
 		// Cancellation uses a separate connection and may be plaintext even when
 		// normal startup requires TLS. The session secret still authenticates it.
@@ -384,7 +456,7 @@ func (l *Listener[T]) handleFirstMessage(ctx context.Context, conn net.Conn, mes
 }
 
 // handleStartup creates a new session for an incoming network connection.
-func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgproto3.StartupMessage) (Session, error) {
+func (l *Listener[T]) handleStartup(ctx, startupCtx context.Context, conn net.Conn, msg *pgproto3.StartupMessage) (Session, error) {
 	if l.cfg.RequireTLS {
 		tlsConn, ok := conn.(*tls.Conn)
 		if !ok || !tlsConn.ConnectionState().HandshakeComplete {
@@ -392,7 +464,7 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 		}
 	}
 	user, ok := msg.Parameters["user"]
-	if !ok {
+	if !ok || user == "" {
 		return nil, startupErrorAt("startup_parameters", errors.New("user name not provided"))
 	}
 	database, ok := msg.Parameters["database"]
@@ -403,8 +475,11 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 	if err != nil {
 		return nil, startupErrorAt("startup_options", err)
 	}
+	if err := startupCtx.Err(); err != nil {
+		return nil, startupErrorAt("authenticate", err)
+	}
 	request := StartupRequest{User: user, Database: database, Parameters: msg.Parameters, Options: options}
-	resolved, err := l.cfg.Hooks.ResolveStartup(ctx, request)
+	resolved, err := l.cfg.Hooks.ResolveStartup(startupCtx, request)
 	if err != nil {
 		return nil, startupErrorAt("resolve_startup", err)
 	}
@@ -412,17 +487,34 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 		resolved.LogicalDatabase = database
 	}
 
+	if resolved.LogicalDatabase == "" {
+		return nil, startupErrorAt("resolve_startup", ErrAuthenticationFailed)
+	}
+	if err := startupCtx.Err(); err != nil {
+		return nil, startupErrorAt("authenticate", err)
+	}
 	// Backend because the proxy is the PostgreSQL backend for this client.
 	client := pgproto3.NewBackend(conn, conn)
 	auth := AuthenticationResult{Service: user}
 	if l.cfg.Hooks.Authenticate != nil {
-		auth, err = l.cfg.Hooks.Authenticate(ctx, request, resolved, protocol.NewConnExchange(conn, client))
+		client.SetMaxBodyLen(l.cfg.AuthenticationMessageLimit)
+		auth, err = l.cfg.Hooks.Authenticate(startupCtx, request, resolved, protocol.NewConnExchange(conn, client))
+		client.SetMaxBodyLen(0) // Authentication limits do not constrain SQL messages.
 		if err != nil {
 			return nil, startupErrorAt("authenticate", err)
 		}
 		if auth.Service == "" {
-			auth.Service = user
+			return nil, startupErrorAt("authenticate", ErrAuthenticationFailed)
 		}
+	}
+	if err := startupCtx.Err(); err != nil {
+		return nil, startupErrorAt("authenticate", err)
+	}
+	if l.cfg.Hooks.Authenticate != nil {
+		pgproxy.LoggerFromContext(ctx).Debug("client authenticated",
+			"authenticated_user", fmt.Sprintf("%.256s", user),
+			"authenticated_service", fmt.Sprintf("%.256s", auth.Service),
+			"logical_database", fmt.Sprintf("%.256s", resolved.LogicalDatabase))
 	}
 	tags := []string{
 		"user:" + user,

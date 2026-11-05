@@ -127,6 +127,7 @@ func TestTelemetryEnvironmentConfig(t *testing.T) {
 func TestSharedConfigRejectsUnsupportedFeatures(t *testing.T) {
 	for name, modify := range map[string]func(*pgconfig.Config){
 		"JWT":                      func(c *pgconfig.Config) { c.Proxy.JWTAuthEnabled = true },
+		"password authentication":  func(c *pgconfig.Config) { c.Proxy.PasswordAuthEnabled = true },
 		"users":                    func(c *pgconfig.Config) { c.Users = []pgconfig.User{{}} },
 		"mirroring":                func(c *pgconfig.Config) { c.Mirroring = &pgconfig.Mirroring{} },
 		"no databases":             func(c *pgconfig.Config) { c.Databases = nil },
