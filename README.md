@@ -228,6 +228,19 @@ These tests require Docker and access to Datadog's container registry. They use
 the existing private PostgreSQL images. The consuming Datadog repository runs
 them in CI against its pinned module version; GitHub Actions compiles them here.
 
+### Differential protocol verification
+
+The [protocol harness](docs/protocol-verification.md) compares deterministic raw
+PostgreSQL conversations through the proxy and two direct controls. It checks
+ordered wire responses, committed effects, and client recovery. Its dedicated
+CI job runs with Docker and a pinned public PostgreSQL image; it needs no
+Datadog account or private registry.
+
+```sh
+go test ./internal/protocoltest
+go test -tags=integration -count=1 -timeout=10m -v ./internal/protocoltest/integration
+```
+
 ### Telemetry
 
 The OSS binary supports native Datadog and OpenTelemetry. With no telemetry flags

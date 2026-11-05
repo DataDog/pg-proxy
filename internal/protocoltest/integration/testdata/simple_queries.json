@@ -1,0 +1,80 @@
+{
+  "version": 1,
+  "name": "simple_queries",
+  "setup": ["CREATE TABLE samples (id integer PRIMARY KEY, value text)", "INSERT INTO samples VALUES (1, 'alpha'), (2, ''), (3, NULL)"],
+  "steps": [
+    {
+      "send": [
+        {"type": "Query", "sql": ""}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "empty_query",
+      "receive": [
+        {"type": "EmptyQueryResponse"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT id, value FROM samples ORDER BY id; SELECT NULL::text AS null_value, ''::text AS empty_value"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "multiple_statements",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31", "616c706861"]
+        },
+        {
+          "type": "DataRow",
+          "values": ["32", ""]
+        },
+        {
+          "type": "DataRow",
+          "values": ["33", null]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 3"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": [null, ""]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id, value FROM samples ORDER BY id",
+      "rows": [
+        ["1", "alpha"],
+        ["2", ""],
+        ["3", null]
+      ]
+    }
+  ]
+}

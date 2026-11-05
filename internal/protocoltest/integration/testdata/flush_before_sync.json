@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "name": "flush_before_sync",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {"type": "Parse", "name": "s", "sql": "SELECT 10 AS value"},
+        {"type": "Flush"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "parse_without_sync",
+      "receive": [
+        {"type": "ParseComplete"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Bind", "statement": "s", "portal": "p"},
+        {"type": "Describe", "object": "P", "name": "p"},
+        {"type": "Execute", "portal": "p"},
+        {"type": "Flush"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "execute_without_sync",
+      "receive": [
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["3130"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "sync",
+      "receive": [
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Close", "object": "S", "name": "s"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "close",
+      "receive": [
+        {"type": "CloseComplete"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}

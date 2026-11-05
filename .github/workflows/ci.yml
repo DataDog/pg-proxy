@@ -90,3 +90,34 @@ jobs:
       # Execute Docker-backed tests after portable fixtures are configured.
       - name: Compile integration tests without running them
         run: go test -tags=integration -run '^$' ./...
+
+  protocol-integration:
+    name: Differential PostgreSQL protocol tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      PGPROXY_TEST_ARTIFACT_DIR: ${{ github.workspace }}/protocol-artifacts
+      PGPROXY_TEST_REVISION: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache-dependency-path: go.sum
+      - name: Report Docker and source revision
+        run: |
+          docker version
+          git rev-parse HEAD
+      - name: Run differential protocol corpus
+        run: go test -tags=integration -count=1 -timeout=10m -v ./internal/protocoltest/integration
+      - name: Upload protocol failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: protocol-failures-${{ github.sha }}
+          path: protocol-artifacts/
+          if-no-files-found: ignore
+          retention-days: 14

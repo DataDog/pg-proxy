@@ -1,0 +1,87 @@
+{
+  "version": 1,
+  "name": "extended_error_sync",
+  "setup": ["CREATE TABLE events (id integer PRIMARY KEY)"],
+  "steps": [
+    {
+      "send": [
+        {"type": "Parse", "name": "first", "sql": "INSERT INTO events VALUES (1)"},
+        {"type": "Bind", "statement": "first", "portal": "p1"},
+        {"type": "Execute", "portal": "p1"},
+        {"type": "Parse", "name": "bad", "sql": "SELEC 1"},
+        {"type": "Parse", "name": "skipped", "sql": "INSERT INTO events VALUES (2)"},
+        {"type": "Bind", "statement": "skipped", "portal": "p2"},
+        {"type": "Execute", "portal": "p2"},
+        {"type": "Sync"},
+        {"type": "Parse", "name": "survives", "sql": "INSERT INTO events VALUES (3)"},
+        {"type": "Bind", "statement": "survives", "portal": "p3"},
+        {"type": "Execute", "portal": "p3"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "aborted_segment",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "CommandComplete", "tag": "INSERT 0 1"},
+        {"type": "ErrorResponse", "code": "42601"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "checkpoint": "recovered_segment",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "CommandComplete", "tag": "INSERT 0 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT id FROM events ORDER BY id"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "visible_effects",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["33"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": [
+        ["3"]
+      ]
+    }
+  ]
+}

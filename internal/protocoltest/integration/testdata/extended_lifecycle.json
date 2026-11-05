@@ -1,0 +1,67 @@
+{
+  "version": 1,
+  "name": "extended_lifecycle",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "s",
+          "sql": "SELECT $1::int4 AS value",
+          "parameter_oids": [23]
+        },
+        {"type": "Describe", "object": "S", "name": "s"},
+        {
+          "type": "Bind",
+          "statement": "s",
+          "portal": "p",
+          "parameters": ["37"]
+        },
+        {"type": "Describe", "object": "P", "name": "p"},
+        {"type": "Execute", "portal": "p"},
+        {"type": "Close", "object": "P", "name": "p"},
+        {"type": "Close", "object": "S", "name": "s"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "describe_execute_close",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "ParameterDescription"},
+        {"type": "RowDescription"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["37"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "CloseComplete"},
+        {"type": "CloseComplete"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}

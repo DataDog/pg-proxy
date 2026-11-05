@@ -1,0 +1,99 @@
+{
+  "version": 1,
+  "name": "unnamed_replacement",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {"type": "Query", "sql": "BEGIN"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "begin",
+      "receive": [
+        {"type": "CommandComplete", "tag": "BEGIN"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Parse", "name": "", "sql": "SELECT 1 AS value"},
+        {"type": "Bind", "statement": "", "portal": ""},
+        {"type": "Describe", "object": "P", "name": ""},
+        {"type": "Execute", "portal": ""},
+        {"type": "Flush"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "first_unnamed",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Parse", "name": "", "sql": "SELECT 2 AS value"},
+        {"type": "Bind", "statement": "", "portal": ""},
+        {"type": "Describe", "object": "P", "name": ""},
+        {"type": "Execute", "portal": ""},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "replace_unnamed",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["32"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "COMMIT"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "commit",
+      "receive": [
+        {"type": "CommandComplete", "tag": "COMMIT"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}

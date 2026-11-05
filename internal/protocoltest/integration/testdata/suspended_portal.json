@@ -1,0 +1,113 @@
+{
+  "version": 1,
+  "name": "suspended_portal",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {"type": "Query", "sql": "BEGIN"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "begin",
+      "receive": [
+        {"type": "CommandComplete", "tag": "BEGIN"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Parse", "name": "s", "sql": "SELECT n FROM generate_series(1, 3) AS n ORDER BY n"},
+        {"type": "Bind", "statement": "s", "portal": "p"},
+        {"type": "Describe", "object": "P", "name": "p"},
+        {"type": "Execute", "portal": "p", "max_rows": 1},
+        {"type": "Flush"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "suspended",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "PortalSuspended"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "transaction_keeps_portal",
+      "receive": [
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Execute", "portal": "p"},
+        {"type": "Close", "object": "P", "name": "p"},
+        {"type": "Close", "object": "S", "name": "s"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "continued",
+      "receive": [
+        {
+          "type": "DataRow",
+          "values": ["32"]
+        },
+        {
+          "type": "DataRow",
+          "values": ["33"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 2"},
+        {"type": "CloseComplete"},
+        {"type": "CloseComplete"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "COMMIT"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "commit",
+      "receive": [
+        {"type": "CommandComplete", "tag": "COMMIT"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}

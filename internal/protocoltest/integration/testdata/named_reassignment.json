@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "name": "named_reassignment",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "stable",
+          "sql": "SELECT $1::int4 AS value",
+          "parameter_oids": [23]
+        },
+        {
+          "type": "Bind",
+          "statement": "stable",
+          "portal": "first",
+          "parameters": ["37"]
+        },
+        {"type": "Describe", "object": "P", "name": "first"},
+        {"type": "Execute", "portal": "first"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "first_backend",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["37"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {"reassign_backend": true},
+    {
+      "send": [
+        {
+          "type": "Bind",
+          "statement": "stable",
+          "portal": "second",
+          "parameters": ["38"]
+        },
+        {"type": "Describe", "object": "P", "name": "second"},
+        {"type": "Execute", "portal": "second"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "new_backend",
+      "receive": [
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["38"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Close", "object": "S", "name": "stable"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "close_statement",
+      "receive": [
+        {"type": "CloseComplete"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Parse", "name": "stable", "sql": "SELECT 9 AS value"},
+        {"type": "Bind", "statement": "stable", "portal": "third"},
+        {"type": "Describe", "object": "P", "name": "third"},
+        {"type": "Execute", "portal": "third"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recreate_statement",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["39"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}

@@ -1,0 +1,194 @@
+{
+  "version": 1,
+  "name": "transaction_effects",
+  "setup": ["CREATE TABLE events (id integer PRIMARY KEY)"],
+  "steps": [
+    {
+      "send": [
+        {"type": "Query", "sql": "BEGIN"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "begin_commit",
+      "receive": [
+        {"type": "CommandComplete", "tag": "BEGIN"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "INSERT INTO events VALUES (1)"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "insert_committed",
+      "receive": [
+        {"type": "CommandComplete", "tag": "INSERT 0 1"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "COMMIT"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "commit",
+      "receive": [
+        {"type": "CommandComplete", "tag": "COMMIT"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "BEGIN"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "begin_rollback",
+      "receive": [
+        {"type": "CommandComplete", "tag": "BEGIN"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "INSERT INTO events VALUES (2)"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "insert_rolled_back",
+      "receive": [
+        {"type": "CommandComplete", "tag": "INSERT 0 1"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "ROLLBACK"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "rollback",
+      "receive": [
+        {"type": "CommandComplete", "tag": "ROLLBACK"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "BEGIN"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "begin_error",
+      "receive": [
+        {"type": "CommandComplete", "tag": "BEGIN"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "INSERT INTO events VALUES (3)"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "insert_aborted",
+      "receive": [
+        {"type": "CommandComplete", "tag": "INSERT 0 1"},
+        {"type": "ReadyForQuery", "status": "T"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 / 0"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "division_error",
+      "receive": [
+        {"type": "ErrorResponse", "code": "22012"},
+        {"type": "ReadyForQuery", "status": "E"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "aborted_transaction",
+      "receive": [
+        {"type": "ErrorResponse", "code": "25P02"},
+        {"type": "ReadyForQuery", "status": "E"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "ROLLBACK"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recover_aborted",
+      "receive": [
+        {"type": "CommandComplete", "tag": "ROLLBACK"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT id FROM events ORDER BY id"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "visible_effects",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": [
+        ["1"]
+      ]
+    }
+  ]
+}

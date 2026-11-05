@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "name": "binary_values",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "binary",
+          "sql": "SELECT $1::int4 AS n, $2::bytea AS payload, $3::bytea AS null_value, $4::bytea AS empty_value",
+          "parameter_oids": [23, 17, 17, 17]
+        },
+        {"type": "Describe", "object": "S", "name": "binary"},
+        {
+          "type": "Bind",
+          "statement": "binary",
+          "portal": "p",
+          "parameter_formats": [1],
+          "parameters": ["0000002a", "00ff8001", null, ""],
+          "result_formats": [1]
+        },
+        {"type": "Describe", "object": "P", "name": "p"},
+        {"type": "Execute", "portal": "p"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "binary_result",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "ParameterDescription"},
+        {"type": "RowDescription"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["0000002a", "00ff8001", null, ""]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}

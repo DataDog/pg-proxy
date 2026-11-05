@@ -1,0 +1,88 @@
+{
+  "version": 1,
+  "name": "multi_pipeline_segments",
+  "setup": [],
+  "steps": [
+    {
+      "send": [
+        {"type": "Parse", "name": "s1", "sql": "SELECT 1 AS value"},
+        {"type": "Bind", "statement": "s1", "portal": "p1"},
+        {"type": "Describe", "object": "P", "name": "p1"},
+        {"type": "Execute", "portal": "p1"},
+        {"type": "Sync"},
+        {"type": "Parse", "name": "s2", "sql": "SELECT 2 AS value"},
+        {"type": "Bind", "statement": "s2", "portal": "p2"},
+        {"type": "Describe", "object": "P", "name": "p2"},
+        {"type": "Execute", "portal": "p2"},
+        {"type": "Sync"},
+        {"type": "Parse", "name": "s3", "sql": "SELECT 3 AS value"},
+        {"type": "Bind", "statement": "s3", "portal": "p3"},
+        {"type": "Describe", "object": "P", "name": "p3"},
+        {"type": "Execute", "portal": "p3"},
+        {"type": "Sync"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "segment_1",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "checkpoint": "segment_2",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["32"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "checkpoint": "segment_3",
+      "receive": [
+        {"type": "ParseComplete"},
+        {"type": "BindComplete"},
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["33"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    },
+    {
+      "send": [
+        {"type": "Query", "sql": "SELECT 1 AS recovery"}
+      ]
+    },
+    {"flush_transport": true},
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {"type": "RowDescription"},
+        {
+          "type": "DataRow",
+          "values": ["31"]
+        },
+        {"type": "CommandComplete", "tag": "SELECT 1"},
+        {"type": "ReadyForQuery", "status": "I"}
+      ]
+    }
+  ],
+  "effects": []
+}
