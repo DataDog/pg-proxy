@@ -23,17 +23,17 @@ type SQLPotentialComparison struct {
 // All access is protected by the owning PoolHealth's sqlComparisonMu.
 type sqlPotentialTimingState struct {
 	// Track previous primary sets and pair SQL/Patroni timestamps by replacement IP.
-	timing potentialTiming
+	leaderComparisons potentialTiming
 	// Remember retained IPs to detect removals and reappearances on the next update.
-	retainedIPs map[string]bool
+	previousRetainedIPs map[string]bool
 	// Per-IP eviction/rediscovery cutoffs used to reject stale Patroni evidence.
-	validAfter map[string]time.Time
+	dnsLifecycleCutoffByIP map[string]time.Time
 	// Newest accepted Patroni timestamp; reject observations delivered out of order.
-	patroniObservedAt time.Time
+	lastAcceptedPatroniObservedAt time.Time
 	// Ignore Patroni timing while invalidation leaves no completed SQL evidence.
-	paused bool
+	waitingForSQLSnapshot bool
 	// First SQL snapshot time after a pause; reject Patroni observations captured earlier.
-	resumedAt time.Time
+	sqlTimingResumedAt time.Time
 }
 
 // Snapshot timing tracks every newly reported primary independently. It shares
@@ -97,13 +97,13 @@ func (s *PoolHealth) resetSQLPotentialTargetLocked(target *sqlHealthTarget) {
 func (p *sqlPotentialTimingState) resetTarget(observed bool, completedTargets int) {
 	if observed {
 		// Removing completed evidence changes the aggregate and breaks timing continuity.
-		p.timing = potentialTiming{}
+		p.leaderComparisons = potentialTiming{}
 	}
 	if completedTargets == 0 || observed && completedTargets == 1 {
 		// With no completed sibling evidence left, suspend Patroni tracking until
 		// a valid SQL completion establishes a fresh baseline.
-		p.timing = potentialTiming{}
-		p.paused = true
+		p.leaderComparisons = potentialTiming{}
+		p.waitingForSQLSnapshot = true
 	}
 }
 
@@ -118,10 +118,10 @@ func (p *sqlPotentialTimingState) observeSQLSnapshot(snapshot sqlHealthCompariso
 			observedAt = completed.ObservedAt
 		}
 	}
-	if p.paused {
-		p.timing = potentialTiming{}
-		p.paused = false
-		p.resumedAt = observedAt
+	if p.waitingForSQLSnapshot {
+		p.leaderComparisons = potentialTiming{}
+		p.waitingForSQLSnapshot = false
+		p.sqlTimingResumedAt = observedAt
 	}
 	p.updateRetained(snapshot.retainedIPs, observedAt)
 	healthy := make(map[string]bool)
@@ -130,7 +130,7 @@ func (p *sqlPotentialTimingState) observeSQLSnapshot(snapshot sqlHealthCompariso
 			healthy[ip] = true
 		}
 	}
-	return p.timing.observe(true, healthy, observedAt)
+	return p.leaderComparisons.observe(true, healthy, observedAt)
 }
 
 // Discovery calls this while holding the same lock as timing observations, before exposing the
@@ -139,28 +139,28 @@ func (p *sqlPotentialTimingState) updateRetained(ips []string, at time.Time) {
 	retained := make(map[string]bool, len(ips))
 	for _, ip := range ips {
 		retained[ip] = true
-		if cutoff, invalidated := p.validAfter[ip]; invalidated && !p.retainedIPs[ip] && at.After(cutoff) {
+		if cutoff, invalidated := p.dnsLifecycleCutoffByIP[ip]; invalidated && !p.previousRetainedIPs[ip] && at.After(cutoff) {
 			// Rediscovery starts another lifecycle. Observations captured while
 			// absent must not become eligible merely because their callback is late.
-			p.validAfter[ip] = at
+			p.dnsLifecycleCutoffByIP[ip] = at
 		}
 	}
-	for ip := range p.retainedIPs {
+	for ip := range p.previousRetainedIPs {
 		if !retained[ip] {
-			if p.validAfter == nil {
-				p.validAfter = make(map[string]time.Time)
+			if p.dnsLifecycleCutoffByIP == nil {
+				p.dnsLifecycleCutoffByIP = make(map[string]time.Time)
 			}
-			if at.After(p.validAfter[ip]) {
-				p.validAfter[ip] = at
+			if at.After(p.dnsLifecycleCutoffByIP[ip]) {
+				p.dnsLifecycleCutoffByIP[ip] = at
 			}
 			// Eviction invalidates only this address. A retained replacement can still
 			// pair with its pending observation, even if the old leader disappears.
-			delete(p.timing.pending, ip)
-			delete(p.timing.sqlLeaders, ip)
-			delete(p.timing.patroniLeaders, ip)
+			delete(p.leaderComparisons.pending, ip)
+			delete(p.leaderComparisons.sqlLeaders, ip)
+			delete(p.leaderComparisons.patroniLeaders, ip)
 		}
 	}
-	p.retainedIPs = retained
+	p.previousRetainedIPs = retained
 }
 
 func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]bool, observedAt time.Time) {
@@ -174,16 +174,16 @@ func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]
 }
 
 func (p *sqlPotentialTimingState) observePatroni(health map[string]bool, observedAt time.Time) []SQLPotentialComparison {
-	if p.paused || observedAt.Before(p.resumedAt) || observedAt.Before(p.patroniObservedAt) {
+	if p.waitingForSQLSnapshot || observedAt.Before(p.sqlTimingResumedAt) || observedAt.Before(p.lastAcceptedPatroniObservedAt) {
 		// Callbacks can arrive after a lifecycle gap or after a newer Patroni poll.
 		// Reject the old snapshot rather than letting it interrupt current evidence.
 		return nil
 	}
-	p.patroniObservedAt = observedAt
+	p.lastAcceptedPatroniObservedAt = observedAt
 	healthy := make(map[string]bool)
 	for ip, primary := range health {
-		if cutoff, invalidated := p.validAfter[ip]; invalidated &&
-			(!p.retainedIPs[ip] || !observedAt.After(cutoff)) {
+		if cutoff, invalidated := p.dnsLifecycleCutoffByIP[ip]; invalidated &&
+			(!p.previousRetainedIPs[ip] || !observedAt.After(cutoff)) {
 			// A callback from before eviction or during absence cannot recreate a
 			// cleared timestamp after rediscovery. While absent, no evidence for
 			// this IP can participate. Other retained IPs remain comparable.
@@ -193,7 +193,7 @@ func (p *sqlPotentialTimingState) observePatroni(health map[string]bool, observe
 			healthy[ip] = true
 		}
 	}
-	return p.timing.observe(false, healthy, observedAt)
+	return p.leaderComparisons.observe(false, healthy, observedAt)
 }
 
 func (w *HealthWorker) reportSQLPotential(s *PoolHealth, comparisons []SQLPotentialComparison) {
