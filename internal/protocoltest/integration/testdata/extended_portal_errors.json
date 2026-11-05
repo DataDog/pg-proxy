@@ -1,0 +1,183 @@
+{
+  "version": 1,
+  "name": "extended_portal_errors",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Execute",
+          "portal": "missing"
+        },
+        {
+          "type": "Parse",
+          "name": "ignored",
+          "sql": "INSERT INTO events VALUES (2)"
+        },
+        {
+          "type": "Bind",
+          "statement": "ignored"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "missing_portal",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "34000"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "BEGIN"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "begin",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "BEGIN"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "T"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "s",
+          "sql": "SELECT 1"
+        },
+        {
+          "type": "Bind",
+          "statement": "s",
+          "portal": "p"
+        },
+        {
+          "type": "Bind",
+          "statement": "s",
+          "portal": "p"
+        },
+        {
+          "type": "Execute",
+          "portal": "p"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "duplicate_portal",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "ErrorResponse",
+          "code": "42P03"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "E"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "ROLLBACK"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "rollback",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "ROLLBACK"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": []
+    }
+  ]
+}

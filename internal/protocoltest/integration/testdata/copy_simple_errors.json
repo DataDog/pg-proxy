@@ -1,0 +1,308 @@
+{
+  "version": 1,
+  "name": "copy_simple_errors",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY, label text)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "COPY events FROM STDIN"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "client_fail_start",
+      "receive": [
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a"
+        },
+        {
+          "type": "CopyFail",
+          "message": "client stopped COPY"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "client_fail",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "57014"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "6c6566746f7665720a"
+        },
+        {
+          "type": "CopyDone"
+        },
+        {
+          "type": "Query",
+          "sql": "SELECT count(*) FROM events"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "client_fail_atomic",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "30"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "COPY events FROM STDIN"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "conversion_start",
+      "receive": [
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a6e6f745f616e5f696e74096261640a"
+        },
+        {
+          "type": "CopyDone"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "conversion",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "22P02"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT count(*) FROM events"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "conversion_atomic",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "30"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "COPY events FROM STDIN"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "constraint_start",
+      "receive": [
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a31096475706c69636174650a"
+        },
+        {
+          "type": "CopyDone"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "constraint",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "23505"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT count(*) FROM events"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "constraint_atomic",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "30"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": []
+    }
+  ]
+}

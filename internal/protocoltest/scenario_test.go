@@ -43,6 +43,9 @@ func TestMessageReferenceFrames(t *testing.T) {
 	}{
 		{Message{Type: "Query", SQL: "SELECT 1"}, "510000000d53454c454354203100"},
 		{Message{Type: "Sync"}, "5300000004"},
+		{Message{Type: "CopyData", Data: stringPointer("000aff")}, "6400000007000aff"},
+		{Message{Type: "CopyDone"}, "6300000004"},
+		{Message{Type: "CopyFail", Message: "stopped"}, "660000000c73746f7070656400"},
 		{Message{Type: "Flush"}, "4800000004"},
 		{Message{Type: "Parse", SQL: "SELECT 1"}, "50000000100053454c4543542031000000"},
 	}
@@ -78,6 +81,10 @@ func TestMessageValidation(t *testing.T) {
 		{Type: "Flush", SQL: "SELECT 1"},
 		{Type: "Parse", Name: "bad\x00name"},
 		{Type: "Unknown"},
+		{Type: "CopyData"},
+		{Type: "CopyData", Data: stringPointer("zz")},
+		{Type: "CopyFail", Message: "bad\x00reason"},
+		{Type: "Sync", Data: stringPointer("")},
 	} {
 		if _, err := message.encode(); err == nil {
 			t.Fatalf("accepted invalid %+v", message)

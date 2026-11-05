@@ -49,16 +49,21 @@ type Message struct {
 	Parameters       []*string `json:"parameters,omitempty"`
 	ResultFormats    []int16   `json:"result_formats,omitempty"`
 	MaxRows          uint32    `json:"max_rows,omitempty"`
+	Data             *string   `json:"data,omitempty"`
+	Message          string    `json:"message,omitempty"`
 }
 
 // Expectation adds independent assertions to differential equality. Values use
 // the same hex/NULL representation as Message.Parameters.
 type Expectation struct {
-	Type   string    `json:"type"`
-	Code   string    `json:"code,omitempty"`
-	Tag    string    `json:"tag,omitempty"`
-	Status string    `json:"status,omitempty"`
-	Values []*string `json:"values,omitempty"`
+	Type          string    `json:"type"`
+	Code          string    `json:"code,omitempty"`
+	Tag           string    `json:"tag,omitempty"`
+	Status        string    `json:"status,omitempty"`
+	Values        []*string `json:"values,omitempty"`
+	Data          *string   `json:"data,omitempty"`
+	Format        *uint8    `json:"format,omitempty"`
+	ColumnFormats []uint16  `json:"column_formats,omitempty"`
 }
 
 // Effect is a sorted control query and its expected text rows after the run.
@@ -145,7 +150,7 @@ func (s Scenario) Validate() error {
 }
 
 func (m Message) encode() ([]byte, error) {
-	for _, value := range []string{m.SQL, m.Name, m.Statement, m.Portal} {
+	for _, value := range []string{m.SQL, m.Name, m.Statement, m.Portal, m.Message} {
 		if strings.ContainsRune(value, 0) {
 			return nil, errors.New("message strings cannot contain NUL")
 		}
@@ -154,7 +159,7 @@ func (m Message) encode() ([]byte, error) {
 	// such as using Name instead of Statement in a Bind.
 	allowed := map[string]string{
 		"Query": "sql", "Parse": "sql,name,parameter_oids", "Bind": "statement,portal,parameter_formats,parameters,result_formats",
-		"Describe": "name,object", "Execute": "portal,max_rows", "Close": "name,object", "Flush": "", "Sync": "",
+		"Describe": "name,object", "Execute": "portal,max_rows", "Close": "name,object", "Flush": "", "Sync": "", "CopyData": "data", "CopyDone": "", "CopyFail": "message",
 	}
 	fields, ok := allowed[m.Type]
 	if !ok {
@@ -163,7 +168,7 @@ func (m Message) encode() ([]byte, error) {
 	present := map[string]bool{
 		"sql": m.SQL != "", "name": m.Name != "", "statement": m.Statement != "", "portal": m.Portal != "", "object": m.Object != "",
 		"parameter_oids": m.ParameterOIDs != nil, "parameter_formats": m.ParameterFormats != nil, "parameters": m.Parameters != nil,
-		"result_formats": m.ResultFormats != nil, "max_rows": m.MaxRows != 0,
+		"result_formats": m.ResultFormats != nil, "max_rows": m.MaxRows != 0, "data": m.Data != nil, "message": m.Message != "",
 	}
 	for field, exists := range present {
 		if exists && !strings.Contains(","+fields+",", ","+field+",") {
@@ -172,6 +177,19 @@ func (m Message) encode() ([]byte, error) {
 	}
 	var message pgproto3.FrontendMessage
 	switch m.Type {
+	case "CopyData":
+		if m.Data == nil {
+			return nil, errors.New("CopyData requires explicit hex data")
+		}
+		data, err := hex.DecodeString(*m.Data)
+		if err != nil {
+			return nil, fmt.Errorf("CopyData.data: %w", err)
+		}
+		message = &pgproto3.CopyData{Data: data}
+	case "CopyDone":
+		message = &pgproto3.CopyDone{}
+	case "CopyFail":
+		message = &pgproto3.CopyFail{Message: m.Message}
 	case "Query":
 		message = &pgproto3.Query{String: m.SQL}
 	case "Parse":
@@ -221,7 +239,7 @@ func (m Message) encode() ([]byte, error) {
 
 func (e Expectation) validate() error {
 	switch e.Type {
-	case "ParseComplete", "BindComplete", "CloseComplete", "CommandComplete", "EmptyQueryResponse", "RowDescription", "DataRow", "ParameterDescription", "NoData", "PortalSuspended", "ReadyForQuery", "ErrorResponse", "NoticeResponse", "ParameterStatus":
+	case "ParseComplete", "BindComplete", "CloseComplete", "CommandComplete", "EmptyQueryResponse", "RowDescription", "DataRow", "ParameterDescription", "NoData", "PortalSuspended", "ReadyForQuery", "ErrorResponse", "NoticeResponse", "ParameterStatus", "CopyInResponse", "CopyOutResponse", "CopyData", "CopyDone":
 	default:
 		return fmt.Errorf("unsupported expected message %q", e.Type)
 	}
@@ -236,6 +254,27 @@ func (e Expectation) validate() error {
 	}
 	if e.Values != nil && e.Type != "DataRow" {
 		return errors.New("values requires DataRow")
+	}
+	if e.Data != nil {
+		if e.Type != "CopyData" {
+			return errors.New("data requires CopyData")
+		}
+		if _, err := hex.DecodeString(*e.Data); err != nil {
+			return fmt.Errorf("expected CopyData.data: %w", err)
+		}
+	}
+	if e.Format != nil || e.ColumnFormats != nil {
+		if e.Type != "CopyInResponse" && e.Type != "CopyOutResponse" {
+			return errors.New("format and column_formats require CopyInResponse or CopyOutResponse")
+		}
+		if e.Format != nil && *e.Format > 1 {
+			return errors.New("COPY format must be 0 or 1")
+		}
+		for _, format := range e.ColumnFormats {
+			if format > 1 {
+				return errors.New("COPY column format must be 0 or 1")
+			}
+		}
 	}
 	for _, value := range e.Values {
 		if value != nil {

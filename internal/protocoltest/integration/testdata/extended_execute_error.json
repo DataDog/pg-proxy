@@ -1,0 +1,204 @@
+{
+  "version": 1,
+  "name": "extended_execute_error",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY)",
+    "CREATE TABLE denominator (id integer)",
+    "INSERT INTO denominator VALUES (0)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "BEGIN"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "begin",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "BEGIN"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "T"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "bad",
+          "sql": "SELECT 1 / id FROM denominator"
+        },
+        {
+          "type": "Bind",
+          "statement": "bad",
+          "parameters": []
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Parse",
+          "name": "ignored",
+          "sql": "INSERT INTO events VALUES (2)"
+        },
+        {
+          "type": "Bind",
+          "statement": "ignored"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "execute_error",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "ErrorResponse",
+          "code": "22012"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "E"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "aborted_transaction",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "25P02"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "E"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "ROLLBACK"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "rollback",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "ROLLBACK"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "INSERT INTO events VALUES (3)"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "after_rollback",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "INSERT 0 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": [
+        [
+          "3"
+        ]
+      ]
+    }
+  ]
+}

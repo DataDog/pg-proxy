@@ -1,0 +1,213 @@
+{
+  "version": 1,
+  "name": "copy_explicit_error",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY, label text)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "BEGIN"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "begin",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "BEGIN"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "T"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "sql": "COPY events FROM STDIN"
+        },
+        {
+          "type": "Bind"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Flush"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "copy_in",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a31096475706c69636174650a"
+        },
+        {
+          "type": "CopyDone"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "constraint_error",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "23505"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "ignored",
+          "sql": "INSERT INTO events VALUES (99, 'ignored')"
+        },
+        {
+          "type": "Bind",
+          "statement": "ignored"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "sync_failed",
+      "receive": [
+        {
+          "type": "ReadyForQuery",
+          "status": "E"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "aborted_transaction",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "25P02"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "E"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "ROLLBACK"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "rollback",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "ROLLBACK"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": []
+    }
+  ]
+}

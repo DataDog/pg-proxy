@@ -174,3 +174,15 @@ func TestOracleZeroColumnDescription(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestOracleCopyPayloadAndFormats(t *testing.T) {
+	for _, pair := range [][2]pgproto3.BackendMessage{
+		{&pgproto3.CopyData{Data: []byte{0, 1, 0xff}}, &pgproto3.CopyData{Data: []byte{0, 2, 0xff}}},
+		{&pgproto3.CopyInResponse{OverallFormat: 0, ColumnFormatCodes: []uint16{0}}, &pgproto3.CopyInResponse{OverallFormat: 1, ColumnFormatCodes: []uint16{1}}},
+		{&pgproto3.CopyOutResponse{ColumnFormatCodes: []uint16{0}}, &pgproto3.CopyOutResponse{ColumnFormatCodes: []uint16{1}}},
+	} {
+		if err := Compare(backendTranscript(t, pair[0]), backendTranscript(t, pair[1]), nil, nil); err == nil {
+			t.Fatal("changed COPY payload or format passed")
+		}
+	}
+}

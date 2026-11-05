@@ -1,0 +1,235 @@
+{
+  "version": 1,
+  "name": "copy_extended_errors",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY, label text)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "sql": "COPY events FROM STDIN"
+        },
+        {
+          "type": "Bind"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Flush"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "client_fail_start",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a"
+        },
+        {
+          "type": "CopyFail",
+          "message": "client stopped COPY"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "client_fail_error",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "57014"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "ignored_client_fail",
+          "sql": "INSERT INTO events VALUES (99, 'ignored')"
+        },
+        {
+          "type": "Bind",
+          "statement": "ignored_client_fail"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "client_fail_sync",
+      "receive": [
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "sql": "COPY events FROM STDIN"
+        },
+        {
+          "type": "Bind"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Flush"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "conversion_start",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a6e6f745f616e5f696e74096261640a"
+        },
+        {
+          "type": "CopyDone"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "conversion_error",
+      "receive": [
+        {
+          "type": "ErrorResponse",
+          "code": "22P02"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "name": "ignored_conversion",
+          "sql": "INSERT INTO events VALUES (99, 'ignored')"
+        },
+        {
+          "type": "Bind",
+          "statement": "ignored_conversion"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "conversion_sync",
+      "receive": [
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id FROM events ORDER BY id",
+      "rows": []
+    }
+  ]
+}

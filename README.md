@@ -232,7 +232,8 @@ them in CI against its pinned module version; GitHub Actions compiles them here.
 
 The [protocol harness](docs/protocol-verification.md) compares deterministic raw
 PostgreSQL conversations through the proxy and two direct controls. It checks
-ordered wire responses, committed effects, and client recovery. Its dedicated
+ordered wire responses, committed effects, COPY recovery, and prepared-statement
+isolation between simultaneous clients. Its dedicated
 CI job runs with Docker and a pinned public PostgreSQL image; it needs no
 Datadog account or private registry.
 

@@ -36,6 +36,8 @@ type Options struct {
 	StepTimeout    time.Duration
 	WriteChunkSize int
 	Reassign       func(context.Context) error
+	// BeforeStep is a bounded scheduling barrier, called only after startup.
+	BeforeStep func(context.Context, int) error
 }
 
 // Frame owns all its data. Hex preserves exact bytes, including NULL versus
@@ -205,6 +207,11 @@ func Run(ctx context.Context, endpoint Endpoint, scenario Scenario, options Opti
 	frontendBytes := 0
 	for stepIndex, step := range scenario.Steps {
 		activeStep = stepIndex
+		if options.BeforeStep != nil {
+			if err := options.BeforeStep(ctx, stepIndex); err != nil {
+				return transcript, fmt.Errorf("step %d scheduling barrier: %w", stepIndex, err)
+			}
+		}
 		switch {
 		case len(step.Send) > 0:
 			for _, msg := range step.Send {
@@ -272,6 +279,11 @@ func Run(ctx context.Context, endpoint Endpoint, scenario Scenario, options Opti
 		return transcript, errors.New("conversation ended with unflushed bytes")
 	}
 	activeStep = len(scenario.Steps)
+	if options.BeforeStep != nil {
+		if err := options.BeforeStep(ctx, activeStep); err != nil {
+			return transcript, fmt.Errorf("termination scheduling barrier: %w", err)
+		}
+	}
 	raw, _ := (&pgproto3.Terminate{}).Encode(nil)
 	frame, _ := snapshot("frontend", raw, &pgproto3.Terminate{})
 	frame.Step = activeStep
@@ -435,6 +447,14 @@ func checkExpectation(want Expectation, response received) error {
 		return fmt.Errorf("message type: want %s, got %s", want.Type, response.frame.Type)
 	}
 	switch msg := response.message.(type) {
+	case *pgproto3.CopyData:
+		if want.Data != nil && *want.Data != hex.EncodeToString(msg.Data) {
+			return fmt.Errorf("CopyData.Data: want %s, got %x", *want.Data, msg.Data)
+		}
+	case *pgproto3.CopyInResponse:
+		return checkCopyFormat(want, msg.OverallFormat, msg.ColumnFormatCodes)
+	case *pgproto3.CopyOutResponse:
+		return checkCopyFormat(want, msg.OverallFormat, msg.ColumnFormatCodes)
 	case *pgproto3.ErrorResponse:
 		if want.Code != "" && want.Code != msg.Code {
 			return fmt.Errorf("ErrorResponse.Code: want %s, got %s", want.Code, msg.Code)
@@ -465,6 +485,16 @@ func checkExpectation(want Expectation, response received) error {
 				}
 			}
 		}
+	}
+	return nil
+}
+
+func checkCopyFormat(want Expectation, format byte, columns []uint16) error {
+	if want.Format != nil && *want.Format != format {
+		return fmt.Errorf("%s.OverallFormat: want %d, got %d", want.Type, *want.Format, format)
+	}
+	if want.ColumnFormats != nil && !reflect.DeepEqual(want.ColumnFormats, columns) {
+		return fmt.Errorf("%s.ColumnFormatCodes: want %v, got %v", want.Type, want.ColumnFormats, columns)
 	}
 	return nil
 }

@@ -61,8 +61,8 @@ func scenarios(t *testing.T) []protocoltest.Scenario {
 }
 
 func TestCorpus(t *testing.T) {
-	if n := len(scenarios(t)); n != 10 {
-		t.Fatalf("expected ten reviewed conversations, got %d", n)
+	if n := len(scenarios(t)); n != 19 {
+		t.Fatalf("expected nineteen reviewed conversations, got %d", n)
 	}
 }
 
@@ -88,7 +88,13 @@ func TestDifferential(t *testing.T) {
 		if expected, ok := pgMetadata["postgres_version"].(string); ok && pg.Metadata["postgres_version"] != expected {
 			t.Fatalf("replay PostgreSQL version differs: got %v, want %s", pg.Metadata["postgres_version"], expected)
 		}
-		t.Run(saved.Scenario.Name, func(t *testing.T) { testConversation(t, pg, saved.Scenario, saved.BufferSize, saved.WriteChunkSize) })
+		t.Run(saved.Scenario.Name, func(t *testing.T) {
+			if saved.Compound != nil {
+				testCompoundConversation(t, pg, *saved.Compound, saved.BufferSize, saved.WriteChunkSize)
+			} else {
+				testConversation(t, pg, saved.Scenario, saved.BufferSize, saved.WriteChunkSize)
+			}
+		})
 		return
 	}
 	cases := scenarios(t)
@@ -128,13 +134,15 @@ func TestBufferBoundaries(t *testing.T) {
 func stringPointer(value string) *string { return &value }
 
 type laneResult struct {
-	Name         string                  `json:"name"`
-	Transcript   protocoltest.Transcript `json:"transcript"`
-	Error        string                  `json:"error,omitempty"`
-	Effects      [][][]*string           `json:"effects"`
-	CheckoutPIDs []uint32                `json:"checkout_pids,omitempty"`
-	CleanupError string                  `json:"cleanup_error,omitempty"`
-	Relations    map[uint32]string       `json:"relations"`
+	Name         string                    `json:"name"`
+	Transcript   protocoltest.Transcript   `json:"transcript"`
+	Error        string                    `json:"error,omitempty"`
+	Effects      [][][]*string             `json:"effects"`
+	CheckoutPIDs []uint32                  `json:"checkout_pids,omitempty"`
+	CleanupError string                    `json:"cleanup_error,omitempty"`
+	Relations    map[uint32]string         `json:"relations"`
+	Clients      []protocoltest.Transcript `json:"clients,omitempty"`
+	Turns        []turnObservation         `json:"turns,omitempty"`
 }
 
 type report struct {
@@ -147,6 +155,7 @@ type report struct {
 	Differences    []string              `json:"differences,omitempty"`
 	ProxyLog       string                `json:"proxy_log"`
 	PostgresLog    string                `json:"postgres_log,omitempty"`
+	Compound       *compoundCase         `json:"compound,omitempty"`
 }
 
 func testConversation(t *testing.T, pg *postgresFixture, scenario protocoltest.Scenario, buffer, chunk int) {
@@ -158,35 +167,7 @@ func testConversation(t *testing.T, pg *postgresFixture, scenario protocoltest.S
 	defer restore()
 	result := report{Test: t.Name(), Scenario: scenario, BufferSize: buffer, WriteChunkSize: chunk, Metadata: map[string]any{"go_version": runtime.Version(), "revision": sourceRevision(), "postgres": pg.Metadata, "schedule": "deterministic; no randomized generation"}}
 	var lanes []*lane
-	defer func() {
-		// Close sessions/pools before observing cleanup and writing the artifact.
-		for index, current := range lanes {
-			if current == nil {
-				continue
-			}
-			if err := current.Close(); err != nil {
-				t.Errorf("%s cleanup: %v", result.Results[index].Name, err)
-				result.Results[index].CleanupError = err.Error()
-			}
-		}
-		if !t.Failed() && os.Getenv("PGPROXY_TEST_KEEP_ARTIFACTS") != "1" {
-			return
-		}
-		result.ProxyLog = logs.String()
-		logCtx, logCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer logCancel()
-		if contents, err := pg.Logs(logCtx); err == nil {
-			result.PostgresLog = contents
-		} else {
-			result.PostgresLog = "log collection failed: " + err.Error()
-		}
-		path, err := writeReport(result, artifactRoot())
-		if err != nil {
-			t.Errorf("write failure artifact: %v", err)
-		} else {
-			t.Logf("protocol artifact: %s", path)
-		}
-	}()
+	defer func() { finishReport(t, pg, &result, logs, lanes) }()
 	for _, mode := range []struct {
 		name  string
 		proxy bool
@@ -245,6 +226,36 @@ func testConversation(t *testing.T, pg *postgresFixture, scenario protocoltest.S
 			result.Differences = append(result.Differences, difference)
 			t.Error(difference)
 		}
+	}
+}
+
+func finishReport(t *testing.T, pg *postgresFixture, result *report, logs *boundedLog, lanes []*lane) {
+	// Close sessions/pools before observing cleanup and writing the artifact.
+	for index, current := range lanes {
+		if current == nil {
+			continue
+		}
+		if err := current.Close(); err != nil {
+			t.Errorf("%s cleanup: %v", result.Results[index].Name, err)
+			result.Results[index].CleanupError = err.Error()
+		}
+	}
+	if !t.Failed() && os.Getenv("PGPROXY_TEST_KEEP_ARTIFACTS") != "1" {
+		return
+	}
+	result.ProxyLog = logs.String()
+	logCtx, logCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer logCancel()
+	if contents, err := pg.Logs(logCtx); err == nil {
+		result.PostgresLog = contents
+	} else {
+		result.PostgresLog = "log collection failed: " + err.Error()
+	}
+	path, err := writeReport(*result, artifactRoot())
+	if err != nil {
+		t.Errorf("write failure artifact: %v", err)
+	} else {
+		t.Logf("protocol artifact: %s", path)
 	}
 }
 
@@ -360,6 +371,24 @@ func loadReplay(path string) (report, error) {
 	result.Scenario, err = protocoltest.DecodeScenario(envelope.Scenario)
 	if err != nil {
 		return result, err
+	}
+	if result.Compound != nil {
+		if err := result.Compound.Validate(); err != nil {
+			return result, err
+		}
+		var saved struct {
+			Compound struct {
+				Clients []json.RawMessage `json:"clients"`
+			} `json:"compound"`
+		}
+		if err := json.Unmarshal(data, &saved); err != nil {
+			return result, err
+		}
+		for _, client := range saved.Compound.Clients {
+			if _, err := protocoltest.DecodeScenario(client); err != nil {
+				return result, err
+			}
+		}
 	}
 	if result.BufferSize <= 0 || result.WriteChunkSize < 0 {
 		return result, fmt.Errorf("invalid saved buffer or chunk size")

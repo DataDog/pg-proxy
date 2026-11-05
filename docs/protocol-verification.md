@@ -78,6 +78,15 @@ The corpus lives in `internal/protocoltest/integration/testdata/`.
 | `suspended_portal` | Continue a suspended portal across Sync inside an explicit transaction. |
 | `binary_values` | Preserve binary int4/bytea, embedded zero bytes, NULL and empty values. |
 | `transaction_effects` | Commit, rollback, aborted transaction, and `I`/`T`/`E` transitions. |
+| `copy_simple_success` | Text COPY FROM/TO, split input rows, ordered output, NULL and empty fields, committed rows. |
+| `copy_extended_success` | Extended COPY FROM/TO; early/in-COPY Sync ignored; exactly one final ReadyForQuery after the completion Sync. |
+| `copy_binary_input` | Binary COPY input split inside its header; binary int4, NULL and empty fields. |
+| `copy_simple_errors` | Client CopyFail, conversion/constraint errors, atomic effects, ignored leftover CopyData/CopyDone, recovery. |
+| `copy_extended_errors` | CopyFail and conversion errors before Sync; queued writes discarded; implicit rollback and recovery. |
+| `copy_explicit_error` | COPY constraint error, explicit transaction `E`, rollback, no partial committed rows. |
+| `extended_bind_error` | Bind conversion error rolls back earlier implicit writes and discards queued commands until Sync. |
+| `extended_execute_error` | Runtime Execute error, explicit transaction `E`, rejected follow-up query, rollback and successful write. |
+| `extended_portal_errors` | Missing portal and duplicate portal errors; implicit/explicit recovery. |
 
 Each case ends with a query on the original client connection. Control
 connections check declared database effects after the conversation finishes.
@@ -86,10 +95,27 @@ Each case runs with proxy buffers of 64/4096 bytes and frontend write chunks of
 generates DataRow frames of size B-1, B and B+1 for each buffer B; for example,
 `TestBufferBoundaries/buffer_64_below`. TCP need not preserve write boundaries.
 A direct-versus-direct run checks fixture repeatability before judging the proxy.
-The corpus and boundary cases are deterministic; no random seed is used.
+`TestPreparedIsolation` keeps two raw clients open against one fixture database.
+Go barriers let both clients complete startup before either sends a query and
+hold both sockets open until all turns finish. Clients alternate on the same
+one-connection backend pool. They reuse the same statement/portal names with
+different SQL and parameter types. A second case replaces the backend between
+turns. A third starts with identical SQL so both clients share the cached backend
+statement. Client A closes/recreates its statement; client B must still execute
+its original statement through Bind/Execute-only reuse. Each turn records the
+observed checkout PID. Compound reports save both scenarios, the exact turn
+schedule, both transcripts, and those observations; `replay.sh` replays the pair.
+Any client failure cancels and joins its sibling.
 
-COPY, cancellation, disconnect/uncertain-commit scenarios, an independent libpq
-client, stateful generation and shrinking are not implemented in this milestone.
+The suite runs **94 variants**: 19 JSON conversations × 4 transport configurations,
+6 buffer boundaries, and 3 two-client cases × 4 configurations. Cases are
+deterministic; no random seed is used.
+
+COPY input cases wait for CopyInResponse and send CopyDone/CopyFail before
+waiting for server errors. Optimistic COPY input sent before CopyInResponse,
+asynchronous error draining during streaming input, and COPY BOTH are outside
+this coverage. Cancellation, disconnect/uncertain-commit scenarios, an
+independent libpq client, stateful generation and shrinking remain deferred.
 Session-state persistence across transaction boundaries is not a supported
 baseline assumption. Deliberate PgProxy differences require explicit contract
 tests and review; current behavior alone does not establish that contract.
@@ -122,15 +148,18 @@ asks PostgreSQL to emit pending responses; it has no response of its own and
 does not substitute for `Sync`. Receive checkpoints list every expected message
 in order. A timeout is a failure, never an implicit end-of-response marker.
 
-Messages support `Query`, `Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Flush`
-and `Sync`. Describe/Close use `object: "S"` or `"P"` and `name`. Bind uses
+Messages support `Query`, `Parse`, `Bind`, `Describe`, `Execute`, `Close`, `Flush`,
+`Sync`, `CopyData`, `CopyDone`, and `CopyFail`. `CopyData.data` contains explicit
+hex bytes, including an empty string for zero bytes. `CopyFail.message` contains
+the client failure reason. Describe/Close use `object: "S"` or `"P"` and `name`. Bind uses
 `statement`, `portal`, `parameter_formats`, `parameters` and `result_formats`.
 Parameters and expected DataRow `values` contain hexadecimal bytes: `"31"` is
 text `1`, `"00000001"` is binary int4 `1`, `null` is SQL NULL, and `""` is a
 non-NULL zero-length value. Effect `rows` instead contain plain text or null.
 
 Expectations may assert `code` for ErrorResponse, `tag` for CommandComplete,
-`status` for ReadyForQuery, and `values` for DataRow. The differential oracle
+`status` for ReadyForQuery, `values` for DataRow, `data` for CopyData, and
+`format`/`column_formats` for CopyInResponse or CopyOutResponse. The differential oracle
 compares all decoded fields even when an expectation specifies only the type.
 
 ## Oracle and diagnostics

@@ -1,0 +1,112 @@
+{
+  "version": 1,
+  "name": "copy_binary_input",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY, label text)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "COPY events FROM STDIN (FORMAT binary)"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "binary_copy_in",
+      "receive": [
+        {
+          "type": "CopyInResponse",
+          "format": 1,
+          "column_formats": [
+            1,
+            1
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "CopyData",
+          "data": "5047434f50590aff0d"
+        },
+        {
+          "type": "CopyData",
+          "data": "0a00000000000000000000020000000400000007ffffffff0002000000040000000800000000ffff"
+        },
+        {
+          "type": "CopyDone"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "binary_copy_complete",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "COPY 2"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id, label FROM events ORDER BY id",
+      "rows": [
+        [
+          "7",
+          null
+        ],
+        [
+          "8",
+          ""
+        ]
+      ]
+    }
+  ]
+}

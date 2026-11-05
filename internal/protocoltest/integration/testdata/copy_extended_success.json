@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "name": "copy_extended_success",
+  "setup": [
+    "CREATE TABLE events (id integer PRIMARY KEY, label text)"
+  ],
+  "steps": [
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "sql": "COPY events FROM STDIN"
+        },
+        {
+          "type": "Bind"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "copy_in",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "CopyInResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Sync"
+        },
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a3209"
+        },
+        {
+          "type": "CopyData",
+          "data": "5c4e0a33090a"
+        },
+        {
+          "type": "CopyDone"
+        },
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "copy_in_complete",
+      "receive": [
+        {
+          "type": "CommandComplete",
+          "tag": "COPY 3"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Parse",
+          "sql": "COPY (SELECT id, label FROM events ORDER BY id) TO STDOUT"
+        },
+        {
+          "type": "Bind"
+        },
+        {
+          "type": "Execute"
+        },
+        {
+          "type": "Flush"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "copy_out",
+      "receive": [
+        {
+          "type": "ParseComplete"
+        },
+        {
+          "type": "BindComplete"
+        },
+        {
+          "type": "CopyOutResponse",
+          "format": 0,
+          "column_formats": [
+            0,
+            0
+          ]
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Sync"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "copy_out_complete",
+      "receive": [
+        {
+          "type": "CopyData",
+          "data": "31096f6e650a"
+        },
+        {
+          "type": "CopyData",
+          "data": "32095c4e0a"
+        },
+        {
+          "type": "CopyData",
+          "data": "33090a"
+        },
+        {
+          "type": "CopyDone"
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "COPY 3"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    },
+    {
+      "send": [
+        {
+          "type": "Query",
+          "sql": "SELECT 1 AS recovery"
+        }
+      ]
+    },
+    {
+      "flush_transport": true
+    },
+    {
+      "checkpoint": "recovery",
+      "receive": [
+        {
+          "type": "RowDescription"
+        },
+        {
+          "type": "DataRow",
+          "values": [
+            "31"
+          ]
+        },
+        {
+          "type": "CommandComplete",
+          "tag": "SELECT 1"
+        },
+        {
+          "type": "ReadyForQuery",
+          "status": "I"
+        }
+      ]
+    }
+  ],
+  "effects": [
+    {
+      "sql": "SELECT id, label FROM events ORDER BY id",
+      "rows": [
+        [
+          "1",
+          "one"
+        ],
+        [
+          "2",
+          null
+        ],
+        [
+          "3",
+          ""
+        ]
+      ]
+    }
+  ]
+}
