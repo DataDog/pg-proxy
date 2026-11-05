@@ -840,7 +840,7 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			assert.Zero(t, comparisons)
 			assert.Empty(t, health.sqlComparisonLatest)
 			assert.Empty(t, health.sqlHealthState.lastKnownHealthy)
-			assert.Equal(t, map[string]struct{}{oldIP: {}}, policy.sqlLeaderObservation.primaryIPs)
+			assert.Equal(t, map[string]bool{oldIP: true}, policy.detectionTiming.candidate.lastNonempty)
 			if invalidation == "disable" {
 				w.checkSQLHealthGroup(group, scheduledAt.Add(2*time.Second))
 				assert.Equal(t, 1, iterations)
@@ -884,7 +884,7 @@ func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T
 	started := time.Now()
 	policy.observeSQL([]string{oldPrimary}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldPrimary}}, started)
 	policy.observeSQL([]string{newPrimary}, SQLHealthCheckOutcome{PrimaryIPs: []string{newPrimary}}, started.Add(time.Second))
-	require.NotEmpty(t, policy.pendingRouting)
+	require.NotEmpty(t, policy.routingTiming.pending)
 
 	// The skipped SQL round cannot observe the routing flag transition. The next Patroni refresh
 	// must apply the disable before its new-primary observation can complete the stale comparison.
@@ -898,7 +898,7 @@ func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T
 	w.checkPoolHealth(poolHealth)
 
 	assert.False(t, policy.isRoutingEnabled())
-	assert.Empty(t, policy.pendingRouting)
+	assert.Empty(t, policy.routingTiming.pending)
 	assert.Empty(t, routingComparisons)
 }
 
@@ -2395,7 +2395,7 @@ func TestHybridEvaluationIncludesPrimaryRestoredByLateSuccess(t *testing.T) {
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[0].RoutingResult)
 	assert.ElementsMatch(t, []string{oldIP, newIP}, comparison.SQLRetainedIPs)
 	assert.Equal(t, map[string]bool{oldIP: false, newIP: true}, comparison.SQLHealth)
-	assert.Equal(t, map[string]struct{}{newIP: {}}, health.hybridPolicy.sqlLeaderObservation.primaryIPs,
+	assert.Equal(t, map[string]bool{newIP: true}, health.hybridPolicy.detectionTiming.candidate.lastNonempty,
 		"the same completion must include the restored primary in the hybrid decision")
 }
 

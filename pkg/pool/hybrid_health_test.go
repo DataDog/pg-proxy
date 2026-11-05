@@ -289,7 +289,7 @@ func TestHybridHealthResetsRoutingComparisonWhenRoutingFlagChanges(t *testing.T)
 		started.Add(time.Second),
 	)
 	assert.Nil(t, sqlDecision.routingComparison)
-	assert.NotEmpty(t, policy.pendingRouting)
+	assert.NotEmpty(t, policy.routingTiming.pending)
 
 	// Do not let a Patroni observation after an off/on transition complete the stale comparison
 	// with a duration that includes the interval where routing evaluation was disabled.
@@ -301,8 +301,8 @@ func TestHybridHealthResetsRoutingComparisonWhenRoutingFlagChanges(t *testing.T)
 	)
 
 	assert.Nil(t, patroniDecision.routingComparison)
-	assert.Empty(t, policy.pendingRouting)
-	assert.Contains(t, policy.patroniRoutingObservation.primaryIPs, "10.0.0.2")
+	assert.Empty(t, policy.routingTiming.pending)
+	assert.Contains(t, policy.routingTiming.reference.lastNonempty, "10.0.0.2")
 }
 
 func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {
@@ -331,7 +331,7 @@ func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {
 	firstPatroni := policy.observePatroni(map[string]bool{"10.0.0.2": true}, firstPatroniAt)
 	// Hybrid has already left this leader, so its old timestamp is no longer comparable.
 	assert.Nil(t, firstPatroni.routingComparison)
-	assert.Contains(t, policy.pendingRouting, "10.0.0.3")
+	assert.Contains(t, policy.routingTiming.pending, "10.0.0.3")
 
 	secondPatroniAt := started.Add(6 * time.Second)
 	secondPatroni := policy.observePatroni(map[string]bool{"10.0.0.3": true}, secondPatroniAt)
@@ -341,7 +341,7 @@ func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {
 		Improvement:  secondPatroniAt.Sub(secondHybridAt),
 		HybridSource: SQLRoutingResultConclusive,
 	}, *secondPatroni.routingComparison)
-	assert.Empty(t, policy.pendingRouting)
+	assert.Empty(t, policy.routingTiming.pending)
 }
 
 func TestHybridHealthDiscardsSupersededRoutingObservations(t *testing.T) {
@@ -378,9 +378,9 @@ func TestHybridHealthDiscardsSupersededRoutingObservations(t *testing.T) {
 
 				// The lagging source still seeing A must not discard the leading source's B.
 				require.Nil(t, observe(otherSource, "A", 12*time.Second))
-				require.Contains(t, policy.pendingRouting, "B")
+				require.Contains(t, policy.routingTiming.pending, "B")
 				require.Nil(t, observe(firstSource, nextLeader, 20*time.Second))
-				require.NotContains(t, policy.pendingRouting, "B")
+				require.NotContains(t, policy.routingTiming.pending, "B")
 				if nextLeader != "" {
 					require.NotNil(t, observe(otherSource, nextLeader, 21*time.Second))
 				}
@@ -455,9 +455,8 @@ func TestHybridHealthRearmsInterruptedLeaderComparisons(t *testing.T) {
 				assert.Equal(t, "B", completed.routingComparison.NewLeaderIP)
 				// B recovered after its own outage; this is not replacement-leader downtime.
 				assert.False(t, completed.leaderDetection.HasDowntimeComparison)
-				assert.Empty(t, policy.sqlDowntimesAwaitingPatroni)
-				assert.Empty(t, policy.pendingLeaderDetections)
-				assert.Empty(t, policy.pendingRouting)
+				assert.Empty(t, policy.detectionTiming.pending)
+				assert.Empty(t, policy.routingTiming.pending)
 			})
 		}
 	}
@@ -533,7 +532,7 @@ func TestHybridHealthDoesNotCompareDowntimeFromEarlierPromotionOfSameLeader(t *t
 		Speedup:           time.Second,
 		SQLRoutingEnabled: true,
 	}, *patroniDecision.leaderDetection)
-	assert.NotContains(t, policy.sqlDowntimesAwaitingPatroni, "10.0.0.2")
+	assert.NotContains(t, policy.detectionTiming.pending, "10.0.0.2")
 }
 
 func TestHybridHealthDiscardsSupersededLeaderObservations(t *testing.T) {
@@ -559,8 +558,7 @@ func TestHybridHealthDiscardsSupersededLeaderObservations(t *testing.T) {
 			observe(firstSource, "C", 15*time.Second)
 			comparison := observe(otherSource, "C", 20*time.Second)
 			require.NotNil(t, comparison.leaderDetection)
-			assert.NotContains(t, policy.pendingLeaderDetections, "B")
-			assert.NotContains(t, policy.sqlDowntimesAwaitingPatroni, "B")
+			assert.NotContains(t, policy.detectionTiming.pending, "B")
 
 			// A later promotion of B must not complete the earlier B comparison.
 			later := observe(otherSource, "B", time.Minute)
@@ -591,7 +589,7 @@ func TestHybridHealthDoesNotCompareDowntimeWhenSameSQLLeaderRecovers(t *testing.
 
 	assert.Nil(t, recovered.leaderDetection)
 	assert.Nil(t, recovered.routingComparison)
-	assert.Empty(t, policy.sqlDowntimesAwaitingPatroni)
+	assert.Empty(t, policy.detectionTiming.pending)
 }
 
 func TestConclusiveSQLUnroutableErrorAllowlist(t *testing.T) {
@@ -757,4 +755,28 @@ func TestHybridHealthFallsBackWhenOtherIPResetsConnection(t *testing.T) {
 	assert.Equal(t, SQLRoutingResultCachedFallback, decision.routingResult)
 	assert.Equal(t, patroniHealth, decision.health)
 	assert.Equal(t, SQLHealthFallbackIndeterminate, decision.fallbackReason)
+}
+
+func TestHybridHealthAgreementDiscardsUnmatchedExcursions(t *testing.T) {
+	for _, sqlFirst := range []bool{true, false} {
+		t.Run(leaderTimingCase(sqlFirst, "A"), func(t *testing.T) {
+			p := newHybridHealthPolicy(true)
+			observe := func(sql bool, ip string, second int) hybridRoutingDecision {
+				if sql {
+					return p.observeSQL([]string{ip}, SQLHealthCheckOutcome{PrimaryIPs: []string{ip}}, leaderTimingAt(second))
+				}
+				return p.observePatroni(leaderTimingIPs(ip), leaderTimingAt(second))
+			}
+			observe(true, "A", 0)
+			observe(false, "A", 0)
+			observe(sqlFirst, "B", 1)
+			observe(sqlFirst, "A", 2)
+			require.Empty(t, p.detectionTiming.pending)
+			require.Empty(t, p.routingTiming.pending)
+			observe(!sqlFirst, "B", 3600)
+			got := observe(!sqlFirst, "A", 3601)
+			assert.Nil(t, got.leaderDetection, "independent excursions must not emit an hour-long speedup")
+			assert.Nil(t, got.routingComparison)
+		})
+	}
 }
