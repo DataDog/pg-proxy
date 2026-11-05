@@ -111,7 +111,10 @@ type HealthWorkerHooks struct {
 	CheckFinished      func(elapsed time.Duration, tags []string)
 	SQLCheckMissed     func(tags []string)
 	SQLPatroniCompared func(SQLPatroniHealthSnapshot, []string)
-	Evicted            func(ip string, tags []string)
+	// SQLPotentialCompared reports optimistic observation timing, never a routing decision.
+	// It can run concurrently for different hosts and must not block probe completion.
+	SQLPotentialCompared func(SQLPotentialComparison, []string)
+	Evicted              func(ip string, tags []string)
 }
 
 // SQLHealthResultsSnapshot is one credential target's complete raw result set. Errors remain wrapped
@@ -233,6 +236,9 @@ type PoolHealth struct {
 	// results. Aggregate roles are derived from those results, never cached independently.
 	sqlComparisonMu     sync.Mutex
 	sqlComparisonLatest map[*sqlHealthTarget]SQLHealthResultsSnapshot
+	// potentialTiming and potentialResults are telemetry-only and protected by sqlComparisonMu.
+	potentialTiming  potentialTiming
+	potentialResults map[*sqlHealthTarget]map[string]bool
 	// subscriptionTargets associates each pool subscription with its SQL connection string.
 	subscriptionTargets map[HealthUpdates]*sqlHealthTarget
 }
@@ -260,6 +266,7 @@ func (s *PoolHealth) disableSQLComparisonTarget(target *sqlHealthTarget) {
 	defer s.sqlComparisonMu.Unlock()
 	target.sqlComparisonGeneration++
 	delete(s.sqlComparisonLatest, target)
+	s.resetSQLPotentialTargetLocked(target)
 }
 
 func (s *PoolHealth) retireSQLComparisonTarget(target *sqlHealthTarget) {
@@ -267,17 +274,35 @@ func (s *PoolHealth) retireSQLComparisonTarget(target *sqlHealthTarget) {
 	defer s.sqlComparisonMu.Unlock()
 	target.sqlComparisonRetired = true
 	delete(s.sqlComparisonLatest, target)
+	s.resetSQLPotentialTargetLocked(target)
 }
 
-// reserveSQLComparisonPoll captures lifecycle identity when reserving the target. Normal polls
-// are serialized by sqlRound; timestamps are metadata, not comparison ordering rules.
-func (s *PoolHealth) reserveSQLComparisonPoll(target *sqlHealthTarget, scheduledAt time.Time) (uint64, bool) {
+func (s *PoolHealth) currentSQLComparisonGeneration(target *sqlHealthTarget) uint64 {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
-	if target.sqlComparisonRetired || !target.tryStartSQLRound(scheduledAt) {
-		return 0, false
+	return target.sqlComparisonGeneration
+}
+
+// reserveSQLComparisonPoll validates the lifecycle captured before flag evaluation. Its final
+// result distinguishes a stale evaluation from a current tick that finds an active SQL round.
+// Disabling and reservation are atomic so an older enabled evaluation cannot adopt a new lifecycle.
+func (s *PoolHealth) reserveSQLComparisonPoll(
+	target *sqlHealthTarget,
+	scheduledAt time.Time,
+	expectedGeneration uint64,
+	enabled bool,
+) (generation uint64, started bool, current bool) {
+	s.sqlComparisonMu.Lock()
+	defer s.sqlComparisonMu.Unlock()
+	if target.sqlComparisonRetired || target.sqlComparisonGeneration != expectedGeneration {
+		return 0, false, false
 	}
-	return target.sqlComparisonGeneration, true
+	if !enabled {
+		target.sqlComparisonGeneration++
+		delete(s.sqlComparisonLatest, target)
+		s.resetSQLPotentialTargetLocked(target)
+	}
+	return target.sqlComparisonGeneration, target.tryStartSQLRound(scheduledAt), true
 }
 
 func (s *PoolHealth) recordSQLComparisonPoll(
@@ -673,6 +698,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 		w.hooks.CheckFinished(time.Since(start), poolHealth.patroniTags)
 	}
 	w.updateHealthAndCleanup(poolHealth, pghealth, systemIDs, ips)
+	w.observePatroniPotential(poolHealth, pghealth)
 }
 
 func patroniHealthTags(host string, isReadReplica bool) []string {
@@ -782,11 +808,12 @@ func (w *HealthWorker) runSQLHealthGroup(
 	startedPlans := make([]sqlHealthCheckPlan, 0, len(group.targets))
 	checksEnabled := false
 	for _, target := range group.targets {
+		generation := group.poolHealth.currentSQLComparisonGeneration(target)
 		enabled := target.checksEnabled == nil || target.checksEnabled(ctx)
-		if !enabled {
-			group.poolHealth.disableSQLComparisonTarget(target)
+		generation, started, current := group.poolHealth.reserveSQLComparisonPoll(target, scheduledAt, generation, enabled)
+		if !current {
+			continue
 		}
-		generation, started := group.poolHealth.reserveSQLComparisonPoll(target, scheduledAt)
 		plan := sqlHealthCheckPlan{target: target, enabled: enabled, generation: generation}
 		if !started {
 			if plan.enabled {
@@ -836,7 +863,12 @@ func (w *HealthWorker) runSQLHealthGroup(
 		go func(plan sqlHealthCheckPlan) {
 			defer wg.Done()
 			defer plan.target.finishSQLRound(scheduledAt)
-			outcome, completed := w.checkSQLHealth(plan.target, toProbe, plan.enabled, scheduledAt)
+			if plan.enabled {
+				w.prepareSQLPotential(group.poolHealth, plan.target, plan.generation, toProbe)
+			}
+			outcome, completed := w.checkSQLHealth(plan.target, toProbe, plan.enabled, scheduledAt, func(result SQLHealthCheckResult) {
+				w.observeSQLPotential(group.poolHealth, plan.target, plan.generation, result)
+			})
 			if !plan.enabled || !completed {
 				return
 			}
@@ -913,6 +945,7 @@ func (w *HealthWorker) checkSQLHealth(
 	toProbe []string,
 	checksEnabled bool,
 	scheduledAt time.Time,
+	resultHooks ...func(SQLHealthCheckResult),
 ) (SQLHealthCheckOutcome, bool) {
 	poolHealth := target.poolHealth
 	ctx := context.Background()
@@ -944,6 +977,9 @@ func (w *HealthWorker) checkSQLHealth(
 			patroniHealth,
 			target.tags,
 			func(result SQLHealthCheckResult) {
+				for _, hook := range resultHooks {
+					hook(result)
+				}
 				// Availability is optimistic: publish as soon as any IP is confirmed writable.
 				// The full round still detects and reports multiple primaries separately.
 				if !result.HealthyPrimary() ||

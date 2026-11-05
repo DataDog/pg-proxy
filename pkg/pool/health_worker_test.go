@@ -1939,7 +1939,7 @@ func TestSQLComparisonDoesNotRestoreRetiredTarget(t *testing.T) {
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
 	assert.Nil(t, late, "a completion after the last unsubscribe must not restore the target")
 	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
-	_, started := poolHealth.reserveSQLComparisonPoll(target, now)
+	_, started, _ := poolHealth.reserveSQLComparisonPoll(target, now, poolHealth.currentSQLComparisonGeneration(target), true)
 	assert.False(t, started, "a retired target cannot start another poll")
 
 	// A new subscription with the same tags has a distinct identity; the old role is gone.
@@ -1957,7 +1957,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	poolHealth := &PoolHealth{sqlHealthState: state}
 	target := &sqlHealthTarget{tags: []string{"database:orders"}}
 	oldRound := time.Now()
-	generation, started := poolHealth.reserveSQLComparisonPoll(target, oldRound)
+	generation, started, _ := poolHealth.reserveSQLComparisonPoll(target, oldRound, poolHealth.currentSQLComparisonGeneration(target), true)
 	require.True(t, started)
 	poolHealth.recordSQLComparisonPoll(target, generation, oldRound, oldRound, []string{ip},
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
@@ -1970,7 +1970,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	assert.Empty(t, current.health, "disabling removes this credential's contribution to the aggregate")
 
 	// Re-enabling while the old check is busy cannot start a competing check.
-	_, started = poolHealth.reserveSQLComparisonPoll(target, oldRound.Add(time.Second))
+	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, oldRound.Add(time.Second), poolHealth.currentSQLComparisonGeneration(target), true)
 	assert.False(t, started)
 	late := poolHealth.recordSQLComparisonPoll(target, generation, oldRound, oldRound.Add(time.Second), []string{ip},
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
@@ -1979,7 +1979,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 
 	// Even a regressed wall clock is valid in the new lifecycle: no timestamp cutoff applies.
 	newRound := oldRound.Add(-time.Second)
-	freshGeneration, started := poolHealth.reserveSQLComparisonPoll(target, newRound)
+	freshGeneration, started, _ := poolHealth.reserveSQLComparisonPoll(target, newRound, poolHealth.currentSQLComparisonGeneration(target), true)
 	require.True(t, started)
 	require.NotEqual(t, generation, freshGeneration)
 	fresh := poolHealth.recordSQLComparisonPoll(target, freshGeneration, newRound, newRound, []string{ip},
@@ -2004,4 +2004,78 @@ func TestSQLComparisonIgnoresEvictedResultsButPreservesDiagnostics(t *testing.T)
 		SQLHealth: snapshot.health, SQLRetainedIPs: snapshot.retainedIPs,
 		PatroniHealth: map[string]bool{oldIP: false, newIP: true},
 	}.Matches())
+}
+
+func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
+	const ip = "10.0.0.1"
+	w := newTestWorker(newMockProber(map[string][]string{"primary.local": {ip}}, ip))
+	prober := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{"conn": {{}}},
+		calls:     make(map[string]int),
+	}
+	checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	var enabled atomic.Bool
+	enabled.Store(true)
+	var evaluations atomic.Int32
+	flagRead := make(chan struct{})
+	releaseFlag := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseFlag) }) }
+	defer release()
+	healthUpdates := w.Subscribe("primary.local", false, "mydb", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "conn" },
+		ChecksEnabled: func(context.Context) bool {
+			value := enabled.Load()
+			if evaluations.Add(1) == 1 {
+				close(flagRead)
+				<-releaseFlag
+			}
+			return value
+		},
+	})
+	health := receivePoolHealth(t, healthUpdates)
+	t.Cleanup(func() { w.Unsubscribe(healthUpdates) })
+	sqlUpdates, err := health.SubscribeSQLHealth()
+	require.NoError(t, err)
+	t.Cleanup(sqlUpdates.Close)
+	var comparisons, missed atomic.Int32
+	w.hooks.SQLPatroniCompared = func(SQLPatroniHealthSnapshot, []string) { comparisons.Add(1) }
+	w.hooks.SQLCheckMissed = func([]string) { missed.Add(1) }
+	w.hooks.SQLPotentialCompared = func(SQLPotentialComparison, []string) { comparisons.Add(1) }
+	group := w.sqlHealthGroups()[0]
+	oldAt := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		w.runSQLHealthGroup(group, oldAt, true)
+	}()
+	select {
+	case <-flagRead:
+	case <-time.After(time.Second):
+		t.Fatal("older tick did not evaluate the check flag")
+	}
+	enabled.Store(false)
+	w.runSQLHealthGroup(group, oldAt.Add(time.Second), true)
+	require.True(t, receiveSQLHealthObservation(t, sqlUpdates).Disabled)
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("older tick did not finish")
+	}
+	assert.Zero(t, prober.callCount("conn"), "stale enabled flag must not start a SQL check")
+	assert.Empty(t, health.sqlComparisonLatest, "stale tick must not restore SQL evidence")
+	assert.Empty(t, health.potentialResults, "stale tick must not restore optimistic evidence")
+	assert.Zero(t, comparisons.Load(), "stale tick must not publish comparison telemetry")
+	assert.Zero(t, missed.Load(), "a stale flag evaluation is not a missed observation")
+	select {
+	case observation := <-sqlUpdates.Updates():
+		t.Fatalf("stale tick published an availability observation: %+v", observation)
+	default:
+	}
+	enabled.Store(true)
+	w.RefreshSQL()
+	assert.Equal(t, 1, prober.callCount("conn"), "a fresh enabled tick must still run")
+	assert.Equal(t, int32(1), comparisons.Load())
 }
