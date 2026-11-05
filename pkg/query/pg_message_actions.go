@@ -47,6 +47,9 @@ type PgMessageAction struct {
 	// If ResolveReplyExpectation is true, the next reply expectation on the
 	// SessionLink is now resolved.
 	ResolveReplyExpectation bool
+	// WaitForCopyInput pauses backend reads and flushes CopyInResponse to the
+	// client. The original Query/Execute expectation remains outstanding.
+	WaitForCopyInput bool
 	// If DiscardUntilSync is true, we've encountered an extended query mode
 	// error condition and need to discard all reply expectations until the
 	// next client Sync. See SessionLink.DiscardUntilSync() for more detail.
@@ -210,31 +213,31 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 
 	case *pgproto3.CopyData:
 		action.ProxyMsgSize = getCopyDataByteSize(m)
-		if expectation == QueryReply {
-			// don't clear expectation, this CopyData is part of a larger QueryReply
+		if expectation == QueryReply || expectation == ExecuteReply {
+			// don't clear expectation, COPY data is part of the original Query/Execute reply
 		} else {
 			return PgMessageAction{}, fmt.Errorf("expected a %s, but received %#v", expectation, m)
 		}
 
 	case *pgproto3.CopyDone:
-		if expectation == QueryReply {
-			// don't clear expectation, this CopyDone is part of a larger QueryReply
+		if expectation == QueryReply || expectation == ExecuteReply {
+			// don't clear expectation, COPY completion is part of the original Query/Execute reply
 		} else {
 			return PgMessageAction{}, fmt.Errorf("expected a %s, but received %#v", expectation, m)
 		}
 
 	case *pgproto3.CopyInResponse:
 		action.ProxyMsgSize = getCopyInResponseByteSize(m)
-		if expectation == QueryReply {
-			action.ResolveReplyExpectation = true // must flush Query, so need to resolve expectation
+		if expectation == QueryReply || expectation == ExecuteReply {
+			action.WaitForCopyInput = true
 		} else {
 			return PgMessageAction{}, fmt.Errorf("expected a %s, but received %#v", expectation, m)
 		}
 
 	case *pgproto3.CopyOutResponse:
 		action.ProxyMsgSize = getCopyOutResponseByteSize(m)
-		if expectation == QueryReply {
-			// don't clear expectation, this CopyOutResponse is part of a larger QueryReply
+		if expectation == QueryReply || expectation == ExecuteReply {
+			// don't clear expectation, COPY output is part of the original Query/Execute reply
 		} else {
 			return PgMessageAction{}, fmt.Errorf("expected a %s, but received %#v", expectation, m)
 		}

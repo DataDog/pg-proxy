@@ -4,6 +4,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
+
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/query"
@@ -35,6 +37,7 @@ type mirrorWorker struct {
 
 	mu      sync.Mutex // guards curLink so stop() can force-close a hung link
 	curLink link.Link
+	copyIn  bool // owned by run; pause shadow reads while replaying COPY input
 }
 
 func newMirrorWorker(q *mirrorQueue, acquire func() (link.Link, error), tags []string) *mirrorWorker {
@@ -123,6 +126,10 @@ func (w *mirrorWorker) run() {
 					break
 				}
 			}
+			switch it.msg.(type) {
+			case *pgproto3.CopyDone, *pgproto3.CopyFail:
+				w.copyIn = false
+			}
 			link.Send(it.msg, it.expectation) // buffered; hits the network at the flush sentinel
 			w.count("mirror.replayed", "kind:msg")
 		case mirrorFlush:
@@ -157,6 +164,9 @@ func (w *mirrorWorker) flushAndDrain(link link.Link) error {
 	if err := link.Flush(); err != nil {
 		return err
 	}
+	if w.copyIn {
+		return nil
+	}
 	timer.Reset(mirrorShadowDrainTimeout) // flush done; re-arm for the drain
 	traceState := &query.TraceState{}     // no root trace is started, so no spans are emitted
 	for {
@@ -173,6 +183,10 @@ func (w *mirrorWorker) flushAndDrain(link link.Link) error {
 		action, err := query.DecidePgMessageAction(msg, expectation, traceState)
 		if err != nil {
 			return err
+		}
+		if action.WaitForCopyInput {
+			w.copyIn = true
+			return nil
 		}
 		if action.ResolveReplyExpectation {
 			link.ResolveNextExpectation()
@@ -206,6 +220,7 @@ func (w *mirrorWorker) getLink() link.Link {
 
 // take clears and returns curLink under the mutex, so stop() can't force-close one being released.
 func (w *mirrorWorker) take() link.Link {
+	w.copyIn = false
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	link := w.curLink
