@@ -274,11 +274,19 @@ func (r *Reconciler[D]) createBackend(name Identifier) (ManagedBackend, error) {
 
 func (r *Reconciler[D]) registerBackend(name Identifier, pending *future[ManagedBackend]) {
 	previous, _ := r.backends.Get(name)
-	// Preserve close-before-replace ordering. Both inventories reference the same
-	// future, so a completed retry is immediately visible to session lookups.
-	closePendingBackend(previous)
+	// Both inventories reference the same future, so a completed retry is
+	// immediately visible to session lookups.
 	r.backends.Put(name, pending)
 	r.runtime.registerPendingBackend(name, pending)
+	if pending.IsReady() {
+		if backend, err := pending.Get(); err == nil {
+			// A backend can be recreated without changing its cluster name. Remap
+			// sessions before closing the old pools so their next checkout cannot
+			// retain a retired backend.
+			r.runtime.RemapBackend(name, backend)
+		}
+	}
+	closePendingBackend(previous)
 }
 
 func (r *Reconciler[D]) deregisterBackend(name Identifier) {
