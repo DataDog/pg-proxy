@@ -255,8 +255,12 @@ func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {
 
 	firstPatroniAt := started.Add(4 * time.Second)
 	firstPatroni := policy.observePatroni(map[string]bool{"10.0.0.2": true}, firstPatroniAt)
-	assert.Nil(t, firstPatroni.routingComparison, "hybrid already superseded this leader")
-	assert.Nil(t, firstPatroni.leaderDetection)
+	require.NotNil(t, firstPatroni.routingComparison)
+	assert.Equal(t, LeaderRoutingComparison{
+		NewLeaderIP:  "10.0.0.2",
+		Improvement:  firstPatroniAt.Sub(firstHybridAt),
+		HybridSource: SQLRoutingResultConclusive,
+	}, *firstPatroni.routingComparison)
 
 	secondPatroniAt := started.Add(6 * time.Second)
 	secondPatroni := policy.observePatroni(map[string]bool{"10.0.0.3": true}, secondPatroniAt)
@@ -267,46 +271,4 @@ func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {
 		HybridSource: SQLRoutingResultConclusive,
 	}, *secondPatroni.routingComparison)
 	assert.Empty(t, policy.routingTiming.pending)
-}
-
-func TestHybridHealthSharedTimingRearmsInterruptedComparisons(t *testing.T) {
-	for _, sqlFirst := range []bool{true, false} {
-		t.Run(leaderTimingCase(sqlFirst, ""), func(t *testing.T) {
-			policy := newHybridHealthPolicy(true)
-			observe := func(sql bool, ip string, second int) hybridRoutingDecision {
-				health := map[string]bool{"A": false, "B": false}
-				var primaries []string
-				if ip != "" {
-					health[ip] = true
-					primaries = []string{ip}
-				}
-				if sql {
-					decision := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: primaries}, leaderTimingAt(second))
-					assert.True(t, decision.publish)
-					assert.Equal(t, health, decision.health, "timing cleanup must not change the SQL routing decision")
-					return decision
-				}
-				decision := policy.observePatroni(health, leaderTimingAt(second))
-				assert.False(t, decision.publish, "timing cleanup must not change the Patroni publication policy")
-				return decision
-			}
-			observe(true, "A", 0)
-			observe(false, "A", 0)
-			observe(sqlFirst, "B", 1)
-			observe(sqlFirst, "", 2)
-			late := observe(!sqlFirst, "B", 60)
-			assert.Nil(t, late.leaderDetection)
-			assert.Nil(t, late.routingComparison)
-			fresh := observe(sqlFirst, "B", 61)
-			require.NotNil(t, fresh.leaderDetection)
-			require.NotNil(t, fresh.routingComparison)
-			want := time.Second
-			if sqlFirst {
-				want = -want
-			}
-			assert.Equal(t, want, fresh.leaderDetection.Speedup)
-			assert.Equal(t, want, fresh.routingComparison.Improvement)
-			assert.Equal(t, SQLRoutingResultConclusive, fresh.routingComparison.HybridSource)
-		})
-	}
 }

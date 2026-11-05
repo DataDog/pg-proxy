@@ -71,15 +71,14 @@ If SQL completes at 2s and Patroni observes the replacement at 5s, speedup is 3s
 If Patroni observes it at 2s and SQL completes at 4s, speedup is -2s. Negative
 values are preserved to expose regressions.
 
-The first nonempty snapshot from each source establishes a baseline. Repeated
-snapshots do not move the first timestamp for a replacement IP. An unmatched
-observation is discarded when its source stops reporting that IP, so a later
-promotion cannot reuse its old timestamp. An interrupted observation may record
-a fresh timestamp when it returns. Agreement on an IP also clears any unmatched
-timestamp for it, including when one source is repeating its initial baseline.
-Agreement uses each source's current snapshot, including empty snapshots, rather
-than a remembered nonempty baseline. This prevents unrelated later excursions
-from matching an old timestamp after the sources have already converged.
+The first eligible nonempty snapshot from each source establishes a baseline.
+Matching follows the existing hybrid timing policy: repeated snapshots do not
+move a pending timestamp, empty observations do not advance the baseline, and
+unmatched timestamps remain available when a source moves to another leader.
+Each IP is paired independently once both sources have a matching observation.
+Explicit disable, retirement, and DNS lifecycle invalidation still clear affected
+evidence as described above. No additional interruption or agreement cleanup
+policy is introduced here.
 
 This callback contains only signed speedup and the IP/timestamps needed to
 identify the event. It defines no outage start and emits no downtime durations
@@ -88,11 +87,11 @@ or reduction percentages. PR9 retains its own downtime measurements.
 ## Comparing with PR9
 
 This PR moves the existing `hybrid_health.go` detection and routing comparisons
-onto `leaderTiming`, alongside snapshot timing. They share baseline tracking,
-timestamp matching, and cleanup of superseded or already-agreed observations.
+onto `leaderTiming`, alongside snapshot timing. They share baseline tracking
+and the original per-IP timestamp matching policy.
 Hybrid detection uses `oneNewLeader`, routing uses `oneHealthyLeader`, and the
-snapshot signal uses `everyNewLeader`. Routing decisions remain unchanged; hybrid
-timing now discards interrupted observations instead of pairing stale events.
+snapshot signal uses `everyNewLeader`. Hybrid routing and timing behavior remain
+unchanged; the helper extracts the existing matching implementation.
 PR9 builds its downtime accounting on the same helper.
 
 For the same failover and the **same Patroni observation**:

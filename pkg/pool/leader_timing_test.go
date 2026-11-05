@@ -61,9 +61,9 @@ func TestLeaderTimingPreservesFirstSnapshotTimestamp(t *testing.T) {
 	assert.Equal(t, 4*time.Second, got[0].speedup())
 }
 
-func TestLeaderTimingSupersededAndInterruptedObservations(t *testing.T) {
-	for _, sqlFirst := range []bool{false, true} {
-		for _, next := range []string{"", "C"} {
+func TestLeaderTimingPreservesPendingAcrossLeaderChanges(t *testing.T) {
+	for _, sqlFirst := range []bool{true, false} {
+		for _, next := range []string{"", "A", "C"} {
 			t.Run(leaderTimingCase(sqlFirst, next), func(t *testing.T) {
 				p := baselineLeaderTiming(t)
 				require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("B"), leaderTimingAt(1), struct{}{}, everyNewLeader))
@@ -72,18 +72,19 @@ func TestLeaderTimingSupersededAndInterruptedObservations(t *testing.T) {
 					following = leaderTimingIPs(next)
 				}
 				require.Empty(t, p.observe(leaderTimingSource(sqlFirst), following, leaderTimingAt(2), struct{}{}, everyNewLeader))
-				require.Empty(t, p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("B"), leaderTimingAt(60), struct{}{}, everyNewLeader))
-				got := p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("B"), leaderTimingAt(61), struct{}{}, everyNewLeader)
-				require.Len(t, got, 1)
-				expected := time.Second
-				if sqlFirst {
-					expected = -time.Second
+				got := p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("B"), leaderTimingAt(5), struct{}{}, everyNewLeader)
+				require.Len(t, got, 1, "match the pending B timestamp using the original hybrid policy")
+				want := 4 * time.Second
+				if !sqlFirst {
+					want = -want
 				}
-				assert.Equal(t, expected, got[0].speedup(), "must not reuse the observation from 1s")
+				assert.Equal(t, "B", got[0].ip)
+				assert.Equal(t, want, got[0].speedup())
 			})
 		}
 	}
 }
+
 func TestLeaderTimingStartupAndSameLeaderRecovery(t *testing.T) {
 	p := &leaderTiming[struct{}]{}
 	require.Empty(t, p.observe(true, nil, leaderTimingAt(0), struct{}{}, everyNewLeader))
@@ -92,53 +93,6 @@ func TestLeaderTimingStartupAndSameLeaderRecovery(t *testing.T) {
 	require.Empty(t, p.observe(true, nil, leaderTimingAt(3), struct{}{}, everyNewLeader))
 	require.Empty(t, p.observe(true, leaderTimingIPs("A"), leaderTimingAt(4), struct{}{}, everyNewLeader))
 	require.Empty(t, p.observe(false, leaderTimingIPs("A"), leaderTimingAt(5), struct{}{}, everyNewLeader))
-}
-
-func TestLeaderTimingAgreementDiscardsUnmatchedPromotions(t *testing.T) {
-	for _, sqlFirst := range []bool{false, true} {
-		t.Run(leaderTimingCase(sqlFirst, "A"), func(t *testing.T) {
-			p := baselineLeaderTiming(t)
-			require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("B"), leaderTimingAt(1), struct{}{}, everyNewLeader))
-			require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("A"), leaderTimingAt(2), struct{}{}, everyNewLeader))
-			require.Empty(t, p.pending, "returning to the other source's baseline is agreement, not a pending promotion")
-			require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("A"), leaderTimingAt(3), struct{}{}, everyNewLeader))
-			require.Empty(t, p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("A"), leaderTimingAt(4), struct{}{}, everyNewLeader))
-			require.Empty(t, p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("B"), leaderTimingAt(3600), struct{}{}, everyNewLeader))
-			require.Empty(t, p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("A"), leaderTimingAt(3601), struct{}{}, everyNewLeader), "must not emit a one-hour comparison")
-			require.Empty(t, p.pending)
-			// A later real matched promotion must still produce a fresh comparison.
-			require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("B"), leaderTimingAt(3602), struct{}{}, everyNewLeader))
-			got := p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("B"), leaderTimingAt(3603), struct{}{}, everyNewLeader)
-			require.Len(t, got, 1)
-			expected := time.Second
-			if !sqlFirst {
-				expected = -time.Second
-			}
-			assert.Equal(t, expected, got[0].speedup())
-		})
-	}
-}
-
-func TestLeaderTimingAgreementOnInitialBaselineDiscardsPending(t *testing.T) {
-	p := &leaderTiming[struct{}]{}
-	require.Empty(t, p.observe(true, leaderTimingIPs("A"), leaderTimingAt(0), struct{}{}, everyNewLeader))
-	require.Empty(t, p.observe(true, leaderTimingIPs("B"), leaderTimingAt(1), struct{}{}, everyNewLeader))
-	require.Empty(t, p.observe(false, leaderTimingIPs("B"), leaderTimingAt(2), struct{}{}, everyNewLeader))
-	assert.Empty(t, p.pending, "the second source's first baseline is not a comparable promotion")
-}
-
-func TestLeaderTimingAgreementUsesCurrentSnapshot(t *testing.T) {
-	for _, sqlFirst := range []bool{false, true} {
-		t.Run(leaderTimingCase(sqlFirst, "A"), func(t *testing.T) {
-			p := baselineLeaderTiming(t)
-			require.Empty(t, p.observe(leaderTimingSource(!sqlFirst), nil, leaderTimingAt(1), struct{}{}, everyNewLeader))
-			require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("B"), leaderTimingAt(2), struct{}{}, everyNewLeader))
-			require.Empty(t, p.observe(leaderTimingSource(sqlFirst), leaderTimingIPs("A"), leaderTimingAt(3), struct{}{}, everyNewLeader))
-			require.Contains(t, p.pending, "A", "the other source's remembered A baseline is not current agreement")
-			require.Empty(t, p.observe(leaderTimingSource(!sqlFirst), leaderTimingIPs("A"), leaderTimingAt(4), struct{}{}, everyNewLeader))
-			assert.Empty(t, p.pending, "actual agreement closes the unmatched excursion")
-		})
-	}
 }
 
 func leaderTimingAt(seconds int) time.Time { return time.Unix(100+int64(seconds), 0) }

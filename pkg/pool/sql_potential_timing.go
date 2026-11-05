@@ -106,12 +106,8 @@ func (s *PoolHealth) updateSQLPotentialRetainedLocked(ips []string, at time.Time
 			// Eviction invalidates only this address. A retained replacement can still
 			// pair with its pending observation, even if the old leader disappears.
 			delete(s.potentialTiming.pending, ip)
-			delete(s.potentialTiming.candidate.current, ip)
 			delete(s.potentialTiming.candidate.lastNonempty, ip)
-			delete(s.potentialTiming.candidate.comparable, ip)
-			delete(s.potentialTiming.reference.current, ip)
 			delete(s.potentialTiming.reference.lastNonempty, ip)
-			delete(s.potentialTiming.reference.comparable, ip)
 		}
 	}
 	s.potentialRetainedIPs = retained

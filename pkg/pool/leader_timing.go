@@ -1,9 +1,6 @@
 package pool
 
-import (
-	"maps"
-	"time"
-)
+import "time"
 
 // leaderTiming pairs independently sampled leader observations. It owns no routing policy,
 // clock, or lock: callers select eligible observations and serialize access with their state.
@@ -14,12 +11,7 @@ type leaderTiming[T any] struct {
 }
 
 type leaderTimingObservation struct {
-	// current includes empty observations and is used only to detect agreement.
-	current map[string]bool
-	// lastNonempty supports policy-owned same-leader recovery accounting.
 	lastNonempty map[string]bool
-	// comparable can be rearmed independently when an unmatched observation is interrupted.
-	comparable map[string]bool
 }
 
 type timedLeader[T any] struct {
@@ -68,34 +60,22 @@ func (p *leaderTiming[T]) observe(source leaderTimingSource, healthy map[string]
 	if source == candidateLeaderSource {
 		observation = &p.candidate
 	}
-	observation.current = current
-	if mode == oneHealthyLeader && len(current) != 1 {
-		// Ambiguous routing evidence cannot establish agreement on a selected leader.
-		observation.current = nil
-	}
-	defer p.discardAgreedPending()
-	for ip, pair := range p.pending {
-		owned := source == candidateLeaderSource && !pair.candidate.at.IsZero() || source == referenceLeaderSource && !pair.reference.at.IsZero()
-		if owned && !current[ip] {
-			delete(p.pending, ip)
-			delete(observation.comparable, ip)
-		}
-	}
+	// Preserve the original hybrid matching policy: empty/ineligible observations
+	// do not advance the baseline, and unmatched timestamps survive leader changes.
 	if len(current) == 0 || mode == oneHealthyLeader && len(current) != 1 {
 		return nil
 	}
-	observation.lastNonempty = maps.Clone(current)
-	if observation.comparable == nil {
-		observation.comparable = maps.Clone(current)
+	previous := observation.lastNonempty
+	observation.lastNonempty = current
+	if previous == nil {
 		return nil
 	}
 	var added []string
 	for ip := range current {
-		if !observation.comparable[ip] {
+		if !previous[ip] {
 			added = append(added, ip)
 		}
 	}
-	observation.comparable = maps.Clone(current)
 	if mode == oneNewLeader && len(added) != 1 {
 		return nil
 	}
@@ -119,12 +99,4 @@ func (p *leaderTiming[T]) observe(source leaderTimingSource, healthy map[string]
 		comparisons = append(comparisons, leaderTimingComparison[T]{ip: ip, candidate: pair.candidate, reference: pair.reference})
 	}
 	return comparisons
-}
-
-func (p *leaderTiming[T]) discardAgreedPending() {
-	for ip := range p.pending {
-		if p.candidate.current[ip] && p.reference.current[ip] {
-			delete(p.pending, ip)
-		}
-	}
 }

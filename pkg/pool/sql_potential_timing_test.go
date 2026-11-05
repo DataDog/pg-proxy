@@ -25,7 +25,7 @@ func TestSQLPotentialUsesCompletedComparisonSnapshot(t *testing.T) {
 	w.observePatroniPotential(s, leaderTimingIPs("A"), time.Now())
 	recordPotentialPoll(s, a, 0, leaderTimingAt(0), SQLHealthCheckResult{IP: "A"})
 	recordPotentialPoll(s, b, 0, leaderTimingAt(1), SQLHealthCheckResult{IP: "A", Err: context.DeadlineExceeded})
-	assert.True(t, s.potentialTiming.candidate.comparable["A"], "another credential still supplies a primary")
+	assert.True(t, s.potentialTiming.candidate.lastNonempty["A"], "another credential still supplies a primary")
 	// Conflicting successful roles are excluded using the exact mismatch-comparison aggregate.
 	snapshot := recordPotentialPoll(s, b, 0, leaderTimingAt(2), SQLHealthCheckResult{IP: "A", InRecovery: true})
 	require.Contains(t, snapshot.conflictingIPs, "A")
@@ -62,7 +62,7 @@ func TestSQLPotentialTargetInvalidationAndOptIn(t *testing.T) {
 		s := &PoolHealth{isReadReplica: replica, sqlHealthState: NewHealthState()}
 		s.sqlHealthState.Track([]string{"A"})
 		s.recordSQLComparisonPoll(replica, &sqlHealthTarget{}, 0, leaderTimingAt(0), leaderTimingAt(0), []string{"A"}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "A"}}})
-		assert.Nil(t, s.potentialTiming.candidate.comparable, "replicas and disabled hooks do not track timing")
+		assert.Nil(t, s.potentialTiming.candidate.lastNonempty, "replicas and disabled hooks do not track timing")
 	}
 }
 
