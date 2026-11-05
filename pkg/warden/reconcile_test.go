@@ -133,6 +133,12 @@ func TestReconcilerRemapsSessionsWhenReplacingSameNameBackend(t *testing.T) {
 			require.NoError(t, reconciler.Accept(test.initial))
 			active := &testSession{backend: testBackend{id: "host-a"}}
 			runtime.Sessions().Register(active.Identifier(), active)
+			created[0].onClose = func() {
+				if test.name == "database settings change" {
+					assert.Equal(t, "host-b", active.backend.(testBackend).id)
+					assert.Equal(t, "host-b", active.readStates[0].Backend.(testBackend).id)
+				}
+			}
 
 			require.NoError(t, reconciler.Accept(test.updated))
 
