@@ -91,13 +91,7 @@ func (w *Warden) GetBackend(name Identifier) (Backend, bool) {
 func (w *Warden) RemapBackend(name Identifier, backend Backend) {
 	for logicalName, logicalDatabase := range w.logicalDatabases.All() {
 		if logicalDatabase.Cluster == string(name) {
-			for pid, active := range w.sessions.All() {
-				if active.LogicalDatabaseID() != string(logicalName) {
-					continue
-				}
-				pgproxy.Logger().Info(fmt.Sprintf("remapping state for session #%s to replacement cluster %q", pid, name))
-				active.RemapBackend(backend.SessionBackend())
-			}
+			w.remapSessionBackend(logicalName, name, backend)
 		}
 
 		if _, ok := logicalDatabase.ReadClusters[string(name)]; !ok {
@@ -108,6 +102,15 @@ func (w *Warden) RemapBackend(name Identifier, backend Backend) {
 			if active.LogicalDatabaseID() == string(logicalName) {
 				active.RemapReadStates(readStates)
 			}
+		}
+	}
+}
+
+func (w *Warden) remapSessionBackend(logicalName, clusterName Identifier, backend Backend) {
+	for pid, active := range w.sessions.All() {
+		if active.LogicalDatabaseID() == string(logicalName) {
+			pgproxy.Logger().Info(fmt.Sprintf("remapping state for session #%s to cluster %q", pid, clusterName))
+			active.RemapBackend(backend.SessionBackend())
 		}
 	}
 }
@@ -130,7 +133,7 @@ func (w *Warden) ReconcileLogicalDatabases(updated map[Identifier]topology.Logic
 				pgproxy.Logger().Error(fmt.Sprintf("could not find an entry in the states map for the given cluster: %q", next.Cluster))
 				continue
 			}
-			w.RemapBackend(Identifier(next.Cluster), backend)
+			w.remapSessionBackend(name, Identifier(next.Cluster), backend)
 			pgproxy.Logger().Info(fmt.Sprintf("logical database %q has been remapped to point to cluster %q", name, next.Cluster))
 		}
 		if topology.ReadClustersChanged(previous.ReadClusters, next.ReadClusters) {
