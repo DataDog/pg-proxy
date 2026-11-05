@@ -22,14 +22,17 @@ type SQLPotentialComparison struct {
 // sqlPotentialTimingState owns snapshot timing and its lifecycle guards.
 // All access is protected by the owning PoolHealth's sqlComparisonMu.
 type sqlPotentialTimingState struct {
-	timing      potentialTiming
+	// Track previous primary sets and pair SQL/Patroni timestamps by replacement IP.
+	timing potentialTiming
+	// Remember retained IPs to detect removals and reappearances on the next update.
 	retainedIPs map[string]bool
-	// Keep eviction/rediscovery cutoffs so delayed observations cannot restore old evidence.
+	// Per-IP eviction/rediscovery cutoffs used to reject stale Patroni evidence.
 	validAfter map[string]time.Time
-	// Reject Patroni observations older than the newest accepted observation.
+	// Newest accepted Patroni timestamp; reject observations delivered out of order.
 	patroniObservedAt time.Time
-	// Suspend reference timing when invalidation removes the last completed SQL evidence.
-	paused    bool
+	// Ignore Patroni timing while invalidation leaves no completed SQL evidence.
+	paused bool
+	// First SQL snapshot time after a pause; reject Patroni observations captured earlier.
 	resumedAt time.Time
 }
 
