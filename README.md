@@ -44,6 +44,7 @@ as prose — one-line rows keep each extraction PR's doc diff small.
 | `pkg/datadog` | Native Datadog tracing, DogStatsD metrics, and JSON log setup using public SDKs |
 | `pkg/otel` | OpenTelemetry trace, metric, and slog adapters using caller-owned providers |
 | `pkg/actions` | Portable frontend-message decision state machine |
+| `pkg/auth` | Static SCRAM users and explicit database grants |
 | `pkg/backend` | Within-cluster routing, connection checkout, and session-link construction |
 | `pkg/config` | Portable database, routing, listener, user, and mirroring configuration |
 | `pkg/classifier` | SQL read-routing classification and statement counting |
@@ -132,7 +133,7 @@ With `RequireTLS=false`, both optional TLS and plaintext startup remain supporte
 Before rollout, check client TLS modes, trusted certificate authorities, server
 names, and certificate-provider configuration. Clients that previously connected
 in plaintext despite `RequireTLS=true` must enable TLS. The OSS binary
-uses loopback trust with optional or required TLS. See the
+supports loopback trust and opt-in [password/SCRAM authentication](docs/client-authentication.md). See the
 [client TLS guide](docs/client-connections.md#standalone-tls) for certificate
 configuration and verified connections.
 
@@ -142,10 +143,10 @@ configuration and verified connections.
 
 `cmd/pg-proxy` runs the portable library against configured PostgreSQL backends, with
 static routing and transaction pooling. It needs no COBS, Vault, or experiments
-service. Client connections use **local trust with optional or required TLS**: the command accepts
-only loopback IP listen addresses and the selected backend's username. Any local
-process using that username can access the backend with its configured privileges.
-Use a disposable development database. This is not a production server.
+service. Client connections default to loopback trust using the selected backend's
+username. Opt-in password/SCRAM authentication requires TLS and allows non-loopback
+listeners with explicit per-user database access. See the
+[authentication guide](docs/client-authentication.md) for complete YAML/JSON examples.
 
 With PostgreSQL running locally, save this configuration as `proxy.yaml`:
 
@@ -192,7 +193,7 @@ Add entries to `databases`, `clusters`, and `logical_databases` for more backend
 Each cluster selects one primary database. Each logical database selects a cluster.
 Multiple logical databases can select the same cluster.
 
-The OSS binary accepts direct connection settings, inline backend credentials, pool sizing/lifetimes, a loopback
+The OSS binary accepts direct connection settings, inline backend credentials, pool sizing/lifetimes, a configured
 listener address, and the message buffer size. Omitted listener and buffer settings
 use `127.0.0.1:15432` and 10240 bytes. Zero pool settings use pgx defaults; negative
 values and minimum connections above the maximum are rejected. Backend connection
@@ -203,9 +204,9 @@ Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS. Set
 `proxy.tls_required: true` to reject plaintext startup. See the
 [client TLS guide](docs/client-connections.md#standalone-tls) for examples.
 
-File mode rejects users/JWT, mirroring sections, replicas, read clusters, and
+File mode rejects JWT, mirroring sections, replicas, read clusters, and
 discovery/Envoy/load-balanced database options with explicit startup errors.
-**TODO:** wire client SCRAM support. Backend TLS is available through the
+Backend TLS is available through the
 database's `sslmode` setting.
 
 `-config` is required and accepts `.yaml`, `.yml`, or `.json` files. All database
@@ -225,8 +226,10 @@ go test -race -tags=integration -count=1 ./cmd/pg-proxy ./pkg/pool
 ```
 
 These tests require Docker and access to Datadog's container registry. They use
-the existing private PostgreSQL images. The consuming Datadog repository runs
-them in CI against its pinned module version; GitHub Actions compiles them here.
+the existing private PostgreSQL images. The standalone suite also accepts an
+explicit disposable PostgreSQL URL, which GitHub Actions uses to execute client
+authentication, TLS, and cancellation tests. See the
+[integration test instructions](docs/client-authentication.md#integration-tests).
 
 ### Differential protocol verification
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/DataDog/pg-proxy/pkg/listener"
 	"github.com/DataDog/pg-proxy/pkg/protocol"
@@ -25,14 +26,17 @@ type SessionRegistry interface {
 // Config contains listener settings, caller-owned inventories, and app integrations.
 // NewServer wires startup resolution, session construction, and lifecycle internally.
 type Config struct {
-	ListenAddress string
-	TLSConfig     *tls.Config
-	RequireTLS    bool
-	Admission     listener.Admission
-	Authenticate  func(context.Context, listener.StartupRequest, listener.StartupResult[ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error)
-	LoadShedder   listener.LoadShedder
-	Runtime       RuntimeConfig
-	Sessions      SessionRegistry
+	ListenAddress              string
+	TLSConfig                  *tls.Config
+	RequireTLS                 bool
+	AuthenticationMessageLimit int
+	StartupTimeout             time.Duration
+	MaxPendingConnections      int
+	Admission                  listener.Admission
+	Authenticate               func(context.Context, listener.StartupRequest, listener.StartupResult[ResolvedStartup], protocol.Exchange) (listener.AuthenticationResult, error)
+	LoadShedder                listener.LoadShedder
+	Runtime                    RuntimeConfig
+	Sessions                   SessionRegistry
 }
 
 // Server owns the listener and the runtime used to construct its sessions.
@@ -51,10 +55,13 @@ func NewServer(ctx context.Context, cfg Config) (*Server, error) {
 	}
 	runtime := NewRuntime(cfg.Runtime)
 	engine, err := listener.New(ctx, listener.Config[ResolvedStartup]{
-		ListenAddress: cfg.ListenAddress,
-		TLSConfig:     cfg.TLSConfig,
-		RequireTLS:    cfg.RequireTLS,
-		Admission:     cfg.Admission,
+		ListenAddress:              cfg.ListenAddress,
+		TLSConfig:                  cfg.TLSConfig,
+		RequireTLS:                 cfg.RequireTLS,
+		AuthenticationMessageLimit: cfg.AuthenticationMessageLimit,
+		StartupTimeout:             cfg.StartupTimeout,
+		MaxPendingConnections:      cfg.MaxPendingConnections,
+		Admission:                  cfg.Admission,
 		Hooks: listener.Hooks[ResolvedStartup]{
 			ResolveStartup: runtime.ResolveStartup,
 			NewSession:     runtime.NewSession,

@@ -40,7 +40,7 @@ func testListenerConn(t *testing.T, engine *Listener[struct{}]) net.Conn {
 		conn, err := engine.ln.Accept()
 		if assert.NoError(t, err) {
 			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-			engine.handleConn(conn)
+			engine.handleConn(conn, func() {})
 		}
 	}()
 	conn, err := net.Dial("tcp", engine.Addr().String())
@@ -132,7 +132,7 @@ func TestRequireTLSRejectsIncompleteHandshake(t *testing.T) {
 	engine.cfg.RequireTLS = true
 	forbidStartupHooks(engine)
 	conn := tls.Server(newBufferConn(nil), &tls.Config{})
-	_, err = engine.handleStartup(t.Context(), conn, &pgproto3.StartupMessage{})
+	_, err = engine.handleStartup(t.Context(), t.Context(), conn, &pgproto3.StartupMessage{})
 	require.EqualError(t, err, "TLS is required")
 }
 
