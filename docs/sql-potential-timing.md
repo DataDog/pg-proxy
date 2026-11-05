@@ -50,7 +50,10 @@ excluded from the aggregate. Eviction and timing invalidation hold the same lock
 so Patroni cannot match a pre-eviction timestamp before the next SQL completion.
 Per-IP lifecycle cutoffs survive eviction and advance on rediscovery: a delayed
 Patroni callback captured before eviction or during absence cannot recreate that
-IP's pending observation after rediscovery. Evidence for an evicted IP also
+IP's pending observation after rediscovery. SQL timing filters each credential's
+results against the same per-IP cutoff before resolving roles, using that
+credential's completion time. A newer sibling completion cannot make old SQL
+evidence fresh. Raw mismatch snapshots remain unchanged. Evidence for an evicted IP also
 remains ineligible while the IP is absent. These checks run
 under the same lock and do not invalidate timing for other retained IPs. Patroni
 callbacks older than the latest accepted reference snapshot are ignored, so they

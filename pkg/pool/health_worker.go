@@ -359,36 +359,20 @@ func buildSQLHealthComparisonSnapshot(
 	latest map[*sqlHealthTarget]SQLHealthResultsSnapshot,
 ) sqlHealthComparisonSnapshot {
 	snapshot := sqlHealthComparisonSnapshot{
-		health:      make(map[string]bool, len(retainedIPs)),
 		retainedIPs: slices.Collect(maps.Keys(retainedIPs)),
 		results:     make([]SQLHealthResultsSnapshot, 0, len(latest)),
 	}
 	slices.Sort(snapshot.retainedIPs)
-	conflicts := make(map[string]struct{})
+	var retainedResults []SQLHealthCheckResult
 	for _, targetSnapshot := range latest {
 		snapshot.results = append(snapshot.results, cloneSQLHealthResultsSnapshot(targetSnapshot))
 		for _, result := range targetSnapshot.Results {
-			// Every error is an unknown role for this credential's latest poll. Another
-			// credential may supply a determinate role, but historical successes cannot.
-			if result.Err != nil {
-				continue
+			if _, retained := retainedIPs[result.IP]; retained {
+				retainedResults = append(retainedResults, result)
 			}
-			if _, retained := retainedIPs[result.IP]; !retained {
-				continue
-			}
-			role := result.HealthyPrimary()
-			if previous, known := snapshot.health[result.IP]; known && previous != role {
-				conflicts[result.IP] = struct{}{}
-			}
-			snapshot.health[result.IP] = role
 		}
 	}
-	// Keep conflicts distinct from unknowns and independent of map iteration/completion order.
-	for ip := range conflicts {
-		delete(snapshot.health, ip)
-		snapshot.conflictingIPs = append(snapshot.conflictingIPs, ip)
-	}
-	slices.Sort(snapshot.conflictingIPs)
+	snapshot.health, snapshot.conflictingIPs = aggregateSQLComparisonRoles(retainedResults)
 	slices.SortFunc(snapshot.results, func(left, right SQLHealthResultsSnapshot) int {
 		if left.ScheduledAt.Before(right.ScheduledAt) {
 			return -1
@@ -405,6 +389,31 @@ func buildSQLHealthComparisonSnapshot(
 		return 0
 	})
 	return snapshot
+}
+
+// aggregateSQLComparisonRoles applies the same role rules to raw mismatch evidence and
+// lifecycle-filtered timing evidence. Unknown roles do not erase a sibling's successful role.
+func aggregateSQLComparisonRoles(results []SQLHealthCheckResult) (map[string]bool, []string) {
+	health := make(map[string]bool)
+	conflicts := make(map[string]struct{})
+	for _, result := range results {
+		if result.Err != nil {
+			continue
+		}
+		role := result.HealthyPrimary()
+		if previous, known := health[result.IP]; known && previous != role {
+			conflicts[result.IP] = struct{}{}
+		}
+		health[result.IP] = role
+	}
+	// Keep conflicts distinct from unknowns and independent of result order.
+	var conflictingIPs []string
+	for ip := range conflicts {
+		delete(health, ip)
+		conflictingIPs = append(conflictingIPs, ip)
+	}
+	slices.Sort(conflictingIPs)
+	return health, conflictingIPs
 }
 
 func cloneSQLHealthResultsSnapshot(snapshot SQLHealthResultsSnapshot) SQLHealthResultsSnapshot {

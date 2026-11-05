@@ -5,8 +5,9 @@ import (
 )
 
 // SQLPotentialComparison compares completed SQL and Patroni snapshots for a replacement primary.
-// SQL uses the same aggregate as SQLPatroniCompared: the completing credential's full multi-IP
-// poll plus the other credentials' latest completed polls. No individual probe advances timing.
+// SQL applies the same role rules as SQLPatroniCompared to the completing credential's full
+// multi-IP poll plus the other credentials' latest completed polls, excluding evidence from
+// before an IP's DNS lifecycle cutoff. No individual probe advances timing.
 // This remains a comparison signal, not proof that routing there is safe or that clients recovered.
 //
 // Speedup is PatroniObservedAt - SQLObservedAt; negative values expose SQL regressions.
@@ -26,7 +27,7 @@ type sqlPotentialTimingState struct {
 	leaderComparisons potentialTiming
 	// Remember retained IPs to detect removals and reappearances on the next update.
 	previousRetainedIPs map[string]bool
-	// Per-IP eviction/rediscovery cutoffs used to reject stale Patroni evidence.
+	// Per-IP eviction/rediscovery cutoffs used to reject stale SQL and Patroni evidence.
 	dnsLifecycleCutoffByIP map[string]time.Time
 	// Newest accepted Patroni timestamp; reject observations delivered out of order.
 	lastAcceptedPatroniObservedAt time.Time
@@ -124,13 +125,22 @@ func (p *sqlPotentialTimingState) observeSQLSnapshot(snapshot sqlHealthCompariso
 		p.sqlTimingResumedAt = observedAt
 	}
 	p.updateRetained(snapshot.retainedIPs, observedAt)
-	healthy := make(map[string]bool)
-	for ip, primary := range snapshot.health {
-		if primary {
-			healthy[ip] = true
+	// Filter each credential's evidence before resolving roles. The aggregate timestamp
+	// may be newer because of another credential, which cannot refresh this IP's old result.
+	var currentResults []SQLHealthCheckResult
+	for _, completed := range snapshot.results {
+		for _, result := range completed.Results {
+			if !p.previousRetainedIPs[result.IP] {
+				continue
+			}
+			if cutoff, invalidated := p.dnsLifecycleCutoffByIP[result.IP]; invalidated && !completed.ObservedAt.After(cutoff) {
+				continue
+			}
+			currentResults = append(currentResults, result)
 		}
 	}
-	return p.leaderComparisons.observe(true, healthy, observedAt)
+	health, _ := aggregateSQLComparisonRoles(currentResults)
+	return p.leaderComparisons.observe(true, health, observedAt)
 }
 
 // Discovery calls this while holding the same lock as timing observations, before exposing the

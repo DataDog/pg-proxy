@@ -282,6 +282,72 @@ func TestSQLPotentialEvictOldLeaderPreservesReplacement(t *testing.T) {
 	}
 }
 
+func TestSQLPotentialEvictionRejectsDelayedSQLEvidence(t *testing.T) {
+	for _, newerSibling := range []bool{false, true} {
+		name := "delayed completion"
+		if newerSibling {
+			name = "newer sibling cannot refresh stale evidence"
+		}
+		t.Run(name, func(t *testing.T) {
+			s := &PoolHealth{sqlHealthState: NewHealthState()}
+			s.refreshSQLResolved([]string{"A", "B", "C"}, 1)
+			target := &sqlHealthTarget{}
+			baseline := time.Now().Add(-time.Minute)
+			recordPotentialPoll(s, target, 0, baseline, SQLHealthCheckResult{IP: "A"})
+			s.potentialTiming.observePatroni(leaderTimingIPs("A"), baseline)
+			staleSQLAt := baseline.Add(time.Second)
+			require.ElementsMatch(t, []string{"A", "C"}, s.refreshSQLResolved([]string{"A", "C"}, 1))
+			s.refreshSQLResolved([]string{"A", "B", "C"}, 1)
+			cutoff := s.potentialTiming.dnsLifecycleCutoffByIP["B"]
+			require.True(t, staleSQLAt.Before(cutoff))
+
+			if newerSibling {
+				recordPotentialPoll(s, &sqlHealthTarget{}, 0, time.Now(), SQLHealthCheckResult{IP: "A"})
+			}
+			// Only B crossed a DNS lifecycle. C's evidence from the same poll remains valid.
+			snapshot := recordPotentialPoll(s, target, 0, staleSQLAt, SQLHealthCheckResult{IP: "B"}, SQLHealthCheckResult{IP: "C"})
+			require.True(t, snapshot.health["B"], "preserve the raw mismatch comparison")
+			require.Equal(t, staleSQLAt, s.sqlComparisonLatest[target].ObservedAt)
+			require.Empty(t, snapshot.potentialComparisons)
+			require.NotContains(t, s.potentialTiming.leaderComparisons.pending, "B")
+			require.NotContains(t, s.potentialTiming.leaderComparisons.sqlLeaders, "B")
+
+			patroniAt := time.Now()
+			comparisons := s.potentialTiming.observePatroni(leaderTimingIPs("B", "C"), patroniAt)
+			require.Len(t, comparisons, 1, "only the retained IP can match the old SQL poll")
+			require.Equal(t, "C", comparisons[0].NewLeaderIP)
+
+			sqlAt := time.Now()
+			snapshot = recordPotentialPoll(s, target, 0, sqlAt, SQLHealthCheckResult{IP: "B"}, SQLHealthCheckResult{IP: "C"})
+			require.Len(t, snapshot.potentialComparisons, 1, "fresh B evidence must still compare")
+			comparison := snapshot.potentialComparisons[0]
+			assert.Equal(t, "B", comparison.NewLeaderIP)
+			assert.Equal(t, sqlAt, comparison.SQLObservedAt)
+			assert.Equal(t, patroniAt.Sub(sqlAt), comparison.Speedup)
+		})
+	}
+}
+
+func TestSQLPotentialEvictionFiltersStaleRoleBeforeAggregation(t *testing.T) {
+	s := &PoolHealth{sqlHealthState: NewHealthState()}
+	s.refreshSQLResolved([]string{"A", "B"}, 1)
+	staleTarget, freshTarget := &sqlHealthTarget{}, &sqlHealthTarget{}
+	baseline := time.Now().Add(-time.Minute)
+	recordPotentialPoll(s, staleTarget, 0, baseline, SQLHealthCheckResult{IP: "A"}, SQLHealthCheckResult{IP: "B", InRecovery: true})
+	s.potentialTiming.observePatroni(leaderTimingIPs("A"), baseline)
+	s.refreshSQLResolved([]string{"A"}, 1)
+	s.refreshSQLResolved([]string{"A", "B"}, 1)
+
+	sqlAt := time.Now()
+	snapshot := recordPotentialPoll(s, freshTarget, 0, sqlAt, SQLHealthCheckResult{IP: "B"})
+	require.Contains(t, snapshot.conflictingIPs, "B", "raw comparison retains both credentials' evidence")
+	patroniAt := time.Now()
+	comparisons := s.potentialTiming.observePatroni(leaderTimingIPs("B"), patroniAt)
+	require.Len(t, comparisons, 1, "obsolete standby evidence must not conflict with a fresh primary")
+	assert.Equal(t, sqlAt, comparisons[0].SQLObservedAt)
+	assert.Equal(t, patroniAt.Sub(sqlAt), comparisons[0].Speedup)
+}
+
 func TestSQLPotentialEvictionRejectsDelayedPatroniEvidence(t *testing.T) {
 	for _, startup := range []bool{true, false} {
 		phase := "established SQL baseline"
