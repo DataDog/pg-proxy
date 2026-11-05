@@ -46,3 +46,11 @@ Tests cover real startup/cancel packets, registry cleanup, shutdown waiting,
 startup resolution, read routing, and session extensions. Portable tests travel
 with this package and retain race detection. Datadog auth, metadata, and Docker
 integration tests remain in the app.
+
+Authentication uses the existing `Config.Authenticate` callback. Verify credentials
+and check access to `resolved.LogicalDatabase` before returning a nonempty
+`listener.AuthenticationResult.Service`. The listener checks cancellation and
+rejects empty identities before admission. Passthrough policy belongs to the
+application's authentication callback. The standalone command rejects it;
+embedders can retain their existing role handling after authentication.
+Credential sources and access policy remain application-owned.

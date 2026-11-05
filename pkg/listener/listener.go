@@ -43,7 +43,8 @@ type StartupResult[T any] struct {
 	Data              T
 }
 
-// AuthenticationResult is the authenticated client identity.
+// AuthenticationResult is the client identity accepted by the application.
+// Authenticate hooks must return a nonempty Service for session accounting.
 type AuthenticationResult struct {
 	Service string
 }
@@ -392,7 +393,7 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 		}
 	}
 	user, ok := msg.Parameters["user"]
-	if !ok {
+	if !ok || user == "" {
 		return nil, startupErrorAt("startup_parameters", errors.New("user name not provided"))
 	}
 	database, ok := msg.Parameters["database"]
@@ -403,6 +404,9 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 	if err != nil {
 		return nil, startupErrorAt("startup_options", err)
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, startupErrorAt("authenticate", err)
+	}
 	request := StartupRequest{User: user, Database: database, Parameters: msg.Parameters, Options: options}
 	resolved, err := l.cfg.Hooks.ResolveStartup(ctx, request)
 	if err != nil {
@@ -412,6 +416,12 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 		resolved.LogicalDatabase = database
 	}
 
+	if resolved.LogicalDatabase == "" {
+		return nil, startupErrorAt("resolve_startup", ErrAuthenticationFailed)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, startupErrorAt("authenticate", err)
+	}
 	// Backend because the proxy is the PostgreSQL backend for this client.
 	client := pgproto3.NewBackend(conn, conn)
 	auth := AuthenticationResult{Service: user}
@@ -421,8 +431,17 @@ func (l *Listener[T]) handleStartup(ctx context.Context, conn net.Conn, msg *pgp
 			return nil, startupErrorAt("authenticate", err)
 		}
 		if auth.Service == "" {
-			auth.Service = user
+			return nil, startupErrorAt("authenticate", ErrAuthenticationFailed)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, startupErrorAt("authenticate", err)
+	}
+	if l.cfg.Hooks.Authenticate != nil {
+		pgproxy.LoggerFromContext(ctx).Debug("client authenticated",
+			"authenticated_user", fmt.Sprintf("%.256s", user),
+			"authenticated_service", fmt.Sprintf("%.256s", auth.Service),
+			"logical_database", fmt.Sprintf("%.256s", resolved.LogicalDatabase))
 	}
 	tags := []string{
 		"user:" + user,

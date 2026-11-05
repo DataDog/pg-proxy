@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"maps"
 	"net"
-	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -61,15 +60,11 @@ func main() {
 }
 
 func (c config) validate() error {
-	address, err := netip.ParseAddrPort(c.listenAddress)
-	if err != nil || !address.Addr().IsLoopback() {
-		return errors.New("proxy.listener_address must use a loopback IP: the OSS binary does not authenticate clients")
+	if err := c.validateListener(false); err != nil {
+		return err
 	}
 	if c.messageBufferSize < 0 {
 		return errors.New("postgres_msg_buffer_size must not be negative")
-	}
-	if c.requireTLS && c.tlsConfig == nil {
-		return errors.New("proxy.tls_required requires tls_cert_file and tls_key_file")
 	}
 	if len(c.databases) == 0 || len(c.clusters) == 0 || len(c.logicalDatabases) == 0 {
 		return errors.New("databases, clusters, and logical_databases must not be empty")
@@ -221,7 +216,7 @@ func localUser(users map[string]string) func(context.Context, listener.StartupRe
 			return listener.AuthenticationResult{}, errors.New("client user must match the configured backend user")
 		}
 		if request.Options.PassthroughUser {
-			return listener.AuthenticationResult{}, errors.New("passthrough_user is not supported by the OSS binary")
+			return listener.AuthenticationResult{}, listener.ErrUnsupportedAuthOption
 		}
 		return listener.AuthenticationResult{Service: user}, nil
 	}
