@@ -711,12 +711,13 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 		}(ip)
 	}
 	wg.Wait()
+	observedAt := time.Now()
 
 	if w.hooks.CheckFinished != nil {
 		w.hooks.CheckFinished(time.Since(start), poolHealth.patroniTags)
 	}
 	w.updateHealthAndCleanup(poolHealth, pghealth, systemIDs, ips)
-	w.observePatroniPotential(poolHealth, pghealth)
+	w.observePatroniPotential(poolHealth, pghealth, observedAt)
 }
 
 func patroniHealthTags(host string, isReadReplica bool) []string {

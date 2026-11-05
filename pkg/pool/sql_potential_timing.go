@@ -81,15 +81,21 @@ func (s *PoolHealth) updateSQLPotentialRetainedLocked(ips []string) {
 	}
 	for ip := range s.potentialRetainedIPs {
 		if !retained[ip] {
-			// DNS eviction is not a SQL failure. Rebaseline rather than compare across a changed address set.
-			s.potentialTiming = potentialTiming{}
-			break
+			// Eviction invalidates only this address. A retained replacement can still
+			// pair with its pending observation, even if the old leader disappears.
+			delete(s.potentialTiming.pending, ip)
+			delete(s.potentialTiming.candidate.current, ip)
+			delete(s.potentialTiming.candidate.lastNonempty, ip)
+			delete(s.potentialTiming.candidate.comparable, ip)
+			delete(s.potentialTiming.reference.current, ip)
+			delete(s.potentialTiming.reference.lastNonempty, ip)
+			delete(s.potentialTiming.reference.comparable, ip)
 		}
 	}
 	s.potentialRetainedIPs = retained
 }
 
-func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]bool) {
+func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]bool, observedAt time.Time) {
 	if w.hooks.SQLPotentialCompared == nil || s.isReadReplica {
 		return
 	}
@@ -100,7 +106,7 @@ func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]
 		}
 	}
 	s.sqlComparisonMu.Lock()
-	comparisons := s.potentialTiming.observe(false, healthy, time.Now())
+	comparisons := s.potentialTiming.observe(false, healthy, observedAt)
 	s.sqlComparisonMu.Unlock()
 	w.reportSQLPotential(s, comparisons)
 }

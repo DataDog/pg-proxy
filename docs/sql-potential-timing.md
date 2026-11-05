@@ -24,6 +24,8 @@ not update timing. `SQLObservedAt` is the newest completion timestamp among all
 credential snapshots included in the aggregate. Each timestamp includes waiting
 for that credential's slower probes. If an older completion is accepted after a
 newer one, the aggregate cannot be timestamped earlier than the evidence it uses.
+Patroni is timestamped immediately after all its probes complete, before completion
+callbacks, health cleanup, or waiting for the timing lock.
 Individual credential timestamps remain intact for diagnostics; timing is never
 backdated to the first successful primary response.
 
@@ -36,9 +38,9 @@ policy: uncertainty on another IP does not automatically reject a primary here.
 Only primary pool subscriptions produce timing comparisons.
 
 Timing and snapshot acceptance share the same lock and lifecycle validation.
-Rejected completions cannot update timing. Recorded evidence removed by disable,
-retirement, or DNS eviction resets timing continuity; evicted results remain
-excluded from the aggregate. DNS eviction and timing invalidation hold that same
+Rejected completions cannot update timing. Disable or retirement resets timing continuity. DNS eviction removes only the
+evicted addresses from pending observations and baselines, preserving timing for
+retained replacement addresses; evicted results remain excluded from the aggregate. DNS eviction and timing invalidation hold that same
 lock together, so Patroni cannot match a pre-eviction timestamp before the next
 SQL completion. DNS lookup itself stays outside the timing lock. Callbacks run
 after releasing the lock.
