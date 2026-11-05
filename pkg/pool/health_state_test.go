@@ -204,3 +204,22 @@ func TestHealthStateDepartedAddressFromAnotherCluster(t *testing.T) {
 		})
 	}
 }
+
+func TestHealthStateReplaceRoutingSnapshotRefreshesLastKnownHealthy(t *testing.T) {
+	const oldAddress, replacementAddress = "10.0.0.1", "10.0.0.2"
+	state := NewHealthState()
+	state.Update(
+		map[string]bool{oldAddress: true, replacementAddress: false},
+		nil,
+		[]string{oldAddress, replacementAddress},
+		1,
+		nil,
+	)
+
+	state.ReplaceRoutingSnapshot(
+		map[string]bool{oldAddress: false, replacementAddress: true},
+		[]string{oldAddress, replacementAddress},
+	)
+
+	assert.ElementsMatch(t, []string{replacementAddress}, state.RefreshResolved(nil, 1, nil))
+}

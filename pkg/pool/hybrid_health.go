@@ -191,6 +191,17 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	return decision
 }
 
+// observePublishedPatroniRouting records hybrid publication when Patroni owns routing (including
+// cached fallback). This happens on the Patroni loop, not at the next SQL completion.
+func (p *hybridHealthPolicy) observePublishedPatroniRouting(health map[string]bool, observedAt time.Time) *LeaderRoutingComparison {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.routingEnabled {
+		return nil
+	}
+	return p.recordRoutingLeaderLocked("hybrid", health, observedAt, SQLRoutingResultCachedFallback)
+}
+
 // observeSQL evaluates one complete SQL snapshot. SQL routing is conclusive only when every IP has
 // a successful role or a narrowly classified unroutable result. Unknown errors, multiple distinct
 // primaries, or conflicting deterministic roles fall back to the most recent Patroni snapshot.

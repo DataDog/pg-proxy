@@ -609,7 +609,7 @@ func TestCentralizedSQLHealthCheckPublishesWithoutChangingPatroniRouting(t *test
 	assert.Equal(t, 2, sqlProber.callCount("10.0.0.1"), "unsubscribed SQL target still ran")
 }
 
-func TestHybridPolicyEvaluationDoesNotReplacePatroniRouting(t *testing.T) {
+func TestHybridPolicyPublishesAggregatedSQLRouting(t *testing.T) {
 	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
 	patroniProber := newMockProber(
 		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
@@ -642,8 +642,8 @@ func TestHybridPolicyEvaluationDoesNotReplacePatroniRouting(t *testing.T) {
 
 	require.Len(t, iterations, 1)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[0].RoutingResult)
-	assert.True(t, health.IsHealthy(patroniPrimary), "shadow evaluation must preserve Patroni routing")
-	assert.False(t, health.IsHealthy(sqlPrimary), "shadow evaluation must not publish the SQL leader")
+	assert.False(t, health.IsHealthy(patroniPrimary), "SQL must replace the old Patroni primary")
+	assert.True(t, health.IsHealthy(sqlPrimary), "a conclusive aggregate must publish the SQL leader")
 }
 
 func TestHybridEvaluationUsesCompleteCredentialSnapshots(t *testing.T) {
@@ -661,9 +661,11 @@ func TestHybridEvaluationUsesCompleteCredentialSnapshots(t *testing.T) {
 			state := NewHealthState()
 			state.Track([]string{primary, standby})
 			health := &PoolHealth{
-				sqlHealthState:   state,
-				hybridPolicy:     newHybridHealthPolicy(true),
-				routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+				state:              NewHealthState(),
+				patroniHealthState: NewHealthState(),
+				sqlHealthState:     state,
+				hybridPolicy:       newHybridHealthPolicy(true),
+				routingEnabledFn:   func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
 			}
 			fast := &sqlHealthTarget{poolHealth: health}
 			slow := &sqlHealthTarget{poolHealth: health}
@@ -684,6 +686,9 @@ func TestHybridEvaluationUsesCompleteCredentialSnapshots(t *testing.T) {
 			require.Len(t, health.sqlComparisonLatest, 2, "reuse the existing complete credential snapshots")
 			if !tc.fallback {
 				assert.Equal(t, SQLRoutingResultConclusive, iterations[0].RoutingResult)
+				assert.True(t, health.IsHealthy(primary), "publish the aggregated route while the other credential remains busy")
+				assert.False(t, health.IsHealthy(standby))
+				assert.True(t, health.sqlRoutingActive)
 			} else {
 				assert.Equal(t, SQLRoutingResultCachedFallback, iterations[0].RoutingResult)
 				assert.Equal(t, SQLHealthFallbackTimeout, iterations[0].FallbackReason)
@@ -697,9 +702,11 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	state := NewHealthState()
 	state.Track([]string{ip})
 	health := &PoolHealth{
-		sqlHealthState:   state,
-		hybridPolicy:     newHybridHealthPolicy(true),
-		routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+		state:              NewHealthState(),
+		patroniHealthState: NewHealthState(),
+		sqlHealthState:     state,
+		hybridPolicy:       newHybridHealthPolicy(true),
+		routingEnabledFn:   func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
 	}
 	a, b, c := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
 	var iterations []SQLIteration
@@ -756,9 +763,11 @@ func TestHybridEvaluationWaitsForNewlyDiscoveredIP(t *testing.T) {
 	state := NewHealthState()
 	state.Track([]string{oldIP, newIP})
 	health := &PoolHealth{
-		sqlHealthState:   state,
-		hybridPolicy:     newHybridHealthPolicy(true),
-		routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+		state:              NewHealthState(),
+		patroniHealthState: NewHealthState(),
+		sqlHealthState:     state,
+		hybridPolicy:       newHybridHealthPolicy(true),
+		routingEnabledFn:   func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
 	}
 	target := &sqlHealthTarget{poolHealth: health}
 	var iterations int
@@ -879,11 +888,9 @@ func TestPatroniRefreshAppliesRoutingDisableWhenSQLChecksAreSkipped(t *testing.T
 	policy.observeSQL([]string{newPrimary}, SQLHealthCheckOutcome{PrimaryIPs: []string{newPrimary}}, started.Add(time.Second))
 	require.NotEmpty(t, policy.pendingRouting)
 
-	// The skipped SQL round cannot observe the routing flag transition. The next Patroni refresh
-	// must apply the disable before its new-primary observation can complete the stale comparison.
+	// Even without another SQL round, the Patroni refresh must apply the disable before its
+	// new-primary observation can complete the stale comparison.
 	routingEnabled = false
-	w.RefreshSQL()
-	assert.True(t, policy.isRoutingEnabled())
 	patroniProber.mu.Lock()
 	patroniProber.healthyIPs[oldPrimary] = false
 	patroniProber.healthyIPs[newPrimary] = true
@@ -1582,7 +1589,9 @@ func TestProbeErrorPublishesInstanceAsUnhealthy(t *testing.T) {
 func newTestPoolHealth(ips ...string) *PoolHealth {
 	state := NewHealthState()
 	state.Track(ips)
-	return &PoolHealth{state: state}
+	patroni := NewHealthState()
+	patroni.Track(ips)
+	return &PoolHealth{state: state, patroniHealthState: patroni}
 }
 
 func TestTrackNewIPs_AddsNewAndDedupes(t *testing.T) {
@@ -1600,27 +1609,27 @@ func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
 	s := newTestPoolHealth("10.0.0.1", "10.0.0.2")
 
 	// both IPs healthy, both in DNS
-	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"})
+	w.applyPatroniHealth(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"}, time.Now())
 	assert.True(t, s.IsHealthy("10.0.0.1"))
 	assert.True(t, s.IsHealthy("10.0.0.2"))
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved())
 
 	// 10.0.0.2 leaves DNS but stays healthy — grace window, not evicted
 	for i := 0; i < maxFailedHostLookups-1; i++ {
-		w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"})
+		w.applyPatroniHealth(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"}, time.Now())
 	}
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved(), "still in grace window")
 
 	// 10.0.0.2 now unhealthy and absent from DNS — eligible for eviction
-	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": false}, nil, []string{"10.0.0.1"})
+	w.applyPatroniHealth(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": false}, nil, []string{"10.0.0.1"}, time.Now())
 	assert.ElementsMatch(t, []string{"10.0.0.1"}, s.Resolved(), "evicted after grace window and unhealthy")
 	assert.False(t, s.IsHealthy("10.0.0.2"), "evicted IP must not stay healthy")
 
 	// verify lastKnownPgHealth protects an IP that is still healthy
 	s2 := newTestPoolHealth("10.0.0.1", "10.0.0.2")
-	w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"})
+	w.applyPatroniHealth(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"}, time.Now())
 	for i := 0; i < maxFailedHostLookups+1; i++ {
-		w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"})
+		w.applyPatroniHealth(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"}, time.Now())
 	}
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s2.Resolved(), "last known healthy IP never evicted")
 }
@@ -2256,7 +2265,7 @@ func TestHybridEvaluationIncludesPrimaryRestoredByLateSuccess(t *testing.T) {
 	state.RefreshResolved(nil, 1, nil)
 	require.ElementsMatch(t, []string{oldIP}, state.Resolved())
 	health := &PoolHealth{
-		state: NewHealthState(), sqlHealthState: state,
+		state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: state,
 		hybridPolicy:     newHybridHealthPolicy(true),
 		routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
 	}
@@ -2342,7 +2351,7 @@ func TestHybridTelemetryUsesDecisionRoutingMode(t *testing.T) {
 			state := NewHealthState()
 			state.Track([]string{ip})
 			health := &PoolHealth{
-				state: NewHealthState(), sqlHealthState: state,
+				state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: state,
 				hybridPolicy:     newHybridHealthPolicy(tc.enabled),
 				routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(tc.enabled) },
 			}
@@ -2381,6 +2390,550 @@ func TestHybridTelemetryUsesDecisionRoutingMode(t *testing.T) {
 			} else {
 				assert.Zero(t, fallbackCount)
 			}
+		})
+	}
+}
+
+func TestPatroniPublishesNewLeaderWhileSQLUsesCachedFallback(t *testing.T) {
+	const oldPrimary, newPrimary = "10.0.0.1", "10.0.0.2"
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {oldPrimary, newPrimary}},
+		oldPrimary,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &credentialSQLHealthProber{
+		responses: map[string]fakeSQLHealthProbeResponse{
+			"timeout": {err: context.DeadlineExceeded},
+		},
+		started:   map[string]chan struct{}{},
+		release:   map[string]chan struct{}{},
+		startOnce: map[string]*sync.Once{},
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	subscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "timeout" },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	health := receivePoolHealth(t, subscription)
+	t.Cleanup(func() { w.Unsubscribe(subscription) })
+
+	var comparisons []LeaderRoutingComparison
+	w.sqlHooks.LeaderRoutingCompared = func(c LeaderRoutingComparison, _ []string) { comparisons = append(comparisons, c) }
+	w.RefreshSQL()
+	require.True(t, health.IsHealthy(oldPrimary))
+	require.False(t, health.sqlRoutingActive, "timeout fallback must not suppress Patroni publication")
+
+	w.applyPatroniHealth(
+		health,
+		map[string]bool{oldPrimary: false, newPrimary: true},
+		nil,
+		[]string{oldPrimary, newPrimary},
+		time.Now(),
+	)
+	assert.False(t, health.IsHealthy(oldPrimary))
+	assert.True(t, health.IsHealthy(newPrimary), "new Patroni leader must publish during SQL fallback")
+
+	require.Len(t, comparisons, 1, "Patroni-owned hybrid routing must be timed on publication, without waiting for SQL")
+	assert.Equal(t, time.Duration(0), comparisons[0].Improvement)
+	assert.Equal(t, SQLRoutingResultCachedFallback, comparisons[0].HybridSource)
+
+	// A subsequent timeout must copy the latest Patroni snapshot rather than restoring the old
+	// primary retained by the earlier fallback decision.
+	w.RefreshSQL()
+	assert.False(t, health.IsHealthy(oldPrimary))
+	assert.True(t, health.IsHealthy(newPrimary))
+}
+
+func TestHybridRoutingPreservesPatroniWhenSQLDiscoveryHasNoCandidates(t *testing.T) {
+	const ip = "10.0.0.1"
+	patroniProber := newMockProber(map[string][]string{"primary.local": {ip}}, ip)
+	w := newTestWorker(patroniProber)
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, &fakeSQLHealthProber{}, 1, SQLHealthCheckHooks{})
+	}
+	subscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(string) string { return "conn" },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	health := receivePoolHealth(t, subscription)
+	t.Cleanup(func() { w.Unsubscribe(subscription) })
+	require.True(t, health.IsHealthy(ip))
+
+	patroniProber.mu.Lock()
+	patroniProber.ipsByHost["primary.local"] = nil
+	patroniProber.mu.Unlock()
+	w.RefreshSQL()
+
+	assert.True(t, health.IsHealthy(ip), "empty SQL discovery must preserve the Patroni route")
+	assert.ElementsMatch(t, []string{ip}, health.Resolved())
+}
+
+func TestSQLRoutingDoesNotReplacePatroniDiscoveryState(t *testing.T) {
+	const (
+		patroniPrimary = "10.0.0.1"
+		standby        = "10.0.0.2"
+	)
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {patroniPrimary, standby}},
+		patroniPrimary,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &credentialSQLHealthProber{
+		responses: map[string]fakeSQLHealthProbeResponse{
+			standby: {inRecovery: true},
+		},
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	subscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	health := receivePoolHealth(t, subscription)
+	t.Cleanup(func() { w.Unsubscribe(subscription) })
+	require.True(t, health.IsHealthy(patroniPrimary))
+
+	// SQL's first discovery sees only the standby and publishes a B-only routing snapshot.
+	patroniProber.mu.Lock()
+	patroniProber.ipsByHost["primary.local"] = []string{standby}
+	patroniProber.mu.Unlock()
+	w.RefreshSQL()
+	require.ElementsMatch(t, []string{standby}, health.Resolved())
+	require.False(t, health.IsHealthy(patroniPrimary))
+	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.patroniHealthState.Resolved())
+
+	// Patroni must continue probing its independently retained primary even though SQL removed it
+	// from the client-visible routing snapshot.
+	var patroniProbeCalls []string
+	patroniProber.mu.Lock()
+	patroniProber.recordCall = func(ip, _ string, _ string, _ bool, _ []string) {
+		patroniProbeCalls = append(patroniProbeCalls, ip)
+	}
+	patroniProber.mu.Unlock()
+	w.Refresh()
+	assert.ElementsMatch(t, []string{patroniPrimary, standby}, patroniProbeCalls)
+
+	// A later SQL timeout falls back to the Patroni snapshot, which still contains A.
+	sqlProber.mu.Lock()
+	sqlProber.responses[standby] = fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}
+	sqlProber.mu.Unlock()
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary))
+	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.Resolved())
+}
+
+func TestSQLChecksDisableRoutingUntilHostStateIsRecreated(t *testing.T) {
+	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
+		patroniPrimary,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &credentialSQLHealthProber{
+		responses: map[string]fakeSQLHealthProbeResponse{
+			patroniPrimary: {inRecovery: true},
+			sqlPrimary:     {inRecovery: false},
+		},
+		started:   map[string]chan struct{}{},
+		release:   map[string]chan struct{}{},
+		startOnce: map[string]*sync.Once{},
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	var enabled atomic.Bool
+	enabled.Store(true)
+	subscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		ChecksEnabled:   func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(enabled.Load()) },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	health := receivePoolHealth(t, subscription)
+	w.RefreshSQL()
+	require.False(t, health.IsHealthy(patroniPrimary), "complete SQL result should become authoritative")
+	require.True(t, health.IsHealthy(sqlPrimary))
+
+	probeStarted := make(chan struct{})
+	releaseProbe := make(chan struct{})
+	var releaseOnce sync.Once
+	sqlProber.mu.Lock()
+	sqlProber.started[sqlPrimary] = probeStarted
+	sqlProber.release[sqlPrimary] = releaseProbe
+	sqlProber.startOnce[sqlPrimary] = &sync.Once{}
+	sqlProber.mu.Unlock()
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(releaseProbe) })
+		w.Unsubscribe(subscription)
+	})
+
+	refreshDone := make(chan struct{})
+	go func() {
+		w.RefreshSQL()
+		close(refreshDone)
+	}()
+	select {
+	case <-probeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not block")
+	}
+
+	enabled.Store(false)
+	w.checkSQLHealthGroup(
+		sqlHealthGroup{poolHealth: health, targets: health.sqlTargetValues()},
+		time.Now(),
+	)
+	assert.True(t, health.IsHealthy(patroniPrimary), "disabling checks must immediately restore cached Patroni")
+
+	enabled.Store(true)
+	releaseOnce.Do(func() { close(releaseProbe) })
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked SQL health check did not finish")
+	}
+	assert.True(t, health.IsHealthy(patroniPrimary), "the pre-disable round must not reactivate SQL routing")
+
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary), "re-enabling checks must not reactivate SQL routing without recreating host state")
+}
+
+func TestSQLRoutingFlagEvaluationFailureDoesNotLatchDisable(t *testing.T) {
+	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
+		patroniPrimary,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{
+			patroniPrimary: {{inRecovery: true}},
+			sqlPrimary:     {{inRecovery: false}},
+		},
+		calls: make(map[string]int),
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	var evaluation atomic.Value
+	evaluation.Store(SQLHealthFeatureFlagEvaluation{})
+	subscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		RoutingEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
+			return evaluation.Load().(SQLHealthFeatureFlagEvaluation)
+		},
+	})
+	health := receivePoolHealth(t, subscription)
+	t.Cleanup(func() { w.Unsubscribe(subscription) })
+
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary), "an initial evaluation error must preserve Patroni routing")
+
+	evaluation.Store(validSQLHealthFeatureFlag(true))
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary), "a poll scheduled before the mode transition must not publish")
+	w.RefreshSQL()
+	assert.False(t, health.IsHealthy(patroniPrimary), "a fresh poll may enable SQL after an earlier error")
+	assert.True(t, health.IsHealthy(sqlPrimary))
+
+	evaluation.Store(SQLHealthFeatureFlagEvaluation{Enabled: true, Valid: false})
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(sqlPrimary), "a later evaluation error must preserve the last-known enabled state")
+
+	evaluation.Store(validSQLHealthFeatureFlag(false))
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary), "an intentional disable must restore Patroni")
+
+	evaluation.Store(validSQLHealthFeatureFlag(true))
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary), "the intentional disable remains sticky until host recreation")
+}
+
+func TestSQLRoutingFlagDisableRejectsBlockedRoundAndStaysDisabled(t *testing.T) {
+	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
+		patroniPrimary,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &credentialSQLHealthProber{
+		responses: map[string]fakeSQLHealthProbeResponse{
+			patroniPrimary: {inRecovery: true},
+			sqlPrimary:     {inRecovery: false},
+		},
+		started:   map[string]chan struct{}{},
+		release:   map[string]chan struct{}{},
+		startOnce: map[string]*sync.Once{},
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	var routingEnabled atomic.Bool
+	routingEnabled.Store(true)
+	subscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		RoutingEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation {
+			return validSQLHealthFeatureFlag(routingEnabled.Load())
+		},
+	})
+	health := receivePoolHealth(t, subscription)
+	t.Cleanup(func() { w.Unsubscribe(subscription) })
+	w.RefreshSQL()
+	require.False(t, health.IsHealthy(patroniPrimary), "SQL should be authoritative before the transition")
+	require.True(t, health.IsHealthy(sqlPrimary))
+
+	blocked := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	sqlProber.mu.Lock()
+	sqlProber.started[sqlPrimary] = blocked
+	sqlProber.release[sqlPrimary] = release
+	sqlProber.startOnce[sqlPrimary] = &sync.Once{}
+	sqlProber.mu.Unlock()
+
+	refreshDone := make(chan struct{})
+	go func() {
+		w.RefreshSQL()
+		close(refreshDone)
+	}()
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("SQL health check did not block")
+	}
+	targets := health.sqlTargetValues()
+
+	routingEnabled.Store(false)
+	w.checkSQLHealthGroup(sqlHealthGroup{poolHealth: health, targets: targets}, time.Now())
+	assert.True(t, health.IsHealthy(patroniPrimary), "disabling routing must restore cached Patroni immediately")
+
+	routingEnabled.Store(true)
+	w.checkSQLHealthGroup(sqlHealthGroup{poolHealth: health, targets: targets}, time.Now())
+	assert.True(t, health.IsHealthy(patroniPrimary), "a missed re-enabled round must preserve Patroni routing")
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-refreshDone:
+	case <-time.After(time.Second):
+		t.Fatal("blocked SQL health check did not finish")
+	}
+	assert.True(t, health.IsHealthy(patroniPrimary), "the pre-transition round must not reactivate SQL routing")
+
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniPrimary), "a fresh round cannot reactivate SQL routing until host state is recreated")
+}
+
+func TestRemovingLastSQLTargetRestoresPatroniRouting(t *testing.T) {
+	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
+	patroniProber := newMockProber(
+		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
+		patroniPrimary,
+	)
+	w := newTestWorker(patroniProber)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{
+			patroniPrimary: {{inRecovery: true}},
+			sqlPrimary:     {{inRecovery: false}},
+		},
+		calls: make(map[string]int),
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+	}
+	patroniOnly := w.Subscribe("primary.local", false, "db", nil, nil)
+	health := receivePoolHealth(t, patroniOnly)
+	sqlSubscription := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	require.Same(t, health, receivePoolHealth(t, sqlSubscription))
+	t.Cleanup(func() { w.Unsubscribe(patroniOnly) })
+
+	w.RefreshSQL()
+	require.False(t, health.IsHealthy(patroniPrimary), "SQL should be authoritative before its target is removed")
+	require.True(t, health.IsHealthy(sqlPrimary))
+	w.Unsubscribe(sqlSubscription)
+	assert.True(t, health.IsHealthy(patroniPrimary), "the remaining Patroni-only subscription must not keep a stale SQL route")
+}
+
+type credentialSQLHealthProber struct {
+	mu        sync.Mutex
+	responses map[string]fakeSQLHealthProbeResponse
+	started   map[string]chan struct{}
+	release   map[string]chan struct{}
+	startOnce map[string]*sync.Once
+	calls     map[string]int
+}
+
+func (p *credentialSQLHealthProber) Probe(
+	_ context.Context,
+	_ string,
+	connString string,
+	_ []string,
+) (bool, error) {
+	p.mu.Lock()
+	if p.calls == nil {
+		p.calls = make(map[string]int)
+	}
+	p.calls[connString]++
+	response := p.responses[connString]
+	started := p.started[connString]
+	release := p.release[connString]
+	once := p.startOnce[connString]
+	p.mu.Unlock()
+	if started != nil {
+		once.Do(func() { close(started) })
+	}
+	if release != nil {
+		<-release
+	}
+	return response.inRecovery, response.err
+}
+
+func (p *credentialSQLHealthProber) callCount(connString string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls[connString]
+}
+
+func TestSQLRoutingWaitsForEveryIPDespiteEarlyWritableAvailability(t *testing.T) {
+	const oldIP, newIP = "10.0.0.1", "10.0.0.2"
+	p := newMockProber(map[string][]string{"primary.local": {oldIP, newIP}}, oldIP)
+	w := newTestWorker(p)
+	probe := &partiallyBlockingSQLHealthProber{
+		blockingIP: oldIP, blockingRecovery: true,
+		blocked: make(chan struct{}), release: make(chan struct{}),
+	}
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, probe, 1, SQLHealthCheckHooks{})
+	}
+	updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	health := receivePoolHealth(t, updates)
+	availability, err := health.SubscribeSQLHealth(updates)
+	require.NoError(t, err)
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(probe.release) }); availability.Close(); w.Unsubscribe(updates) })
+	done := make(chan struct{})
+	go func() { w.RefreshSQL(); close(done) }()
+	observation := receiveSQLHealthObservation(t, availability)
+	require.True(t, observation.Writable, "availability can publish before all IPs finish")
+	assert.True(t, health.IsHealthy(oldIP), "the incomplete SQL poll must preserve Patroni routing")
+	assert.False(t, health.IsHealthy(newIP))
+	release.Do(func() { close(probe.release) })
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SQL poll did not finish")
+	}
+	assert.False(t, health.IsHealthy(oldIP))
+	assert.True(t, health.IsHealthy(newIP), "the complete poll may publish SQL")
+	// Patroni keeps its independent leader and cannot overwrite conclusive SQL.
+	var comparison SQLPatroniHealthSnapshot
+	w.hooks.SQLPatroniCompared = func(snapshot SQLPatroniHealthSnapshot, _ []string) { comparison = snapshot }
+	w.Refresh()
+	assert.True(t, health.IsHealthy(newIP))
+	w.RefreshSQL()
+	assert.Equal(t, map[string]bool{oldIP: true, newIP: false}, comparison.PatroniHealth)
+	assert.False(t, comparison.Matches(), "comparison must use Patroni's own snapshot, not SQL-owned client routing")
+}
+
+func TestPatroniPromotionDuringFallbackTelemetryCannotBeOverwritten(t *testing.T) {
+	const oldIP, newIP = "10.0.0.1", "10.0.0.2"
+	w := newTestWorker(newMockProber(map[string][]string{"primary.local": {oldIP, newIP}}, oldIP))
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, &fakeSQLHealthProber{responses: map[string][]fakeSQLHealthProbeResponse{
+			oldIP: {{err: context.DeadlineExceeded}}, newIP: {{inRecovery: true}},
+		}, calls: make(map[string]int)}, 1, SQLHealthCheckHooks{})
+	}
+	updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+		RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	})
+	health := receivePoolHealth(t, updates)
+	entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var release sync.Once
+	t.Cleanup(func() { release.Do(func() { close(resume) }); w.Unsubscribe(updates) })
+	w.sqlHooks.CachedFallback = func(SQLFallback, []string) { close(entered); <-resume }
+	go func() { w.RefreshSQL(); close(done) }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("fallback was not reported")
+	}
+	assert.True(t, health.IsHealthy(oldIP))
+	w.applyPatroniHealth(health, map[string]bool{oldIP: false, newIP: true}, nil, []string{oldIP, newIP}, time.Now())
+	assert.True(t, health.IsHealthy(newIP), "hooks must not block Patroni publication")
+	release.Do(func() { close(resume) })
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SQL refresh did not finish")
+	}
+	assert.True(t, health.IsHealthy(newIP), "the earlier fallback must not overwrite Patroni after its hook returns")
+	assert.False(t, health.IsHealthy(oldIP))
+}
+
+func TestRoutingDisableSurvivesSQLTargetRecreation(t *testing.T) {
+	const patroniIP, sqlIP = "10.0.0.1", "10.0.0.2"
+	w := newTestWorker(newMockProber(map[string][]string{"primary.local": {patroniIP, sqlIP}}, patroniIP))
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, &fakeSQLHealthProber{
+			responses: map[string][]fakeSQLHealthProbeResponse{patroniIP: {{inRecovery: true}}, sqlIP: {{}}}, calls: make(map[string]int),
+		}, 1, SQLHealthCheckHooks{})
+	}
+	patroniOnly := w.Subscribe("primary.local", false, "db", nil, nil)
+	health := receivePoolHealth(t, patroniOnly)
+	cfg := &SQLHealthConfig{ConnStringForIP: func(ip string) string { return ip }, RoutingEnabled: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) }}
+	sql := w.Subscribe("primary.local", false, "db", nil, cfg)
+	w.RefreshSQL()
+	require.True(t, health.IsHealthy(sqlIP))
+	w.Unsubscribe(sql)
+	require.True(t, health.IsHealthy(patroniIP))
+	replacement := w.Subscribe("primary.local", false, "db", nil, cfg)
+	t.Cleanup(func() { w.Unsubscribe(replacement); w.Unsubscribe(patroniOnly) })
+	w.RefreshSQL()
+	assert.True(t, health.IsHealthy(patroniIP), "recreating a target must not reset the host's latched disable")
+	assert.False(t, health.IsHealthy(sqlIP))
+}
+
+func TestAggregatedSQLDecisionsControlPublishedRouting(t *testing.T) {
+	const a, b = "10.0.0.1", "10.0.0.2"
+	for _, tc := range []struct {
+		name           string
+		results, other []SQLHealthCheckResult
+		wantPrimary    string
+		wantSQL        bool
+	}{
+		{name: "unique primary", results: []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b}}, wantPrimary: b, wantSQL: true},
+		{name: "determinate no primary", results: []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b, InRecovery: true}}, wantSQL: true},
+		{name: "unknown other IP", results: []SQLHealthCheckResult{{IP: a, Err: context.DeadlineExceeded}, {IP: b}}, wantPrimary: a},
+		{name: "multiple primaries", results: []SQLHealthCheckResult{{IP: a}, {IP: b}}, wantPrimary: a},
+		{name: "role resolves same IP timeout", results: []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b}}, other: []SQLHealthCheckResult{{IP: b, Err: context.DeadlineExceeded}}, wantPrimary: b, wantSQL: true},
+		{name: "conflicting same IP roles", results: []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b}}, other: []SQLHealthCheckResult{{IP: b, InRecovery: true}}, wantPrimary: a},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			health := newTestPoolHealth(a, b)
+			health.sqlHealthState = NewHealthState()
+			health.sqlHealthState.Track([]string{a, b})
+			health.hybridPolicy = newHybridHealthPolicy(true)
+			health.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) }
+			w := newTestWorker(nil)
+			w.applyPatroniHealth(health, map[string]bool{a: true, b: false}, nil, []string{a, b}, time.Now())
+			now := time.Now()
+			if len(tc.other) > 0 {
+				health.recordSQLComparisonPoll(&sqlHealthTarget{poolHealth: health}, now, now, []string{a, b}, SQLHealthCheckOutcome{Results: tc.other})
+			}
+			w.completeSQLHealthCheck(&sqlHealthTarget{poolHealth: health}, now, []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{Results: tc.results})
+			assert.Equal(t, tc.wantSQL, health.sqlRoutingActive)
+			assert.Equal(t, tc.wantPrimary == a, health.IsHealthy(a))
+			assert.Equal(t, tc.wantPrimary == b, health.IsHealthy(b))
+			assert.ElementsMatch(t, []string{a, b}, health.Resolved())
 		})
 	}
 }
