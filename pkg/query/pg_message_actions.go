@@ -14,12 +14,8 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// LeaderSwitchoverHint is appended to error messages that match IsSwitchoverSignature,
-// both when annotating a proxied ErrorResponse and when building a FATAL response to
-// the client directly (see closeErrorResponse in pkg/session).
-const LeaderSwitchoverHint = " (a PostgreSQL leader switchover may be in progress; retry shortly)"
-
 // IsSwitchoverSignature matches the three switchover SQLSTATEs by code+message.
+// closeErrorResponse in the session forwards these errors to the client unchanged.
 // Message check is required: same code can mean different root causes (e.g. 57P03 "starting up" vs "shutting down").
 func IsSwitchoverSignature(code, message string) bool {
 	switch code {
@@ -31,13 +27,6 @@ func IsSwitchoverSignature(code, message string) bool {
 		return strings.Contains(message, "the database system is shutting down")
 	}
 	return false
-}
-
-// annotateIfSwitchoverError appends the hint to a non-FATAL ErrorResponse in place.
-func annotateIfSwitchoverError(m *pgproto3.ErrorResponse) {
-	if IsSwitchoverSignature(m.Code, m.Message) {
-		m.Message += LeaderSwitchoverHint
-	}
 }
 
 // PgMessageAction contains a set of actions the proxy will take to handle
@@ -195,12 +184,10 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 	case *pgproto3.ErrorResponse:
 		traceState.FinishTrace(fmt.Errorf("code %s: %s", m.Code, m.Message))
 		if m.Severity == "FATAL" {
-			// FATAL always closes the session; annotation happens in closeErrorResponse()
-			// to avoid double-appending the hint when the error is forwarded to the client.
+			// FATAL always closes the session; closeErrorResponse() forwards it to the client.
 			action.ProxyMsgSize = getErrorResponseByteSize(m)
 			return PgMessageAction{}, pgconn.ErrorResponseToPgError(m)
 		}
-		annotateIfSwitchoverError(m)
 		action.ProxyMsgSize = getErrorResponseByteSize(m)
 		if expectation == ParseReply || expectation == BindReply || expectation == DescribeReply || expectation == ExecuteReply || expectation == CloseReply {
 			// This error was in response to an Extended Query Mode message. Postgres will discard all messages until a sync
