@@ -69,6 +69,84 @@ func TestReconcilerCreatesReplacesAndRemovesBackends(t *testing.T) {
 	assert.True(t, created["cluster"][1].closed.Load())
 }
 
+func TestReconcilerRemapsSessionsWhenReplacingSameNameBackend(t *testing.T) {
+	tests := []struct {
+		name       string
+		initial    Snapshot[string]
+		updated    Snapshot[string]
+		wantDB     string
+		wantClosed bool
+	}{
+		{
+			name: "database settings change",
+			initial: Snapshot[string]{
+				Databases: map[Identifier]string{"primary": "host-a"},
+				Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+				LogicalDatabases: map[Identifier]topology.LogicalDatabase{
+					"app": {Cluster: "cluster", ReadClusters: topology.ReadClusters{"cluster": {Weight: 100}}},
+				},
+			},
+			updated: Snapshot[string]{
+				Databases: map[Identifier]string{"primary": "host-b"},
+				Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+				LogicalDatabases: map[Identifier]topology.LogicalDatabase{
+					"app": {Cluster: "cluster", ReadClusters: topology.ReadClusters{"cluster": {Weight: 100}}},
+				},
+			},
+			wantDB:     "host-b",
+			wantClosed: true,
+		},
+		{
+			name: "replica membership change",
+			initial: Snapshot[string]{
+				Databases: map[Identifier]string{"primary": "host-a"},
+				Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+				LogicalDatabases: map[Identifier]topology.LogicalDatabase{
+					"app": {Cluster: "cluster", ReadClusters: topology.ReadClusters{"cluster": {Weight: 100}}},
+				},
+			},
+			updated: Snapshot[string]{
+				Databases: map[Identifier]string{"primary": "host-a", "replica": "host-r"},
+				Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary", Replicas: []string{"replica"}}},
+				LogicalDatabases: map[Identifier]topology.LogicalDatabase{
+					"app": {Cluster: "cluster", ReadClusters: topology.ReadClusters{"cluster": {Weight: 100}}},
+				},
+			},
+			wantDB:     "host-a",
+			wantClosed: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runtime := New()
+			created := make([]*testManagedBackend, 0, 2)
+			reconciler := NewReconciler(ReconcilerConfig[string]{
+				Runtime: runtime,
+				Factory: func(_ context.Context, _ string, primary string, _ []string) (ManagedBackend, error) {
+					backend := &testManagedBackend{Backend: testBackend{id: primary}}
+					created = append(created, backend)
+					return backend, nil
+				},
+			})
+
+			require.NoError(t, reconciler.Accept(test.initial))
+			active := &testSession{backend: testBackend{id: "host-a"}}
+			runtime.Sessions().Register(active.Identifier(), active)
+
+			require.NoError(t, reconciler.Accept(test.updated))
+
+			require.Len(t, created, 2)
+			assert.Equal(t, test.wantDB, created[1].Backend.(testBackend).id)
+			assert.Equal(t, test.wantClosed, created[0].closed.Load())
+			assert.Equal(t, test.wantDB, active.backend.(testBackend).id)
+			require.Len(t, active.readStates, 1)
+			assert.Equal(t, test.wantDB, active.readStates[0].Backend.(testBackend).id)
+			runtime.Sessions().Delete(active.Identifier())
+		})
+	}
+}
+
 func TestReconcilerRegistersRetriedBackend(t *testing.T) {
 	var attempts atomic.Int32
 	reconciler := NewReconciler(ReconcilerConfig[string]{
@@ -263,12 +341,15 @@ func TestReconcilerPublishesConfigurationBeforeCreatingBackends(t *testing.T) {
 	}
 }
 
-func TestReconcilerClosesBackendBeforeReplacingOrRemovingIt(t *testing.T) {
+func TestReconcilerClosesBackendWhenReplacingOrRemovingIt(t *testing.T) {
 	for _, replace := range []bool{true, false} {
 		t.Run(map[bool]string{true: "replace", false: "remove"}[replace], func(t *testing.T) {
 			r := NewReconciler(ReconcilerConfig[string]{})
 			previous := &testManagedBackend{}
 			previous.onClose = func() {
+				if replace {
+					return
+				}
 				actual, found := r.GetManagedBackend("cluster")
 				assert.True(t, found)
 				assert.Same(t, previous, actual)

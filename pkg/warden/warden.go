@@ -85,6 +85,33 @@ func (w *Warden) GetBackend(name Identifier) (Backend, bool) {
 	return backend, err == nil
 }
 
+// RemapBackend updates sessions that route through a replaced backend. The
+// logical database name and cluster name can remain unchanged when a backend
+// is recreated, so ReconcileLogicalDatabases cannot detect this transition.
+func (w *Warden) RemapBackend(name Identifier, backend Backend) {
+	for logicalName, logicalDatabase := range w.logicalDatabases.All() {
+		if logicalDatabase.Cluster == string(name) {
+			for pid, active := range w.sessions.All() {
+				if active.LogicalDatabaseID() != string(logicalName) {
+					continue
+				}
+				pgproxy.Logger().Info(fmt.Sprintf("remapping state for session #%s to replacement cluster %q", pid, name))
+				active.RemapBackend(backend.SessionBackend())
+			}
+		}
+
+		if _, ok := logicalDatabase.ReadClusters[string(name)]; !ok {
+			continue
+		}
+		readStates := w.resolveReadStates(logicalDatabase.ReadClusters)
+		for _, active := range w.sessions.All() {
+			if active.LogicalDatabaseID() == string(logicalName) {
+				active.RemapReadStates(readStates)
+			}
+		}
+	}
+}
+
 // ReconcileLogicalDatabases replaces the logical database inventory and
 // notifies active sessions when their backend routing changes.
 func (w *Warden) ReconcileLogicalDatabases(updated map[Identifier]topology.LogicalDatabase) {
@@ -98,18 +125,12 @@ func (w *Warden) ReconcileLogicalDatabases(updated map[Identifier]topology.Logic
 		if previous.Cluster != next.Cluster {
 			previous.Cluster = next.Cluster
 			w.RegisterLogicalDatabase(name, previous)
-			for pid, active := range w.sessions.All() {
-				if active.LogicalDatabaseID() != string(name) {
-					continue
-				}
-				backend, ok := w.GetBackend(Identifier(next.Cluster))
-				if !ok {
-					pgproxy.Logger().Error(fmt.Sprintf("could not find an entry in the states map for the given cluster: %q", next.Cluster))
-					continue
-				}
-				pgproxy.Logger().Info(fmt.Sprintf("remapping state for session #%s to cluster %q", pid, next.Cluster))
-				active.RemapBackend(backend.SessionBackend())
+			backend, ok := w.GetBackend(Identifier(next.Cluster))
+			if !ok {
+				pgproxy.Logger().Error(fmt.Sprintf("could not find an entry in the states map for the given cluster: %q", next.Cluster))
+				continue
 			}
+			w.RemapBackend(Identifier(next.Cluster), backend)
 			pgproxy.Logger().Info(fmt.Sprintf("logical database %q has been remapped to point to cluster %q", name, next.Cluster))
 		}
 		if topology.ReadClustersChanged(previous.ReadClusters, next.ReadClusters) {
