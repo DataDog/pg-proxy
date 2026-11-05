@@ -263,3 +263,118 @@ func TestSQLPotentialWorkerWaitsForCompleteSnapshot(t *testing.T) {
 		})
 	}
 }
+
+func TestSQLPotentialAggregateTimestampIncludesNewerEvidence(t *testing.T) {
+	s := &PoolHealth{sqlHealthState: NewHealthState()}
+	s.sqlHealthState.Track([]string{"A", "B"})
+	early, later := &sqlHealthTarget{}, &sqlHealthTarget{}
+	recordPotentialPoll(s, early, 0, potentialAt(0), SQLHealthCheckResult{IP: "A"}, SQLHealthCheckResult{IP: "B", InRecovery: true})
+	s.potentialTiming.observe(false, potentialIPs("A"), potentialAt(0))
+	require.Empty(t, s.potentialTiming.observe(false, potentialIPs("B"), potentialAt(4)))
+	// Accepted first at 5s, but B is still conflicted with the other credential's old snapshot.
+	conflict := recordPotentialPoll(s, later, 0, potentialAt(5), SQLHealthCheckResult{IP: "A", InRecovery: true}, SQLHealthCheckResult{IP: "B"})
+	require.Contains(t, conflict.conflictingIPs, "B")
+	require.Empty(t, conflict.potentialComparisons)
+	// This poll completed at 2s but was delayed before acquiring the snapshot lock. It resolves
+	// the conflict, so the resulting aggregate must include the other credential's 5s timestamp.
+	completed := recordPotentialPoll(s, early, 0, potentialAt(2), SQLHealthCheckResult{IP: "A", InRecovery: true}, SQLHealthCheckResult{IP: "B"})
+	require.Len(t, completed.potentialComparisons, 1)
+	comparison := completed.potentialComparisons[0]
+	assert.Equal(t, potentialAt(5), comparison.SQLObservedAt)
+	assert.Equal(t, -time.Second, comparison.Speedup, "cannot report +2s using evidence only available at 5s")
+	assert.Equal(t, potentialAt(2), s.sqlComparisonLatest[early].ObservedAt, "preserve the raw credential timestamp")
+}
+
+func TestSQLPotentialAgreementDiscardsUnmatchedPromotions(t *testing.T) {
+	for _, sqlFirst := range []bool{false, true} {
+		t.Run(fmtPotentialCase(sqlFirst, "A"), func(t *testing.T) {
+			p := baselinePotential(t)
+			require.Empty(t, p.observe(sqlFirst, potentialIPs("B"), potentialAt(1)))
+			require.Empty(t, p.observe(sqlFirst, potentialIPs("A"), potentialAt(2)))
+			require.Empty(t, p.pending, "returning to the other source's baseline is agreement, not a pending promotion")
+			require.Empty(t, p.observe(sqlFirst, potentialIPs("A"), potentialAt(3)))
+			require.Empty(t, p.observe(!sqlFirst, potentialIPs("A"), potentialAt(4)))
+			require.Empty(t, p.observe(!sqlFirst, potentialIPs("B"), potentialAt(3600)))
+			require.Empty(t, p.observe(!sqlFirst, potentialIPs("A"), potentialAt(3601)), "must not emit a one-hour comparison")
+			require.Empty(t, p.pending)
+			// A later real matched promotion must still produce a fresh comparison.
+			require.Empty(t, p.observe(sqlFirst, potentialIPs("B"), potentialAt(3602)))
+			got := p.observe(!sqlFirst, potentialIPs("B"), potentialAt(3603))
+			require.Len(t, got, 1)
+			expected := time.Second
+			if !sqlFirst {
+				expected = -time.Second
+			}
+			assert.Equal(t, expected, got[0].Speedup)
+		})
+	}
+}
+
+func TestSQLPotentialAgreementOnInitialBaselineDiscardsPending(t *testing.T) {
+	p := &potentialTiming{}
+	require.Empty(t, p.observe(true, potentialIPs("A"), potentialAt(0)))
+	require.Empty(t, p.observe(true, potentialIPs("B"), potentialAt(1)))
+	require.Empty(t, p.observe(false, potentialIPs("B"), potentialAt(2)))
+	assert.Empty(t, p.pending, "the second source's first baseline is not a comparable promotion")
+}
+
+func TestSQLPotentialDNSInvalidatesBeforeNextCompletion(t *testing.T) {
+	w := newTestWorker(newMockProber(map[string][]string{"primary.local": {"C"}}, "C"))
+	w.absenceThreshold = 1
+	prober := &partiallyBlockingSQLHealthProber{blockingIP: "C", blocked: make(chan struct{}), release: make(chan struct{})}
+	var once sync.Once
+	release := func() { once.Do(func() { close(prober.release) }) }
+	defer release()
+	checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{})
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker { return checker }
+	updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{ConnStringForIP: func(ip string) string { return ip }})
+	s := receivePoolHealth(t, updates)
+	t.Cleanup(func() { w.Unsubscribe(updates) })
+	target := s.subscriptionTargets[updates]
+	otherCredential := &sqlHealthTarget{}
+	s.sqlHealthState.Track([]string{"A", "B", "C"})
+	recordPotentialPoll(s, otherCredential, 0, potentialAt(0), SQLHealthCheckResult{IP: "A"})
+	s.potentialTiming.observe(false, potentialIPs("A"), potentialAt(0))
+	recordPotentialPoll(s, otherCredential, 0, potentialAt(1), SQLHealthCheckResult{IP: "B"})
+	recordPotentialPoll(s, target, 0, potentialAt(2), SQLHealthCheckResult{IP: "C"})
+	// Another credential's latest successful C poll makes B eligible for DNS eviction, while
+	// the completed comparison cache still contains the independent credential's B success.
+	s.sqlHealthState.RecordHealthAt(potentialAt(2), potentialIPs("C"))
+	require.Contains(t, s.potentialTiming.pending, "B")
+	comparisons := make(chan SQLPotentialComparison, 4)
+	w.hooks.SQLPotentialCompared = func(c SQLPotentialComparison, _ []string) { comparisons <- c }
+	done := make(chan struct{})
+	go func() { w.RefreshSQL(); close(done) }()
+	select {
+	case <-prober.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("next SQL poll did not start")
+	}
+	require.NotContains(t, s.sqlHealthState.Resolved(), "B", "DNS eviction must have occurred")
+	w.observePatroniPotential(s, potentialIPs("B"))
+	select {
+	case c := <-comparisons:
+		t.Errorf("Patroni matched pre-eviction evidence before the next SQL completion: %+v", c)
+	default:
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SQL poll did not complete")
+	}
+}
+
+func TestSQLPotentialAgreementUsesCurrentSnapshot(t *testing.T) {
+	for _, sqlFirst := range []bool{false, true} {
+		t.Run(fmtPotentialCase(sqlFirst, "A"), func(t *testing.T) {
+			p := baselinePotential(t)
+			require.Empty(t, p.observe(!sqlFirst, nil, potentialAt(1)))
+			require.Empty(t, p.observe(sqlFirst, potentialIPs("B"), potentialAt(2)))
+			require.Empty(t, p.observe(sqlFirst, potentialIPs("A"), potentialAt(3)))
+			require.Contains(t, p.pending, "A", "the other source's remembered A baseline is not current agreement")
+			require.Empty(t, p.observe(!sqlFirst, potentialIPs("A"), potentialAt(4)))
+			assert.Empty(t, p.pending, "actual agreement closes the unmatched excursion")
+		})
+	}
+}

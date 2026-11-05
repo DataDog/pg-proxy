@@ -21,6 +21,8 @@ type SQLPotentialComparison struct {
 }
 
 type potentialObservation struct {
+	// current includes empty snapshots; agreement must not use a remembered nonempty baseline.
+	current map[string]bool
 	// comparable can be rearmed independently when an unmatched observation is interrupted.
 	comparable map[string]bool
 }
@@ -41,6 +43,8 @@ func (p *potentialTiming) observe(sql bool, healthy map[string]bool, now time.Ti
 	if sql {
 		o = &p.sql
 	}
+	o.current = maps.Clone(healthy)
+	defer p.discardAgreedPending()
 	// An address that this source stopped reporting cannot pair with its later promotion.
 	// Do not discard a newer observation belonging only to the other source.
 	for ip, pair := range p.pending {
@@ -86,6 +90,16 @@ func (p *potentialTiming) observe(sql bool, healthy map[string]bool, now time.Ti
 	return comparisons
 }
 
+// Agreement closes an unmatched excursion even if one source only repeats its baseline. Never
+// let that timestamp pair with an unrelated promotion when the other source leaves and returns.
+func (p *potentialTiming) discardAgreedPending() {
+	for ip := range p.pending {
+		if p.sql.current[ip] && p.patroni.current[ip] {
+			delete(p.pending, ip)
+		}
+	}
+}
+
 func (s *PoolHealth) resetSQLPotentialTargetLocked(target *sqlHealthTarget) {
 	if _, observed := s.sqlComparisonLatest[target]; observed {
 		// Reset before removing the completed snapshot. A change in the observation population
@@ -97,8 +111,29 @@ func (s *PoolHealth) resetSQLPotentialTargetLocked(target *sqlHealthTarget) {
 // Called while accepting a completed poll under sqlComparisonMu, so timing and comparison
 // snapshots share lifecycle validation, aggregation, and ordering. Callbacks run after unlock.
 func (s *PoolHealth) observeSQLPotentialSnapshotLocked(snapshot sqlHealthComparisonSnapshot, observedAt time.Time) []SQLPotentialComparison {
-	retained := make(map[string]bool, len(snapshot.retainedIPs))
-	for _, ip := range snapshot.retainedIPs {
+	// A delayed completion can clear a conflict using another credential's newer snapshot.
+	// Timestamp the aggregate no earlier than any completed evidence it includes, while leaving
+	// the individual credential timestamps intact for diagnostics.
+	for _, completed := range snapshot.results {
+		if completed.ObservedAt.After(observedAt) {
+			observedAt = completed.ObservedAt
+		}
+	}
+	s.updateSQLPotentialRetainedLocked(snapshot.retainedIPs)
+	healthy := make(map[string]bool)
+	for ip, primary := range snapshot.health {
+		if primary {
+			healthy[ip] = true
+		}
+	}
+	return s.potentialTiming.observe(true, healthy, observedAt)
+}
+
+// Discovery calls this while holding the same lock as timing observations, before exposing the
+// changed retained set to them. Snapshot acceptance also calls it to keep its population current.
+func (s *PoolHealth) updateSQLPotentialRetainedLocked(ips []string) {
+	retained := make(map[string]bool, len(ips))
+	for _, ip := range ips {
 		retained[ip] = true
 	}
 	for ip := range s.potentialRetainedIPs {
@@ -109,13 +144,6 @@ func (s *PoolHealth) observeSQLPotentialSnapshotLocked(snapshot sqlHealthCompari
 		}
 	}
 	s.potentialRetainedIPs = retained
-	healthy := make(map[string]bool)
-	for ip, primary := range snapshot.health {
-		if primary {
-			healthy[ip] = true
-		}
-	}
-	return s.potentialTiming.observe(true, healthy, observedAt)
 }
 
 func (w *HealthWorker) observePatroniPotential(s *PoolHealth, health map[string]bool) {

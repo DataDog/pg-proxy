@@ -306,6 +306,19 @@ func (s *PoolHealth) reserveSQLComparisonPoll(
 	return target.sqlComparisonGeneration, target.tryStartSQLRound(scheduledAt), true
 }
 
+// refreshSQLResolved makes DNS eviction and timing invalidation indivisible to observations.
+// The caller holds sqlScheduleMu; DNS lookup happens before taking sqlComparisonMu so a slow
+// lookup cannot delay completed SQL or Patroni observations.
+func (s *PoolHealth) refreshSQLResolved(resolved []string, absenceThreshold int) []string {
+	s.sqlComparisonMu.Lock()
+	defer s.sqlComparisonMu.Unlock()
+	retained := s.sqlHealthState.RefreshResolved(resolved, absenceThreshold, nil)
+	if s.potentialRetainedIPs != nil {
+		s.updateSQLPotentialRetainedLocked(retained)
+	}
+	return retained
+}
+
 func (s *PoolHealth) recordSQLComparisonPoll(
 	trackPotential bool,
 	target *sqlHealthTarget,
@@ -854,11 +867,7 @@ func (w *HealthWorker) runSQLHealthGroup(
 		for _, ip := range resolved {
 			resolvedSet[ip] = struct{}{}
 		}
-		toProbe = group.poolHealth.sqlHealthState.RefreshResolved(
-			resolved,
-			w.absenceThreshold,
-			nil,
-		)
+		toProbe = group.poolHealth.refreshSQLResolved(resolved, w.absenceThreshold)
 		group.poolHealth.sqlScheduleMu.Unlock()
 	}
 

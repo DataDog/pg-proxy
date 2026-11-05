@@ -20,9 +20,12 @@ completed polls. Credentials remain independently scheduled; this does not wait
 for every credential to finish a synchronized round.
 
 A successful individual probe can still publish early availability, but it does
-not update timing. `SQLObservedAt` is the completion timestamp recorded in that
-credential's snapshot, including time spent waiting for its slower probes.
-The timestamp is not backdated to the first successful primary response.
+not update timing. `SQLObservedAt` is the newest completion timestamp among all
+credential snapshots included in the aggregate. Each timestamp includes waiting
+for that credential's slower probes. If an older completion is accepted after a
+newer one, the aggregate cannot be timestamped earlier than the evidence it uses.
+Individual credential timestamps remain intact for diagnostics; timing is never
+backdated to the first successful primary response.
 
 Completed polls replace their credential's entire previous evidence, including
 errors and empty results. Successful primary/standby conflicts on an IP exclude
@@ -35,7 +38,10 @@ Only primary pool subscriptions produce timing comparisons.
 Timing and snapshot acceptance share the same lock and lifecycle validation.
 Rejected completions cannot update timing. Recorded evidence removed by disable,
 retirement, or DNS eviction resets timing continuity; evicted results remain
-excluded from the aggregate. Callbacks run after releasing the lock.
+excluded from the aggregate. DNS eviction and timing invalidation hold that same
+lock together, so Patroni cannot match a pre-eviction timestamp before the next
+SQL completion. DNS lookup itself stays outside the timing lock. Callbacks run
+after releasing the lock.
 
 ## Signed speedup
 
@@ -53,7 +59,11 @@ The first nonempty snapshot from each source establishes a baseline. Repeated
 snapshots do not move the first timestamp for a replacement IP. An unmatched
 observation is discarded when its source stops reporting that IP, so a later
 promotion cannot reuse its old timestamp. An interrupted observation may record
-a fresh timestamp when it returns.
+a fresh timestamp when it returns. Agreement on an IP also clears any unmatched
+timestamp for it, including when one source is repeating its initial baseline.
+Agreement uses each source's current snapshot, including empty snapshots, rather
+than a remembered nonempty baseline. This prevents unrelated later excursions
+from matching an old timestamp after the sources have already converged.
 
 This callback contains only signed speedup and the IP/timestamps needed to
 identify the event. It defines no outage start and emits no downtime durations
