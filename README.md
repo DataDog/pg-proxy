@@ -340,3 +340,8 @@ go test -race -skip '^TestProxyAgainstPostgres$' -count=1 ./...
 The unit command excludes the Docker-backed CLI test. Run the Docker checks
 above when registry access is available. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
+
+## License
+
+PG Proxy is licensed under [Apache-2.0](LICENSE). Third-party licenses and
+attributions are listed in [LICENSE-3rdparty.csv](LICENSE-3rdparty.csv).
