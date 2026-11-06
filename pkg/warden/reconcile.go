@@ -7,6 +7,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"time"
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/topology"
@@ -37,21 +38,51 @@ type ManagedBackend interface {
 // Retry runs a backend factory according to application-provided retry policy.
 type Retry[T any] func(context.Context, func() (T, error)) (T, error)
 
+// DatabaseUpdate describes a configured database change and the backends that
+// reference it in the next snapshot.
+type DatabaseUpdate[D any] struct {
+	Name       Identifier
+	Current    D
+	Next       D
+	Clusters   []Identifier
+	ReceivedAt time.Time
+}
+
+// DatabaseUpdateHandler may apply a database change to existing backends.
+// Returning handled=true prevents that change alone from recreating them.
+type DatabaseUpdateHandler[D any] func(DatabaseUpdate[D]) (handled bool, err error)
+
+// BackendReady describes a newly created backend once it is available to serve.
+type BackendReady struct {
+	Name       Identifier
+	Backend    ManagedBackend
+	Initial    bool
+	ReceivedAt time.Time
+	ReadyAt    time.Time
+}
+
+// BackendReadyHandler observes when a newly created backend can serve traffic.
+type BackendReadyHandler func(BackendReady)
+
 // ReconcilerConfig configures backend lifecycle reconciliation.
 type ReconcilerConfig[D any] struct {
-	Context context.Context
-	Runtime *Warden
-	Factory func(context.Context, string, D, []D) (ManagedBackend, error)
-	Retry   Retry[ManagedBackend]
+	Context        context.Context
+	Runtime        *Warden
+	Factory        func(context.Context, string, D, []D) (ManagedBackend, error)
+	Retry          Retry[ManagedBackend]
+	DatabaseUpdate DatabaseUpdateHandler[D]
+	BackendReady   BackendReadyHandler
 }
 
 // Reconciler owns portable backend creation, replacement, removal, retries,
 // and logical-database remapping.
 type Reconciler[D any] struct {
-	ctx     context.Context
-	runtime *Warden
-	factory func(context.Context, string, D, []D) (ManagedBackend, error)
-	retry   Retry[ManagedBackend]
+	ctx            context.Context
+	runtime        *Warden
+	factory        func(context.Context, string, D, []D) (ManagedBackend, error)
+	retry          Retry[ManagedBackend]
+	databaseUpdate DatabaseUpdateHandler[D]
+	backendReady   BackendReadyHandler
 
 	databases *ConcurrentMap[Identifier, D]
 	clusters  *ConcurrentMap[Identifier, Cluster]
@@ -69,13 +100,15 @@ func NewReconciler[D any](cfg ReconcilerConfig[D]) *Reconciler[D] {
 		runtime = New()
 	}
 	return &Reconciler[D]{
-		ctx:       ctx,
-		runtime:   runtime,
-		factory:   cfg.Factory,
-		retry:     cfg.Retry,
-		backends:  NewConcurrentMap(make(map[Identifier]*future[ManagedBackend])),
-		databases: NewConcurrentMap(make(map[Identifier]D)),
-		clusters:  NewConcurrentMap(make(map[Identifier]Cluster)),
+		ctx:            ctx,
+		runtime:        runtime,
+		factory:        cfg.Factory,
+		retry:          cfg.Retry,
+		databaseUpdate: cfg.DatabaseUpdate,
+		backendReady:   cfg.BackendReady,
+		backends:       NewConcurrentMap(make(map[Identifier]*future[ManagedBackend])),
+		databases:      NewConcurrentMap(make(map[Identifier]D)),
+		clusters:       NewConcurrentMap(make(map[Identifier]Cluster)),
 	}
 }
 
@@ -97,6 +130,7 @@ func (r *Reconciler[D]) Accept(next Snapshot[D]) error {
 // reconcileClusters reconciles each cluster's backend runtime with the supplied configuration.
 // Callers must serialize it with full configuration acceptance.
 func (r *Reconciler[D]) reconcileClusters(next Snapshot[D]) error {
+	receivedAt := time.Now()
 	logConfigs("databases", next.Databases)
 	// Retain the named resource shape in configuration logs.
 	type namedCluster struct {
@@ -110,7 +144,11 @@ func (r *Reconciler[D]) reconcileClusters(next Snapshot[D]) error {
 	}
 	logConfigs("clusters", clusters)
 
-	toCreate, toRemove := r.Diff(next)
+	handled, err := r.handleDatabaseUpdates(next, receivedAt)
+	if err != nil {
+		return fmt.Errorf("apply database update: %w", err)
+	}
+	toCreate, toRemove := r.diff(next, handled)
 	// Publish configuration before creating backends, as the app inventory did.
 	snapshot := cloneSnapshot(next)
 	r.databases.Set(snapshot.Databases)
@@ -126,7 +164,10 @@ func (r *Reconciler[D]) reconcileClusters(next Snapshot[D]) error {
 		r.deregisterBackend(name)
 	}
 	for _, name := range toCreate {
-		r.registerBackend(name, r.createBackendWithRetries(name))
+		_, existed := r.backends.Get(name)
+		pending := r.createBackendWithRetries(name)
+		r.registerBackend(name, pending)
+		r.observeBackendReady(name, pending, !existed, receivedAt)
 	}
 
 	return nil
@@ -148,6 +189,10 @@ func (r *Reconciler[D]) reconcileClusters(next Snapshot[D]) error {
 // cluster1 still points to db1, but its connection pool must be rebuilt for the
 // new host.
 func (r *Reconciler[D]) Diff(next Snapshot[D]) (toCreate, toRemove []Identifier) {
+	return r.diff(next, nil)
+}
+
+func (r *Reconciler[D]) diff(next Snapshot[D], handledDatabases map[Identifier]struct{}) (toCreate, toRemove []Identifier) {
 	currentSnapshot := Snapshot[D]{Databases: maps.Collect(r.databases.All()), Clusters: maps.Collect(r.clusters.All())}
 	create := make(map[Identifier]struct{})
 	remove := make(map[Identifier]struct{})
@@ -172,6 +217,9 @@ func (r *Reconciler[D]) Diff(next Snapshot[D]) (toCreate, toRemove []Identifier)
 		if !ok || reflect.DeepEqual(current, updated) {
 			continue
 		}
+		if _, handled := handledDatabases[databaseName]; handled {
+			continue
+		}
 		for clusterName, cluster := range next.Clusters {
 			if cluster.Primary == string(databaseName) || slices.Contains(cluster.Replicas, string(databaseName)) {
 				create[clusterName] = struct{}{}
@@ -182,6 +230,70 @@ func (r *Reconciler[D]) Diff(next Snapshot[D]) (toCreate, toRemove []Identifier)
 	toCreate = mapKeys(create)
 	toRemove = mapKeys(remove)
 	return toCreate, toRemove
+}
+
+func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.Time) (map[Identifier]struct{}, error) {
+	handled := make(map[Identifier]struct{})
+	if r.databaseUpdate == nil {
+		return handled, nil
+	}
+	for name, current := range r.databases.All() {
+		updated, ok := next.Databases[name]
+		if !ok || reflect.DeepEqual(current, updated) {
+			continue
+		}
+		clusters := make([]Identifier, 0)
+		for clusterName, cluster := range next.Clusters {
+			if cluster.Primary == string(name) || slices.Contains(cluster.Replicas, string(name)) {
+				clusters = append(clusters, clusterName)
+			}
+		}
+		slices.Sort(clusters)
+		wasHandled, err := r.databaseUpdate(DatabaseUpdate[D]{
+			Name: name, Current: current, Next: updated, Clusters: clusters, ReceivedAt: receivedAt,
+		})
+		if err != nil {
+			return nil, err
+		}
+		if wasHandled {
+			handled[name] = struct{}{}
+		}
+	}
+	return handled, nil
+}
+
+func (r *Reconciler[D]) observeBackendReady(name Identifier, pending *future[ManagedBackend], initial bool, receivedAt time.Time) {
+	if r.backendReady == nil {
+		return
+	}
+	record := func() {
+		current, ok := r.backends.Get(name)
+		if !ok || current != pending {
+			return
+		}
+		readyAt, ready := pending.ReadyAt()
+		if !ready {
+			return
+		}
+		backend, err := pending.Get()
+		if err != nil {
+			return
+		}
+		r.backendReady(BackendReady{
+			Name: name, Backend: backend, Initial: initial, ReceivedAt: receivedAt, ReadyAt: readyAt,
+		})
+	}
+	if pending.IsReady() {
+		record()
+		return
+	}
+	go func() {
+		select {
+		case <-pending.Done():
+			record()
+		case <-r.ctx.Done():
+		}
+	}()
 }
 
 // Databases holds the collection's read lock throughout iteration.

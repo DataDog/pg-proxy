@@ -13,6 +13,14 @@ import (
 func TestSettledFuture(t *testing.T) {
 	pending := newSettledFuture(1)
 	assert.True(t, pending.IsReady())
+	readyAt, ready := pending.ReadyAt()
+	assert.True(t, ready)
+	assert.False(t, readyAt.IsZero())
+	select {
+	case <-pending.Done():
+	default:
+		t.Fatal("settled future did not close Done")
+	}
 	value, err := pending.Get()
 	assert.NoError(t, err)
 	assert.Equal(t, 1, value)

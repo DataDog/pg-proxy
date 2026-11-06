@@ -69,6 +69,92 @@ func TestReconcilerCreatesReplacesAndRemovesBackends(t *testing.T) {
 	assert.True(t, created["cluster"][1].closed.Load())
 }
 
+func TestReconcilerDatabaseUpdateHandlerAvoidsBackendReplacement(t *testing.T) {
+	created := 0
+	var update DatabaseUpdate[string]
+	reconciler := NewReconciler(ReconcilerConfig[string]{
+		Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+			created++
+			return &testManagedBackend{}, nil
+		},
+		DatabaseUpdate: func(candidate DatabaseUpdate[string]) (bool, error) {
+			update = candidate
+			return true, nil
+		},
+	})
+	initial := Snapshot[string]{
+		Databases: map[Identifier]string{"primary": "host-a"},
+		Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+	}
+	require.NoError(t, reconciler.Accept(initial))
+
+	next := cloneSnapshot(initial)
+	next.Databases["primary"] = "host-b"
+	require.NoError(t, reconciler.Accept(next))
+
+	assert.Equal(t, 1, created)
+	assert.Equal(t, Identifier("primary"), update.Name)
+	assert.Equal(t, "host-a", update.Current)
+	assert.Equal(t, "host-b", update.Next)
+	assert.Equal(t, []Identifier{"cluster"}, update.Clusters)
+	assert.False(t, update.ReceivedAt.IsZero())
+	actual, found := reconciler.GetDatabase("primary")
+	require.True(t, found)
+	assert.Equal(t, "host-b", actual)
+}
+
+func TestReconcilerDatabaseUpdateHandlerErrorStopsReconciliation(t *testing.T) {
+	sentinel := errors.New("update failed")
+	reconciler := NewReconciler(ReconcilerConfig[string]{
+		Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+			return &testManagedBackend{}, nil
+		},
+		DatabaseUpdate: func(DatabaseUpdate[string]) (bool, error) {
+			return false, sentinel
+		},
+	})
+	initial := Snapshot[string]{
+		Databases: map[Identifier]string{"primary": "host-a"},
+		Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+	}
+	require.NoError(t, reconciler.Accept(initial))
+
+	next := cloneSnapshot(initial)
+	next.Databases["primary"] = "host-b"
+	err := reconciler.Accept(next)
+	require.ErrorIs(t, err, sentinel)
+	actual, found := reconciler.GetDatabase("primary")
+	require.True(t, found)
+	assert.Equal(t, "host-a", actual)
+}
+
+func TestReconcilerReportsBackendReadiness(t *testing.T) {
+	events := make(chan BackendReady, 2)
+	reconciler := NewReconciler(ReconcilerConfig[string]{
+		Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+			return &testManagedBackend{}, nil
+		},
+		BackendReady: func(event BackendReady) { events <- event },
+	})
+	initial := Snapshot[string]{
+		Databases: map[Identifier]string{"primary": "host-a"},
+		Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+	}
+	require.NoError(t, reconciler.Accept(initial))
+	first := <-events
+	assert.Equal(t, Identifier("cluster"), first.Name)
+	assert.True(t, first.Initial)
+	assert.False(t, first.ReadyAt.Before(first.ReceivedAt))
+
+	next := cloneSnapshot(initial)
+	next.Databases["primary"] = "host-b"
+	require.NoError(t, reconciler.Accept(next))
+	second := <-events
+	assert.Equal(t, Identifier("cluster"), second.Name)
+	assert.False(t, second.Initial)
+	assert.False(t, second.ReadyAt.Before(second.ReceivedAt))
+}
+
 func TestReconcilerRegistersRetriedBackend(t *testing.T) {
 	var attempts atomic.Int32
 	reconciler := NewReconciler(ReconcilerConfig[string]{
