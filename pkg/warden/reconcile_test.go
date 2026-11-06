@@ -572,3 +572,81 @@ func TestReconcilerSkipsReadinessAfterRetirement(t *testing.T) {
 		})
 	}
 }
+
+func TestReconcilerDatabaseUpdateCoversCurrentReferences(t *testing.T) {
+	for _, change := range []string{"remove", "change primary", "remove replica"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(change+"/"+map[bool]string{false: "accepted", true: "rejected then restored"}[fail], func(t *testing.T) {
+				sentinel := errors.New("unrelated database update failed")
+				initial := Snapshot[string]{
+					Databases: map[Identifier]string{"shared": "old", "other": "other"},
+					Clusters: map[Identifier]Cluster{
+						"a":     {Primary: "shared"},
+						"b":     {Primary: "shared"},
+						"other": {Primary: "other"},
+					},
+				}
+				if change == "remove replica" {
+					initial.Clusters["a"] = Cluster{Primary: "other", Replicas: []string{"shared"}}
+				}
+				backends := make(map[string]*testManagedBackend)
+				sharedUpdates := 0
+				r := NewReconciler(ReconcilerConfig[string]{
+					Factory: func(_ context.Context, name, primary string, replicas []string) (ManagedBackend, error) {
+						value := primary
+						if name == "a" && len(replicas) > 0 {
+							value = replicas[0]
+						}
+						backend := &testManagedBackend{id: value}
+						backends[name] = backend
+						return backend, nil
+					},
+					DatabaseUpdate: func(update DatabaseUpdate[string]) (bool, error) {
+						if update.Name == "other" {
+							return false, sentinel
+						}
+						sharedUpdates++
+						for _, name := range update.Clusters {
+							backends[string(name)].id = update.Next
+						}
+						return true, nil
+					},
+				})
+				require.NoError(t, r.Accept(initial))
+				oldA, oldB := backends["a"], backends["b"]
+				next := cloneSnapshot(initial)
+				next.Databases["shared"] = "new"
+				switch change {
+				case "remove":
+					delete(next.Clusters, "a")
+				case "change primary", "remove replica":
+					next.Clusters["a"] = Cluster{Primary: "other"}
+				}
+				if fail {
+					next.Databases["other"] = "changed"
+					require.ErrorIs(t, r.Accept(next), sentinel)
+					// Rejection must not record an update that left a live user behind.
+					assert.Equal(t, 0, sharedUpdates)
+					current, _ := r.GetDatabase("shared")
+					assert.Equal(t, "old", current)
+					assert.Equal(t, "old", oldA.id)
+					assert.Equal(t, "old", oldB.id)
+					assert.False(t, oldA.closed.Load())
+
+					restored := cloneSnapshot(initial)
+					restored.Databases["shared"] = "new"
+					require.NoError(t, r.Accept(restored))
+					assert.Equal(t, 1, sharedUpdates)
+					assert.Equal(t, "new", oldA.id)
+					assert.Equal(t, "new", oldB.id)
+				} else {
+					require.NoError(t, r.Accept(next))
+					assert.Equal(t, 0, sharedUpdates, "in-place update must cover all current references")
+					assert.True(t, oldA.closed.Load())
+					assert.True(t, oldB.closed.Load())
+					assert.Equal(t, "new", backends["b"].id)
+				}
+			})
+		}
+	}
+}

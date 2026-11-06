@@ -257,6 +257,19 @@ func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.
 				clusters = append(clusters, clusterName)
 			}
 		}
+		// A later handler may fail before topology changes are applied. Only
+		// retain an in-place update if it covers every current reference.
+		missingCurrentReference := false
+		for clusterName, cluster := range r.clusters.All() {
+			if (cluster.Primary == string(name) || slices.Contains(cluster.Replicas, string(name))) &&
+				!slices.Contains(clusters, clusterName) {
+				missingCurrentReference = true
+				break
+			}
+		}
+		if missingCurrentReference {
+			continue // Let normal reconciliation replace the remaining backends.
+		}
 		slices.Sort(clusters)
 		wasHandled, err := r.databaseUpdate(DatabaseUpdate[D]{
 			Name: name, Current: current, Next: updated, Clusters: clusters, ReceivedAt: receivedAt,
