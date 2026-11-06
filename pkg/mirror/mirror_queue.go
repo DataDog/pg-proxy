@@ -39,6 +39,7 @@ const (
 	mirrorFlush                         // the source flushed here; worker flushes + drains replies
 	mirrorRelease                       // the source released its link; worker returns its shadow link
 	mirrorPoison                        // a message in this batch was dropped; worker skips the rest
+	mirrorCatalog                       // a named Parse's definition only: catalogue it, never replay it
 )
 
 // mirrorItem is one queue entry: a cloned forwarded message, or a boundary

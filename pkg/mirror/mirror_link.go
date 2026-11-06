@@ -5,6 +5,7 @@ import (
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/link"
+	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -56,8 +57,10 @@ func (l *mirroringLink) MirrorParse(msg *pgproto3.Parse) {
 
 // enqueue queues a clone of msg for the shadow. Never blocks.
 func (l *mirroringLink) enqueue(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
-	// A poisoned batch is already doomed (the worker skips it), so stop cloning.
+	// A poisoned batch is already doomed (the worker skips it), so stop cloning —
+	// but a Parse still has to reach the catalog, or the definition is lost for good.
 	if l.poisoned || !canMirror(msg) {
+		l.preserveDefinition(msg)
 		return
 	}
 	size := sizeOfFrontendMessage(msg) // size the original; clone only if it fits
@@ -73,12 +76,30 @@ func (l *mirroringLink) enqueue(msg pgproto3.FrontendMessage, expectation query.
 		l.flushHasData = true
 		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.message_mirrored", 1, l.tags, 1)
 	case mirrorDroppedSessionCap:
+		l.preserveDefinition(msg)
 		l.poison()
 		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.message_mirror_dropped", 1, l.dropTag("reason:session"), 1)
 	case mirrorDroppedGlobalBudget:
+		l.preserveDefinition(msg)
 		l.poison()
 		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.message_mirror_dropped", 1, l.dropTag("reason:global"), 1)
 	}
+}
+
+// preserveDefinition keeps a named Parse's definition reaching the worker's catalog even
+// when its message is not replayed. The client sends a Parse once, so a definition lost
+// to a drop or a poisoned batch is lost for the session: every later Bind is a catalog
+// miss and reaches a cold shadow connection as 26000. Admitted past the cap for the same
+// reason a batch boundary is — the bytes cost one batch, losing this costs the session —
+// and bounded at the far end by the catalog's own byte cap.
+func (l *mirroringLink) preserveDefinition(msg pgproto3.FrontendMessage) {
+	parse, ok := msg.(*pgproto3.Parse)
+	if !ok || !prepared.IsNamedPreparedStmt(parse.Name) {
+		return
+	}
+	size := sizeOfFrontendMessage(parse)
+	l.q.enqueueSentinel(mirrorItem{typ: mirrorCatalog, msg: cloneFrontendMessage(parse), size: size})
+	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.mirror.definition_preserved", 1, l.tags, 1)
 }
 
 // poison marks the batch so the worker skips it whole (a dropped message would

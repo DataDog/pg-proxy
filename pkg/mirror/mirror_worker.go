@@ -213,6 +213,17 @@ func (w *mirrorWorker) run() {
 			}
 			recorded = false
 			release() // buffer flushed or batch dropped
+		case mirrorCatalog:
+			// Definition-only: the producer could not queue this Parse for replay, so
+			// catalogue it and move on. Handled before the skipping gate, since a
+			// poisoned batch is exactly when this arrives.
+			if m, ok := it.msg.(*pgproto3.Parse); ok {
+				st := prepared.CreatePreparedStatement("", m.Name, m.Query, m.ParameterOIDs)
+				if st.IsProxyNamedPreparedStmt() {
+					cat.put(st)
+					w.count("mirror.catalog_preserved")
+				}
+			}
 		case mirrorPoison:
 			skipping = true // a producer drop poisoned the batch; skip to release, RESET rolls back
 		case mirrorRelease:
