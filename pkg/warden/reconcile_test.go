@@ -6,6 +6,7 @@ import (
 	"iter"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -67,6 +68,92 @@ func TestReconcilerCreatesReplacesAndRemovesBackends(t *testing.T) {
 	_, found = runtime.GetBackend("cluster")
 	assert.False(t, found)
 	assert.True(t, created["cluster"][1].closed.Load())
+}
+
+func TestReconcilerDatabaseUpdateHandlerAvoidsBackendReplacement(t *testing.T) {
+	created := 0
+	var update DatabaseUpdate[string]
+	reconciler := NewReconciler(ReconcilerConfig[string]{
+		Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+			created++
+			return &testManagedBackend{}, nil
+		},
+		DatabaseUpdate: func(candidate DatabaseUpdate[string]) (bool, error) {
+			update = candidate
+			return true, nil
+		},
+	})
+	initial := Snapshot[string]{
+		Databases: map[Identifier]string{"primary": "host-a"},
+		Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+	}
+	require.NoError(t, reconciler.Accept(initial))
+
+	next := cloneSnapshot(initial)
+	next.Databases["primary"] = "host-b"
+	require.NoError(t, reconciler.Accept(next))
+
+	assert.Equal(t, 1, created)
+	assert.Equal(t, Identifier("primary"), update.Name)
+	assert.Equal(t, "host-a", update.Current)
+	assert.Equal(t, "host-b", update.Next)
+	assert.Equal(t, []Identifier{"cluster"}, update.Clusters)
+	assert.False(t, update.ReceivedAt.IsZero())
+	actual, found := reconciler.GetDatabase("primary")
+	require.True(t, found)
+	assert.Equal(t, "host-b", actual)
+}
+
+func TestReconcilerDatabaseUpdateHandlerErrorStopsReconciliation(t *testing.T) {
+	sentinel := errors.New("update failed")
+	reconciler := NewReconciler(ReconcilerConfig[string]{
+		Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+			return &testManagedBackend{}, nil
+		},
+		DatabaseUpdate: func(DatabaseUpdate[string]) (bool, error) {
+			return false, sentinel
+		},
+	})
+	initial := Snapshot[string]{
+		Databases: map[Identifier]string{"primary": "host-a"},
+		Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+	}
+	require.NoError(t, reconciler.Accept(initial))
+
+	next := cloneSnapshot(initial)
+	next.Databases["primary"] = "host-b"
+	err := reconciler.Accept(next)
+	require.ErrorIs(t, err, sentinel)
+	actual, found := reconciler.GetDatabase("primary")
+	require.True(t, found)
+	assert.Equal(t, "host-a", actual)
+}
+
+func TestReconcilerReportsBackendReadiness(t *testing.T) {
+	events := make(chan BackendReady, 2)
+	reconciler := NewReconciler(ReconcilerConfig[string]{
+		Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+			return &testManagedBackend{}, nil
+		},
+		BackendReady: func(event BackendReady) { events <- event },
+	})
+	initial := Snapshot[string]{
+		Databases: map[Identifier]string{"primary": "host-a"},
+		Clusters:  map[Identifier]Cluster{"cluster": {Primary: "primary"}},
+	}
+	require.NoError(t, reconciler.Accept(initial))
+	first := <-events
+	assert.Equal(t, Identifier("cluster"), first.Name)
+	assert.True(t, first.Initial)
+	assert.False(t, first.ReadyAt.Before(first.ReceivedAt))
+
+	next := cloneSnapshot(initial)
+	next.Databases["primary"] = "host-b"
+	require.NoError(t, reconciler.Accept(next))
+	second := <-events
+	assert.Equal(t, Identifier("cluster"), second.Name)
+	assert.False(t, second.Initial)
+	assert.False(t, second.ReadyAt.Before(second.ReceivedAt))
 }
 
 func TestReconcilerRegistersRetriedBackend(t *testing.T) {
@@ -355,5 +442,275 @@ func assertLockedIteration[V any](t *testing.T, values iter.Seq2[Identifier, V],
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("write stayed blocked after iteration ended")
+	}
+}
+
+// The first update succeeds and the second fails, regardless of map iteration order.
+func TestReconcilerRetainsSuccessfulUpdatesAfterError(t *testing.T) {
+	for _, restore := range []bool{true, false} {
+		t.Run(map[bool]string{true: "restore original", false: "retry rejected"}[restore], func(t *testing.T) {
+			sentinel := errors.New("second update failed")
+			live := map[Identifier]string{"one": "old", "two": "old"}
+			calls := 0
+			var succeeded Identifier
+			r := NewReconciler(ReconcilerConfig[string]{
+				Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+					return &testManagedBackend{}, nil
+				},
+				DatabaseUpdate: func(update DatabaseUpdate[string]) (bool, error) {
+					calls++
+					assert.Equal(t, live[update.Name], update.Current)
+					if calls == 2 {
+						return false, sentinel
+					}
+					live[update.Name] = update.Next
+					succeeded = update.Name
+					return true, nil
+				},
+			})
+			initial := Snapshot[string]{
+				Databases: map[Identifier]string{"one": "old", "two": "old"},
+				Clusters:  map[Identifier]Cluster{"one": {Primary: "one"}, "two": {Primary: "two"}},
+			}
+			require.NoError(t, r.Accept(initial))
+			next := cloneSnapshot(initial)
+			next.Databases["one"], next.Databases["two"] = "new", "new"
+			require.ErrorIs(t, r.Accept(next), sentinel)
+			actual, found := r.GetDatabase(succeeded)
+			require.True(t, found)
+			assert.Equal(t, "new", actual)
+			target := next
+			if restore {
+				target = initial
+			}
+			require.NoError(t, r.Accept(target))
+			assert.Equal(t, 3, calls, "only the database that differs from live state should be updated")
+			assert.Equal(t, target.Databases, live)
+		})
+	}
+}
+
+func TestReconcilerReadinessFinishesBeforeRetirement(t *testing.T) {
+	for _, replace := range []bool{true, false} {
+		t.Run(map[bool]string{true: "replace", false: "remove"}[replace], func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			finished := make(chan struct{})
+			previous := &testManagedBackend{}
+			var r *Reconciler[string]
+			r = NewReconciler(ReconcilerConfig[string]{
+				BackendReady: func(event BackendReady) {
+					// Inventory reads remain safe inside the callback.
+					actual, found := r.GetManagedBackend(event.Name)
+					assert.True(t, found)
+					assert.Same(t, previous, actual)
+					close(entered)
+					<-release
+					assert.False(t, previous.closed.Load(), "backend retired during readiness delivery")
+					close(finished)
+				},
+			})
+			pending := &future[ManagedBackend]{done: make(chan struct{})}
+			r.registerBackend("cluster", pending)
+			r.observeBackendReady("cluster", pending, true, time.Now())
+			pending.settle(previous)
+			<-entered
+
+			started := make(chan struct{})
+			retired := make(chan struct{})
+			go func() {
+				close(started)
+				if replace {
+					r.registerBackend("cluster", newSettledFuture[ManagedBackend](&testManagedBackend{}))
+				} else {
+					r.deregisterBackend("cluster")
+				}
+				close(retired)
+			}()
+			<-started
+			select {
+			case <-retired:
+				t.Error("retirement completed before readiness callback returned")
+			case <-time.After(25 * time.Millisecond):
+			}
+			close(release)
+			<-finished
+			<-retired
+			assert.True(t, previous.closed.Load())
+		})
+	}
+}
+
+func TestReconcilerSkipsReadinessAfterRetirement(t *testing.T) {
+	for _, replace := range []bool{true, false} {
+		t.Run(map[bool]string{true: "replace", false: "remove"}[replace], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var events []BackendReady
+				r := NewReconciler(ReconcilerConfig[string]{
+					BackendReady: func(event BackendReady) { events = append(events, event) },
+				})
+				pending := &future[ManagedBackend]{done: make(chan struct{})}
+				r.registerBackend("cluster", pending)
+				r.observeBackendReady("cluster", pending, true, time.Now())
+				synctest.Wait()
+				if replace {
+					replacement := newSettledFuture[ManagedBackend](&testManagedBackend{})
+					r.registerBackend("cluster", replacement)
+					r.observeBackendReady("cluster", replacement, false, time.Now())
+				} else {
+					r.deregisterBackend("cluster")
+				}
+				pending.settle(&testManagedBackend{})
+				synctest.Wait()
+				if replace {
+					require.Len(t, events, 1)
+					assert.False(t, events[0].Initial)
+				} else {
+					assert.Empty(t, events)
+				}
+			})
+		})
+	}
+}
+
+func TestReconcilerDatabaseUpdateCoversCurrentReferences(t *testing.T) {
+	for _, change := range []string{"remove", "change primary", "remove replica"} {
+		for _, fail := range []bool{false, true} {
+			t.Run(change+"/"+map[bool]string{false: "accepted", true: "rejected then restored"}[fail], func(t *testing.T) {
+				sentinel := errors.New("unrelated database update failed")
+				initial := Snapshot[string]{
+					Databases: map[Identifier]string{"shared": "old", "other": "other"},
+					Clusters: map[Identifier]Cluster{
+						"a":     {Primary: "shared"},
+						"b":     {Primary: "shared"},
+						"other": {Primary: "other"},
+					},
+				}
+				if change == "remove replica" {
+					initial.Clusters["a"] = Cluster{Primary: "other", Replicas: []string{"shared"}}
+				}
+				backends := make(map[string]*testManagedBackend)
+				sharedUpdates := 0
+				r := NewReconciler(ReconcilerConfig[string]{
+					Factory: func(_ context.Context, name, primary string, replicas []string) (ManagedBackend, error) {
+						value := primary
+						if name == "a" && len(replicas) > 0 {
+							value = replicas[0]
+						}
+						backend := &testManagedBackend{id: value}
+						backends[name] = backend
+						return backend, nil
+					},
+					DatabaseUpdate: func(update DatabaseUpdate[string]) (bool, error) {
+						if update.Name == "other" {
+							return false, sentinel
+						}
+						sharedUpdates++
+						for _, name := range update.Clusters {
+							backends[string(name)].id = update.Next
+						}
+						return true, nil
+					},
+				})
+				require.NoError(t, r.Accept(initial))
+				oldA, oldB := backends["a"], backends["b"]
+				next := cloneSnapshot(initial)
+				next.Databases["shared"] = "new"
+				switch change {
+				case "remove":
+					delete(next.Clusters, "a")
+				case "change primary", "remove replica":
+					next.Clusters["a"] = Cluster{Primary: "other"}
+				}
+				if fail {
+					next.Databases["other"] = "changed"
+					require.ErrorIs(t, r.Accept(next), sentinel)
+					// Rejection must not record an update that left a live user behind.
+					assert.Equal(t, 0, sharedUpdates)
+					current, _ := r.GetDatabase("shared")
+					assert.Equal(t, "old", current)
+					assert.Equal(t, "old", oldA.id)
+					assert.Equal(t, "old", oldB.id)
+					assert.False(t, oldA.closed.Load())
+
+					restored := cloneSnapshot(initial)
+					restored.Databases["shared"] = "new"
+					require.NoError(t, r.Accept(restored))
+					assert.Equal(t, 1, sharedUpdates)
+					assert.Equal(t, "new", oldA.id)
+					assert.Equal(t, "new", oldB.id)
+				} else {
+					require.NoError(t, r.Accept(next))
+					assert.Equal(t, 0, sharedUpdates, "in-place update must cover all current references")
+					assert.True(t, oldA.closed.Load())
+					assert.True(t, oldB.closed.Load())
+					assert.Equal(t, "new", backends["b"].id)
+				}
+			})
+		}
+	}
+}
+
+func TestReconcilerDatabaseUpdateRestartsUnavailableBackend(t *testing.T) {
+	for _, exhausted := range []bool{true, false} {
+		t.Run(map[bool]string{true: "exhausted retries", false: "pending retry"}[exhausted], func(t *testing.T) {
+			var failedAttempts atomic.Int32
+			retryStarted := make(chan struct{})
+			retryFinished := make(chan struct{})
+			handlerCalls := 0
+			r := NewReconciler(ReconcilerConfig[string]{
+				Factory: func(_ context.Context, name, primary string, _ []string) (ManagedBackend, error) {
+					if name == "unavailable" && primary == "old" {
+						failedAttempts.Add(1)
+						return nil, errors.New("database unavailable")
+					}
+					return &testManagedBackend{id: primary}, nil
+				},
+				Retry: func(ctx context.Context, computation func() (ManagedBackend, error)) (ManagedBackend, error) {
+					defer close(retryFinished)
+					close(retryStarted)
+					if exhausted {
+						return computation()
+					}
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+				DatabaseUpdate: func(DatabaseUpdate[string]) (bool, error) {
+					handlerCalls++
+					return true, nil // Even an optimistic handler cannot suppress recovery.
+				},
+			})
+			initial := Snapshot[string]{
+				Databases: map[Identifier]string{"shared": "old"},
+				Clusters: map[Identifier]Cluster{
+					"ready":       {Primary: "shared"},
+					"unavailable": {Primary: "shared"},
+				},
+			}
+			require.NoError(t, r.Accept(initial))
+			<-retryStarted
+			pending, found := r.backends.Get("unavailable")
+			require.True(t, found)
+			if exhausted {
+				<-pending.Done()
+				assert.Equal(t, int32(2), failedAttempts.Load())
+			}
+			_, ready := r.GetManagedBackend("unavailable")
+			require.False(t, ready)
+			oldReady, ready := r.GetManagedBackend("ready")
+			require.True(t, ready)
+
+			next := cloneSnapshot(initial)
+			next.Databases["shared"] = "new"
+			require.NoError(t, r.Accept(next))
+			assert.Zero(t, handlerCalls)
+			for _, name := range []Identifier{"ready", "unavailable"} {
+				backend, ready := r.GetManagedBackend(name)
+				require.True(t, ready, "%s must recover through normal recreation", name)
+				assert.Equal(t, "new", backend.(*testManagedBackend).id)
+			}
+			assert.True(t, oldReady.(*testManagedBackend).closed.Load())
+			<-retryFinished
+		})
 	}
 }

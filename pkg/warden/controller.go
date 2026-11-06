@@ -36,6 +36,8 @@ type ControllerConfig[C, D any] struct {
 	RefreshInterval RefreshInterval[C]
 	Factory         func(context.Context, string, D, []D) (ManagedBackend, error)
 	Retry           Retry[ManagedBackend]
+	DatabaseUpdate  DatabaseUpdateHandler[D]
+	BackendReady    BackendReadyHandler
 	Hooks           ControllerHooks[C]
 }
 
@@ -64,10 +66,12 @@ func NewController[C, D any](cfg ControllerConfig[C, D]) *Controller[C, D] {
 		hooks:           cfg.Hooks,
 	}
 	controller.reconciler = NewReconciler(ReconcilerConfig[D]{
-		Context: cfg.Context,
-		Runtime: runtime,
-		Factory: cfg.Factory,
-		Retry:   cfg.Retry,
+		Context:        cfg.Context,
+		Runtime:        runtime,
+		Factory:        cfg.Factory,
+		Retry:          cfg.Retry,
+		DatabaseUpdate: cfg.DatabaseUpdate,
+		BackendReady:   cfg.BackendReady,
 	})
 	controller.refresher = NewRefresher(RefresherConfig[C]{
 		Context:  cfg.Context,
