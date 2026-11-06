@@ -7,6 +7,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"sync"
 	"time"
 
 	pgproxy "github.com/DataDog/pg-proxy"
@@ -50,6 +51,8 @@ type DatabaseUpdate[D any] struct {
 
 // DatabaseUpdateHandler may apply a database change to existing backends.
 // Returning handled=true prevents that change alone from recreating them.
+// Successful updates are retained even if another update fails. A handler returning
+// an error must leave the affected backends unchanged or roll back its changes.
 type DatabaseUpdateHandler[D any] func(DatabaseUpdate[D]) (handled bool, err error)
 
 // BackendReady describes a newly created backend once it is available to serve.
@@ -62,6 +65,8 @@ type BackendReady struct {
 }
 
 // BackendReadyHandler observes when a newly created backend can serve traffic.
+// Delivery is serialized with backend replacement and removal. Handlers may read
+// the inventory, but must not call Accept or wait for another Accept to finish.
 type BackendReadyHandler func(BackendReady)
 
 // ReconcilerConfig configures backend lifecycle reconciliation.
@@ -83,6 +88,9 @@ type Reconciler[D any] struct {
 	retry          Retry[ManagedBackend]
 	databaseUpdate DatabaseUpdateHandler[D]
 	backendReady   BackendReadyHandler
+
+	// Protects readiness validation and delivery against backend retirement.
+	lifecycleMu sync.Mutex
 
 	databases *ConcurrentMap[Identifier, D]
 	clusters  *ConcurrentMap[Identifier, Cluster]
@@ -237,7 +245,8 @@ func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.
 	if r.databaseUpdate == nil {
 		return handled, nil
 	}
-	for name, current := range r.databases.All() {
+	// Do not hold the inventory read lock while recording successful updates.
+	for name, current := range maps.Collect(r.databases.All()) {
 		updated, ok := next.Databases[name]
 		if !ok || reflect.DeepEqual(current, updated) {
 			continue
@@ -256,6 +265,7 @@ func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.
 			return nil, err
 		}
 		if wasHandled {
+			r.databases.Put(name, updated)
 			handled[name] = struct{}{}
 		}
 	}
@@ -267,6 +277,8 @@ func (r *Reconciler[D]) observeBackendReady(name Identifier, pending *future[Man
 		return
 	}
 	record := func() {
+		r.lifecycleMu.Lock()
+		defer r.lifecycleMu.Unlock()
 		current, ok := r.backends.Get(name)
 		if !ok || current != pending {
 			return
@@ -385,6 +397,8 @@ func (r *Reconciler[D]) createBackend(name Identifier) (ManagedBackend, error) {
 }
 
 func (r *Reconciler[D]) registerBackend(name Identifier, pending *future[ManagedBackend]) {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	previous, _ := r.backends.Get(name)
 	// Preserve close-before-replace ordering. Both inventories reference the same
 	// future, so a completed retry is immediately visible to session lookups.
@@ -394,6 +408,8 @@ func (r *Reconciler[D]) registerBackend(name Identifier, pending *future[Managed
 }
 
 func (r *Reconciler[D]) deregisterBackend(name Identifier) {
+	r.lifecycleMu.Lock()
+	defer r.lifecycleMu.Unlock()
 	pending, _ := r.backends.Get(name)
 	closePendingBackend(pending)
 	r.backends.Delete(name)

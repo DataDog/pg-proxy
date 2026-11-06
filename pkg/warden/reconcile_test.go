@@ -6,6 +6,7 @@ import (
 	"iter"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/stretchr/testify/assert"
@@ -441,5 +442,133 @@ func assertLockedIteration[V any](t *testing.T, values iter.Seq2[Identifier, V],
 	case <-finished:
 	case <-time.After(time.Second):
 		t.Fatal("write stayed blocked after iteration ended")
+	}
+}
+
+// The first update succeeds and the second fails, regardless of map iteration order.
+func TestReconcilerRetainsSuccessfulUpdatesAfterError(t *testing.T) {
+	for _, restore := range []bool{true, false} {
+		t.Run(map[bool]string{true: "restore original", false: "retry rejected"}[restore], func(t *testing.T) {
+			sentinel := errors.New("second update failed")
+			live := map[Identifier]string{"one": "old", "two": "old"}
+			calls := 0
+			var succeeded Identifier
+			r := NewReconciler(ReconcilerConfig[string]{
+				Factory: func(context.Context, string, string, []string) (ManagedBackend, error) {
+					return &testManagedBackend{}, nil
+				},
+				DatabaseUpdate: func(update DatabaseUpdate[string]) (bool, error) {
+					calls++
+					assert.Equal(t, live[update.Name], update.Current)
+					if calls == 2 {
+						return false, sentinel
+					}
+					live[update.Name] = update.Next
+					succeeded = update.Name
+					return true, nil
+				},
+			})
+			initial := Snapshot[string]{
+				Databases: map[Identifier]string{"one": "old", "two": "old"},
+				Clusters:  map[Identifier]Cluster{"one": {Primary: "one"}, "two": {Primary: "two"}},
+			}
+			require.NoError(t, r.Accept(initial))
+			next := cloneSnapshot(initial)
+			next.Databases["one"], next.Databases["two"] = "new", "new"
+			require.ErrorIs(t, r.Accept(next), sentinel)
+			actual, found := r.GetDatabase(succeeded)
+			require.True(t, found)
+			assert.Equal(t, "new", actual)
+			target := next
+			if restore {
+				target = initial
+			}
+			require.NoError(t, r.Accept(target))
+			assert.Equal(t, 3, calls, "only the database that differs from live state should be updated")
+			assert.Equal(t, target.Databases, live)
+		})
+	}
+}
+
+func TestReconcilerReadinessFinishesBeforeRetirement(t *testing.T) {
+	for _, replace := range []bool{true, false} {
+		t.Run(map[bool]string{true: "replace", false: "remove"}[replace], func(t *testing.T) {
+			entered := make(chan struct{})
+			release := make(chan struct{})
+			finished := make(chan struct{})
+			previous := &testManagedBackend{}
+			var r *Reconciler[string]
+			r = NewReconciler(ReconcilerConfig[string]{
+				BackendReady: func(event BackendReady) {
+					// Inventory reads remain safe inside the callback.
+					actual, found := r.GetManagedBackend(event.Name)
+					assert.True(t, found)
+					assert.Same(t, previous, actual)
+					close(entered)
+					<-release
+					assert.False(t, previous.closed.Load(), "backend retired during readiness delivery")
+					close(finished)
+				},
+			})
+			pending := &future[ManagedBackend]{done: make(chan struct{})}
+			r.registerBackend("cluster", pending)
+			r.observeBackendReady("cluster", pending, true, time.Now())
+			pending.settle(previous)
+			<-entered
+
+			started := make(chan struct{})
+			retired := make(chan struct{})
+			go func() {
+				close(started)
+				if replace {
+					r.registerBackend("cluster", newSettledFuture[ManagedBackend](&testManagedBackend{}))
+				} else {
+					r.deregisterBackend("cluster")
+				}
+				close(retired)
+			}()
+			<-started
+			select {
+			case <-retired:
+				t.Error("retirement completed before readiness callback returned")
+			case <-time.After(25 * time.Millisecond):
+			}
+			close(release)
+			<-finished
+			<-retired
+			assert.True(t, previous.closed.Load())
+		})
+	}
+}
+
+func TestReconcilerSkipsReadinessAfterRetirement(t *testing.T) {
+	for _, replace := range []bool{true, false} {
+		t.Run(map[bool]string{true: "replace", false: "remove"}[replace], func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				var events []BackendReady
+				r := NewReconciler(ReconcilerConfig[string]{
+					BackendReady: func(event BackendReady) { events = append(events, event) },
+				})
+				pending := &future[ManagedBackend]{done: make(chan struct{})}
+				r.registerBackend("cluster", pending)
+				r.observeBackendReady("cluster", pending, true, time.Now())
+				synctest.Wait()
+				if replace {
+					replacement := newSettledFuture[ManagedBackend](&testManagedBackend{})
+					r.registerBackend("cluster", replacement)
+					r.observeBackendReady("cluster", replacement, false, time.Now())
+				} else {
+					r.deregisterBackend("cluster")
+				}
+				pending.settle(&testManagedBackend{})
+				synctest.Wait()
+				if replace {
+					require.Len(t, events, 1)
+					assert.False(t, events[0].Initial)
+				} else {
+					assert.Empty(t, events)
+				}
+			})
+		})
 	}
 }
