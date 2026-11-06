@@ -200,7 +200,7 @@ func TestSQLHealthTimeoutType(t *testing.T) {
 	}
 }
 
-func TestHybridHealthComparesLeaderDetection(t *testing.T) {
+func TestHybridHealthPairsLeaderObservationsWithoutDowntime(t *testing.T) {
 	policy := newHybridHealthPolicy(true)
 	started := time.Now()
 	policy.observePatroni(map[string]bool{"10.0.0.1": true}, started)
@@ -212,7 +212,6 @@ func TestHybridHealthComparesLeaderDetection(t *testing.T) {
 	require.NotNil(t, patroniDecision.leaderDetection)
 	assert.Equal(t, LeaderDetectionComparison{
 		NewLeaderIP:       "10.0.0.2",
-		Speedup:           3 * time.Second,
 		SQLRoutingEnabled: true,
 	}, *patroniDecision.leaderDetection)
 }
@@ -250,7 +249,6 @@ func TestHybridHealthIgnoresAmbiguousLeaderDetection(t *testing.T) {
 	require.NotNil(t, patroni.leaderDetection)
 	assert.Equal(t, LeaderDetectionComparison{
 		NewLeaderIP:       "10.0.0.2",
-		Speedup:           time.Second,
 		SQLRoutingEnabled: true,
 	}, *patroni.leaderDetection)
 }
@@ -449,7 +447,6 @@ func TestHybridHealthRearmsInterruptedLeaderComparisons(t *testing.T) {
 				if first == "patroni" {
 					wantSpeedup = -wantSpeedup
 				}
-				assert.Equal(t, wantSpeedup, completed.leaderDetection.Speedup)
 				assert.Equal(t, wantSpeedup, completed.routingComparison.Improvement)
 				assert.Equal(t, "B", completed.leaderDetection.NewLeaderIP)
 				assert.Equal(t, "B", completed.routingComparison.NewLeaderIP)
@@ -479,7 +476,6 @@ func TestHybridHealthComparesDowntimeReductionWhenSQLRecoversFirst(t *testing.T)
 	require.NotNil(t, patroniDecision.leaderDetection)
 	assert.Equal(t, LeaderDetectionComparison{
 		NewLeaderIP:              "10.0.0.2",
-		Speedup:                  3 * time.Second,
 		SQLRoutingEnabled:        true,
 		SQLDowntime:              time.Second,
 		PatroniDowntime:          4 * time.Second,
@@ -504,7 +500,6 @@ func TestHybridHealthComparesNegativeDowntimeReductionWhenPatroniRecoversFirst(t
 	require.NotNil(t, sqlDecision.leaderDetection)
 	assert.Equal(t, LeaderDetectionComparison{
 		NewLeaderIP:              "10.0.0.2",
-		Speedup:                  -2 * time.Second,
 		SQLRoutingEnabled:        true,
 		SQLDowntime:              3 * time.Second,
 		PatroniDowntime:          time.Second,
@@ -529,7 +524,6 @@ func TestHybridHealthDoesNotCompareDowntimeFromEarlierPromotionOfSameLeader(t *t
 	require.NotNil(t, patroniDecision.leaderDetection)
 	assert.Equal(t, LeaderDetectionComparison{
 		NewLeaderIP:       "10.0.0.2",
-		Speedup:           time.Second,
 		SQLRoutingEnabled: true,
 	}, *patroniDecision.leaderDetection)
 	assert.NotContains(t, policy.detectionTiming.pending, "10.0.0.2")
@@ -565,11 +559,8 @@ func TestHybridHealthDiscardsSupersededLeaderObservations(t *testing.T) {
 			assert.Nil(t, later.leaderDetection)
 			fresh := observe(firstSource, "B", time.Minute+5*time.Second)
 			require.NotNil(t, fresh.leaderDetection)
-			wantSpeedup := -5 * time.Second
-			if firstSource == "patroni" {
-				wantSpeedup = 5 * time.Second
-			}
-			assert.Equal(t, wantSpeedup, fresh.leaderDetection.Speedup)
+			assert.Equal(t, "B", fresh.leaderDetection.NewLeaderIP)
+			assert.Empty(t, policy.detectionTiming.pending)
 			assert.False(t, fresh.leaderDetection.HasDowntimeComparison)
 		})
 	}

@@ -29,13 +29,12 @@ const (
 	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
 )
 
-// LeaderDetectionComparison compares independent SQL and Patroni observations of a new leader.
-// A positive Speedup means SQL observed the leader first. When SQL observed a no-leader interval
-// before the transition, the downtime fields share that SQL observation as their start, and
-// DowntimeReductionPercent is (PatroniDowntime-SQLDowntime)/PatroniDowntime*100.
+// LeaderDetectionComparison pairs independent SQL and Patroni observations of a new leader.
+// When HasDowntimeComparison is true, the downtime fields share the first conclusive SQL
+// no-leader observation as their start. DowntimeReductionPercent is
+// (PatroniDowntime-SQLDowntime)/PatroniDowntime*100; no standalone detection speedup is exposed.
 type LeaderDetectionComparison struct {
 	NewLeaderIP              string
-	Speedup                  time.Duration
 	SQLRoutingEnabled        bool
 	SQLDowntime              time.Duration
 	PatroniDowntime          time.Duration
@@ -369,7 +368,7 @@ func (p *hybridHealthPolicy) observeLeaderLocked(source string, primaryIPs []str
 		return nil
 	}
 	pair := pairs[0]
-	comparison := &LeaderDetectionComparison{NewLeaderIP: pair.ip, Speedup: pair.speedup(), SQLRoutingEnabled: p.routingEnabled}
+	comparison := &LeaderDetectionComparison{NewLeaderIP: pair.ip, SQLRoutingEnabled: p.routingEnabled}
 	downtime = pair.candidate.data
 	if downtime.startedAt.IsZero() || !downtime.recoveredAt.Equal(pair.candidate.at) {
 		return comparison
