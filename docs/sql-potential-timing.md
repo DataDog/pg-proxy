@@ -58,8 +58,10 @@ remains ineligible while the IP is absent. These checks run
 under the same lock and do not invalidate timing for other retained IPs. Patroni
 callbacks older than the latest accepted reference snapshot are ignored, so they
 cannot interrupt fresh pending evidence after rediscovery.
-Retention is tracked from the first discovery, including while initial SQL polls
-are unfinished. DNS lookup stays outside the timing lock. Callbacks run after
+For primary subscriptions with the comparison hook configured, retention is
+tracked from the first discovery, including while initial SQL polls are unfinished.
+Subscriptions without the hook still discover and probe SQL addresses but retain
+no DNS timing history. DNS lookup stays outside the timing lock. Callbacks run after
 releasing the lock.
 
 ## Signed speedup
