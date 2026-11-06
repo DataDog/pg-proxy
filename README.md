@@ -139,6 +139,19 @@ configuration and verified connections.
 
 ## Development
 
+### License headers
+
+CI checks every repository Go file against the header in [.licenserc.yaml](.licenserc.yaml),
+including tests and files behind build tags. Vendored dependencies keep their own notices.
+Check headers locally with:
+
+```sh
+go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
+```
+
+To add missing headers, run the same command with `header fix` instead of
+`header check`. Review the resulting diff before committing.
+
 ### OSS binary
 
 `cmd/pg-proxy` runs the portable library against configured PostgreSQL backends, with
