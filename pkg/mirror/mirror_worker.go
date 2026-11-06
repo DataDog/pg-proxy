@@ -161,7 +161,9 @@ func (w *mirrorWorker) run() {
 					break // this connection already has it; sending again is 42P05
 				}
 				link.Send(m, it.expectation)
-				if link.RecordNewNamedPreparedStmt(parsed) == nil && parsed.IsProxyNamedPreparedStmt() {
+				// While Postgres discards until Sync it ignores this Parse, so claiming it
+				// would hand the pool a statement the connection does not have.
+				if !link.DiscardingUntilSync() && link.RecordNewNamedPreparedStmt(parsed) == nil && parsed.IsProxyNamedPreparedStmt() {
 					recorded = true
 				}
 			case *pgproto3.Bind:
@@ -237,6 +239,9 @@ func (w *mirrorWorker) reparseIfMissing(link link.Link, cat *stmtCatalog, name s
 	}
 	if link.HasExistingNamedPreparedStmt(st) {
 		return 0, false, true
+	}
+	if link.DiscardingUntilSync() {
+		return 0, false, true // Postgres drops it until Sync; injecting buys nothing and claims a lie
 	}
 	parse := &pgproto3.Parse{
 		Name: st.GetProxyName(), Query: st.GetSQLQuery(), ParameterOIDs: st.GetParamOIDs(),

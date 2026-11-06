@@ -114,6 +114,10 @@ func (link *SessionLink) ResolveNextExpectation() {
 // If we don't yet have a reply expectation for a SyncReply, we need to set
 // an addition flag discardingUntilSync indicating we also need to drop future
 // expectations until we see a Sync.
+// DiscardingUntilSync reports the extended-query error state: Postgres is dropping
+// everything until a Sync, so nothing sent now reaches it.
+func (link *SessionLink) DiscardingUntilSync() bool { return link.discardingUntilSync }
+
 func (link *SessionLink) DiscardUntilSync() {
 	nDrop := 0
 	for ; nDrop < len(link.replyExpectations); nDrop++ {

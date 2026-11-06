@@ -28,6 +28,9 @@ type Link interface {
 	NextExpectation() query.ReplyExpectation
 	ResolveNextExpectation()
 	DiscardUntilSync()
+	// DiscardingUntilSync reports whether Postgres is dropping messages until the next
+	// Sync, so callers can tell that what they send now will not take effect.
+	DiscardingUntilSync() bool
 	Idle() bool
 	Cancel() error
 	Release() error

@@ -38,6 +38,7 @@ type fakeShadowLink struct {
 	closeOnce       sync.Once
 
 	stmts        map[string]bool // named statements live on this connection, as SessionLink tracks
+	discarding   bool            // extended-query error state, as SessionLink tracks
 	existingUsed []string        // proxy names passed to RecordExistingNamedPreparedStmtUsed
 }
 
@@ -47,7 +48,14 @@ func (l *fakeShadowLink) Send(msg pgproto3.FrontendMessage, e query.ReplyExpecta
 	}
 	l.sent = append(l.sent, msg)
 	if e != query.NoReply {
-		l.expectations = append(l.expectations, e)
+		// Mirror SessionLink: a Sync clears the error state, and while it is set
+		// the message still goes out but no reply is expected for it.
+		if e == query.SyncReply {
+			l.discarding = false
+		}
+		if !l.discarding {
+			l.expectations = append(l.expectations, e)
+		}
 	}
 }
 func (l *fakeShadowLink) Flush() error { l.flushes++; return l.flushErr }
@@ -88,10 +96,12 @@ func (l *fakeShadowLink) DiscardUntilSync() {
 		n++
 	}
 	l.expectations = l.expectations[n:]
+	l.discarding = len(l.expectations) == 0
 }
-func (l *fakeShadowLink) Idle() bool     { return len(l.expectations) == 0 }
-func (l *fakeShadowLink) Cancel() error  { return nil }
-func (l *fakeShadowLink) Release() error { l.releases++; return nil }
+func (l *fakeShadowLink) DiscardingUntilSync() bool { return l.discarding }
+func (l *fakeShadowLink) Idle() bool                { return len(l.expectations) == 0 }
+func (l *fakeShadowLink) Cancel() error             { return nil }
+func (l *fakeShadowLink) Release() error            { l.releases++; return nil }
 func (l *fakeShadowLink) ForceClose() bool {
 	l.forceCloses++
 	if l.blockUntilClose != nil {
@@ -822,5 +832,41 @@ func TestMirrorWorker_ErrorAfterRecordingDiscardsConnection(t *testing.T) {
 
 	if l := f.links[0]; l.forceCloses != 1 {
 		t.Errorf("forceCloses = %d, want 1 (a connection with an unconfirmed statement must be discarded)", l.forceCloses)
+	}
+}
+
+// A non-FATAL error puts Postgres in its discard-until-Sync state, which outlives the
+// flush that observed it. A Parse replayed in that window is dropped by Postgres, so
+// claiming it on the connection would hand the pool a statement it does not have and
+// cost a later session a 26000.
+//
+// Built by hand rather than with enqueueBatch: this needs a flush sentinel mid-batch,
+// and nothing recorded in the erroring window, so the sawError && recorded guard stays
+// out of the way and the discard state is what is under test.
+func TestMirrorWorker_NoClaimWhileDiscardingUntilSync(t *testing.T) {
+	q := newMirrorQueue(1<<20, nil)
+	// First window: an Execute fails, so Postgres starts discarding. Nothing recorded.
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, size: 10, msg: &pgproto3.Execute{}, expectation: query.ExecuteReply})
+	q.enqueueSentinel(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
+	// Same batch, still before the Sync: Postgres ignores this Parse.
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, size: 10, msg: &pgproto3.Parse{Name: "s2", Query: "select 2"}, expectation: query.ParseReply})
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, size: 10, msg: &pgproto3.Sync{}, expectation: query.SyncReply})
+	q.enqueueSentinel(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
+	q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
+
+	f := newLinkFactory(func(l *fakeShadowLink) {
+		l.replies = []pgproto3.BackendMessage{
+			&pgproto3.ErrorResponse{Code: "42703"}, // answers the Execute
+			&pgproto3.ReadyForQuery{TxStatus: 'I'}, // answers the Sync
+		}
+	})
+	drainClosed(q, f.acquire)
+
+	l := f.links[0]
+	if l.stmts["s2"] {
+		t.Error("s2 was claimed on the connection, but Postgres discarded it until the Sync")
+	}
+	if l.forceCloses != 0 {
+		t.Errorf("forceCloses = %d, want 0: nothing was claimed, so the connection is still good", l.forceCloses)
 	}
 }

@@ -91,6 +91,8 @@ func (l *testLink) ResolveNextExpectation() {
 		l.resolveNextExpectation()
 	}
 }
+func (l *testLink) DiscardingUntilSync() bool { return false }
+
 func (l *testLink) DiscardUntilSync() {
 	l.calls.discardUntilSync++
 	if l.discardUntilSync != nil {
