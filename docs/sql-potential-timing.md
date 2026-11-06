@@ -88,36 +88,3 @@ policy is introduced here.
 This callback contains only signed speedup and the IP/timestamps needed to
 identify the event. It defines no outage start and emits no downtime durations
 or reduction percentages. PR9 retains its own downtime measurements.
-
-## Comparing with PR9
-
-Snapshot timing and `hybrid_health.go` keep their own leader selection, baselines,
-and pending observations. They share only `leaderTimingPair`, which records the
-two timestamps and calculates their signed difference. Hybrid detection still
-requires exactly one newly observed primary; hybrid routing requires one healthy
-primary. Snapshot timing compares each newly observed primary independently.
-Hybrid routing and timing behavior remain unchanged.
-
-For the same failover and the **same Patroni observation**:
-
-```text
-snapshot speedup - hybrid improvement = hybrid selection time - SQL snapshot time
-```
-
-For example, 3s snapshot speedup and 2s hybrid improvement leave a 1s delay between
-SQL's snapshot and the hybrid selection. An absolute duration is easier to
-interpret than a percentage when the denominator is small, zero, or negative.
-
-Join by host, replacement IP, and Patroni event timestamp, not merely IP: an
-address can be promoted repeatedly. This callback exposes both observation
-timestamps. PR9's consumer must also retain that event identity before producing
-a paired gap metric. Do not subtract maxima or percentiles from unmatched series.
-
-Keep the signed distribution and sample count as well as maxima. A maximum alone
-can hide slower events. Poll cadence, retries, aggregation, and cached evidence
-affect these observations; they do not establish end-to-end client recovery.
-
-The portable library emits optional callbacks only. The embedding application
-owns metric names, units, event correlation, and dashboard queries. Leave the
-hook nil to disable tracking. Callbacks must return promptly and may run
-concurrently for different hosts.
