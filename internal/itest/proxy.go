@@ -193,7 +193,8 @@ func (p *Proxy) Logs() string {
 }
 
 // encodeConfig marshals cfg to YAML. Secret redacts itself when marshaled, so
-// database passwords are written back into the encoded document.
+// database passwords and user static credentials are written back into the
+// encoded document.
 func encodeConfig(cfg pgconfig.Config) ([]byte, error) {
 	var document yaml.Node
 	if err := document.Encode(cfg); err != nil {
@@ -203,6 +204,20 @@ func encodeConfig(cfg pgconfig.Config) ([]byte, error) {
 		for i, entry := range databases.Content {
 			if password := mappingValue(entry, "password"); password != nil {
 				password.Value = string(cfg.Databases[i].Password)
+			}
+		}
+	}
+	if users := mappingValue(&document, "users"); users != nil {
+		for i, entry := range users.Content {
+			credentials := mappingValue(entry, "static_credentials")
+			if credentials == nil {
+				continue
+			}
+			if password := mappingValue(credentials, "password"); password != nil {
+				password.Value = string(cfg.Users[i].StaticCredentials.Password)
+			}
+			if verifier := mappingValue(credentials, "scram_sha_256"); verifier != nil {
+				verifier.Value = string(cfg.Users[i].StaticCredentials.SCRAMSHA256)
 			}
 		}
 	}

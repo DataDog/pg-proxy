@@ -5,6 +5,7 @@ package itest
 import (
 	"context"
 	"fmt"
+	"net"
 	"net/url"
 	"strconv"
 	"time"
@@ -109,7 +110,7 @@ func (p *Postgres) URL(database string) string {
 	u := url.URL{
 		Scheme:   "postgres",
 		User:     url.UserPassword(PostgresUser, PostgresPassword),
-		Host:     fmt.Sprintf("%s:%d", p.Host, p.Port),
+		Host:     net.JoinHostPort(p.Host, strconv.Itoa(int(p.Port))),
 		Path:     "/" + database,
 		RawQuery: "sslmode=disable",
 	}
