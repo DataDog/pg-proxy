@@ -257,9 +257,20 @@ func (w *mirrorWorker) reparseIfMissing(link link.Link, cat *stmtCatalog, name s
 		w.count("mirror.replay_errors", "op:reparse_budget")
 		return 0, false, false
 	}
+	// The caller only folds size into the batch's reservation on a normal return, so a
+	// panic between here and there would strand these bytes in the shared budget for
+	// the life of the process. Hand ownership over at the last moment.
+	owned := true
+	defer func() {
+		if owned {
+			w.q.releaseBudgetRaw(size)
+		}
+	}()
 	link.Send(parse, query.ParseReply)
 	w.count("mirror.shadow_reparse")
-	return size, link.RecordNewNamedPreparedStmt(st) == nil, true
+	recorded = link.RecordNewNamedPreparedStmt(st) == nil
+	owned = false
+	return size, recorded, true
 }
 
 // flushAndDrain flushes to the shadow, then reads and drops every reply until idle,

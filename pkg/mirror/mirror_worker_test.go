@@ -893,3 +893,23 @@ func TestMirrorWorker_BindOnExistingStatementRefreshesUsage(t *testing.T) {
 		t.Errorf("existingUsed = %v, want %v (one for the Parse short-circuit, one for the Bind cache hit)", got, want)
 	}
 }
+
+// An injected Parse reserves budget before it is sent, but the caller only folds that
+// size into the batch's reservation on a normal return. A panic in between must not
+// strand the bytes in the shared budget for the life of the process.
+//
+// Seeded rather than parsed in-batch so the very first Send is the injected one: that
+// puts the panic after tryReserveRaw, which is the window under test.
+func TestMirrorWorker_PanicAfterReparseReservationReleasesBudget(t *testing.T) {
+	b := NewBudget(1 << 20)
+	q := newMirrorQueue(1<<20, b)
+	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply})
+
+	seed := []prepared.PreparedStatement{prepared.CreatePreparedStatement("", "s1", "select 1", nil)}
+	f := newLinkFactory(func(l *fakeShadowLink) { l.panicOnSend = true })
+	drainClosedWithSeed(q, f.acquire, seed)
+
+	if used := b.UsedBytes(); used != 0 {
+		t.Errorf("UsedBytes = %d after a panic, want 0: the raw reservation leaked", used)
+	}
+}
