@@ -870,3 +870,26 @@ func TestMirrorWorker_NoClaimWhileDiscardingUntilSync(t *testing.T) {
 		t.Errorf("forceCloses = %d, want 0: nothing was claimed, so the connection is still good", l.forceCloses)
 	}
 }
+
+// Release evicts by LFU/LRU over TimeLastUsed and UsageCount. A mirrored statement is
+// normally only ever reached through Bind after its one Parse, so a cache hit here must
+// refresh usage or the statement looks unused and is deallocated ahead of cold ones.
+func TestMirrorWorker_BindOnExistingStatementRefreshesUsage(t *testing.T) {
+	q := newMirrorQueue(1<<20, nil)
+	enqueueBatch(q,
+		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
+		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply},
+	)
+
+	// The connection already holds s1, so the Parse short-circuits and the Bind takes
+	// the catalog-hit path in reparseIfMissing.
+	f := newLinkFactory(func(l *fakeShadowLink) {
+		l.stmts = map[string]bool{"s1": true}
+		l.replies = []pgproto3.BackendMessage{&pgproto3.ReadyForQuery{TxStatus: 'I'}}
+	})
+	drainClosed(q, f.acquire)
+
+	if got, want := f.links[0].existingUsed, []string{"s1", "s1"}; !slices.Equal(got, want) {
+		t.Errorf("existingUsed = %v, want %v (one for the Parse short-circuit, one for the Bind cache hit)", got, want)
+	}
+}

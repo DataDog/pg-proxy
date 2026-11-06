@@ -238,6 +238,10 @@ func (w *mirrorWorker) reparseIfMissing(link link.Link, cat *stmtCatalog, name s
 		return 0, false, true // continuing is never worse than skipping: a miss costs one batch either way
 	}
 	if link.HasExistingNamedPreparedStmt(st) {
+		// Refresh usage so Release's LFU/LRU eviction sees this statement as hot. A
+		// mirrored statement is normally only ever reached through Bind, so without
+		// this it looks unused and is deallocated ahead of genuinely cold ones.
+		_ = link.RecordExistingNamedPreparedStmtUsed(st)
 		return 0, false, true
 	}
 	if link.DiscardingUntilSync() {
