@@ -650,3 +650,67 @@ func TestReconcilerDatabaseUpdateCoversCurrentReferences(t *testing.T) {
 		}
 	}
 }
+
+func TestReconcilerDatabaseUpdateRestartsUnavailableBackend(t *testing.T) {
+	for _, exhausted := range []bool{true, false} {
+		t.Run(map[bool]string{true: "exhausted retries", false: "pending retry"}[exhausted], func(t *testing.T) {
+			var failedAttempts atomic.Int32
+			retryStarted := make(chan struct{})
+			retryFinished := make(chan struct{})
+			handlerCalls := 0
+			r := NewReconciler(ReconcilerConfig[string]{
+				Factory: func(_ context.Context, name, primary string, _ []string) (ManagedBackend, error) {
+					if name == "unavailable" && primary == "old" {
+						failedAttempts.Add(1)
+						return nil, errors.New("database unavailable")
+					}
+					return &testManagedBackend{id: primary}, nil
+				},
+				Retry: func(ctx context.Context, computation func() (ManagedBackend, error)) (ManagedBackend, error) {
+					defer close(retryFinished)
+					close(retryStarted)
+					if exhausted {
+						return computation()
+					}
+					<-ctx.Done()
+					return nil, ctx.Err()
+				},
+				DatabaseUpdate: func(DatabaseUpdate[string]) (bool, error) {
+					handlerCalls++
+					return true, nil // Even an optimistic handler cannot suppress recovery.
+				},
+			})
+			initial := Snapshot[string]{
+				Databases: map[Identifier]string{"shared": "old"},
+				Clusters: map[Identifier]Cluster{
+					"ready":       {Primary: "shared"},
+					"unavailable": {Primary: "shared"},
+				},
+			}
+			require.NoError(t, r.Accept(initial))
+			<-retryStarted
+			pending, found := r.backends.Get("unavailable")
+			require.True(t, found)
+			if exhausted {
+				<-pending.Done()
+				assert.Equal(t, int32(2), failedAttempts.Load())
+			}
+			_, ready := r.GetManagedBackend("unavailable")
+			require.False(t, ready)
+			oldReady, ready := r.GetManagedBackend("ready")
+			require.True(t, ready)
+
+			next := cloneSnapshot(initial)
+			next.Databases["shared"] = "new"
+			require.NoError(t, r.Accept(next))
+			assert.Zero(t, handlerCalls)
+			for _, name := range []Identifier{"ready", "unavailable"} {
+				backend, ready := r.GetManagedBackend(name)
+				require.True(t, ready, "%s must recover through normal recreation", name)
+				assert.Equal(t, "new", backend.(*testManagedBackend).id)
+			}
+			assert.True(t, oldReady.(*testManagedBackend).closed.Load())
+			<-retryFinished
+		})
+	}
+}

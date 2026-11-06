@@ -152,11 +152,10 @@ func (r *Reconciler[D]) reconcileClusters(next Snapshot[D]) error {
 	}
 	logConfigs("clusters", clusters)
 
-	handled, err := r.handleDatabaseUpdates(next, receivedAt)
-	if err != nil {
+	if err := r.handleDatabaseUpdates(next, receivedAt); err != nil {
 		return fmt.Errorf("apply database update: %w", err)
 	}
-	toCreate, toRemove := r.diff(next, handled)
+	toCreate, toRemove := r.Diff(next)
 	// Publish configuration before creating backends, as the app inventory did.
 	snapshot := cloneSnapshot(next)
 	r.databases.Set(snapshot.Databases)
@@ -197,10 +196,6 @@ func (r *Reconciler[D]) reconcileClusters(next Snapshot[D]) error {
 // cluster1 still points to db1, but its connection pool must be rebuilt for the
 // new host.
 func (r *Reconciler[D]) Diff(next Snapshot[D]) (toCreate, toRemove []Identifier) {
-	return r.diff(next, nil)
-}
-
-func (r *Reconciler[D]) diff(next Snapshot[D], handledDatabases map[Identifier]struct{}) (toCreate, toRemove []Identifier) {
 	currentSnapshot := Snapshot[D]{Databases: maps.Collect(r.databases.All()), Clusters: maps.Collect(r.clusters.All())}
 	create := make(map[Identifier]struct{})
 	remove := make(map[Identifier]struct{})
@@ -225,9 +220,6 @@ func (r *Reconciler[D]) diff(next Snapshot[D], handledDatabases map[Identifier]s
 		if !ok || reflect.DeepEqual(current, updated) {
 			continue
 		}
-		if _, handled := handledDatabases[databaseName]; handled {
-			continue
-		}
 		for clusterName, cluster := range next.Clusters {
 			if cluster.Primary == string(databaseName) || slices.Contains(cluster.Replicas, string(databaseName)) {
 				create[clusterName] = struct{}{}
@@ -240,10 +232,9 @@ func (r *Reconciler[D]) diff(next Snapshot[D], handledDatabases map[Identifier]s
 	return toCreate, toRemove
 }
 
-func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.Time) (map[Identifier]struct{}, error) {
-	handled := make(map[Identifier]struct{})
+func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.Time) error {
 	if r.databaseUpdate == nil {
-		return handled, nil
+		return nil
 	}
 	// Do not hold the inventory read lock while recording successful updates.
 	for name, current := range maps.Collect(r.databases.All()) {
@@ -270,19 +261,25 @@ func (r *Reconciler[D]) handleDatabaseUpdates(next Snapshot[D], receivedAt time.
 		if missingCurrentReference {
 			continue // Let normal reconciliation replace the remaining backends.
 		}
+		if slices.ContainsFunc(clusters, func(clusterName Identifier) bool {
+			_, ready := r.GetManagedBackend(clusterName)
+			return !ready
+		}) {
+			// Preserve configuration-driven recovery, including exhausted retries.
+			continue
+		}
 		slices.Sort(clusters)
 		wasHandled, err := r.databaseUpdate(DatabaseUpdate[D]{
 			Name: name, Current: current, Next: updated, Clusters: clusters, ReceivedAt: receivedAt,
 		})
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if wasHandled {
 			r.databases.Put(name, updated)
-			handled[name] = struct{}{}
 		}
 	}
-	return handled, nil
+	return nil
 }
 
 func (r *Reconciler[D]) observeBackendReady(name Identifier, pending *future[ManagedBackend], initial bool, receivedAt time.Time) {
