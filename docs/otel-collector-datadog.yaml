@@ -1,3 +1,8 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+
 # Metrics-only example for otelcol-contrib 0.163.2.
 # Set DD_API_KEY and DD_SITE on the Collector, and configure the proxy with
 # OTEL_METRICS_EXPORTER=otlp and
