@@ -155,7 +155,8 @@ func isBeginReadOnlyTx(txStmt *pg_query.TransactionStmt) bool {
 	for _, opt := range txStmt.GetOptions() {
 		elem := opt.GetDefElem()
 		if elem != nil && elem.GetDefname() == txReadOnly {
-			return true
+			// READ ONLY and READ WRITE use the same option name, with values 1 and 0.
+			return elem.GetArg().GetAConst().GetIval().GetIval() == 1
 		}
 	}
 	return false
