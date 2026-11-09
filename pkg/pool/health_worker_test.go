@@ -1990,6 +1990,50 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	target.finishSQLRound(newRound)
 }
 
+func TestSQLComparisonPrunesEvictedResultsAndRejectsLateCompletion(t *testing.T) {
+	for _, trackPotential := range []bool{false, true} {
+		t.Run(fmt.Sprintf("timing=%t", trackPotential), func(t *testing.T) {
+			s := &PoolHealth{sqlHealthState: NewHealthState()}
+			s.refreshSQLResolved(trackPotential, []string{"A", "B"}, 2)
+			first, second := &sqlHealthTarget{}, &sqlHealthTarget{}
+			at := time.Now()
+			candidates := []string{"A", "B"}
+			results := []SQLHealthCheckResult{{IP: "A", InRecovery: true}, {IP: "B"}}
+			var published *sqlHealthComparisonSnapshot
+			for _, target := range []*sqlHealthTarget{first, second} {
+				published = s.recordSQLComparisonPoll(trackPotential, target, 0, at, at, candidates, SQLHealthCheckOutcome{Results: results})
+			}
+			// A single missing DNS response must not bypass the normal retention threshold.
+			require.ElementsMatch(t, candidates, s.refreshSQLResolved(trackPotential, []string{"A"}, 2))
+			require.Len(t, s.sqlComparisonLatest[first].Results, 2)
+			require.Equal(t, []string{"A"}, s.refreshSQLResolved(trackPotential, []string{"A"}, 2))
+			for _, target := range []*sqlHealthTarget{first, second} {
+				cached := s.sqlComparisonLatest[target]
+				require.Equal(t, []string{"A"}, cached.CandidateIPs)
+				require.Equal(t, results[:1], cached.Results)
+				require.Equal(t, at, cached.ObservedAt)
+			}
+			// Snapshots already handed to hooks must remain independent of cache pruning.
+			for _, snapshot := range published.results {
+				require.Equal(t, results, snapshot.Results)
+			}
+			late := s.recordSQLComparisonPoll(trackPotential, first, 0, at, time.Now(), candidates, SQLHealthCheckOutcome{Results: results})
+			require.NotContains(t, late.health, "B")
+			require.Equal(t, results[:1], s.sqlComparisonLatest[first].Results)
+			require.Equal(t, []string{"A"}, s.sqlComparisonLatest[first].CandidateIPs)
+			require.Equal(t, []string{"A", "B"}, candidates, "filtering must not mutate caller-owned slices")
+			require.Equal(t, []SQLHealthCheckResult{{IP: "A", InRecovery: true}, {IP: "B"}}, results)
+
+			// Rediscovery alone cannot make the removed B result reappear in aggregation.
+			s.refreshSQLResolved(trackPotential, candidates, 2)
+			aOnly := s.recordSQLComparisonPoll(trackPotential, second, 0, at, time.Now(), []string{"A"}, SQLHealthCheckOutcome{Results: results[:1]})
+			require.NotContains(t, aOnly.health, "B")
+			fresh := s.recordSQLComparisonPoll(trackPotential, first, 0, time.Now(), time.Now(), candidates, SQLHealthCheckOutcome{Results: results})
+			require.True(t, fresh.health["B"], "rediscovered IPs can supply fresh evidence")
+		})
+	}
+}
+
 func TestSQLComparisonIgnoresEvictedResultsButPreservesDiagnostics(t *testing.T) {
 	oldIP, newIP := "10.0.0.1", "10.0.0.2"
 	target := &sqlHealthTarget{}

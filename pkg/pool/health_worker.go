@@ -117,7 +117,7 @@ type HealthWorkerHooks struct {
 	Evicted              func(ip string, tags []string)
 }
 
-// SQLHealthResultsSnapshot is one credential target's complete raw result set. Errors remain wrapped
+// SQLHealthResultsSnapshot is one credential target's raw result set for retained IPs. Errors remain wrapped
 // so observability hooks can inspect PostgreSQL SQLSTATEs and errors.Is/errors.As chains.
 type SQLHealthResultsSnapshot struct {
 	ScheduledAt  time.Time
@@ -127,7 +127,7 @@ type SQLHealthResultsSnapshot struct {
 	Results      []SQLHealthCheckResult
 }
 
-// SQLPatroniHealthSnapshot exposes every raw SQL finding alongside the Patroni snapshot used for
+// SQLPatroniHealthSnapshot exposes retained raw SQL findings alongside the Patroni snapshot used for
 // comparison. SQL results may come from different scheduled polls when credentials finish at
 // different rates.
 type SQLPatroniHealthSnapshot struct {
@@ -311,7 +311,15 @@ func (s *PoolHealth) reserveSQLComparisonPoll(
 func (s *PoolHealth) refreshSQLResolved(trackPotential bool, resolved []string, absenceThreshold int) []string {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
-	retained := s.sqlHealthState.RefreshResolved(resolved, absenceThreshold, nil)
+	retained := s.sqlHealthState.RefreshResolved(resolved, absenceThreshold, func(ip string) {
+		// Eviction removes cached evidence, rather than only hiding it during aggregation.
+		// Keep sibling IPs and their original observation timestamps intact.
+		for target, snapshot := range s.sqlComparisonLatest {
+			snapshot.CandidateIPs = slices.DeleteFunc(snapshot.CandidateIPs, func(candidate string) bool { return candidate == ip })
+			snapshot.Results = slices.DeleteFunc(snapshot.Results, func(result SQLHealthCheckResult) bool { return result.IP == ip })
+			s.sqlComparisonLatest[target] = snapshot
+		}
+	})
 	if trackPotential && !s.isReadReplica {
 		s.potentialTiming.updateRetained(retained, time.Now())
 	}
@@ -341,12 +349,22 @@ func (s *PoolHealth) recordSQLComparisonPoll(
 	if s.sqlComparisonLatest == nil {
 		s.sqlComparisonLatest = make(map[*sqlHealthTarget]SQLHealthResultsSnapshot)
 	}
+	// A poll can complete after DNS eviction. Filter owned copies so its callback
+	// cannot restore absent IPs or mutate the caller's diagnostic results.
+	retainedCandidates := slices.DeleteFunc(slices.Clone(candidateIPs), func(ip string) bool {
+		_, retained := retainedIPs[ip]
+		return !retained
+	})
+	retainedResults := slices.DeleteFunc(slices.Clone(outcome.Results), func(result SQLHealthCheckResult) bool {
+		_, retained := retainedIPs[result.IP]
+		return !retained
+	})
 	s.sqlComparisonLatest[target] = SQLHealthResultsSnapshot{
 		ScheduledAt:  scheduledAt,
 		ObservedAt:   observedAt,
-		CandidateIPs: slices.Clone(candidateIPs),
+		CandidateIPs: retainedCandidates,
 		Tags:         slices.Clone(target.tags),
-		Results:      slices.Clone(outcome.Results),
+		Results:      retainedResults,
 	}
 
 	snapshot := buildSQLHealthComparisonSnapshot(retainedIPs, s.sqlComparisonLatest)
