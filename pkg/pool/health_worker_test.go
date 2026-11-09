@@ -694,6 +694,86 @@ func TestHybridEvaluationUsesCompleteCredentialSnapshots(t *testing.T) {
 	}
 }
 
+func TestHybridEvaluationUsesNewestRoundForConflictingRoles(t *testing.T) {
+	const ip = "10.0.0.1"
+	for _, primaryFirst := range []bool{false, true} {
+		t.Run(fmt.Sprintf("primaryCompletesFirst=%t", primaryFirst), func(t *testing.T) {
+			state := NewHealthState()
+			state.Track([]string{ip})
+			health := &PoolHealth{
+				sqlHealthState: state, state: NewHealthState(),
+				hybridPolicy:     newHybridHealthPolicy(true),
+				routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+			}
+			health.state.RecordHealthAt(time.Now(), map[string]bool{ip: false})
+			oldTarget, newTarget := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
+			var iterations []SQLIteration
+			var comparisons []SQLPatroniHealthSnapshot
+			w := &HealthWorker{
+				sqlHooks: SQLHealthWorkerHooks{Iteration: func(i SQLIteration, _ []string) { iterations = append(iterations, i) }},
+				hooks:    HealthWorkerHooks{SQLPatroniCompared: func(s SQLPatroniHealthSnapshot, _ []string) { comparisons = append(comparisons, s) }},
+			}
+			oldRound := time.Now()
+			newRound := oldRound.Add(time.Second)
+			complete := func(target *sqlHealthTarget, round time.Time, standby bool) {
+				w.completeSQLHealthCheck(target, 0, round, []string{ip}, map[string]struct{}{ip: {}}, SQLHealthCheckOutcome{
+					Results: []SQLHealthCheckResult{{IP: ip, InRecovery: standby}},
+				})
+			}
+			if primaryFirst {
+				complete(newTarget, newRound, false)
+				complete(oldTarget, oldRound, true) // A delayed old completion must not restore standby.
+			} else {
+				complete(oldTarget, oldRound, true)
+				complete(newTarget, newRound, false)
+			}
+			require.Len(t, iterations, 2)
+			assert.Equal(t, SQLRoutingResultConclusive, iterations[1].RoutingResult)
+			require.Len(t, comparisons, 2)
+			assert.Equal(t, map[string]bool{ip: true}, comparisons[1].SQLHealth)
+			assert.Empty(t, comparisons[1].SQLConflictingIPs)
+			assert.Len(t, comparisons[1].SQLResults, 2, "retain both raw credential snapshots for diagnostics")
+			assert.False(t, health.IsHealthy(ip), "hybrid evaluation must remain shadow-only")
+
+			// A successful standby from the same round is genuinely conflicting evidence.
+			complete(oldTarget, newRound, true)
+			assert.Equal(t, SQLHealthFallbackConflictingRoles, iterations[2].FallbackReason)
+			assert.Equal(t, SQLRoutingResultCachedFallback, iterations[2].RoutingResult)
+			assert.Equal(t, []string{ip}, comparisons[2].SQLConflictingIPs)
+
+			// A newer standby round supersedes the primary, just as promotion supersedes standby.
+			complete(oldTarget, newRound.Add(time.Second), true)
+			assert.Equal(t, SQLRoutingResultConclusive, iterations[3].RoutingResult)
+			assert.Equal(t, map[string]bool{ip: false}, comparisons[3].SQLHealth)
+			assert.Empty(t, comparisons[3].SQLConflictingIPs)
+		})
+	}
+}
+
+func TestSQLComparisonSelectsNewestRoundPerIPIncludingErrors(t *testing.T) {
+	const primary, standby, evicted = "10.0.0.1", "10.0.0.2", "10.0.0.3"
+	oldRound := time.Now()
+	newRound := oldRound.Add(time.Second)
+	oldTarget, newTarget := &sqlHealthTarget{}, &sqlHealthTarget{}
+	for _, err := range []error{context.DeadlineExceeded, &pgconn.PgError{Code: "28P01"}, &pgconn.PgError{Code: "57P01"}} {
+		t.Run(err.Error(), func(t *testing.T) {
+			latest := map[*sqlHealthTarget]SQLHealthResultsSnapshot{
+				oldTarget: {ScheduledAt: oldRound, ObservedAt: newRound.Add(time.Second), Results: []SQLHealthCheckResult{
+					{IP: primary}, {IP: standby, InRecovery: true}, {IP: evicted},
+				}},
+				newTarget: {ScheduledAt: newRound, ObservedAt: newRound, Results: []SQLHealthCheckResult{{IP: primary, Err: err}}},
+			}
+			snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{primary: {}, standby: {}}, latest)
+			assert.Equal(t, map[string]bool{standby: false}, snapshot.health,
+				"new errors must not resurrect old primary evidence; other IPs keep their own newest round")
+			assert.Empty(t, snapshot.conflictingIPs)
+			assert.ElementsMatch(t, []SQLHealthCheckResult{{IP: primary, Err: err}, {IP: standby, InRecovery: true}}, snapshot.latestRoundResults)
+			assert.Len(t, snapshot.results, 2)
+			assert.Len(t, latest[oldTarget].Results, 3, "selection must not mutate raw cached evidence")
+		})
+	}
+}
+
 func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.T) {
 	const ip = "10.0.0.1"
 	state := NewHealthState()
@@ -733,10 +813,10 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	assert.NoError(t, health.sqlComparisonLatest[b].Results[0].Err)
 	assert.Empty(t, conclusiveErrors, "a timeout resolved by another credential is still an indeterminate error")
 
-	// Once all latest credential results are unknown, comparison and hybrid evaluation must
-	// both stop relying on the previous successful observations.
+	// A newer round with only unknown results supersedes all older successful observations
+	// immediately; another credential from that newer round can still resolve the IP.
 	complete(a, t0.Add(2*time.Second), context.DeadlineExceeded)
-	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
+	assert.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
 	complete(b, t0.Add(2*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
 	assert.Equal(t, SQLHealthFallbackTimeout, iterations[len(iterations)-1].FallbackReason)
