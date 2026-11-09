@@ -136,8 +136,8 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 
 		// handle unnamed prepared statements (and that are not autocached)
 		if !prepared.IsNamedPreparedStmt(m.Name) && !state.AutoPreparedStmtsEnabled {
-			// TODO: https://datadoghq.atlassian.net/browse/ORGSTORE-1124
-			// Update in Phase 2
+			// TODO: track unnamed prepared statements across backend releases
+			// instead of treating them as one-off queries.
 			return handleClientQuery(m.Query, ExtendedQueryProtocol, action, state, hooks)
 		}
 		if hooks.NamedPreparedStmtObserved != nil {

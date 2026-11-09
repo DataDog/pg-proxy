@@ -297,7 +297,7 @@ func (p *proxyPreparedStmtsState) EnqueuePendingStmt(pendingPreparedStmt Prepare
 func (p *proxyPreparedStmtsState) ConfirmPendingStmt() QueuedPreparedStatement {
 	if len(p.allPendingPreparedStmtsQueue) == 0 {
 		// this signifies a bug in the code
-		pgproxy.Logger().Error("unexpectedly attempted to confirm pending prepared stmt when there are no known pending stmts, please contact OrgStore")
+		pgproxy.Logger().Error("unexpectedly attempted to confirm pending prepared stmt when there are no known pending stmts; this is a pg-proxy bug")
 		return nil
 	}
 	successfulStmt := p.allPendingPreparedStmtsQueue[0]

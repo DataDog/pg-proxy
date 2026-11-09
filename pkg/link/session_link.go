@@ -270,7 +270,7 @@ func (link *SessionLink) logNonIdleRelease(computedState string, pid uint32) {
 
 func (link *SessionLink) nonIdleReleaseLogMessage(computedState string, pid uint32) string {
 	return fmt.Sprintf(
-		"Releasing non-idle session link. state: %s, backend PID: %d, expectations: %q, tags: %q. Read more about this error: https://datadoghq.atlassian.net/wiki/x/rAC3PgE",
+		"Releasing non-idle session link. state: %s, backend PID: %d, expectations: %q, tags: %q.",
 		computedState,
 		pid,
 		link.DebugExpectationString(),

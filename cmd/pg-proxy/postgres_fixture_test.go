@@ -19,8 +19,19 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 )
 
-// An explicit disposable PostgreSQL URL lets CI execute the suite without access
-// to the internal container registry. The existing Docker fixture stays intact.
+// defaultPostgresTestImage is the public image the Docker fixture starts. Set
+// PG_PROXY_TEST_POSTGRES_IMAGE to use another image or registry mirror.
+const defaultPostgresTestImage = "postgres:14"
+
+func postgresTestImage() string {
+	if image := os.Getenv("PG_PROXY_TEST_POSTGRES_IMAGE"); image != "" {
+		return image
+	}
+	return defaultPostgresTestImage
+}
+
+// An explicit disposable PostgreSQL URL lets CI execute the suite without
+// starting a container. Otherwise the Docker fixture starts postgresTestImage.
 func postgresTestConnectionString(t *testing.T, ctx context.Context) func(context.Context, ...string) (string, error) {
 	t.Helper()
 	if value, supplied := os.LookupEnv("PG_PROXY_TEST_DATABASE_URL"); supplied {
@@ -42,8 +53,7 @@ func postgresTestConnectionString(t *testing.T, ctx context.Context) func(contex
 		}
 	}
 	testcontainers.SkipIfProviderIsNotHealthy(t)
-	t.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "registry.ddbuild.io/images/mirror")
-	pg, err := postgres.Run(ctx, "registry.ddbuild.io/images/postgres-official:14-gbi",
+	pg, err := postgres.Run(ctx, postgresTestImage(),
 		postgres.WithDatabase("postgres"), postgres.WithUsername("postgres"), postgres.WithPassword("postgres"),
 		testcontainers.WithWaitStrategy(wait.ForLog("database system is ready to accept connections").WithOccurrence(2)))
 	require.NoError(t, err)

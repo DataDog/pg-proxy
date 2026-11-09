@@ -362,7 +362,7 @@ func (r *Reconciler[D]) createBackendWithRetries(name Identifier) *future[Manage
 	}
 	pgproxy.Logger().Error(fmt.Sprintf("failed to create state for cluster %q (will retry in the background): %v", name, err))
 
-	// TODO(OSQQUERY-447): tie each created Backend's lifetime to its owning future.
+	// TODO: tie each created Backend's lifetime to its owning future.
 	//
 	// The factory currently receives the long-lived Reconciler context. On the
 	// background-retry path, this can leak a fully built Backend: if a config

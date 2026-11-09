@@ -84,7 +84,7 @@ func TestIdleSessionRemappingIsTransparentToClient(t *testing.T) {
 		_, closer := runTestSession(t, session, fakeClient)
 		defer closer()
 
-		// Simulate logical database re-mapping by the COBS poller
+		// Simulate logical database re-mapping by a configuration refresh
 		session.RemapBackend(newBackend)
 
 		// RemapState doesn't immediately change original state from NewTestSession
@@ -213,7 +213,7 @@ func TestSessionRemappingReturnsErrorDuringTransaction(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'T'}, readyForQueryMessage)
 
-		// Simulate logical database re-mapping by the COBS poller
+		// Simulate logical database re-mapping by a configuration refresh
 		newBackend := &fixedBackend{backendLink: &testLink{}, loadShedder: &passthroughLoadShedder{}}
 		session.RemapBackend(newBackend)
 

@@ -101,6 +101,5 @@ requires the session's PID and secret key. Cancellation over TLS also works.
 See [listener configuration](../pkg/listener/listener.go) and
 [server configuration](../pkg/server/server.go).
 
-Certificate sourcing stays with the application. Datadog's dd-source app uses
-Emissary SDS to supply and rotate its `tls.Config`; it does not use the command's
-PEM file loader. This command feature needs no dd-source TLS changes.
+Certificate sourcing stays with the application. An embedder can supply and
+rotate its own `tls.Config` instead of using the command's PEM file loader.

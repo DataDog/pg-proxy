@@ -14,7 +14,7 @@ import (
 )
 
 // mirroringLink wraps a Link so everything the session forwards to the source is
-// also queued for shadow replay (OSQQUERY-92). The mirror decision is made once,
+// also queued for shadow replay. The mirror decision is made once,
 // when the link is created; from then on Send/Flush are the single choke point
 // for mirroring, so the session can't forget to mirror a message it sends.
 //

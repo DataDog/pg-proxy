@@ -33,7 +33,7 @@ const (
 // for more information on the format, particularly the "-c" parameter and the
 // pg-proxy.<option> syntax.
 //
-// TODO: ORGSTORE-1791 Remove `-c` because it's not needed and adds complexity
+// TODO: Remove `-c` because it's not needed and adds complexity.
 // Matches flags like: pg_proxy.<key>=<value> where both are alphanumeric/underscore
 var optionsRegex = regexp.MustCompile(`-c pg_proxy\.(\w+)=([\w$]+)`)
 
