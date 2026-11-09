@@ -140,10 +140,11 @@ type SQLHealthResultsSnapshot struct {
 // comparison. SQL results may come from different scheduled polls when credentials finish at
 // different rates.
 type SQLPatroniHealthSnapshot struct {
-	// SQLHealth contains only roles on which the latest determinate credential results agree.
+	// SQLHealth contains roles agreed on by determinate results from the newest scheduled round
+	// for each IP. Older rounds remain in SQLResults for diagnostics but do not establish roles.
 	// Retained addresses with only inconclusive results are unknown and absent from this map.
 	SQLHealth map[string]bool
-	// SQLConflictingIPs lists addresses observed as both primary and standby by current targets.
+	// SQLConflictingIPs lists addresses observed as both primary and standby in their newest round.
 	SQLConflictingIPs []string
 	SQLRetainedIPs    []string
 	SQLResults        []SQLHealthResultsSnapshot
@@ -297,6 +298,9 @@ type sqlHealthComparisonSnapshot struct {
 	health         map[string]bool
 	retainedIPs    []string
 	results        []SQLHealthResultsSnapshot
+	// latestRoundResults includes all evidence (including errors) from each retained IP's
+	// newest scheduled round. Both comparison and hybrid evaluation use this selection.
+	latestRoundResults []SQLHealthCheckResult
 }
 
 func (s *PoolHealth) disableSQLComparisonTarget(target *sqlHealthTarget) {
@@ -396,16 +400,31 @@ func buildSQLHealthComparisonSnapshot(
 		results:     make([]SQLHealthResultsSnapshot, 0, len(latest)),
 	}
 	slices.Sort(snapshot.retainedIPs)
-	conflicts := make(map[string]struct{})
+	// A completed newer round supersedes older evidence for the same IP, even if it
+	// failed. Use scheduling time: a slow older probe can finish after a newer one.
+	newestRoundByIP := make(map[string]time.Time, len(retainedIPs))
 	for _, targetSnapshot := range latest {
 		snapshot.results = append(snapshot.results, cloneSQLHealthResultsSnapshot(targetSnapshot))
 		for _, result := range targetSnapshot.Results {
-			// Every error is an unknown role for this credential's latest poll. Another
-			// credential may supply a determinate role, but historical successes cannot.
-			if result.Err != nil {
+			if _, retained := retainedIPs[result.IP]; !retained {
 				continue
 			}
-			if _, retained := retainedIPs[result.IP]; !retained {
+			if previous, exists := newestRoundByIP[result.IP]; !exists || targetSnapshot.ScheduledAt.After(previous) {
+				newestRoundByIP[result.IP] = targetSnapshot.ScheduledAt
+			}
+		}
+	}
+	conflicts := make(map[string]struct{})
+	for _, targetSnapshot := range snapshot.results {
+		for _, result := range targetSnapshot.Results {
+			newestRound, retained := newestRoundByIP[result.IP]
+			if !retained || !targetSnapshot.ScheduledAt.Equal(newestRound) {
+				continue
+			}
+			snapshot.latestRoundResults = append(snapshot.latestRoundResults, result)
+			// Errors do not establish a role. Another credential in this same round
+			// may resolve the IP, but an older successful observation cannot.
+			if result.Err != nil {
 				continue
 			}
 			role := result.HealthyPrimary()
@@ -1006,16 +1025,8 @@ func (w *HealthWorker) completeSQLHealthCheck(
 				return false
 			}
 		}
-		results := make([]SQLHealthCheckResult, 0)
-		for _, credential := range snapshot.results {
-			for _, result := range credential.Results {
-				if slices.Contains(snapshot.retainedIPs, result.IP) {
-					results = append(results, result)
-				}
-			}
-		}
 		policy.setRoutingEnabled(routingEnabled)
-		decision = policy.observeSQL(snapshot.retainedIPs, aggregateSQLHealthCheckResults(results).Outcome, time.Now())
+		decision = policy.observeSQL(snapshot.retainedIPs, aggregateSQLHealthCheckResults(snapshot.latestRoundResults).Outcome, time.Now())
 		return true
 	}()
 	w.reportSQLPatroniComparison(poolHealth, snapshot)
