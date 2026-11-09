@@ -17,9 +17,9 @@ const (
 	customDataPreparedStmtsKey = "preparedStmts"
 	customDataStatsKey         = "preparedStmtsStats"
 
-	connPreparedStmtDeallocatedCount = "dd.orgstore.pg_proxy.sessions.connections.prepared_stmt.deallocated.count"
-	connPreparedStmtCreatedCount     = "dd.orgstore.pg_proxy.sessions.connections.prepared_stmt.created.count"
-	connPreparedStmtMaxUsage         = "dd.orgstore.pg_proxy.sessions.connections.prepared_stmt.max_usage"
+	connPreparedStmtDeallocatedCount = "pg_proxy.sessions.connections.prepared_stmt.deallocated.count"
+	connPreparedStmtCreatedCount     = "pg_proxy.sessions.connections.prepared_stmt.created.count"
+	connPreparedStmtMaxUsage         = "pg_proxy.sessions.connections.prepared_stmt.max_usage"
 )
 
 // statistics associated with a connection

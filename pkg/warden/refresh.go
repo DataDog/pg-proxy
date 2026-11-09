@@ -75,7 +75,7 @@ func (r *Refresher[C]) Refresh() error {
 	defer r.mu.Unlock()
 	if r.hasAppliedSourceRevision && sourceRevision <= r.latestAppliedSourceRevision {
 		pgproxy.Logger().Debug(fmt.Sprintf("skipping configuration update based on source change counters: source_revision=%d latest_applied_source_revision=%d", sourceRevision, r.latestAppliedSourceRevision))
-		pgproxy.Metrics().Count("dd.orgstore.pg_proxy.warden.accept.count", 1, []string{"outcome:skipped"}, 1)
+		pgproxy.Metrics().Count("pg_proxy.warden.accept.count", 1, []string{"outcome:skipped"}, 1)
 		return nil
 	}
 	pgproxy.Logger().Info(fmt.Sprintf("applying configuration using source change counter: source_revision=%d configuration=%#v", sourceRevision, &cfg))

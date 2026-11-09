@@ -11,6 +11,7 @@ import (
 	"io"
 	"testing"
 
+	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 )
@@ -74,7 +75,7 @@ func bodyLengthTestSession(wire []byte) (*Session, *recordingSessionMetrics) {
 func bodyLengthCalls(metrics *recordingSessionMetrics) []metricCall {
 	var calls []metricCall
 	for _, call := range metrics.distributions {
-		if call.name == MetricClientMessageBodyLength {
+		if call.name == pgproxy.MetricName(MetricClientMessageBodyLength) {
 			calls = append(calls, call)
 		}
 	}
@@ -88,7 +89,7 @@ func TestClientMessageBodyLengthSessionReads(t *testing.T) {
 		s, metrics := bodyLengthTestSession(wire)
 		require.ErrorIs(t, s.receiveAndHandleMessage(), io.EOF)
 		require.Equal(t, []metricCall{{
-			name: MetricClientMessageBodyLength, value: 0, tags: []string{"database:test", "message:terminate"},
+			name: pgproxy.MetricName(MetricClientMessageBodyLength), value: 0, tags: []string{"database:test", "message:terminate"},
 		}}, bodyLengthCalls(metrics))
 	})
 	t.Run("in flight", func(t *testing.T) {
@@ -102,7 +103,7 @@ func TestClientMessageBodyLengthSessionReads(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, wire, encoded)
 		require.Equal(t, []metricCall{{
-			name: MetricClientMessageBodyLength, value: float64(len(wire) - 5), tags: []string{"database:test", "message:bind"},
+			name: pgproxy.MetricName(MetricClientMessageBodyLength), value: float64(len(wire) - 5), tags: []string{"database:test", "message:bind"},
 		}}, bodyLengthCalls(metrics))
 	})
 	t.Run("discard until sync counts each message once", func(t *testing.T) {
@@ -115,8 +116,8 @@ func TestClientMessageBodyLengthSessionReads(t *testing.T) {
 		s.setDiscardUntilSync(true)
 		require.NoError(t, s.drainUntilSync())
 		require.Equal(t, []metricCall{
-			{name: MetricClientMessageBodyLength, value: float64(bindSize), tags: []string{"database:test", "message:bind"}},
-			{name: MetricClientMessageBodyLength, value: 0, tags: []string{"database:test", "message:sync"}},
+			{name: pgproxy.MetricName(MetricClientMessageBodyLength), value: float64(bindSize), tags: []string{"database:test", "message:bind"}},
+			{name: pgproxy.MetricName(MetricClientMessageBodyLength), value: 0, tags: []string{"database:test", "message:sync"}},
 		}, bodyLengthCalls(metrics))
 	})
 }

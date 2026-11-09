@@ -92,9 +92,9 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	child.SetTag("db.parameters", "42,alice")
 	child.Finish(nil)
 	root.Finish(nil)
-	require.NoError(t, pgproxy.Metrics().Count("dd.orgstore.pg_proxy.query", 3, []string{"database:orders"}, 1))
-	require.NoError(t, pgproxy.Metrics().Distribution("dd.orgstore.pg_proxy.size", 12, nil, 1))
-	require.NoError(t, pgproxy.Metrics().Timing("dd.orgstore.pg_proxy.latency", 5*time.Millisecond, nil, 1))
+	require.NoError(t, pgproxy.Metrics().Count("datadog.pg_proxy.query", 3, []string{"database:orders"}, 1))
+	require.NoError(t, pgproxy.Metrics().Distribution("datadog.pg_proxy.size", 12, nil, 1))
+	require.NoError(t, pgproxy.Metrics().Timing("datadog.pg_proxy.latency", 5*time.Millisecond, nil, 1))
 	pgproxy.Logger().Warn("ready", "database", "orders")
 	// Close must flush buffered traces and metrics, and be safe to call twice.
 	require.NoError(t, shutdown())
@@ -122,9 +122,9 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	require.Equal(t, "42,alice", childSpan.Meta["db.parameters"])
 	require.NoError(t, udp.SetReadDeadline(time.Now().Add(3*time.Second)))
 	var packets strings.Builder
-	for !strings.Contains(packets.String(), "dd.orgstore.pg_proxy.query:3|c") ||
-		!strings.Contains(packets.String(), "dd.orgstore.pg_proxy.size:12|d") ||
-		!strings.Contains(packets.String(), "dd.orgstore.pg_proxy.latency:5.000000|ms") {
+	for !strings.Contains(packets.String(), "datadog.pg_proxy.query:3|c") ||
+		!strings.Contains(packets.String(), "datadog.pg_proxy.size:12|d") ||
+		!strings.Contains(packets.String(), "datadog.pg_proxy.latency:5.000000|ms") {
 		buffer := make([]byte, 65535)
 		n, _, err := udp.ReadFrom(buffer)
 		require.NoError(t, err, packets.String())
@@ -142,7 +142,7 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	}
 	t.Logf("Datadog trace: service=%s trace_id=%d parent_id=%d db.parameters=%q", rootSpan.Service, rootSpan.TraceID, rootSpan.ParentID, childSpan.Meta["db.parameters"])
 	for _, packet := range strings.Split(packets.String(), "\n") {
-		if strings.HasPrefix(packet, "dd.orgstore.pg_proxy.") {
+		if strings.HasPrefix(packet, "datadog.pg_proxy.") {
 			t.Logf("DogStatsD received: %s", packet)
 		}
 	}

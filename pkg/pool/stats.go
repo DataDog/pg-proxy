@@ -27,10 +27,10 @@ func exportPoolStats(stats *pgxpool.Stat, tags []string, isDirectPool bool, maxC
 	tags = append(tags, fmt.Sprintf("direct_pool:%t", isDirectPool))
 	metrics := pgproxy.Metrics()
 
-	_ = metrics.Gauge("dd.orgstore.pg_proxy.connections.pool_total", float64(stats.TotalConns()), tags, 1)
-	_ = metrics.Gauge("dd.orgstore.pg_proxy.connections.pool_acquired", float64(stats.AcquiredConns()), tags, 1)
-	_ = metrics.Gauge("dd.orgstore.pg_proxy.connections.pool_acquired_total", float64(stats.AcquireCount()), tags, 1)
-	_ = metrics.Gauge("dd.orgstore.pg_proxy.connections.pool_idle", float64(stats.IdleConns()), tags, 1)
-	_ = metrics.Gauge("dd.orgstore.pg_proxy.connections.pool_constructing", float64(stats.ConstructingConns()), tags, 1)
-	_ = metrics.Gauge("dd.orgstore.pg_proxy.connections.pool_max", float64(maxConns), tags, 1)
+	_ = metrics.Gauge("pg_proxy.connections.pool_total", float64(stats.TotalConns()), tags, 1)
+	_ = metrics.Gauge("pg_proxy.connections.pool_acquired", float64(stats.AcquiredConns()), tags, 1)
+	_ = metrics.Gauge("pg_proxy.connections.pool_acquired_total", float64(stats.AcquireCount()), tags, 1)
+	_ = metrics.Gauge("pg_proxy.connections.pool_idle", float64(stats.IdleConns()), tags, 1)
+	_ = metrics.Gauge("pg_proxy.connections.pool_constructing", float64(stats.ConstructingConns()), tags, 1)
+	_ = metrics.Gauge("pg_proxy.connections.pool_max", float64(maxConns), tags, 1)
 }

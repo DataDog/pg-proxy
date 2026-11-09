@@ -19,14 +19,14 @@ import (
 const (
 	pgSeverityFatal = "FATAL"
 
-	MetricBufferFlushCount        = "dd.orgstore.pg_proxy.sessions.buffer_flush.count"
+	MetricBufferFlushCount        = "pg_proxy.sessions.buffer_flush.count"
 	MetricFlushPostgresLatency    = pgproxy.MetricFlushPostgresLatency
-	MetricClientMessageBodyLength = "dd.orgstore.pg_proxy.client_messages.body_length_bytes"
-	MetricMessages                = "dd.orgstore.pg_proxy.messages"
+	MetricClientMessageBodyLength = "pg_proxy.client_messages.body_length_bytes"
+	MetricMessages                = "pg_proxy.messages"
 	MetricMessageLatency          = pgproxy.MetricMessageLatency
-	MetricQueries                 = "dd.orgstore.pg_proxy.messages.queries"
+	MetricQueries                 = "pg_proxy.messages.queries"
 	MetricQueryParseLatency       = pgproxy.MetricQueryParseLatency
-	MetricLoadSheddingRejected    = "dd.orgstore.pg_proxy.messages.load_shedding_rejected"
+	MetricLoadSheddingRejected    = "pg_proxy.messages.load_shedding_rejected"
 )
 
 // MetricTags carries both the tags sent to DogStatsD and a stable lookup key.
@@ -68,7 +68,19 @@ func resolveMetrics(metrics Metrics) Metrics {
 	if metrics == nil {
 		return directMetrics{}
 	}
-	return metrics
+	return namespacedMetrics{inner: metrics}
+}
+
+// namespacedMetrics applies the configured metric namespace before a
+// caller-supplied sink sees the name, matching what directMetrics emits.
+type namespacedMetrics struct{ inner Metrics }
+
+func (m namespacedMetrics) Count(name string, value int64, tags MetricTags) {
+	m.inner.Count(pgproxy.MetricName(name), value, tags)
+}
+
+func (m namespacedMetrics) Distribution(name string, value float64, tags MetricTags) {
+	m.inner.Distribution(pgproxy.MetricName(name), value, tags)
 }
 
 func newMetricTags(tags []string) MetricTags {
@@ -135,7 +147,7 @@ func (s *Session) recordQueryClassified(sql string, protocol actions.PGQueryProt
 		return
 	}
 	s.metrics.Count(
-		"dd.orgstore.pg_proxy.messages.queries.multiple_statements",
+		"pg_proxy.messages.queries.multiple_statements",
 		1,
 		s.obsVals.baseMetricTags(),
 	)
@@ -198,7 +210,7 @@ func (s *Session) recordLoadSheddingRejected() {
 
 func (s *Session) recordDrained() {
 	s.metrics.Count(
-		"dd.orgstore.pg_proxy.sessions.drained_connections",
+		"pg_proxy.sessions.drained_connections",
 		1,
 		s.obsVals.baseMetricTags(),
 	)
@@ -213,12 +225,12 @@ func (s *Session) recordCloseError(err error) {
 	} else {
 		pgproxy.Logger().Warn(message)
 	}
-	s.metrics.Count("dd.orgstore.pg_proxy.sessions.close_errors", 1, newMetricTags(tags))
+	s.metrics.Count("pg_proxy.sessions.close_errors", 1, newMetricTags(tags))
 }
 
 func (s *Session) recordBackendDestroyed(path string) {
 	s.metrics.Count(
-		"dd.orgstore.pg_proxy.sessions.connections.destroyed",
+		"pg_proxy.sessions.connections.destroyed",
 		1,
 		newMetricTags(appendTags(s.obsVals.metricTags, "reason:client_disconnect", "path:"+path)),
 	)

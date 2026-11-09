@@ -102,19 +102,19 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 
 	assert.Equal(t, []listenerMetricCall{
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"outcome:error", "placement:tls_upgrade_failure"}, rate: 1,
 		},
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"outcome:error", "placement:load_shedding"}, rate: 1,
 		},
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"user:limited", "database:testdb", "client_service_account:limited", "passthrough_user:false", "outcome:error", "error_type:service_limit_exceeded", "placement:register_session", "client_notified:true"}, rate: 1,
 		},
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"user:successful", "database:testdb", "client_service_account:successful", "passthrough_user:false", "outcome:successful", "with_dynamic_routing:false"}, rate: 1,
 		},
 	}, metrics.counts)

@@ -7,6 +7,7 @@ package otel_test
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -29,7 +30,7 @@ func TestMetricSDKCollection(t *testing.T) {
 	require.NoError(t, pgproxy.Metrics().Gauge("connections", 7, tags, 1))
 	require.NoError(t, pgproxy.Metrics().Distribution("rows", 10, tags, 1))
 	// Similar names must not silently acquire latency units or buckets.
-	const customMetric = "dd.orgstore.pg_proxy.custom_us"
+	const customMetric = "pg_proxy.custom_us"
 	require.NoError(t, pgproxy.Metrics().Distribution(customMetric, 20_000, tags, 1))
 	require.NoError(t, pgproxy.Metrics().Timing("latency", 1500*time.Microsecond, tags, 1))
 	var result metricdata.ResourceMetrics
@@ -37,7 +38,7 @@ func TestMetricSDKCollection(t *testing.T) {
 	require.Len(t, result.ScopeMetrics, 1)
 	metrics := map[string]metricdata.Metrics{}
 	for _, m := range result.ScopeMetrics[0].Metrics {
-		metrics[m.Name] = m
+		metrics[strings.TrimPrefix(m.Name, pgproxy.DefaultMetricNamespace)] = m
 	}
 	count := metrics["queries"].Data.(metricdata.Sum[int64]).DataPoints[0]
 	require.Equal(t, int64(3), count.Value)

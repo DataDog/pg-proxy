@@ -25,6 +25,12 @@ type Dependencies struct {
 	// Metrics receives the library's telemetry. Optional: nil discards metrics.
 	Metrics MetricsClient
 
+	// MetricNamespace is prepended to every metric name the library emits,
+	// for example "datadog." + "pg_proxy.messages". Empty selects
+	// DefaultMetricNamespace. Do not also configure a namespace on the client
+	// itself (such as statsd.WithNamespace), or names are prefixed twice.
+	MetricNamespace string
+
 	// Tracer receives query spans. Optional: nil disables tracing.
 	Tracer Tracer
 }
@@ -34,10 +40,11 @@ type Dependencies struct {
 // particular are emitted from per-message code, where an RWMutex would
 // contend across every session goroutine.
 type resolved struct {
-	deps    Dependencies
-	logger  *slog.Logger
-	metrics MetricsClient
-	tracer  Tracer
+	deps      Dependencies
+	logger    *slog.Logger
+	metrics   MetricsClient
+	namespace string
+	tracer    Tracer
 }
 
 var current atomic.Pointer[resolved]
@@ -95,16 +102,20 @@ func Metrics() MetricsClient { return current.Load().metrics }
 
 func resolve(d Dependencies) *resolved {
 	r := &resolved{
-		deps:    d,
-		logger:  slog.New(slog.DiscardHandler),
-		metrics: NoopMetrics{},
-		tracer:  NoopTracer{},
+		deps:      d,
+		logger:    slog.New(slog.DiscardHandler),
+		metrics:   NoopMetrics{},
+		namespace: d.MetricNamespace,
+		tracer:    NoopTracer{},
+	}
+	if r.namespace == "" {
+		r.namespace = DefaultMetricNamespace
 	}
 	if d.LogHandler != nil {
 		r.logger = slog.New(d.LogHandler)
 	}
 	if d.Metrics != nil {
-		r.metrics = d.Metrics
+		r.metrics = namespacedMetrics{namespace: r.namespace, inner: d.Metrics}
 	}
 	if d.Tracer != nil {
 		r.tracer = d.Tracer

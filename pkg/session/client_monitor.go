@@ -143,7 +143,7 @@ func (s *Session) startClientMonitor() (*clientMonitor, context.Context) {
 			case <-ticker.C:
 				if probe.IsDisconnected() {
 					pgproxy.Logger().Info("client disconnection detected", "session_id", s.pid)
-					_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.client_disconnected", 1, s.obsVals.metricTags, 1)
+					_ = pgproxy.Metrics().Count("pg_proxy.sessions.client_disconnected", 1, s.obsVals.metricTags, 1)
 
 					s.clientDisconnected.Store(true)
 					cancel(ErrClientDisconnected) // abort a pending AcquireConnection with an identifiable cause

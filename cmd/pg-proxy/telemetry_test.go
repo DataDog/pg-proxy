@@ -185,8 +185,8 @@ func TestTelemetryOTLPMetricTemporality(t *testing.T) {
 			deps, shutdown, err := setupTelemetry(t.Context(), telemetryConfig{Metrics: metricOTel})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = shutdown() })
-			require.NoError(t, deps.Metrics.Count("dd.orgstore.pg_proxy.messages", 3, nil, 1))
-			require.NoError(t, deps.Metrics.Incr("dd.orgstore.pg_proxy.messages", nil, 1))
+			require.NoError(t, deps.Metrics.Count("datadog.pg_proxy.messages", 3, nil, 1))
+			require.NoError(t, deps.Metrics.Incr("datadog.pg_proxy.messages", nil, 1))
 			require.NoError(t, shutdown())
 			receiver.mu.Lock()
 			defer receiver.mu.Unlock()
@@ -669,7 +669,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 		requireResource(t, resource.Resource.Attributes)
 		for _, scope := range resource.ScopeMetrics {
 			for _, metric := range scope.Metrics {
-				if metric.Name == "dd.orgstore.pg_proxy.messages.queries" {
+				if metric.Name == "datadog.pg_proxy.messages.queries" {
 					for _, point := range metric.GetSum().GetDataPoints() {
 						queryMetric = queryMetric || point.GetAsInt() > 0
 					}

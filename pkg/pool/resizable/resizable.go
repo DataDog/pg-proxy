@@ -18,8 +18,8 @@ import (
 )
 
 const (
-	poolResizeMetric        = "dd.orgstore.pg_proxy.connections.pool_resize"
-	poolLimitMetric         = "dd.orgstore.pg_proxy.connections.pool_limit"
+	poolResizeMetric        = "pg_proxy.connections.pool_resize"
+	poolLimitMetric         = "pg_proxy.connections.pool_limit"
 	retirementRetryInterval = 50 * time.Millisecond
 )
 

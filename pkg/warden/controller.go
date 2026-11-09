@@ -104,11 +104,11 @@ func (c *Controller[C, D]) Accept(cfg C) (err error) {
 	start := time.Now()
 	defer func() {
 		if err != nil {
-			pgproxy.Metrics().Count("dd.orgstore.pg_proxy.warden.accept.count", 1, []string{"outcome:error"}, 1)
+			pgproxy.Metrics().Count("pg_proxy.warden.accept.count", 1, []string{"outcome:error"}, 1)
 			return
 		}
-		pgproxy.Metrics().Timing("dd.orgstore.pg_proxy.warden.accept.duration", time.Since(start), nil, 1)
-		pgproxy.Metrics().Count("dd.orgstore.pg_proxy.warden.accept.count", 1, []string{"outcome:success"}, 1)
+		pgproxy.Metrics().Timing("pg_proxy.warden.accept.duration", time.Since(start), nil, 1)
+		pgproxy.Metrics().Count("pg_proxy.warden.accept.count", 1, []string{"outcome:success"}, 1)
 	}()
 	if c.hooks.BeforeAccept != nil {
 		if beforeErr := c.hooks.BeforeAccept(cfg); beforeErr != nil {
