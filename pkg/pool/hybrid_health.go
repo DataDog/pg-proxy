@@ -12,15 +12,19 @@ import (
 	"net"
 	"slices"
 	"sync"
+	"syscall"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
 const (
-	SQLRoutingResultShadow         = "shadow"
-	SQLRoutingResultConclusive     = "conclusive_sql"
-	SQLRoutingResultCachedFallback = "cached_fallback"
+	SQLRoutingResultShadow          = "shadow"
+	SQLRoutingResultConclusive      = "conclusive_sql"
+	SQLRoutingResultCachedFallback  = "cached_fallback"
+	SQLRoutingResultPatroniRecovery = "patroni_recovery"
+	SQLRoutingResultRetainedSQL     = "retained_sql"
 
 	SQLHealthTimeoutNone      = "none"
 	SQLHealthTimeoutContext   = "context_timeout"
@@ -29,7 +33,9 @@ const (
 	SQLHealthTimeoutMixed     = "mixed"
 
 	SQLHealthFallbackTimeout           = "timeout"
+	SQLHealthFallbackIndeterminate     = "indeterminate_error"
 	SQLHealthFallbackMultiplePrimaries = "multiple_primaries"
+	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
 )
 
 // LeaderDetectionComparison compares independent SQL and Patroni observations of a new leader.
@@ -87,6 +93,23 @@ type hybridHealthPolicy struct {
 	patroniHealth    map[string]bool
 	patroniUpdatedAt time.Time
 
+	// A conclusive SQL snapshot with no primary allows Patroni to restore routing
+	// immediately. Once restored, follow Patroni until a fresh SQL snapshot arrives.
+	sqlNoPrimaryAt        time.Time
+	patroniRecoveryActive bool
+	patroniRecoveryAt     time.Time
+
+	// Preserve SQL's selected leader through uncertainty until Patroni agrees
+	// or a newer Patroni observation identifies a different, non-superseded leader.
+	// Keep the superseded leader excluded even if the selected leader becomes
+	// unusable; losing B does not establish that the old Patroni leader A is valid.
+	awaitingPatroniLeader   string
+	supersededPatroniLeader string
+	sqlLeaderSelectedAt     time.Time
+	// Intermediate SQL leaders superseded before Patroni caught up (A -> B -> C).
+	// Bound this history to current candidates; delayed Patroni B must not replace C.
+	supersededSQLLeaders map[string]struct{}
+
 	patroniLeaderObservation leaderObservation
 	sqlLeaderObservation     leaderObservation
 	pendingLeaderDetections  map[string]leaderDetectionPair
@@ -104,11 +127,16 @@ func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
 }
 
 // observePatroni refreshes the fallback snapshot. Patroni remains authoritative in shadow mode;
-// when SQL routing is enabled it is cached without replacing the active route.
+// when SQL routing is enabled it can also restore a route after SQL found no primary
+// or advance past a SQL leader whose Patroni confirmation was missed.
 func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt time.Time) hybridRoutingDecision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if observedAt.Before(p.patroniUpdatedAt) {
+		return hybridRoutingDecision{routingResult: SQLRoutingResultShadow}
+	}
+	previousLeader, previousUnique := singleHealthyIP(p.patroniHealth)
 	p.patroniHealth = maps.Clone(health)
 	p.patroniUpdatedAt = observedAt
 	decision := hybridRoutingDecision{
@@ -119,14 +147,53 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	decision.leaderDetection = p.observeLeaderLocked("patroni", healthyIPs(health), observedAt)
 	if p.routingEnabled {
 		decision.routingComparison = p.recordRoutingLeaderLocked("patroni", health, observedAt, "")
+		leader, unique := singleHealthyIP(health)
+		if unique && leader == p.awaitingPatroniLeader && observedAt.After(p.sqlLeaderSelectedAt) {
+			p.awaitingPatroniLeader = ""
+			p.supersededPatroniLeader = ""
+			p.supersededSQLLeaders = nil
+		}
+		// A -> B -> C may happen without this proxy observing Patroni confirm B.
+		// Protecting B from stale A must not block a newer unique Patroni leader C.
+		_, supersededSQLLeader := p.supersededSQLLeaders[leader]
+		patroniAdvancedPastSQLLeader := p.awaitingPatroniLeader != "" && unique && !supersededSQLLeader &&
+			leader != p.awaitingPatroniLeader && leader != p.supersededPatroniLeader &&
+			observedAt.After(p.sqlLeaderSelectedAt)
+		p.excludeSupersededPatroniLeaderLocked(decision.health)
+		// Excluding a superseded leader must not make an ambiguous snapshot
+		// eligible to recover routing and clear that exclusion.
+		eligibleLeader := unique && decision.health[leader]
+		if (!p.sqlNoPrimaryAt.IsZero() && observedAt.After(p.sqlNoPrimaryAt) && eligibleLeader) ||
+			patroniAdvancedPastSQLLeader || p.patroniRecoveryActive {
+			// Do not wait for another SQL completion to publish a recovered Patroni
+			// leader. Continue following Patroni, including loss of that leader,
+			// until SQL supplies evidence collected after this routing transition.
+			if !p.patroniRecoveryActive || unique != previousUnique || leader != previousLeader {
+				p.patroniRecoveryAt = observedAt
+			}
+			p.patroniRecoveryActive = true
+			if eligibleLeader {
+				p.awaitingPatroniLeader = ""
+				p.supersededPatroniLeader = ""
+				p.supersededSQLLeaders = nil
+			}
+			decision.publish = true
+			decision.routingResult = SQLRoutingResultPatroniRecovery
+			if comparison := p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult); comparison != nil {
+				decision.routingComparison = comparison
+			}
+		}
 	}
 	return decision
 }
 
-// observeSQL evaluates one complete SQL snapshot. Timeout-classified probe errors and multiple
-// distinct primaries are indeterminate, so routing falls back to the most recent Patroni snapshot.
-// Ordinary non-timeout probe errors are conclusive unhealthy results. candidateIPs includes every
-// address retained for this snapshot, not only addresses returned by its latest DNS lookup.
+// observeSQL evaluates one complete SQL snapshot. SQL routing is conclusive only when every IP has
+// a successful role or a narrowly classified unroutable result. Unknown errors, multiple distinct
+// primaries, or conflicting deterministic roles require fallback. While Patroni has not caught
+// up to a SQL-selected leader, uncertainty can retain that leader but cannot restore the
+// superseded Patroni leader.
+// candidateIPs includes every address retained for this snapshot, not only addresses returned by
+// its latest DNS lookup.
 func (p *hybridHealthPolicy) observeSQL(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
@@ -146,12 +213,47 @@ func (p *hybridHealthPolicy) observeSQL(
 		return decision
 	}
 
+	// Completion time cannot prove freshness: a slow check may have observed the
+	// old topology before Patroni restored routing. Unknown start times also cannot
+	// supersede that recovery. Keep the barrier after accepting a fresh snapshot so
+	// another late completion cannot subsequently roll routing back.
+	if !p.patroniRecoveryAt.IsZero() && !outcome.StartedAt.After(p.patroniRecoveryAt) {
+		decision.routingResult = SQLRoutingResultPatroniRecovery
+		return decision
+	}
+	p.patroniRecoveryActive = false
+	for ip := range p.supersededSQLLeaders {
+		if !slices.Contains(candidateIPs, ip) {
+			delete(p.supersededSQLLeaders, ip)
+		}
+	}
+	p.sqlNoPrimaryAt = time.Time{}
+	if fallbackReason == "" && len(outcome.PrimaryIPs) == 0 {
+		p.sqlNoPrimaryAt = observedAt
+	}
 	decision.publish = true
 	decision.fallbackReason = fallbackReason
 	decision.timeoutType = timeoutType
 	if decision.fallbackReason != "" {
+		if p.canRetainSQLLeaderLocked(candidateIPs, outcome, fallbackReason) {
+			decision.routingResult = SQLRoutingResultRetainedSQL
+			decision.health = make(map[string]bool, len(candidateIPs))
+			for _, ip := range candidateIPs {
+				decision.health[ip] = ip == p.awaitingPatroniLeader
+			}
+			decision.routingComparison = p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult)
+			return decision
+		}
+		p.awaitingPatroniLeader = ""
 		decision.routingResult = SQLRoutingResultCachedFallback
+		p.supersededSQLLeaders = nil
 		decision.health = maps.Clone(p.patroniHealth)
+		p.excludeSupersededPatroniLeaderLocked(decision.health)
+		if p.supersededPatroniLeader != "" && len(healthyIPs(decision.health)) == 0 {
+			// The old leader remains excluded, but a different Patroni leader can
+			// restore routing immediately through the case-2 recovery path.
+			p.sqlNoPrimaryAt = observedAt
+		}
 		if !p.patroniUpdatedAt.IsZero() {
 			decision.cachedAge = observedAt.Sub(p.patroniUpdatedAt)
 			if decision.cachedAge < 0 {
@@ -168,6 +270,30 @@ func (p *hybridHealthPolicy) observeSQL(
 		return decision
 	}
 
+	previousSQLLeader := p.awaitingPatroniLeader
+	p.awaitingPatroniLeader = ""
+	if len(outcome.PrimaryIPs) == 1 {
+		leader := outcome.PrimaryIPs[0]
+		patroniLeader, unique := singleHealthyIP(p.patroniHealth)
+		if unique && patroniLeader == leader {
+			p.supersededPatroniLeader = ""
+			p.supersededSQLLeaders = nil
+		} else {
+			if previousSQLLeader != "" && previousSQLLeader != leader && slices.Contains(candidateIPs, previousSQLLeader) {
+				if p.supersededSQLLeaders == nil {
+					p.supersededSQLLeaders = make(map[string]struct{})
+				}
+				p.supersededSQLLeaders[previousSQLLeader] = struct{}{}
+			}
+			p.awaitingPatroniLeader = leader
+			p.sqlLeaderSelectedAt = observedAt
+			if unique && p.supersededPatroniLeader == "" {
+				p.supersededPatroniLeader = patroniLeader
+			}
+		}
+	} else {
+		p.supersededSQLLeaders = nil
+	}
 	decision.routingResult = SQLRoutingResultConclusive
 	decision.health = make(map[string]bool, len(candidateIPs))
 	for _, ip := range candidateIPs {
@@ -185,26 +311,146 @@ func (p *hybridHealthPolicy) observeSQL(
 	return decision
 }
 
-func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {
-	timeoutType := SQLHealthTimeoutNone
+// Retain a previously conclusive SQL leader only through uncertainty. Explicit
+// demotion, an unroutable result, removal from the candidate set, or conflicting
+// role evidence must not be hidden by the retained route. A successful primary
+// result still takes precedence over an allowlisted error for that same IP.
+func (p *hybridHealthPolicy) canRetainSQLLeaderLocked(candidateIPs []string, outcome SQLHealthCheckOutcome, fallbackReason string) bool {
+	leader := p.awaitingPatroniLeader
+	if leader == "" || !slices.Contains(candidateIPs, leader) ||
+		fallbackReason == SQLHealthFallbackConflictingRoles || fallbackReason == SQLHealthFallbackMultiplePrimaries {
+		return false
+	}
+	primary, unroutable := false, false
 	for _, result := range outcome.Results {
-		resultTimeoutType := sqlHealthTimeoutType(result.Err)
-		if resultTimeoutType == SQLHealthTimeoutNone {
+		if result.IP != leader {
+			continue
+		}
+		if result.Err == nil {
+			if result.InRecovery {
+				return false
+			}
+			primary = true
+		} else if isConclusiveSQLUnroutableError(result.Err) {
+			unroutable = true
+		}
+	}
+	return primary || !unroutable
+}
+
+func (p *hybridHealthPolicy) excludeSupersededPatroniLeaderLocked(health map[string]bool) {
+	if _, present := health[p.supersededPatroniLeader]; present {
+		health[p.supersededPatroniLeader] = false
+	}
+}
+
+func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {
+	type ipEvidence struct {
+		deterministicRole    bool
+		primary              bool
+		conclusiveUnroutable bool
+		indeterminate        bool
+		timeoutType          string
+	}
+
+	evidenceByIP := make(map[string]*ipEvidence)
+	conflictingRoles := false
+	for _, result := range outcome.Results {
+		evidence := evidenceByIP[result.IP]
+		if evidence == nil {
+			evidence = &ipEvidence{timeoutType: SQLHealthTimeoutNone}
+			evidenceByIP[result.IP] = evidence
+		}
+		if result.Err != nil {
+			if isConclusiveSQLUnroutableError(result.Err) {
+				evidence.conclusiveUnroutable = true
+				continue
+			}
+			evidence.indeterminate = true
+			resultTimeoutType := sqlHealthTimeoutType(result.Err)
+			if resultTimeoutType == SQLHealthTimeoutNone {
+				continue
+			}
+			if evidence.timeoutType == SQLHealthTimeoutNone {
+				evidence.timeoutType = resultTimeoutType
+			} else if evidence.timeoutType != resultTimeoutType {
+				evidence.timeoutType = SQLHealthTimeoutMixed
+			}
+			continue
+		}
+
+		primary := !result.InRecovery
+		if evidence.deterministicRole && evidence.primary != primary {
+			conflictingRoles = true
+		} else {
+			evidence.deterministicRole = true
+			evidence.primary = primary
+		}
+	}
+	if conflictingRoles {
+		return SQLHealthFallbackConflictingRoles, SQLHealthTimeoutNone
+	}
+	if len(outcome.PrimaryIPs) > 1 {
+		return SQLHealthFallbackMultiplePrimaries, SQLHealthTimeoutNone
+	}
+
+	timeoutType := SQLHealthTimeoutNone
+	hasIndeterminateError := false
+	for _, evidence := range evidenceByIP {
+		// Reconcile credentials per IP before aggregating across IPs. A successful role
+		// takes precedence over an allowlisted error on the same IP: primary + 57P01
+		// remains primary, and standby + 57P01 remains standby, in either result order.
+		// A successful role or an allowlisted error resolves uncertainty from another
+		// credential on that IP. Unresolved evidence on another IP still requires
+		// Patroni fallback; conflicting successful roles are handled above.
+		if evidence.deterministicRole || evidence.conclusiveUnroutable {
+			continue
+		}
+		if !evidence.indeterminate {
+			continue
+		}
+		if evidence.timeoutType == SQLHealthTimeoutNone {
+			hasIndeterminateError = true
 			continue
 		}
 		if timeoutType == SQLHealthTimeoutNone {
-			timeoutType = resultTimeoutType
-		} else if timeoutType != resultTimeoutType {
+			timeoutType = evidence.timeoutType
+		} else if timeoutType != evidence.timeoutType {
 			timeoutType = SQLHealthTimeoutMixed
 		}
 	}
 	if timeoutType != SQLHealthTimeoutNone {
 		return SQLHealthFallbackTimeout, timeoutType
 	}
-	if len(outcome.PrimaryIPs) > 1 {
-		return SQLHealthFallbackMultiplePrimaries, SQLHealthTimeoutNone
+	if hasIndeterminateError {
+		return SQLHealthFallbackIndeterminate, SQLHealthTimeoutNone
 	}
 	return "", ""
+}
+
+// isConclusiveSQLUnroutableError is intentionally an allowlist. New or ambiguous errors fall back
+// to Patroni unless SQL has already determined that same IP's role through another credential.
+func isConclusiveSQLUnroutableError(err error) bool {
+	if errors.Is(err, syscall.ECONNREFUSED) {
+		return true
+	}
+
+	var postgresErr *pgconn.PgError
+	if !errors.As(err, &postgresErr) {
+		return false
+	}
+	switch postgresErr.Code {
+	case pgerrcode.AdminShutdown,
+		pgerrcode.CrashShutdown,
+		pgerrcode.CannotConnectNow,
+		pgerrcode.DiskFull,
+		pgerrcode.OutOfMemory:
+		return true
+	default:
+		// System (58) and internal (XX) classes describe a failure category,
+		// not whether the whole instance is unavailable. Leave them indeterminate.
+		return false
+	}
 }
 
 func sqlHealthTimeoutType(err error) string {
