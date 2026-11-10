@@ -221,10 +221,20 @@ func verifyRejectedAuthMessages(t *testing.T, address string, tlsConfig *tls.Con
 	data := "n,,n=,r=clientnonce"
 	if oversized {
 		data += strings.Repeat("AUTH_PAYLOAD_SENTINEL", 1024)
-	}
-	frontend.Send(&pgproto3.SASLInitialResponse{AuthMechanism: "SCRAM-SHA-256", Data: []byte(data)})
-	require.NoError(t, frontend.Flush())
-	if !oversized {
+		// The proxy rejects an oversized message from its length header and closes
+		// without reading the body. Send only the header and a prefix containing the
+		// sentinel: writing the rest could race that close and fail with a broken
+		// pipe. If the proxy instead waited for the full body, the deadline would
+		// expire before the FATAL response below.
+		frame, err := (&pgproto3.SASLInitialResponse{AuthMechanism: "SCRAM-SHA-256", Data: []byte(data)}).Encode(nil)
+		require.NoError(t, err)
+		prefix := frame[:4096]
+		require.Contains(t, string(prefix), "AUTH_PAYLOAD_SENTINEL")
+		_, err = secured.Write(prefix)
+		require.NoError(t, err)
+	} else {
+		frontend.Send(&pgproto3.SASLInitialResponse{AuthMechanism: "SCRAM-SHA-256", Data: []byte(data)})
+		require.NoError(t, frontend.Flush())
 		message, err = frontend.Receive()
 		require.NoError(t, err)
 		challenge := message.(*pgproto3.AuthenticationSASLContinue)
