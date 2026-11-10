@@ -14,6 +14,15 @@ if (process.argv.length > 3 || !/^\/([a-zA-Z0-9._-]+\/)*$/.test(prefix)) {
 const base = prefix;
 const origin = 'https://site.invalid';
 
+// Astro writes redirect destinations exactly as configured, without the base, so
+// a destination such as /reference/observability/ must not be read as prefixed
+// when the base is /reference/. Track the pages Astro generates for redirects.
+const { default: config } = await import('../astro.config.mjs');
+const redirectPages = new Set(Object.keys(config.redirects ?? {}).map((source) => {
+  const page = source.replace(/^\/+|\/+$/g, '');
+  return page ? `${page}/index.html` : 'index.html';
+}));
+
 function run(args) {
   const result = spawnSync('npm', args, {
     cwd: root,
@@ -41,9 +50,9 @@ function staticURL(value, file, files) {
   if (value.startsWith('#') || value.startsWith('//') || /^[a-z][a-z0-9+.-]*:/i.test(value)) return value;
   const url = new URL(decodeHTML(value), `${origin}${base}${file}`);
   if (url.origin !== origin) return value;
-  // Astro does not prefix redirect destinations with the base.
   let relative;
-  if (url.pathname.startsWith(base)) relative = url.pathname.slice(base.length);
+  if (redirectPages.has(file) && value.startsWith('/')) relative = url.pathname.slice(1);
+  else if (url.pathname.startsWith(base)) relative = url.pathname.slice(base.length);
   else if (value.startsWith('/')) relative = url.pathname.slice(1);
   else return value;
   const index = relative ? `${relative.replace(/\/$/, '')}/index.html` : 'index.html';
