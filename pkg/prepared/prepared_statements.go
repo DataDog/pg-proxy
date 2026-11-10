@@ -17,8 +17,8 @@ const (
 	// UnnamedStmtName is the Postgres empty prepared-statement name.
 	UnnamedStmtName = ""
 
-	confirmedCountMetric = "dd.orgstore.pg_proxy.session.prepared_stmt.confirmed.size"
-	enqueuedCountMetric  = "dd.orgstore.pg_proxy.session.prepared_stmt.enqueued.size"
+	confirmedCountMetric = "pg_proxy.session.prepared_stmt.confirmed.size"
+	enqueuedCountMetric  = "pg_proxy.session.prepared_stmt.enqueued.size"
 
 	preparedStmtNamedTrue       = "named:true"
 	preparedStmtNamedFalse      = "named:false"
@@ -280,7 +280,7 @@ func (p *proxyPreparedStmtsState) AddConfirmedNamedStmt(preparedStmt PreparedSta
 		return fmt.Errorf("attempting to add a confirmed named prepared statement that already exists in the map %s", strings.Join(append(preparedStmt.GetErrorTags(), p.metricTags...), " "))
 	}
 	p.confirmedNamedPreparedStmtsMap[clientName] = preparedStmt
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.session.prepared_stmt.confirmed_added", p.metricTags, 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.session.prepared_stmt.confirmed_added", p.metricTags, 1)
 	_ = pgproxy.Metrics().Gauge(confirmedCountMetric, float64(len(p.confirmedNamedPreparedStmtsMap)), p.metricTags, 1)
 	return nil
 }
@@ -290,7 +290,7 @@ func (p *proxyPreparedStmtsState) EnqueuePendingStmt(pendingPreparedStmt Prepare
 
 	tags := append(p.metricTags, pendingPreparedStmt.GetMetricTags()...)
 	tags = append(tags, preparedStmtExistingTag(existing))
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.session.prepared_stmt.enqueued", tags, 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.session.prepared_stmt.enqueued", tags, 1)
 	_ = pgproxy.Metrics().Gauge(enqueuedCountMetric, float64(len(p.allPendingPreparedStmtsQueue)), p.metricTags, 1)
 }
 
@@ -308,14 +308,14 @@ func (p *proxyPreparedStmtsState) ConfirmPendingStmt() QueuedPreparedStatement {
 		p.confirmedNamedPreparedStmtsMap[successfulStmt.GetClientName()] = successfulStmt
 	}
 	p.allPendingPreparedStmtsQueue = slices.Delete(p.allPendingPreparedStmtsQueue, 0, 1)
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.session.prepared_stmt.confirmed_enqueued", append(p.metricTags, successfulStmt.GetMetricTags()...), 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.session.prepared_stmt.confirmed_enqueued", append(p.metricTags, successfulStmt.GetMetricTags()...), 1)
 	_ = pgproxy.Metrics().Gauge(confirmedCountMetric, float64(len(p.confirmedNamedPreparedStmtsMap)), p.metricTags, 1)
 	return successfulStmt
 }
 
 func (p *proxyPreparedStmtsState) InvalidatePendingStmts(fromError bool) {
 	p.allPendingPreparedStmtsQueue = nil
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.session.prepared_stmt.invalidated", append(p.metricTags, preparedStmtFromErrorTag(fromError)), 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.session.prepared_stmt.invalidated", append(p.metricTags, preparedStmtFromErrorTag(fromError)), 1)
 	_ = pgproxy.Metrics().Gauge(enqueuedCountMetric, float64(len(p.allPendingPreparedStmtsQueue)), p.metricTags, 1)
 }
 
@@ -364,6 +364,6 @@ func (p *proxyPreparedStmtsState) DeallocateNamedStmtFromClientName(clientName s
 	if existed {
 		tags = append(tags, preparedStmt.GetMetricTags()...)
 	}
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.session.prepared_stmt.deallocated", tags, 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.session.prepared_stmt.deallocated", tags, 1)
 	_ = pgproxy.Metrics().Gauge(confirmedCountMetric, float64(len(p.confirmedNamedPreparedStmtsMap)), p.metricTags, 1)
 }

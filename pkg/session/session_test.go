@@ -154,7 +154,7 @@ func TestRunDrainsCanceledIdleSession(t *testing.T) {
 
 	require.NoError(t, s.Run())
 	require.Equal(t, []metricCall{{
-		name:  "dd.orgstore.pg_proxy.sessions.drained_connections",
+		name:  "datadog.pg_proxy.sessions.drained_connections",
 		value: 1,
 		tags:  []string{"user:user", "database:database", "client_service_account:service", "passthrough_user:false"},
 	}}, metrics.counts)

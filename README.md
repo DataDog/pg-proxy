@@ -219,11 +219,48 @@ transactions, pool reuse, startup cleanup, cancellation, and shutdown:
 go test -race -tags=integration -count=1 ./cmd/pg-proxy ./pkg/pool
 ```
 
-These tests require Docker. They start the public `postgres:14` image; set
-`PG_PROXY_TEST_POSTGRES_IMAGE` to use another image or a registry mirror. The standalone suite also accepts an
-explicit disposable PostgreSQL URL, which GitHub Actions uses to execute client
-authentication, TLS, and cancellation tests. See the
-[integration test instructions](docs/client-authentication.md#integration-tests).
+Integration tests pull public Docker Hub images pinned by digest in
+[`internal/itest/images.go`](internal/itest/images.go). To use a Docker Hub
+mirror, set Testcontainers' standard `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX`.
+Tests fail if Docker is unavailable.
+
+The standalone-command suite also accepts an explicit disposable PostgreSQL URL
+through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
+See the [client integration test instructions](docs/client-authentication.md#integration-tests).
+
+#### Black-box integration tests
+
+`test/integration` runs the `cmd/pg-proxy` binary as a black box. Each test starts
+a proxy process from a YAML configuration and connects to it with pgx, against
+a PostgreSQL container shared by the package. The harness lives in `internal/itest`:
+
+- `itest.Main` builds the binary once and starts shared fixtures from `TestMain`.
+- `itest.StartPostgres` starts a PostgreSQL container. `Postgres.Database`
+  returns a `pkg/config` database entry pointing at it.
+- `itest.StartProxy` / `itest.MustStartProxy` write a `pkg/config.Config` to a
+  file, start the binary on a free loopback port, and stop it with SIGTERM.
+  `MustStartProxy` fails the test if the process does not exit cleanly and logs
+  its output when the test fails.
+
+```sh
+go test -tags=integration ./test/integration
+```
+
+Running with `-race` also builds the proxy binary with `-race`. For custom build
+flags, build the binary separately and set `PG_PROXY_ITEST_BINARY` to its absolute
+path. A prebuilt binary is used as is, so build it with `-race` yourself if needed.
+
+| Variable | Effect |
+| --- | --- |
+| `PG_PROXY_TEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
+| `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX` | Docker Hub mirror for images without a registry host, including Testcontainers' own. A fully qualified image name bypasses it |
+| `PG_PROXY_ITEST_BINARY` | Absolute path to a prebuilt pg-proxy binary instead of building one |
+
+Readiness uses a timed TCP port probe, not startup log parsing. Captured output
+is printed only for failure diagnostics.
+
+GitHub Actions runs unit tests on minimum and stable Go and Docker-backed
+integration tests with race detection.
 
 ### Telemetry
 
@@ -313,6 +350,30 @@ Bind parameter capture uses `server.RuntimeConfig.EnableTraceParameters` (or
 already own a logger, StatsD client, or tracer can pass them through
 `pgproxy.Dependencies` instead of using the helpers.
 
+#### Metric names
+
+Metrics are named `datadog.pg_proxy.*`, for example
+`datadog.pg_proxy.sessions.connections`. The same names are used with
+DogStatsD and OpenTelemetry. Library code emits bare names (`pg_proxy.…`), and
+the metrics client installed by `pgproxy.Bootstrap` adds the namespace exactly
+once.
+
+Set `pgproxy.Dependencies.MetricNamespace` to replace the `datadog.` prefix:
+
+- Empty selects `datadog.`.
+- A missing trailing dot is added, so `"acme"` emits
+  `acme.pg_proxy.sessions.connections`.
+- It must start with a letter and contain only letters, digits, `_` and `.`.
+  `Bootstrap` panics on an invalid value; call `pgproxy.NormalizeMetricNamespace`
+  first to get the same check as an error.
+
+A custom `session.Metrics` sink receives bare names. Forward them through
+`pgproxy.Metrics()`, or wrap them with `pgproxy.MetricName` when sending to
+another client. Do not also set a namespace on the client, such as
+`statsd.WithNamespace`, or names are prefixed twice. If you change the
+namespace, update the filter in the
+[Collector configuration](docs/otel-collector-datadog.yaml) to match.
+
 #### Test coverage
 
 The OSS binary's tests send parameterized queries through PostgreSQL and decode
@@ -329,11 +390,11 @@ From the repository root, run the build, static checks, and unit tests:
 ```sh
 go build ./...
 go vet ./...
-go test -race -skip '^TestProxyAgainstPostgres$' -count=1 ./...
+go test -race -count=1 ./...
 ```
 
-The unit command excludes the Docker-backed CLI test. Run the Docker checks
-above when Docker is available. Format changed Go files with `gofmt -w`;
+Docker-backed tests require the `integration` build tag. Run the Docker checks
+above when needed. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
 
 ## License

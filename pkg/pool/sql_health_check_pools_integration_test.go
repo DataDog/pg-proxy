@@ -9,7 +9,6 @@ package pool
 
 import (
 	"context"
-	"os"
 	"sync"
 	"testing"
 	"time"
@@ -22,18 +21,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
+
+	"github.com/DataDog/pg-proxy/internal/itest"
 )
-
-// sqlHealthCheckIntegrationPostgresImage is the public image these tests start.
-// Set PG_PROXY_TEST_POSTGRES_IMAGE to use another image or registry mirror.
-const sqlHealthCheckIntegrationPostgresImage = "postgres:14"
-
-func sqlHealthCheckIntegrationImage() string {
-	if image := os.Getenv("PG_PROXY_TEST_POSTGRES_IMAGE"); image != "" {
-		return image
-	}
-	return sqlHealthCheckIntegrationPostgresImage
-}
 
 type integrationHealthProber struct {
 	mu  sync.Mutex
@@ -94,11 +84,10 @@ func (p *delayedIntegrationSQLHealthProber) blockNext(ip string) {
 
 func startSQLHealthCheckIntegrationPostgres(t *testing.T) (context.Context, string, *pgx.ConnConfig) {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
-	postgresContainer, err := postgres.Run(ctx, sqlHealthCheckIntegrationImage(),
+	postgresContainer, err := postgres.Run(ctx, itest.PostgresImage(),
 		postgres.WithDatabase("sql_health_check_integration"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),

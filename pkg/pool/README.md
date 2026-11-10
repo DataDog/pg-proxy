@@ -27,3 +27,11 @@ latency includes the initial refresh.
 
 Discovery and cleanup scenarios live in `pgk_setup_test.go`. Shared-worker
 subscription, probing, and cleanup tests live in `health_worker_test.go`.
+
+## SQL snapshot timing
+
+The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed
+SQL and Patroni snapshots for a replacement primary. It reports signed speedup,
+without downtime durations or percentages, using the completed-snapshot mismatch
+aggregate. See [SQL snapshot timing](../../docs/sql-potential-timing.md) for the
+snapshot boundary, lifecycle rules, and how to compare it with hybrid timing.

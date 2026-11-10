@@ -1,0 +1,262 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
+//go:build integration
+
+package itest
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"gopkg.in/yaml.v3"
+
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
+)
+
+// Proxy is a running pg-proxy process.
+type Proxy struct {
+	// Addr is the host:port the proxy listens on.
+	Addr string
+	// ConfigPath is the YAML file the proxy was started with.
+	ConfigPath string
+
+	dir      string
+	cmd      *exec.Cmd
+	logs     logBuffer
+	done     chan struct{}
+	err      error
+	stopOnce sync.Once
+}
+
+// StartProxy writes cfg to a YAML file, starts the pg-proxy binary with it, and
+// polls its TCP port until it accepts connections, exits, or ctx expires. An
+// empty listener address selects a free loopback port. Callers must Stop the proxy.
+func StartProxy(ctx context.Context, cfg pgconfig.Config) (*Proxy, error) {
+	binary, err := Binary()
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Proxy.ListenerAddress == "" {
+		cfg.Proxy.ListenerAddress = "127.0.0.1:0"
+	}
+	host, _, err := net.SplitHostPort(cfg.Proxy.ListenerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("proxy listener address: %w", err)
+	}
+	// Select and check the port before starting the child. Closing this listener
+	// leaves a small bind race, but avoids depending on startup log formatting.
+	listener, err := net.Listen("tcp", cfg.Proxy.ListenerAddress)
+	if err != nil {
+		return nil, fmt.Errorf("select proxy port: %w", err)
+	}
+	_, port, err := net.SplitHostPort(listener.Addr().String())
+	closeErr := listener.Close()
+	if err != nil || closeErr != nil {
+		return nil, errors.Join(err, closeErr)
+	}
+	cfg.Proxy.ListenerAddress = net.JoinHostPort(host, port)
+	data, err := encodeConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	dir, err := os.MkdirTemp("", "pg-proxy-itest-config-")
+	if err != nil {
+		return nil, err
+	}
+	p := &Proxy{Addr: cfg.Proxy.ListenerAddress, ConfigPath: filepath.Join(dir, "proxy.yaml"), dir: dir, done: make(chan struct{})}
+	if err := os.WriteFile(p.ConfigPath, data, 0o600); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, err
+	}
+	p.cmd = exec.Command(binary, "-config", p.ConfigPath)
+	p.cmd.Stdout = &p.logs
+	p.cmd.Stderr = &p.logs
+	if err := p.cmd.Start(); err != nil {
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("start pg-proxy: %w", err)
+	}
+	go func() {
+		p.err = p.cmd.Wait()
+		close(p.done)
+	}()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	dialer := net.Dialer{Timeout: 100 * time.Millisecond}
+	var probeErr error
+	for {
+		select {
+		case <-p.done:
+			_ = os.RemoveAll(dir)
+			if p.err != nil {
+				return nil, fmt.Errorf("pg-proxy exited before accepting connections: %w\n%s", p.err, p.Logs())
+			}
+			return nil, fmt.Errorf("pg-proxy exited successfully before accepting connections\n%s", p.Logs())
+		case <-ctx.Done():
+			_ = p.Stop()
+			return nil, fmt.Errorf("pg-proxy did not accept connections at %s (last probe: %v): %w\n%s", p.Addr, probeErr, ctx.Err(), p.Logs())
+		case <-ticker.C:
+			conn, err := dialer.DialContext(ctx, "tcp", p.Addr)
+			if err == nil {
+				_ = conn.Close()
+				return p, nil
+			}
+			probeErr = err
+		}
+	}
+}
+
+// MustStartProxy starts a proxy for the duration of t. Cleanup stops it, fails t
+// if it does not exit cleanly, and logs its output if t failed.
+func MustStartProxy(t testing.TB, cfg pgconfig.Config) *Proxy {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	p, err := StartProxy(ctx, cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := p.Stop(); err != nil {
+			t.Errorf("pg-proxy did not exit cleanly: %v", err)
+		}
+		if t.Failed() {
+			t.Logf("pg-proxy output:\n%s", p.Logs())
+		}
+	})
+	return p
+}
+
+// URL returns a connection URL for a logical database through the proxy.
+func (p *Proxy) URL(database, user string) string {
+	u := url.URL{
+		Scheme:   "postgres",
+		User:     url.User(user),
+		Host:     p.Addr,
+		Path:     "/" + database,
+		RawQuery: "sslmode=disable",
+	}
+	return u.String()
+}
+
+// Connect opens a client connection to a logical database through the proxy.
+func (p *Proxy) Connect(ctx context.Context, database, user string) (*pgx.Conn, error) {
+	return pgx.Connect(ctx, p.URL(database, user))
+}
+
+// Signal sends sig to the proxy process.
+func (p *Proxy) Signal(sig os.Signal) error {
+	return p.cmd.Process.Signal(sig)
+}
+
+// Done is closed when the proxy process exits; Err then reports its exit status.
+func (p *Proxy) Done() <-chan struct{} { return p.done }
+
+// Err returns the exit status once Done is closed.
+func (p *Proxy) Err() error {
+	select {
+	case <-p.done:
+		return p.err
+	default:
+		return errors.New("pg-proxy is still running")
+	}
+}
+
+// Stop sends SIGTERM, kills the process if it has not exited within 15 seconds,
+// removes its configuration, and returns its exit status.
+func (p *Proxy) Stop() error {
+	p.stopOnce.Do(func() {
+		_ = p.cmd.Process.Signal(syscall.SIGTERM)
+		select {
+		case <-p.done:
+		case <-time.After(15 * time.Second):
+			_ = p.cmd.Process.Kill()
+			<-p.done
+		}
+		_ = os.RemoveAll(p.dir)
+	})
+	return p.err
+}
+
+// Logs returns everything the process has written so far.
+func (p *Proxy) Logs() string {
+	return p.logs.String()
+}
+
+// encodeConfig marshals cfg to YAML. Secret redacts itself when marshaled, so
+// database passwords and user static credentials are written back into the
+// encoded document.
+func encodeConfig(cfg pgconfig.Config) ([]byte, error) {
+	var document yaml.Node
+	if err := document.Encode(cfg); err != nil {
+		return nil, fmt.Errorf("encode pg-proxy config: %w", err)
+	}
+	if databases := mappingValue(&document, "databases"); databases != nil {
+		for i, entry := range databases.Content {
+			if password := mappingValue(entry, "password"); password != nil {
+				password.Value = string(cfg.Databases[i].Password)
+			}
+		}
+	}
+	if users := mappingValue(&document, "users"); users != nil {
+		for i, entry := range users.Content {
+			credentials := mappingValue(entry, "static_credentials")
+			if credentials == nil {
+				continue
+			}
+			if password := mappingValue(credentials, "password"); password != nil {
+				password.Value = string(cfg.Users[i].StaticCredentials.Password)
+			}
+			if verifier := mappingValue(credentials, "scram_sha_256"); verifier != nil {
+				verifier.Value = string(cfg.Users[i].StaticCredentials.SCRAMSHA256)
+			}
+		}
+	}
+	return yaml.Marshal(&document)
+}
+
+func mappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node.Kind == yaml.DocumentNode && len(node.Content) == 1 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1]
+		}
+	}
+	return nil
+}
+
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(data []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(data)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}

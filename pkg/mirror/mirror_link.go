@@ -63,13 +63,13 @@ func (l *mirroringLink) Send(msg pgproto3.FrontendMessage, expectation query.Rep
 		// batch admitted data -> its flush/release sentinels are worth admitting
 		l.batchHasData = true
 		l.flushHasData = true
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.message_mirrored", 1, l.tags, 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.session.message_mirrored", 1, l.tags, 1)
 	case mirrorDroppedSessionCap:
 		l.poison()
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.message_mirror_dropped", 1, l.dropTag("reason:session"), 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.session.message_mirror_dropped", 1, l.dropTag("reason:session"), 1)
 	case mirrorDroppedGlobalBudget:
 		l.poison()
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session.message_mirror_dropped", 1, l.dropTag("reason:global"), 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.session.message_mirror_dropped", 1, l.dropTag("reason:global"), 1)
 	}
 }
 

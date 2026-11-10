@@ -14,10 +14,7 @@ import (
 )
 
 // cleartextMetricName counts cleartext password exchanges, tagged by outcome.
-//
-// TODO: make the metric namespace configurable. Changing it means emitting
-// both names for a window, since existing dashboards and monitors depend on it.
-const cleartextMetricName = "dd.orgstore.pg_proxy.protocol.cleartext"
+const cleartextMetricName = "pg_proxy.protocol.cleartext"
 
 // GetCleartextPassword asks the client for a cleartext password and returns it.
 //

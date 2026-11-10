@@ -25,6 +25,15 @@ type Dependencies struct {
 	// Metrics receives the library's telemetry. Optional: nil discards metrics.
 	Metrics MetricsClient
 
+	// MetricNamespace is prepended once to every metric name the library
+	// emits, for example "datadog." + "pg_proxy.messages". Empty selects
+	// DefaultMetricNamespace, and a missing trailing dot is added. It must
+	// start with a letter and contain only letters, digits, '_' and '.';
+	// Bootstrap panics otherwise (see NormalizeMetricNamespace). Do not also
+	// configure a namespace on the client itself (such as
+	// statsd.WithNamespace), or names are prefixed twice.
+	MetricNamespace string
+
 	// Tracer receives query spans. Optional: nil disables tracing.
 	Tracer Tracer
 }
@@ -34,10 +43,11 @@ type Dependencies struct {
 // particular are emitted from per-message code, where an RWMutex would
 // contend across every session goroutine.
 type resolved struct {
-	deps    Dependencies
-	logger  *slog.Logger
-	metrics MetricsClient
-	tracer  Tracer
+	deps      Dependencies
+	logger    *slog.Logger
+	metrics   MetricsClient
+	namespace string
+	tracer    Tracer
 }
 
 var current atomic.Pointer[resolved]
@@ -52,6 +62,9 @@ func init() {
 // Bootstrap sets the process-wide Dependencies used by every pg-proxy
 // component. Call once, as early as possible in the embedder's startup,
 // before constructing any Session, TraceState, etc.
+//
+// Bootstrap panics if d.MetricNamespace is invalid. Call
+// NormalizeMetricNamespace first to get the same check as an error.
 //
 // Returns a restore func so tests can Bootstrap a fake and undo it, e.g. via
 // t.Cleanup. Tests that do this must not run in parallel with each other:
@@ -100,11 +113,16 @@ func resolve(d Dependencies) *resolved {
 		metrics: NoopMetrics{},
 		tracer:  NoopTracer{},
 	}
+	namespace, err := NormalizeMetricNamespace(d.MetricNamespace)
+	if err != nil {
+		panic(err)
+	}
+	r.namespace = namespace
 	if d.LogHandler != nil {
 		r.logger = slog.New(d.LogHandler)
 	}
 	if d.Metrics != nil {
-		r.metrics = d.Metrics
+		r.metrics = namespacedMetrics{namespace: r.namespace, inner: d.Metrics}
 	}
 	if d.Tracer != nil {
 		r.tracer = d.Tracer
