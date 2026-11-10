@@ -6,6 +6,8 @@
 package pgproxy
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -43,22 +45,38 @@ func (NoopMetrics) Gauge(string, float64, []string, float64) error        { retu
 func (NoopMetrics) Distribution(string, float64, []string, float64) error { return nil }
 func (NoopMetrics) Timing(string, time.Duration, []string, float64) error { return nil }
 
-// MetricName returns name with the configured metric namespace prepended. A
-// name that already carries the namespace is returned unchanged, so a sink that
-// forwards to Metrics() does not prefix twice.
+// metricNamespacePattern accepts a letter followed by letters, digits,
+// underscores, and dots, ending in a dot.
+var metricNamespacePattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_.]*\.$`)
+
+// NormalizeMetricNamespace returns the namespace Bootstrap applies for ns.
+// Empty selects DefaultMetricNamespace. A missing trailing dot is added, so
+// "acme" becomes "acme.". It returns an error unless ns starts with a letter
+// and contains only letters, digits, underscores, and dots.
+func NormalizeMetricNamespace(ns string) (string, error) {
+	if ns == "" {
+		return DefaultMetricNamespace, nil
+	}
+	if !strings.HasSuffix(ns, ".") {
+		ns += "."
+	}
+	if !metricNamespacePattern.MatchString(ns) {
+		return "", fmt.Errorf("pgproxy: invalid MetricNamespace %q: must start with a letter and contain only letters, digits, '_' and '.'", strings.TrimSuffix(ns, "."))
+	}
+	return ns, nil
+}
+
+// MetricName returns name with the configured metric namespace prepended.
+// Library code emits bare names (pg_proxy.…), and the client installed by
+// Bootstrap adds the namespace exactly once. Use MetricName only when sending
+// a library metric to a client other than Metrics(), for example from a
+// custom session.Metrics sink with its own StatsD client.
 func MetricName(name string) string {
-	return withNamespace(current.Load().namespace, name)
+	return current.Load().namespace + name
 }
 
 // MetricNamespace returns the namespace prepended to emitted metric names.
 func MetricNamespace() string { return current.Load().namespace }
-
-func withNamespace(namespace, name string) string {
-	if strings.HasPrefix(name, namespace) {
-		return name
-	}
-	return namespace + name
-}
 
 // namespacedMetrics prepends the configured namespace before forwarding.
 type namespacedMetrics struct {
@@ -67,21 +85,21 @@ type namespacedMetrics struct {
 }
 
 func (m namespacedMetrics) Count(name string, value int64, tags []string, rate float64) error {
-	return m.inner.Count(withNamespace(m.namespace, name), value, tags, rate)
+	return m.inner.Count(m.namespace+name, value, tags, rate)
 }
 
 func (m namespacedMetrics) Incr(name string, tags []string, rate float64) error {
-	return m.inner.Incr(withNamespace(m.namespace, name), tags, rate)
+	return m.inner.Incr(m.namespace+name, tags, rate)
 }
 
 func (m namespacedMetrics) Gauge(name string, value float64, tags []string, rate float64) error {
-	return m.inner.Gauge(withNamespace(m.namespace, name), value, tags, rate)
+	return m.inner.Gauge(m.namespace+name, value, tags, rate)
 }
 
 func (m namespacedMetrics) Distribution(name string, value float64, tags []string, rate float64) error {
-	return m.inner.Distribution(withNamespace(m.namespace, name), value, tags, rate)
+	return m.inner.Distribution(m.namespace+name, value, tags, rate)
 }
 
 func (m namespacedMetrics) Timing(name string, value time.Duration, tags []string, rate float64) error {
-	return m.inner.Timing(withNamespace(m.namespace, name), value, tags, rate)
+	return m.inner.Timing(m.namespace+name, value, tags, rate)
 }

@@ -123,8 +123,12 @@ func TestMetricNamespace(t *testing.T) {
 	for _, tc := range []struct {
 		name, namespace, want string
 	}{
-		{name: "default", namespace: "", want: "datadog."},
+		{name: "empty selects the default", namespace: "", want: "datadog."},
 		{name: "custom", namespace: "dd.orgstore.", want: "dd.orgstore."},
+		{name: "missing trailing dot is added", namespace: "dd.orgstore", want: "dd.orgstore."},
+		// A namespace that is itself a prefix of "pg_proxy." must still apply.
+		{name: "prefix of pg_proxy", namespace: "pg_", want: "pg_."},
+		{name: "repeated segment", namespace: "pg_pg.", want: "pg_pg."},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sink := &recordingMetrics{}
@@ -145,13 +149,56 @@ func TestMetricNamespace(t *testing.T) {
 	}
 }
 
-// A sink that forwards an already-namespaced name back through Metrics() must
-// not see the namespace twice.
-func TestMetricNamespaceIsIdempotent(t *testing.T) {
+func TestEmptyMetricNamespaceDefaultsToDatadog(t *testing.T) {
+	ns, err := NormalizeMetricNamespace("")
+	require.NoError(t, err)
+	assert.Equal(t, "datadog.", ns)
+	assert.Equal(t, DefaultMetricNamespace, ns)
+
+	restore := Bootstrap(Dependencies{Metrics: &recordingMetrics{}})
+	t.Cleanup(restore)
+	assert.Equal(t, "datadog.", MetricNamespace())
+}
+
+func TestInvalidMetricNamespaceIsRejected(t *testing.T) {
+	for _, ns := range []string{
+		"1abc",        // must start with a letter
+		".abc",        // must start with a letter
+		"_abc",        // must start with a letter
+		"dd-orgstore", // '-' not allowed
+		"dd orgstore", // space not allowed
+		"dd/orgstore.",
+		"dd.örgstore.",
+	} {
+		t.Run(ns, func(t *testing.T) {
+			_, err := NormalizeMetricNamespace(ns)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "invalid MetricNamespace")
+			assert.Contains(t, err.Error(), "must start with a letter")
+
+			before := current.Load()
+			assert.PanicsWithError(t, err.Error(), func() {
+				Bootstrap(Dependencies{MetricNamespace: ns})
+			})
+			assert.Same(t, before, current.Load(), "a rejected namespace must not replace the dependencies")
+		})
+	}
+}
+
+// The namespace is applied exactly once, even to a name that already starts
+// with it. Callers must pass bare names; see TestMetricNamesAreBare.
+func TestMetricNamespaceAppliedExactlyOnce(t *testing.T) {
 	sink := &recordingMetrics{}
-	restore := Bootstrap(Dependencies{Metrics: sink})
+	restore := Bootstrap(Dependencies{Metrics: sink, MetricNamespace: "pg_pg."})
 	t.Cleanup(restore)
 
-	require.NoError(t, Metrics().Count(MetricName("pg_proxy.a"), 1, nil, 1))
-	assert.Equal(t, []recordedMetric{{"count", "datadog.pg_proxy.a"}}, sink.got)
+	// Deliberately misuse the API through a variable, which
+	// TestMetricNamesAreBare cannot see.
+	alreadyPrefixed := "pg_pg.pg_proxy.a"
+	require.NoError(t, Metrics().Count("pg_proxy.a", 1, nil, 1))
+	require.NoError(t, Metrics().Count(alreadyPrefixed, 1, nil, 1))
+	assert.Equal(t, []recordedMetric{
+		{"count", "pg_pg.pg_proxy.a"},
+		{"count", "pg_pg.pg_pg.pg_proxy.a"},
+	}, sink.got)
 }

@@ -92,9 +92,9 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	child.SetTag("db.parameters", "42,alice")
 	child.Finish(nil)
 	root.Finish(nil)
-	require.NoError(t, pgproxy.Metrics().Count("datadog.pg_proxy.query", 3, []string{"database:orders"}, 1))
-	require.NoError(t, pgproxy.Metrics().Distribution("datadog.pg_proxy.size", 12, nil, 1))
-	require.NoError(t, pgproxy.Metrics().Timing("datadog.pg_proxy.latency", 5*time.Millisecond, nil, 1))
+	require.NoError(t, pgproxy.Metrics().Count("pg_proxy.query", 3, []string{"database:orders"}, 1))
+	require.NoError(t, pgproxy.Metrics().Distribution("pg_proxy.size", 12, nil, 1))
+	require.NoError(t, pgproxy.Metrics().Timing("pg_proxy.latency", 5*time.Millisecond, nil, 1))
 	pgproxy.Logger().Warn("ready", "database", "orders")
 	// Close must flush buffered traces and metrics, and be safe to call twice.
 	require.NoError(t, shutdown())

@@ -48,7 +48,10 @@ func (t MetricTags) Key() string {
 }
 
 // Metrics is the session metric sink. Embedders may provide a buffered
-// implementation for high-throughput production traffic.
+// implementation for high-throughput production traffic. Sinks receive bare
+// names (pg_proxy.…). Forward them through pgproxy.Metrics(), which applies
+// the namespace once, or wrap them with pgproxy.MetricName when sending to
+// another client.
 type Metrics interface {
 	Count(name string, value int64, tags MetricTags)
 	Distribution(name string, value float64, tags MetricTags)
@@ -68,19 +71,7 @@ func resolveMetrics(metrics Metrics) Metrics {
 	if metrics == nil {
 		return directMetrics{}
 	}
-	return namespacedMetrics{inner: metrics}
-}
-
-// namespacedMetrics applies the configured metric namespace before a
-// caller-supplied sink sees the name, matching what directMetrics emits.
-type namespacedMetrics struct{ inner Metrics }
-
-func (m namespacedMetrics) Count(name string, value int64, tags MetricTags) {
-	m.inner.Count(pgproxy.MetricName(name), value, tags)
-}
-
-func (m namespacedMetrics) Distribution(name string, value float64, tags MetricTags) {
-	m.inner.Distribution(pgproxy.MetricName(name), value, tags)
+	return metrics
 }
 
 func newMetricTags(tags []string) MetricTags {

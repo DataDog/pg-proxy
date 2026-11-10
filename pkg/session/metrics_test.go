@@ -124,10 +124,10 @@ func TestSessionTelemetryUsesConfiguredMetrics(t *testing.T) {
 	s.recordMessageFinished("query", 150*time.Microsecond)
 
 	require.Equal(t, []metricCall{
-		{name: pgproxy.MetricName(MetricMessages), value: 1, tags: []string{"user:foo", "message:query"}},
+		{name: MetricMessages, value: 1, tags: []string{"user:foo", "message:query"}},
 	}, metrics.counts)
 	require.Equal(t, []metricCall{
-		{name: pgproxy.MetricName(MetricMessageLatency), value: 150, tags: []string{"user:foo", "message:query"}},
+		{name: MetricMessageLatency, value: 150, tags: []string{"user:foo", "message:query"}},
 	}, metrics.distributions)
 }
 
