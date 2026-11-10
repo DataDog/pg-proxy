@@ -833,7 +833,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 			routingEnabled = routingEnabledFn(context.Background()).Enabled
 		}
 		policy.setRoutingEnabled(routingEnabled)
-		decision := policy.observePatroni(poolHealth.state.Snapshot(), time.Now())
+		decision := policy.observePatroni(poolHealth.state.Snapshot(), observedAt)
 		w.reportHybridDecision(poolHealth, decision, false)
 	}
 }
