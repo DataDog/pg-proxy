@@ -55,13 +55,6 @@ type pgVersion struct {
 var versions []*pgVersion
 
 func TestMain(m *testing.M) {
-	// testcontainers/sshd, which forwards the proxy's port on the host to the
-	// pg_regress container, is not in registry.ddbuild.io's Docker Hub mirror, so
-	// Testcontainers' own images come from Docker Hub here even when
-	// PG_PROXY_ITEST_INTERNAL_IMAGES selects the internal Debian base image.
-	if _, set := os.LookupEnv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX"); !set {
-		_ = os.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "")
-	}
 	os.Exit(itest.Main(func() int { return m.Run() }, func(context.Context) (func(), error) {
 		var err error
 		if versions, err = selectVersions(os.Getenv("PG_PROXY_REGRESS_PG_MAJORS")); err != nil {
