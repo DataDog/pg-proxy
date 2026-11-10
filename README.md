@@ -8,6 +8,14 @@ run standalone or inside a larger system.
 
 **Status: early.** What is here is in use, but the API is not yet stable.
 
+## Documentation
+
+Guides, reference, and design explanations live in the documentation site under
+[`docs/site`](docs/site). Its pages are Markdown in
+[`docs/site/src/content/docs`](docs/site/src/content/docs), starting with the
+[introduction](docs/site/src/content/docs/index.md). To build and preview the
+site locally, see [`docs/site/README.md`](docs/site/README.md).
+
 ## Dependency policy
 
 This library builds and runs with public dependencies only. Imports beginning
