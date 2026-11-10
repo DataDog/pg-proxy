@@ -119,7 +119,7 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
-	// TODO(OSQQUERY-714): support configuration refresh through the library Warden.
+	// TODO: support configuration refresh through the library Warden.
 	// File changes currently require a restart.
 	inventory := &staticInventory{
 		logicalDatabases: cfg.logicalDatabases,
@@ -164,7 +164,7 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 		AuthenticationMessageLimit: 16 << 10,
 		StartupTimeout:             10 * time.Second,
 		MaxPendingConnections:      100,
-		// TODO(OSQQUERY-713): configure session admission limits independently of backend pool sizes.
+		// TODO: configure session admission limits independently of backend pool sizes.
 		Admission: limiter.New(limiter.Params{
 			GlobalLimit: 100, DefaultServiceMax: 100,
 		}),

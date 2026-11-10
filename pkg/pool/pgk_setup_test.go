@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// These scenarios moved from apps/pg-proxy/pools with the original inventory
-// and health expectations. Discover supplies the health worker's retained set,
+// These scenarios cover discovery and cleanup with their inventory and
+// health expectations. Discover supplies the health worker's retained set,
 // so the pool must not apply a second DNS-miss threshold.
 func TestSetupPool_PGK(t *testing.T) {
 	const repeatedHealthChecks = 3

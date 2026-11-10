@@ -134,7 +134,7 @@ func (sl *Limiter) ExportGauges(ctx context.Context) {
 func (sl *Limiter) RegisterSession(service string) error {
 	serviceState, found := sl.lookup(service)
 	if !found {
-		// When service is not in the supplied quotas, e.g. orgstore-devenv-toolbox.
+		// When service is not in the supplied quotas, e.g. an ad hoc tooling client.
 		serviceState = sl.RegisterService(service, sl.defaultServiceMax)
 	}
 

@@ -20,5 +20,6 @@ passthrough policy; the standalone command rejects it before credential exchange
 Callbacks return errors to the listener, which sends startup responses and logs
 the accepted identity. Never log passwords, tokens, proofs, or provider payloads.
 
-Datadog JWT and Vault policy stay in dd-source callbacks. They use the same
-listener checks and the library's protocol and SCRAM exchanges directly.
+Other mechanisms, such as token or secret-store based authentication, belong in
+application callbacks. They use the same listener checks and the library's
+protocol and SCRAM exchanges directly.

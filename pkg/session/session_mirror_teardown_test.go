@@ -25,7 +25,7 @@ import (
 const mirrorTestDatabase = "logical"
 
 // mirrorTestSession builds a session whose mirroring policy is toggled through the
-// returned flag, so a test can flip mirroring off the way a COBS change would.
+// returned flag, so a test can flip mirroring off the way a configuration change would.
 func mirrorTestSession(t *testing.T, budget *mirror.Budget, acquireShadow func(context.Context, string, LinkRequest) (link.Link, error)) (*Session, *atomic.Bool) {
 	t.Helper()
 	enabled := &atomic.Bool{}
