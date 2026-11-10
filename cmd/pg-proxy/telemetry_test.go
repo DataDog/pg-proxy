@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package main
 
 import (
@@ -180,8 +185,8 @@ func TestTelemetryOTLPMetricTemporality(t *testing.T) {
 			deps, shutdown, err := setupTelemetry(t.Context(), telemetryConfig{Metrics: metricOTel})
 			require.NoError(t, err)
 			t.Cleanup(func() { _ = shutdown() })
-			require.NoError(t, deps.Metrics.Count("dd.orgstore.pg_proxy.messages", 3, nil, 1))
-			require.NoError(t, deps.Metrics.Incr("dd.orgstore.pg_proxy.messages", nil, 1))
+			require.NoError(t, deps.Metrics.Count("pg_proxy.messages", 3, nil, 1))
+			require.NoError(t, deps.Metrics.Incr("pg_proxy.messages", nil, 1))
 			require.NoError(t, shutdown())
 			receiver.mu.Lock()
 			defer receiver.mu.Unlock()
@@ -664,7 +669,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 		requireResource(t, resource.Resource.Attributes)
 		for _, scope := range resource.ScopeMetrics {
 			for _, metric := range scope.Metrics {
-				if metric.Name == "dd.orgstore.pg_proxy.messages.queries" {
+				if metric.Name == "datadog.pg_proxy.messages.queries" {
 					for _, point := range metric.GetSum().GetDataPoints() {
 						queryMetric = queryMetric || point.GetAsInt() > 0
 					}

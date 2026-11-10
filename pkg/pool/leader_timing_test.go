@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package pool
 
 import (
@@ -40,8 +45,8 @@ func TestLeaderTimingSignedTiming(t *testing.T) {
 			require.Len(t, got, 1)
 			c := got[0]
 			assert.Equal(t, "B", c.ip)
-			assert.Equal(t, leaderTimingAt(tc.sqlSecond), c.candidate.at)
-			assert.Equal(t, leaderTimingAt(tc.patroniSecond), c.reference.at)
+			assert.Equal(t, leaderTimingAt(tc.sqlSecond), c.candidateAt)
+			assert.Equal(t, leaderTimingAt(tc.patroniSecond), c.patroniAt)
 			assert.Equal(t, time.Duration(tc.patroniSecond-tc.sqlSecond)*time.Second, c.speedup())
 			require.Empty(t, p.observe(true, leaderTimingIPs("B"), leaderTimingAt(10), struct{}{}, everyNewLeader))
 			require.Empty(t, p.observe(false, leaderTimingIPs("B"), leaderTimingAt(11), struct{}{}, everyNewLeader))
@@ -182,7 +187,7 @@ func TestLeaderTimingEligibilityAndMetadata(t *testing.T) {
 		got = p.observe(referenceLeaderSource, leaderTimingIPs("B"), leaderTimingAt(6), "patroni", mode)
 		require.Len(t, got, 1)
 		assert.Equal(t, 2*time.Second, got[0].speedup())
-		assert.Equal(t, "conclusive_sql", got[0].candidate.data)
-		assert.Equal(t, "patroni", got[0].reference.data)
+		assert.Equal(t, "conclusive_sql", got[0].candidateData)
+		assert.Equal(t, "patroni", got[0].referenceData)
 	}
 }

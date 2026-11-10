@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package session
 
 import (
@@ -149,7 +154,7 @@ func TestRunDrainsCanceledIdleSession(t *testing.T) {
 
 	require.NoError(t, s.Run())
 	require.Equal(t, []metricCall{{
-		name:  "dd.orgstore.pg_proxy.sessions.drained_connections",
+		name:  "datadog.pg_proxy.sessions.drained_connections",
 		value: 1,
 		tags:  []string{"user:user", "database:database", "client_service_account:service", "passthrough_user:false"},
 	}}, metrics.counts)

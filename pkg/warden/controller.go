@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package warden
 
 import (
@@ -36,6 +41,8 @@ type ControllerConfig[C, D any] struct {
 	RefreshInterval RefreshInterval[C]
 	Factory         func(context.Context, string, D, []D) (ManagedBackend, error)
 	Retry           Retry[ManagedBackend]
+	DatabaseUpdate  DatabaseUpdateHandler[D]
+	BackendReady    BackendReadyHandler
 	Hooks           ControllerHooks[C]
 }
 
@@ -64,10 +71,12 @@ func NewController[C, D any](cfg ControllerConfig[C, D]) *Controller[C, D] {
 		hooks:           cfg.Hooks,
 	}
 	controller.reconciler = NewReconciler(ReconcilerConfig[D]{
-		Context: cfg.Context,
-		Runtime: runtime,
-		Factory: cfg.Factory,
-		Retry:   cfg.Retry,
+		Context:        cfg.Context,
+		Runtime:        runtime,
+		Factory:        cfg.Factory,
+		Retry:          cfg.Retry,
+		DatabaseUpdate: cfg.DatabaseUpdate,
+		BackendReady:   cfg.BackendReady,
 	})
 	controller.refresher = NewRefresher(RefresherConfig[C]{
 		Context:  cfg.Context,
@@ -95,11 +104,11 @@ func (c *Controller[C, D]) Accept(cfg C) (err error) {
 	start := time.Now()
 	defer func() {
 		if err != nil {
-			pgproxy.Metrics().Count("dd.orgstore.pg_proxy.warden.accept.count", 1, []string{"outcome:error"}, 1)
+			pgproxy.Metrics().Count("pg_proxy.warden.accept.count", 1, []string{"outcome:error"}, 1)
 			return
 		}
-		pgproxy.Metrics().Timing("dd.orgstore.pg_proxy.warden.accept.duration", time.Since(start), nil, 1)
-		pgproxy.Metrics().Count("dd.orgstore.pg_proxy.warden.accept.count", 1, []string{"outcome:success"}, 1)
+		pgproxy.Metrics().Timing("pg_proxy.warden.accept.duration", time.Since(start), nil, 1)
+		pgproxy.Metrics().Count("pg_proxy.warden.accept.count", 1, []string{"outcome:success"}, 1)
 	}()
 	if c.hooks.BeforeAccept != nil {
 		if beforeErr := c.hooks.BeforeAccept(cfg); beforeErr != nil {

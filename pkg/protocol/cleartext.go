@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package protocol
 
 import (
@@ -9,11 +14,7 @@ import (
 )
 
 // cleartextMetricName counts cleartext password exchanges, tagged by outcome.
-//
-// TODO: make the namespace configurable. "dd.orgstore" is an internal Datadog
-// name; changing it means emitting both for a window, since dashboards and
-// monitors depend on it.
-const cleartextMetricName = "dd.orgstore.pg_proxy.protocol.cleartext"
+const cleartextMetricName = "pg_proxy.protocol.cleartext"
 
 // GetCleartextPassword asks the client for a cleartext password and returns it.
 //

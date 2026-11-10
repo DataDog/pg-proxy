@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package session
 
 import (
@@ -138,7 +143,7 @@ func (s *Session) startClientMonitor() (*clientMonitor, context.Context) {
 			case <-ticker.C:
 				if probe.IsDisconnected() {
 					pgproxy.Logger().Info("client disconnection detected", "session_id", s.pid)
-					_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.client_disconnected", 1, s.obsVals.metricTags, 1)
+					_ = pgproxy.Metrics().Count("pg_proxy.sessions.client_disconnected", 1, s.obsVals.metricTags, 1)
 
 					s.clientDisconnected.Store(true)
 					cancel(ErrClientDisconnected) // abort a pending AcquireConnection with an identifiable cause

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package mirror
 
 import (
@@ -275,5 +280,5 @@ func (w *mirrorWorker) count(metric string, extraTags ...string) {
 	if len(extraTags) > 0 {
 		tags = append(append([]string(nil), w.tags...), extraTags...)
 	}
-	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session."+metric, 1, tags, 1)
+	_ = pgproxy.Metrics().Count("pg_proxy.session."+metric, 1, tags, 1)
 }

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package pool
 
 import (
@@ -369,11 +374,11 @@ func (p *hybridHealthPolicy) observeLeaderLocked(source string, primaryIPs []str
 	}
 	pair := pairs[0]
 	comparison := &LeaderDetectionComparison{NewLeaderIP: pair.ip, SQLRoutingEnabled: p.routingEnabled}
-	downtime = pair.candidate.data
-	if downtime.startedAt.IsZero() || !downtime.recoveredAt.Equal(pair.candidate.at) {
+	downtime = pair.candidateData
+	if downtime.startedAt.IsZero() || !downtime.recoveredAt.Equal(pair.candidateAt) {
 		return comparison
 	}
-	patroniDowntime := pair.reference.at.Sub(downtime.startedAt)
+	patroniDowntime := pair.patroniAt.Sub(downtime.startedAt)
 	sqlDowntime := downtime.recoveredAt.Sub(downtime.startedAt)
 	if patroniDowntime <= 0 || sqlDowntime < 0 {
 		return comparison
@@ -399,5 +404,5 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(source string, health map
 		return nil
 	}
 	pair := pairs[0]
-	return &LeaderRoutingComparison{NewLeaderIP: pair.ip, Improvement: pair.speedup(), HybridSource: pair.candidate.data}
+	return &LeaderRoutingComparison{NewLeaderIP: pair.ip, Improvement: pair.speedup(), HybridSource: pair.candidateData}
 }

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package pool
 
 import (
@@ -10,7 +15,7 @@ import (
 // Metadata follows the originating observation (e.g. a downtime window or hybrid source).
 type leaderTiming[T any] struct {
 	candidate, reference leaderTimingObservation
-	pending              map[string]leaderTimingPair[T]
+	pending              map[string]leaderTimingRecord[T]
 }
 
 type leaderTimingObservation struct {
@@ -22,21 +27,16 @@ type leaderTimingObservation struct {
 	comparable map[string]bool
 }
 
-type timedLeader[T any] struct {
-	at   time.Time
-	data T
-}
-
-type leaderTimingPair[T any] struct {
-	candidate, reference timedLeader[T]
+// leaderTimingRecord adds observation metadata to the shared timestamp pair.
+type leaderTimingRecord[T any] struct {
+	leaderTimingPair
+	candidateData, referenceData T
 }
 
 type leaderTimingComparison[T any] struct {
-	ip                   string
-	candidate, reference timedLeader[T]
+	leaderTimingRecord[T]
+	ip string
 }
-
-func (c leaderTimingComparison[T]) speedup() time.Duration { return c.reference.at.Sub(c.candidate.at) }
 
 type leaderTimingSource bool
 
@@ -75,7 +75,7 @@ func (p *leaderTiming[T]) observe(source leaderTimingSource, healthy map[string]
 	}
 	defer p.discardAgreedPending()
 	for ip, pair := range p.pending {
-		owned := source == candidateLeaderSource && !pair.candidate.at.IsZero() || source == referenceLeaderSource && !pair.reference.at.IsZero()
+		owned := source == candidateLeaderSource && !pair.candidateAt.IsZero() || source == referenceLeaderSource && !pair.patroniAt.IsZero()
 		if owned && !current[ip] {
 			delete(p.pending, ip)
 			delete(observation.comparable, ip)
@@ -102,21 +102,20 @@ func (p *leaderTiming[T]) observe(source leaderTimingSource, healthy map[string]
 	var comparisons []leaderTimingComparison[T]
 	for _, ip := range added {
 		if p.pending == nil {
-			p.pending = make(map[string]leaderTimingPair[T])
+			p.pending = make(map[string]leaderTimingRecord[T])
 		}
 		pair := p.pending[ip]
-		sample := timedLeader[T]{at: at, data: data}
 		if source == candidateLeaderSource {
-			pair.candidate = sample
+			pair.candidateData = data
 		} else {
-			pair.reference = sample
+			pair.referenceData = data
 		}
-		if pair.candidate.at.IsZero() || pair.reference.at.IsZero() {
+		if !pair.observe(source == candidateLeaderSource, at) {
 			p.pending[ip] = pair
 			continue
 		}
 		delete(p.pending, ip)
-		comparisons = append(comparisons, leaderTimingComparison[T]{ip: ip, candidate: pair.candidate, reference: pair.reference})
+		comparisons = append(comparisons, leaderTimingComparison[T]{ip: ip, leaderTimingRecord: pair})
 	}
 	return comparisons
 }
@@ -128,3 +127,23 @@ func (p *leaderTiming[T]) discardAgreedPending() {
 		}
 	}
 }
+
+// leaderTimingPair records timestamps for an IP already selected by the caller.
+// Callers own leader eligibility, baselines, pending maps, and lifecycle cleanup.
+// The candidate is SQL for detection/snapshot timing, or hybrid for routing timing.
+type leaderTimingPair struct {
+	candidateAt time.Time
+	patroniAt   time.Time
+}
+
+// observe returns true once both sources have supplied a timestamp.
+func (p *leaderTimingPair) observe(candidate bool, at time.Time) bool {
+	if candidate {
+		p.candidateAt = at
+	} else {
+		p.patroniAt = at
+	}
+	return !p.candidateAt.IsZero() && !p.patroniAt.IsZero()
+}
+
+func (p leaderTimingPair) speedup() time.Duration { return p.patroniAt.Sub(p.candidateAt) }
