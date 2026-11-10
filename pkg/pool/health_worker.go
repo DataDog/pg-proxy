@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package pool
 
 import (
@@ -123,10 +128,13 @@ type HealthWorkerHooks struct {
 	CheckFinished      func(elapsed time.Duration, tags []string)
 	SQLCheckMissed     func(tags []string)
 	SQLPatroniCompared func(SQLPatroniHealthSnapshot, []string)
-	Evicted            func(ip string, tags []string)
+	// SQLPotentialCompared reports signed snapshot speedup, never a routing decision.
+	// It can run concurrently for different hosts and must return promptly.
+	SQLPotentialCompared func(SQLPotentialComparison, []string)
+	Evicted              func(ip string, tags []string)
 }
 
-// SQLHealthResultsSnapshot is one credential target's complete raw result set. Errors remain wrapped
+// SQLHealthResultsSnapshot is one credential target's raw result set for retained IPs. Errors remain wrapped
 // so observability hooks can inspect PostgreSQL SQLSTATEs and errors.Is/errors.As chains.
 type SQLHealthResultsSnapshot struct {
 	ScheduledAt  time.Time
@@ -136,7 +144,7 @@ type SQLHealthResultsSnapshot struct {
 	Results      []SQLHealthCheckResult
 }
 
-// SQLPatroniHealthSnapshot exposes every raw SQL finding alongside the Patroni snapshot used for
+// SQLPatroniHealthSnapshot exposes retained raw SQL findings alongside the Patroni snapshot used for
 // comparison. SQL results may come from different scheduled polls when credentials finish at
 // different rates.
 type SQLPatroniHealthSnapshot struct {
@@ -272,7 +280,8 @@ type PoolHealth struct {
 	// runs outside sqlComparisonMu so it cannot delay completed polls or invalidation.
 	sqlComparisonMu     sync.Mutex
 	sqlComparisonLatest map[*sqlHealthTarget]SQLHealthResultsSnapshot
-
+	// Potential timing is telemetry-only and protected by sqlComparisonMu.
+	potentialTiming sqlPotentialTimingState
 	// subscriptionTargets associates each pool subscription with its SQL connection string.
 	subscriptionTargets map[HealthUpdates]*sqlHealthTarget
 	// hybridPolicy evaluates SQL and Patroni snapshots for shadow telemetry. It does not own or
@@ -293,16 +302,18 @@ type sqlHealthRoundState struct {
 }
 
 type sqlHealthComparisonSnapshot struct {
-	conflictingIPs []string
-	health         map[string]bool
-	retainedIPs    []string
-	results        []SQLHealthResultsSnapshot
+	potentialComparisons []SQLPotentialComparison
+	conflictingIPs       []string
+	health               map[string]bool
+	retainedIPs          []string
+	results              []SQLHealthResultsSnapshot
 }
 
 func (s *PoolHealth) disableSQLComparisonTarget(target *sqlHealthTarget) {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
 	target.sqlComparisonGeneration++
+	s.resetSQLPotentialTargetLocked(target)
 	delete(s.sqlComparisonLatest, target)
 }
 
@@ -310,6 +321,7 @@ func (s *PoolHealth) retireSQLComparisonTarget(target *sqlHealthTarget) {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
 	target.sqlComparisonRetired = true
+	s.resetSQLPotentialTargetLocked(target)
 	delete(s.sqlComparisonLatest, target)
 }
 
@@ -335,12 +347,35 @@ func (s *PoolHealth) reserveSQLComparisonPoll(
 	}
 	if !enabled {
 		target.sqlComparisonGeneration++
+		s.resetSQLPotentialTargetLocked(target)
 		delete(s.sqlComparisonLatest, target)
 	}
 	return target.sqlComparisonGeneration, target.tryStartSQLRound(scheduledAt), true
 }
 
+// refreshSQLResolved makes DNS eviction and timing invalidation indivisible to observations.
+// The caller holds sqlScheduleMu; DNS lookup happens before taking sqlComparisonMu so a slow
+// lookup cannot delay completed SQL or Patroni observations.
+func (s *PoolHealth) refreshSQLResolved(trackPotential bool, resolved []string, absenceThreshold int) []string {
+	s.sqlComparisonMu.Lock()
+	defer s.sqlComparisonMu.Unlock()
+	retained := s.sqlHealthState.RefreshResolved(resolved, absenceThreshold, func(ip string) {
+		// Eviction removes cached evidence, rather than only hiding it during aggregation.
+		// Keep sibling IPs and their original observation timestamps intact.
+		for target, snapshot := range s.sqlComparisonLatest {
+			snapshot.CandidateIPs = slices.DeleteFunc(snapshot.CandidateIPs, func(candidate string) bool { return candidate == ip })
+			snapshot.Results = slices.DeleteFunc(snapshot.Results, func(result SQLHealthCheckResult) bool { return result.IP == ip })
+			s.sqlComparisonLatest[target] = snapshot
+		}
+	})
+	if trackPotential && !s.isReadReplica {
+		s.potentialTiming.updateRetained(retained, time.Now())
+	}
+	return retained
+}
+
 func (s *PoolHealth) recordSQLComparisonPoll(
+	trackPotential bool,
 	target *sqlHealthTarget,
 	generation uint64,
 	scheduledAt time.Time,
@@ -350,11 +385,12 @@ func (s *PoolHealth) recordSQLComparisonPoll(
 ) *sqlHealthComparisonSnapshot {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
-	return s.recordSQLComparisonPollLocked(target, generation, scheduledAt, observedAt, candidateIPs, outcome)
+	return s.recordSQLComparisonPollLocked(trackPotential, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 }
 
 // recordSQLComparisonPollLocked requires sqlComparisonMu to be held.
 func (s *PoolHealth) recordSQLComparisonPollLocked(
+	trackPotential bool,
 	target *sqlHealthTarget,
 	generation uint64,
 	scheduledAt time.Time,
@@ -374,15 +410,28 @@ func (s *PoolHealth) recordSQLComparisonPollLocked(
 	if s.sqlComparisonLatest == nil {
 		s.sqlComparisonLatest = make(map[*sqlHealthTarget]SQLHealthResultsSnapshot)
 	}
+	// A poll can complete after DNS eviction. Filter owned copies so its callback
+	// cannot restore absent IPs or mutate the caller's diagnostic results.
+	retainedCandidates := slices.DeleteFunc(slices.Clone(candidateIPs), func(ip string) bool {
+		_, retained := retainedIPs[ip]
+		return !retained
+	})
+	retainedResults := slices.DeleteFunc(slices.Clone(outcome.Results), func(result SQLHealthCheckResult) bool {
+		_, retained := retainedIPs[result.IP]
+		return !retained
+	})
 	s.sqlComparisonLatest[target] = SQLHealthResultsSnapshot{
 		ScheduledAt:  scheduledAt,
 		ObservedAt:   observedAt,
-		CandidateIPs: slices.Clone(candidateIPs),
+		CandidateIPs: retainedCandidates,
 		Tags:         slices.Clone(target.tags),
-		Results:      slices.Clone(outcome.Results),
+		Results:      retainedResults,
 	}
 
 	snapshot := buildSQLHealthComparisonSnapshot(retainedIPs, s.sqlComparisonLatest)
+	if trackPotential && !s.isReadReplica {
+		snapshot.potentialComparisons = s.potentialTiming.observeSQLSnapshot(snapshot, observedAt)
+	}
 	return &snapshot
 }
 
@@ -391,36 +440,20 @@ func buildSQLHealthComparisonSnapshot(
 	latest map[*sqlHealthTarget]SQLHealthResultsSnapshot,
 ) sqlHealthComparisonSnapshot {
 	snapshot := sqlHealthComparisonSnapshot{
-		health:      make(map[string]bool, len(retainedIPs)),
 		retainedIPs: slices.Collect(maps.Keys(retainedIPs)),
 		results:     make([]SQLHealthResultsSnapshot, 0, len(latest)),
 	}
 	slices.Sort(snapshot.retainedIPs)
-	conflicts := make(map[string]struct{})
+	var retainedResults []SQLHealthCheckResult
 	for _, targetSnapshot := range latest {
 		snapshot.results = append(snapshot.results, cloneSQLHealthResultsSnapshot(targetSnapshot))
 		for _, result := range targetSnapshot.Results {
-			// Every error is an unknown role for this credential's latest poll. Another
-			// credential may supply a determinate role, but historical successes cannot.
-			if result.Err != nil {
-				continue
+			if _, retained := retainedIPs[result.IP]; retained {
+				retainedResults = append(retainedResults, result)
 			}
-			if _, retained := retainedIPs[result.IP]; !retained {
-				continue
-			}
-			role := result.HealthyPrimary()
-			if previous, known := snapshot.health[result.IP]; known && previous != role {
-				conflicts[result.IP] = struct{}{}
-			}
-			snapshot.health[result.IP] = role
 		}
 	}
-	// Keep conflicts distinct from unknowns and independent of map iteration/completion order.
-	for ip := range conflicts {
-		delete(snapshot.health, ip)
-		snapshot.conflictingIPs = append(snapshot.conflictingIPs, ip)
-	}
-	slices.Sort(snapshot.conflictingIPs)
+	snapshot.health, snapshot.conflictingIPs = aggregateSQLComparisonRoles(retainedResults)
 	slices.SortFunc(snapshot.results, func(left, right SQLHealthResultsSnapshot) int {
 		if left.ScheduledAt.Before(right.ScheduledAt) {
 			return -1
@@ -437,6 +470,31 @@ func buildSQLHealthComparisonSnapshot(
 		return 0
 	})
 	return snapshot
+}
+
+// aggregateSQLComparisonRoles applies the same role rules to raw mismatch evidence and
+// lifecycle-filtered timing evidence. Unknown roles do not erase a sibling's successful role.
+func aggregateSQLComparisonRoles(results []SQLHealthCheckResult) (map[string]bool, []string) {
+	health := make(map[string]bool)
+	conflicts := make(map[string]struct{})
+	for _, result := range results {
+		if result.Err != nil {
+			continue
+		}
+		role := result.HealthyPrimary()
+		if previous, known := health[result.IP]; known && previous != role {
+			conflicts[result.IP] = struct{}{}
+		}
+		health[result.IP] = role
+	}
+	// Keep conflicts distinct from unknowns and independent of result order.
+	var conflictingIPs []string
+	for ip := range conflicts {
+		delete(health, ip)
+		conflictingIPs = append(conflictingIPs, ip)
+	}
+	slices.Sort(conflictingIPs)
+	return health, conflictingIPs
 }
 
 func cloneSQLHealthResultsSnapshot(snapshot SQLHealthResultsSnapshot) SQLHealthResultsSnapshot {
@@ -760,11 +818,13 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 		}(ip)
 	}
 	wg.Wait()
+	observedAt := time.Now()
 
 	if w.hooks.CheckFinished != nil {
 		w.hooks.CheckFinished(time.Since(start), poolHealth.patroniTags)
 	}
 	w.updateHealthAndCleanup(poolHealth, pghealth, systemIDs, ips)
+	w.observePatroniPotential(poolHealth, pghealth, observedAt)
 	if policy, routingEnabledFn := poolHealth.routingPolicy(); policy != nil {
 		routingEnabled := false
 		if routingEnabledFn != nil {
@@ -929,13 +989,7 @@ func (w *HealthWorker) runSQLHealthGroup(
 		for _, ip := range resolved {
 			resolvedSet[ip] = struct{}{}
 		}
-		group.poolHealth.sqlComparisonMu.Lock()
-		toProbe = group.poolHealth.sqlHealthState.RefreshResolved(
-			resolved,
-			w.absenceThreshold,
-			nil,
-		)
-		group.poolHealth.sqlComparisonMu.Unlock()
+		toProbe = group.poolHealth.refreshSQLResolved(w.hooks.SQLPotentialCompared != nil, resolved, w.absenceThreshold)
 		group.poolHealth.sqlScheduleMu.Unlock()
 	}
 
@@ -967,6 +1021,8 @@ func (w *HealthWorker) completeSQLHealthCheck(
 	resolvedSet map[string]struct{},
 	outcome SQLHealthCheckOutcome,
 ) {
+	// Preserve probe completion time even when routing-flag evaluation blocks.
+	observedAt := time.Now()
 	poolHealth := target.poolHealth
 	policy, routingEnabledFn := poolHealth.routingPolicy()
 	// External callbacks and telemetry must not run under the snapshot/invalidation lock.
@@ -991,7 +1047,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, retainedHealth)
 		// A delayed success can restore an IP evicted by DNS while the probe was running.
 		// Capture membership and roles only after that retention update.
-		snapshot = poolHealth.recordSQLComparisonPollLocked(target, generation, scheduledAt, time.Now(), candidateIPs, outcome)
+		snapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		if policy == nil || len(snapshot.retainedIPs) == 0 {
 			return false
 		}
@@ -1019,6 +1075,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		return true
 	}()
 	w.reportSQLPatroniComparison(poolHealth, snapshot)
+	if snapshot != nil {
+		w.reportSQLPotential(poolHealth, snapshot.potentialComparisons)
+	}
 	if applied {
 		// Cached errors remain evidence for the decision, but are not new probe events.
 		w.reportConclusiveErrors([]completedSQLHealthCheck{{target: target, outcome: outcome}}, decision)

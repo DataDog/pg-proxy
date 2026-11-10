@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 // Package listener owns the portable PostgreSQL listener and startup engine.
 package listener
 
@@ -344,7 +349,7 @@ func (l *Listener[T]) handleConn(conn net.Conn, releaseStartup func()) {
 	pgproxy.Logger().Debug("Opened connection", "remote", conn.RemoteAddr().String(), "user", session.User(), "database", session.Database())
 	tags := append(session.MetricTags(), "outcome:successful",
 		fmt.Sprintf("with_dynamic_routing:%t", session.DynamicRoutingEnabled()))
-	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", 1, tags, 1)
+	_ = pgproxy.Metrics().Count("pg_proxy.listener.connection_attempt", 1, tags, 1)
 	if l.cfg.Hooks.Lifecycle.Register != nil {
 		l.cfg.Hooks.Lifecycle.Register(session)
 	}
@@ -543,7 +548,7 @@ func (l *Listener[T]) handleStartup(ctx, startupCtx context.Context, conn net.Co
 		writeErr := handleSessionLimitExceeded(conn, err)
 		metricTags := append(tags, "outcome:error", "error_type:"+l.cfg.Admission.GetErrorType(err),
 			"placement:register_session", fmt.Sprintf("client_notified:%t", writeErr == nil))
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", 1, metricTags, 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.listener.connection_attempt", 1, metricTags, 1)
 		// Suppress a duplicate client response / error log in handleConn — the client
 		// was already sent the 53300 above.
 		return nil, ClientNotified(err)
@@ -650,7 +655,7 @@ func handleLoadSheddingRejection(conn net.Conn) {
 	backend := pgproto3.NewBackend(conn, conn)
 	if msg, readErr := backend.ReceiveStartupMessage(); readErr == nil {
 		if _, isSSL := msg.(*pgproto3.SSLRequest); isSSL {
-			_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", 1,
+			_ = pgproxy.Metrics().Count("pg_proxy.listener.connection_attempt", 1,
 				[]string{"outcome:error", "placement:load_shedding"}, 1)
 			_, _ = conn.Write([]byte("N"))
 			return
@@ -697,7 +702,7 @@ func handleConnError(ctx context.Context, conn net.Conn, err error, placement st
 		stage, reason, diagnostic = "tls", "tls_handshake_failed", "TLS handshake failed"
 	}
 	pgproxy.LoggerFromContext(ctx).Error(fmt.Sprintf("failed to open connection from %s: %v", conn.RemoteAddr().String(), diagnostic), "remote", conn.RemoteAddr().String(), "stage", stage, "reason", reason)
-	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.listener.connection_attempt", 1,
+	_ = pgproxy.Metrics().Count("pg_proxy.listener.connection_attempt", 1,
 		[]string{"outcome:error", "placement:" + placement}, 1)
 	if failedTLS {
 		// SSL was accepted, but the TLS handshake failed. Only TLS may write

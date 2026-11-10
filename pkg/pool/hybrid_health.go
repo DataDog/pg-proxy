@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package pool
 
 import (
@@ -65,14 +70,8 @@ type leaderObservation struct {
 	primaryIPs map[string]struct{}
 }
 
-type leaderDetectionPair struct {
-	sqlAt     time.Time
-	patroniAt time.Time
-}
-
 type leaderRoutingPair struct {
-	patroniAt    time.Time
-	hybridAt     time.Time
+	leaderTimingPair
 	hybridSource string
 }
 
@@ -88,7 +87,7 @@ type hybridHealthPolicy struct {
 
 	patroniLeaderObservation leaderObservation
 	sqlLeaderObservation     leaderObservation
-	pendingLeaderDetections  map[string]leaderDetectionPair
+	pendingLeaderDetections  map[string]leaderTimingPair
 
 	patroniRoutingLeaderIP string
 	hybridRoutingLeaderIP  string
@@ -370,22 +369,17 @@ func (p *hybridHealthPolicy) observeLeaderLocked(
 
 	leaderIP := newLeaders[0]
 	if p.pendingLeaderDetections == nil {
-		p.pendingLeaderDetections = make(map[string]leaderDetectionPair)
+		p.pendingLeaderDetections = make(map[string]leaderTimingPair)
 	}
 	pair := p.pendingLeaderDetections[leaderIP]
-	if source == "sql" {
-		pair.sqlAt = observedAt
-	} else {
-		pair.patroniAt = observedAt
-	}
-	if pair.sqlAt.IsZero() || pair.patroniAt.IsZero() {
+	if !pair.observe(source == "sql", observedAt) {
 		p.pendingLeaderDetections[leaderIP] = pair
 		return nil
 	}
 	delete(p.pendingLeaderDetections, leaderIP)
 	return &LeaderDetectionComparison{
 		NewLeaderIP:       leaderIP,
-		Speedup:           pair.patroniAt.Sub(pair.sqlAt),
+		Speedup:           pair.speedup(),
 		SQLRoutingEnabled: p.routingEnabled,
 	}
 }
@@ -421,13 +415,10 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(
 		p.pendingRouting = make(map[string]leaderRoutingPair)
 	}
 	pair := p.pendingRouting[leaderIP]
-	if source == "patroni" {
-		pair.patroniAt = observedAt
-	} else {
-		pair.hybridAt = observedAt
+	if source == "hybrid" {
 		pair.hybridSource = hybridSource
 	}
-	if pair.patroniAt.IsZero() || pair.hybridAt.IsZero() {
+	if !pair.observe(source == "hybrid", observedAt) {
 		p.pendingRouting[leaderIP] = pair
 		return nil
 	}
@@ -436,7 +427,7 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(
 	delete(p.pendingRouting, leaderIP)
 	return &LeaderRoutingComparison{
 		NewLeaderIP:  leaderIP,
-		Improvement:  pair.patroniAt.Sub(pair.hybridAt),
+		Improvement:  pair.speedup(),
 		HybridSource: pair.hybridSource,
 	}
 }

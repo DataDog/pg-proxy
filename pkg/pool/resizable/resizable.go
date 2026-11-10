@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package resizable
 
 import (
@@ -13,8 +18,8 @@ import (
 )
 
 const (
-	poolResizeMetric        = "dd.orgstore.pg_proxy.connections.pool_resize"
-	poolLimitMetric         = "dd.orgstore.pg_proxy.connections.pool_limit"
+	poolResizeMetric        = "pg_proxy.connections.pool_resize"
+	poolLimitMetric         = "pg_proxy.connections.pool_limit"
 	retirementRetryInterval = 50 * time.Millisecond
 )
 

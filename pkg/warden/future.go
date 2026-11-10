@@ -1,19 +1,26 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package warden
 
 import (
 	"context"
 	"errors"
 	"sync"
+	"time"
 )
 
 var errFutureNotReady = errors.New("future not ready")
 
 type future[T any] struct {
-	mu     sync.RWMutex
-	cancel context.CancelFunc
-	done   chan struct{}
-	value  T
-	ready  bool
+	mu      sync.RWMutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	value   T
+	ready   bool
+	readyAt time.Time
 }
 
 func newRetriableFuture[T any](
@@ -57,6 +64,7 @@ func (f *future[T]) settle(value T) {
 	f.cancel = nil
 	f.value = value
 	f.ready = true
+	f.readyAt = time.Now()
 	close(f.done)
 }
 
@@ -71,6 +79,14 @@ func (f *future[T]) IsReady() bool {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 	return f.ready
+}
+
+func (f *future[T]) Done() <-chan struct{} { return f.done }
+
+func (f *future[T]) ReadyAt() (time.Time, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.readyAt, f.ready
 }
 
 func (f *future[T]) Get() (T, error) {

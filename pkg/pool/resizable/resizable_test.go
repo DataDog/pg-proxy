@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package resizable
 
 import (
@@ -237,12 +242,12 @@ func TestResizeLogsLimitChangeAndReset(t *testing.T) {
 	assert.Contains(t, logs, "retirement_required=true")
 	require.Len(t, metrics.counts, 1)
 	assert.Equal(t, resizeMetricCall{
-		name:  poolResizeMetric,
+		name:  pgproxy.MetricName(poolResizeMetric),
 		value: 1,
 		tags:  []string{"outcome:success"},
 	}, metrics.counts[0])
 	require.Len(t, metrics.gauges, 1)
-	assert.Equal(t, resizeMetricCall{name: poolLimitMetric, value: 1}, metrics.gauges[0])
+	assert.Equal(t, resizeMetricCall{name: pgproxy.MetricName(poolLimitMetric), value: 1}, metrics.gauges[0])
 }
 
 func TestResizeLogsAndCountsFailures(t *testing.T) {
