@@ -26,7 +26,7 @@ processors:
           - >-
             set(datapoint.attributes["datadog.metric.as_type"], "rate")
             where instrumentation_scope.name == "pg-proxy"
-            and IsMatch(metric.name, "^dd[.]orgstore[.]pg_proxy[.]")
+            and IsMatch(metric.name, "^datadog[.]pg_proxy[.]")
             and metric.type == METRIC_DATA_TYPE_SUM
             and metric.is_monotonic == true
             and metric.aggregation_temporality == AGGREGATION_TEMPORALITY_DELTA

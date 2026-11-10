@@ -134,10 +134,10 @@ func TestReleaseNonIdleCountsDestroyedConnection(t *testing.T) {
 				"database_cluster:test-cluster",
 				"state:" + test.state,
 			}
-			counts, emitted := metrics.getCount("dd.orgstore.pg_proxy.sessions.connections.destroyed.release_non_idle", tags)
+			counts, emitted := metrics.getCount("datadog.pg_proxy.sessions.connections.destroyed.release_non_idle", tags)
 			assert.True(t, emitted)
 			assert.Equal(t, []int64{1}, counts)
-			_, emitted = metrics.getCount("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags)
+			_, emitted = metrics.getCount("datadog.pg_proxy.sessions.connections.destroyed", tags)
 			assert.False(t, emitted, "release-state telemetry must not double-count the destroyed-connections metric")
 			assert.Equal(t, []string{"session:test-session", "database_cluster:test-cluster", "", ""}, sessionLinkTags[:cap(sessionLinkTags)])
 		})
@@ -229,10 +229,10 @@ func TestReleaseNonIdleDestroysBeforeRoleReset(t *testing.T) {
 	}
 
 	tags := []string{"database_cluster:test-cluster", "state:" + sessionLinkStateNoReadyForQuery}
-	counts, emitted := metrics.getCount("dd.orgstore.pg_proxy.sessions.connections.destroyed.release_non_idle", tags)
+	counts, emitted := metrics.getCount("datadog.pg_proxy.sessions.connections.destroyed.release_non_idle", tags)
 	assert.True(t, emitted, "a destroyed passthrough-role backend must still be counted")
 	assert.Equal(t, []int64{1}, counts)
-	_, emitted = metrics.getCount("dd.orgstore.pg_proxy.sessions.connections.resetrole", []string{"database_cluster:test-cluster", "outcome:error"})
+	_, emitted = metrics.getCount("datadog.pg_proxy.sessions.connections.resetrole", []string{"database_cluster:test-cluster", "outcome:error"})
 	assert.False(t, emitted, "no role reset should be attempted on a backend being destroyed")
 }
 

@@ -331,6 +331,30 @@ for adapter and ownership options. Bind parameter capture uses
 and defaults to `false`. The internal Datadog app explicitly enables it and
 retains its existing logger, StatsD client, tracer startup, and propagation.
 
+#### Metric names
+
+Metrics are named `datadog.pg_proxy.*`, for example
+`datadog.pg_proxy.sessions.connections`. The same names are used with
+DogStatsD and OpenTelemetry. Library code emits bare names (`pg_proxy.…`), and
+the metrics client installed by `pgproxy.Bootstrap` adds the namespace exactly
+once.
+
+Set `pgproxy.Dependencies.MetricNamespace` to replace the `datadog.` prefix:
+
+- Empty selects `datadog.`.
+- A missing trailing dot is added, so `"acme"` emits
+  `acme.pg_proxy.sessions.connections`.
+- It must start with a letter and contain only letters, digits, `_` and `.`.
+  `Bootstrap` panics on an invalid value; call `pgproxy.NormalizeMetricNamespace`
+  first to get the same check as an error.
+
+A custom `session.Metrics` sink receives bare names. Forward them through
+`pgproxy.Metrics()`, or wrap them with `pgproxy.MetricName` when sending to
+another client. Do not also set a namespace on the client, such as
+`statsd.WithNamespace`, or names are prefixed twice. If you change the
+namespace, update the filter in the
+[Collector configuration](docs/otel-collector-datadog.yaml) to match.
+
 #### Test coverage
 
 The OSS binary's tests send parameterized queries through PostgreSQL and decode

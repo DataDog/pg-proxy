@@ -170,7 +170,7 @@ func (link *SessionLink) Cancel() error {
 	}
 	pgConn := link.conn.Conn().PgConn()
 	pgproxy.Logger().Debug("Canceling PG connection", "PID", pgConn.PID())
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.sessions.connections.cancellation_attempt", link.sessionLinkTags, 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.sessions.connections.cancellation_attempt", link.sessionLinkTags, 1)
 	return pgConn.CancelRequest(context.Background())
 }
 
@@ -195,7 +195,7 @@ func (link *SessionLink) Release() error {
 	// role-reset failure instead.
 	if computedState := link.getComputedState(); computedState != sessionLinkStateIdle && link.conn != nil {
 		metricTags := append(slices.Clone(link.sessionLinkTags), "state:"+computedState)
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections.destroyed.release_non_idle", 1, metricTags, 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.destroyed.release_non_idle", 1, metricTags, 1)
 		pid := link.conn.Conn().PgConn().PID() // read before Close so the log can be matched against Postgres' own logs
 		link.conn.Conn().Close(context.Background())
 		link.logNonIdleRelease(computedState, pid)
@@ -227,7 +227,7 @@ func (link *SessionLink) Release() error {
 		_, err := link.conn.Exec(resetCtx, "RESET ALL")
 		cancel()
 		if err != nil {
-			_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
+			_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
 			link.conn.Conn().Close(context.Background())
 			pgproxy.Logger().Warn("Closing connection due to RESET ALL failure", "error", err)
 			return err

@@ -94,19 +94,19 @@ func TestSessionTelemetryUsesBootstrappedMetrics(t *testing.T) {
 	s.recordCloseError(assert.AnError)
 
 	require.Equal(t, []metricCall{
-		{name: "dd.orgstore.pg_proxy.messages", value: 1, tags: []string{"user:foo", "database:bar", "message:query"}},
-		{name: "dd.orgstore.pg_proxy.messages.queries", value: 1, tags: baseTags},
-		{name: "dd.orgstore.pg_proxy.messages.queries.multiple_statements", value: 1, tags: baseTags},
-		{name: "dd.orgstore.pg_proxy.messages.load_shedding_rejected", value: 1, tags: baseTags},
-		{name: "dd.orgstore.pg_proxy.sessions.drained_connections", value: 1, tags: baseTags},
-		{name: "dd.orgstore.pg_proxy.sessions.connections.destroyed", value: 1, tags: []string{"user:foo", "database:bar", "reason:client_disconnect", "path:force_close"}},
-		{name: "dd.orgstore.pg_proxy.sessions.close_errors", value: 1, tags: baseTags},
+		{name: "datadog.pg_proxy.messages", value: 1, tags: []string{"user:foo", "database:bar", "message:query"}},
+		{name: "datadog.pg_proxy.messages.queries", value: 1, tags: baseTags},
+		{name: "datadog.pg_proxy.messages.queries.multiple_statements", value: 1, tags: baseTags},
+		{name: "datadog.pg_proxy.messages.load_shedding_rejected", value: 1, tags: baseTags},
+		{name: "datadog.pg_proxy.sessions.drained_connections", value: 1, tags: baseTags},
+		{name: "datadog.pg_proxy.sessions.connections.destroyed", value: 1, tags: []string{"user:foo", "database:bar", "reason:client_disconnect", "path:force_close"}},
+		{name: "datadog.pg_proxy.sessions.close_errors", value: 1, tags: baseTags},
 	}, metrics.counts)
 	require.Equal(t, []metricCall{
-		{name: "dd.orgstore.pg_proxy.messages.latency_us", value: 150, tags: []string{"user:foo", "database:bar", "message:query"}},
-		{name: "dd.orgstore.pg_proxy.messages.parse.latency_us", value: 75, tags: baseTags},
-		{name: "dd.orgstore.pg_proxy.flush_postgres.latency_us", value: 25, tags: baseTags},
-		{name: "dd.orgstore.pg_proxy.sessions.buffer_flush.count", value: 3, tags: baseTags},
+		{name: "datadog.pg_proxy.messages.latency_us", value: 150, tags: []string{"user:foo", "database:bar", "message:query"}},
+		{name: "datadog.pg_proxy.messages.parse.latency_us", value: 75, tags: baseTags},
+		{name: "datadog.pg_proxy.flush_postgres.latency_us", value: 25, tags: baseTags},
+		{name: "datadog.pg_proxy.sessions.buffer_flush.count", value: 3, tags: baseTags},
 	}, metrics.distributions)
 	require.Equal(t, []string{"user:foo", "database:bar"}, baseTags)
 }

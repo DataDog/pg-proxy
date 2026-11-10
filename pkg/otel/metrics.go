@@ -100,7 +100,7 @@ func (m *Metrics) histogram(name string, value float64, tags []string, timing bo
 		if timing {
 			opts = append(opts, metric.WithUnit("ms"))
 		} else {
-			switch name {
+			switch strings.TrimPrefix(name, pgproxy.MetricNamespace()) {
 			case pgproxy.MetricMessageLatency, pgproxy.MetricQueryParseLatency,
 				pgproxy.MetricFlushPostgresLatency, pgproxy.MetricConnectWait:
 				// Keep the SDK's fine buckets for fast operations, then extend them

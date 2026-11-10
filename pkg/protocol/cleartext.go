@@ -14,11 +14,7 @@ import (
 )
 
 // cleartextMetricName counts cleartext password exchanges, tagged by outcome.
-//
-// TODO: make the namespace configurable. "dd.orgstore" is an internal Datadog
-// name; changing it means emitting both for a window, since dashboards and
-// monitors depend on it.
-const cleartextMetricName = "dd.orgstore.pg_proxy.protocol.cleartext"
+const cleartextMetricName = "pg_proxy.protocol.cleartext"
 
 // GetCleartextPassword asks the client for a cleartext password and returns it.
 //
