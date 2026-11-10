@@ -58,8 +58,6 @@ jobs:
         run: docker info
       - name: Regression suite
         env:
-          # GitHub-hosted runners cannot pull from registry.ddbuild.io.
-          PG_PROXY_ITEST_PUBLIC_IMAGES: 'true'
           PG_PROXY_REGRESS_PG_MAJORS: ${{ matrix.major }}
           PG_PROXY_REGRESS_ARTIFACTS: ${{ runner.temp }}/regress
         run: go test -tags=integration,regress -count=1 -timeout=55m -v ./test/regress
