@@ -681,6 +681,56 @@ func TestSQLPotentialStartupAndSameLeaderRecovery(t *testing.T) {
 	require.Empty(t, p.observe(false, leaderTimingIPs("A"), leaderTimingAt(5)))
 }
 
+func TestSQLPotentialBaselineDiscardsPendingObservation(t *testing.T) {
+	for _, sqlFirst := range []bool{true, false} {
+		t.Run(leaderTimingCase(sqlFirst, "C"), func(t *testing.T) {
+			p := &potentialTiming{}
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("A"), leaderTimingAt(0)))
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("B"), leaderTimingAt(1)))
+			// The other source starts on B; this is a baseline, not a replacement.
+			require.Empty(t, p.observe(!sqlFirst, leaderTimingIPs("B"), leaderTimingAt(2)))
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("C"), leaderTimingAt(3)))
+			require.Len(t, p.observe(!sqlFirst, leaderTimingIPs("C"), leaderTimingAt(4)), 1)
+
+			// A later return to B must wait for fresh observations from both sources.
+			require.Empty(t, p.observe(!sqlFirst, leaderTimingIPs("B"), leaderTimingAt(100)))
+			got := p.observe(sqlFirst, leaderTimingIPs("B"), leaderTimingAt(101))
+			want := SQLPotentialComparison{
+				NewLeaderIP: "B", SQLObservedAt: leaderTimingAt(101),
+				PatroniObservedAt: leaderTimingAt(100), Speedup: -time.Second,
+			}
+			if !sqlFirst {
+				want.SQLObservedAt, want.PatroniObservedAt = want.PatroniObservedAt, want.SQLObservedAt
+				want.Speedup = time.Second
+			}
+			require.Equal(t, []SQLPotentialComparison{want}, got)
+		})
+	}
+}
+
+func TestSQLPotentialReappearingPrimaryPreservesFirstObservation(t *testing.T) {
+	for _, sqlFirst := range []bool{true, false} {
+		t.Run(leaderTimingCase(sqlFirst, "C"), func(t *testing.T) {
+			p := baselinePotentialTiming(t)
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("B"), leaderTimingAt(2)))
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("C"), leaderTimingAt(3)))
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("B"), leaderTimingAt(4)))
+			got := p.observe(!sqlFirst, leaderTimingIPs("B"), leaderTimingAt(5))
+			want := SQLPotentialComparison{
+				NewLeaderIP: "B", SQLObservedAt: leaderTimingAt(2),
+				PatroniObservedAt: leaderTimingAt(5), Speedup: 3 * time.Second,
+			}
+			if !sqlFirst {
+				want.SQLObservedAt, want.PatroniObservedAt = want.PatroniObservedAt, want.SQLObservedAt
+				want.Speedup = -want.Speedup
+			}
+			require.Equal(t, []SQLPotentialComparison{want}, got)
+			require.Empty(t, p.observe(sqlFirst, leaderTimingIPs("B"), leaderTimingAt(6)))
+			require.Empty(t, p.observe(!sqlFirst, leaderTimingIPs("B"), leaderTimingAt(7)))
+		})
+	}
+}
+
 func leaderTimingAt(seconds int) time.Time { return time.Unix(100+int64(seconds), 0) }
 func leaderTimingIPs(ips ...string) map[string]bool {
 	m := make(map[string]bool, len(ips))

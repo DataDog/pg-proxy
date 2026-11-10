@@ -62,6 +62,11 @@ func (p *potentialTiming) observe(sql bool, healthy map[string]bool, at time.Tim
 		p.patroniLeaders = current
 	}
 	if previous == nil {
+		// This source did not observe a replacement for its initial primaries.
+		// Discard the other source's pending observations for those IPs too.
+		for ip := range current {
+			delete(p.pending, ip)
+		}
 		return nil // The first nonempty snapshot establishes this source's baseline.
 	}
 	var comparisons []SQLPotentialComparison
@@ -73,6 +78,11 @@ func (p *potentialTiming) observe(sql bool, healthy map[string]bool, at time.Tim
 			p.pending = make(map[string]leaderTimingPair)
 		}
 		pair := p.pending[ip]
+		// A source can leave and revisit this IP before the other source sees it.
+		// Preserve its first observation until the pair completes or is invalidated.
+		if sql && !pair.candidateAt.IsZero() || !sql && !pair.patroniAt.IsZero() {
+			continue
+		}
 		if !pair.observe(sql, at) {
 			p.pending[ip] = pair
 			continue

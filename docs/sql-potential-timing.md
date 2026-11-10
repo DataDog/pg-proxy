@@ -76,14 +76,16 @@ If SQL completes at 2s and Patroni observes the replacement at 5s, speedup is 3s
 If Patroni observes it at 2s and SQL completes at 4s, speedup is -2s. Negative
 values are preserved to expose regressions.
 
-The first eligible nonempty snapshot from each source establishes a baseline.
-Matching follows the existing hybrid timing policy: repeated snapshots do not
-move a pending timestamp, empty observations do not advance the baseline, and
-unmatched timestamps remain available when a source moves to another leader.
+The first eligible nonempty snapshot from each source establishes a baseline
+and clears any pending observations for its initial primary IPs. Startup evidence
+must not pair with a later replacement observation for the same IP.
+Repeated snapshots, including a primary reappearing after an intervening leader,
+do not move a pending timestamp. Empty observations do not advance the baseline,
+and unmatched timestamps remain available when a source moves to another leader.
 Each IP is paired independently once both sources have a matching observation.
 Explicit disable, retirement, and DNS lifecycle invalidation still clear affected
-evidence as described above. No additional interruption or agreement cleanup
-policy is introduced here.
+evidence as described above. These snapshot tracking rules do not change the
+shared timestamp helper or hybrid routing timing policy.
 
 This callback contains only signed speedup and the IP/timestamps needed to
 identify the event. It defines no outage start and emits no downtime durations
