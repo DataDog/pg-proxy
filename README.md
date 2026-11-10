@@ -287,7 +287,7 @@ on Linux `POLLRDHUP`, so that test is skipped on other platforms. To run the
 full suite from macOS, run it in a Linux container that uses the host's Docker:
 
 ```sh
-docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock -e PG_PROXY_ITEST_PUBLIC_IMAGES=true golang:1.26-bookworm go test -tags=integration -race ./test/integration
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
 ```
 
 GitHub Actions runs unit tests on minimum and stable Go and Docker-backed
