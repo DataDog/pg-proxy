@@ -86,7 +86,7 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Vet
-        run: go vet ./...
+        run: go vet -tags=integration ./...
       - name: Unit tests on minimum Go
         if: matrix.toolchain == 'minimum'
         run: go test -count=1 -timeout=10m ./...
@@ -110,7 +110,4 @@ jobs:
       - name: Check Docker
         run: docker info
       - name: Integration tests
-        env:
-          # GitHub-hosted runners cannot pull from registry.ddbuild.io.
-          PG_PROXY_ITEST_PUBLIC_IMAGES: 'true'
         run: go test -tags=integration -race -count=1 -timeout=15m -v ./...

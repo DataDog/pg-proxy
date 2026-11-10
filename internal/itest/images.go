@@ -12,10 +12,9 @@ import (
 	"strconv"
 )
 
-// Images come from Datadog's internal registry, as in dd-source's tests, unless
-// PG_PROXY_ITEST_PUBLIC_IMAGES is true: then their public Docker Hub
-// equivalents are used, for machines without access to registry.ddbuild.io such
-// as GitHub-hosted runners. All are pinned by digest.
+// Images come from Docker Hub by default, so the tests run anywhere Docker can
+// pull public images. Set PG_PROXY_ITEST_INTERNAL_IMAGES=true to use Datadog's
+// internal registry instead, as dd-source's tests do. All are pinned by digest.
 const (
 	internalPostgresImage = "registry.ddbuild.io/images/postgres-official:14-gbi@sha256:326064632521fb19c9897e9e3d31b2c7dc0c1756763deaef53487d2b8b3c4c20"
 	publicPostgresImage   = "postgres:14-bookworm@sha256:5a05f61a534e50e679d27fb45953afec7821f2ffc2aa6c738b94515ca0891ac2"
@@ -26,41 +25,45 @@ const (
 	internalHubMirror = "registry.ddbuild.io/images/mirror"
 )
 
-func publicImages() bool {
-	public, _ := strconv.ParseBool(os.Getenv("PG_PROXY_ITEST_PUBLIC_IMAGES"))
-	return public
+func internalImages() bool {
+	internal, _ := strconv.ParseBool(os.Getenv("PG_PROXY_ITEST_INTERNAL_IMAGES"))
+	return internal
 }
 
 // PostgresImage returns the image StartPostgres runs by default:
 // PG_PROXY_ITEST_POSTGRES_IMAGE if set, or else PostgreSQL 14 from the selected
-// registry.
+// registry. With internal images, Testcontainers pulls an override without a
+// registry host, such as postgres:17, through the internal Docker Hub mirror;
+// use a fully qualified name to pull from elsewhere.
 func PostgresImage() string {
 	if override := os.Getenv("PG_PROXY_ITEST_POSTGRES_IMAGE"); override != "" {
 		return override
 	}
-	if publicImages() {
-		return publicPostgresImage
+	if internalImages() {
+		return internalPostgresImage
 	}
-	return internalPostgresImage
+	return publicPostgresImage
 }
 
 // DebianImage returns the Debian image from the selected registry.
 func DebianImage() string {
-	if publicImages() {
-		return publicDebianImage
+	if internalImages() {
+		return internalDebianImage
 	}
-	return internalDebianImage
+	return publicDebianImage
 }
 
-// UseImageRegistry makes Testcontainers pull its own images from the selected
-// registry. Testcontainers reads its configuration once, so this must run before
-// the first container starts; Main calls it. An explicit
-// TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX takes precedence. Locally built images
-// must then be tagged with a registry host containing a dot, such as
-// pg-proxy.localhost/, so that the prefix is not applied to them; Testcontainers
-// does not treat a bare localhost/ as a registry.
+// UseImageRegistry makes Testcontainers pull Docker Hub images, including its
+// own such as Ryuk, through the internal mirror when internal images are
+// selected. It does nothing for public images. Testcontainers reads its
+// configuration once, so this must run before the first container starts; Main
+// calls it. An explicit TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX takes precedence.
+// The prefix applies to every image without a registry host. Locally built
+// images must therefore be tagged with a host containing a dot, such as
+// pg-proxy.localhost/; Testcontainers does not treat a bare localhost/ as a
+// registry.
 func UseImageRegistry() {
-	if _, set := os.LookupEnv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX"); set || publicImages() {
+	if _, set := os.LookupEnv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX"); set || !internalImages() {
 		return
 	}
 	_ = os.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", internalHubMirror)

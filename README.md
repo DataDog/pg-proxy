@@ -238,10 +238,10 @@ transactions, pool reuse, startup cleanup, cancellation, and shutdown:
 go test -race -tags=integration -count=1 ./cmd/pg-proxy ./pkg/pool
 ```
 
-Integration tests pull images pinned by digest in
-[`internal/itest/images.go`](internal/itest/images.go) from `registry.ddbuild.io`.
-Set `PG_PROXY_ITEST_PUBLIC_IMAGES=true` to use public Docker Hub images instead,
-as GitHub CI does. Tests fail if Docker is unavailable.
+Integration tests pull public Docker Hub images pinned by digest in
+[`internal/itest/images.go`](internal/itest/images.go). Datadog developers can set
+`PG_PROXY_ITEST_INTERNAL_IMAGES=true` to pull them from `registry.ddbuild.io`
+instead. Tests fail if Docker is unavailable.
 
 The standalone-command suite also accepts an explicit disposable PostgreSQL URL
 through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
@@ -266,13 +266,14 @@ go test -tags=integration ./test/integration
 ```
 
 Running with `-race` also builds the proxy binary with `-race`. For custom build
-flags, build the binary separately and set `PG_PROXY_ITEST_BINARY`.
+flags, build the binary separately and set `PG_PROXY_ITEST_BINARY` to its absolute
+path. A prebuilt binary is used as is, so build it with `-race` yourself if needed.
 
 | Variable | Effect |
 | --- | --- |
-| `PG_PROXY_ITEST_PUBLIC_IMAGES` | `true` pulls public Docker Hub images instead of `registry.ddbuild.io` ones |
-| `PG_PROXY_ITEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
-| `PG_PROXY_ITEST_BINARY` | Prebuilt pg-proxy binary instead of building one |
+| `PG_PROXY_ITEST_INTERNAL_IMAGES` | `true` pulls images from `registry.ddbuild.io` instead of Docker Hub. Images without a registry host, including Testcontainers' own, go through its Docker Hub mirror |
+| `PG_PROXY_ITEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default. With internal images, use a fully qualified name to bypass the mirror |
+| `PG_PROXY_ITEST_BINARY` | Absolute path to a prebuilt pg-proxy binary instead of building one |
 
 Readiness uses a timed TCP port probe, not startup log parsing. Captured output
 is printed only for failure diagnostics.

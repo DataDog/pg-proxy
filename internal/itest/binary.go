@@ -24,8 +24,15 @@ var built struct {
 }
 
 // Binary returns the pg-proxy binary used by StartProxy, building it on first use.
+// PG_PROXY_ITEST_BINARY selects a prebuilt binary instead. It must be an
+// absolute path: go test runs each package from its own directory, so a
+// relative path would resolve differently per package. A prebuilt binary is
+// used as is; it is not rebuilt with -race.
 func Binary() (string, error) {
 	if prebuilt := os.Getenv("PG_PROXY_ITEST_BINARY"); prebuilt != "" {
+		if !filepath.IsAbs(prebuilt) {
+			return "", fmt.Errorf("PG_PROXY_ITEST_BINARY must be an absolute path, got %q", prebuilt)
+		}
 		return prebuilt, nil
 	}
 	built.once.Do(func() {

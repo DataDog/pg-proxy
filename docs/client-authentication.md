@@ -123,12 +123,10 @@ session limits remain 100.
 
 The standalone test uses the shared `internal/itest` PostgreSQL container fixture.
 GitHub Actions runs authentication, TLS, cancellation, and the other integration
-tests together with race detection. Set `PG_PROXY_ITEST_PUBLIC_IMAGES=true` to
-use public images without access to the internal registry:
+tests together with race detection. It uses public Docker Hub images by default:
 
 ```sh
-PG_PROXY_ITEST_PUBLIC_IMAGES=true \
-  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
 ```
 
 Alternatively, set `PG_PROXY_TEST_DATABASE_URL` to use an external disposable
