@@ -108,5 +108,8 @@ func TestShutdownWithOpenTransaction(t *testing.T) {
 	err = proxy.Stop()
 	var exitErr *exec.ExitError
 	require.ErrorAs(t, err, &exitErr, "an open transaction should make shutdown exit nonzero")
+	// Stop kills the process after 15 seconds, which also yields an ExitError
+	// (exit code -1). Exit code 1 shows the proxy exited on its own deadline.
+	require.Equal(t, 1, exitErr.ExitCode(), "shutdown should exit on its own deadline, not be killed by the harness")
 	require.GreaterOrEqual(t, time.Since(start), 4*time.Second, "shutdown should wait for the session")
 }
