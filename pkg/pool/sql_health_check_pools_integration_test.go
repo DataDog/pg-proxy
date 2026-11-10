@@ -152,7 +152,7 @@ func TestSQLHealthCheckPoolAgainstPostgres(t *testing.T) {
 	assert.Equal(t, 1, healthCheckConnections)
 }
 
-func TestSQLHealthWorkerHostWideRoundPreventsStaleCredentialOverlap(t *testing.T) {
+func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T) {
 	ctx, connString, connConfig := startSQLHealthCheckIntegrationPostgres(t)
 	oldIP := connConfig.Host
 	replacementIP := "127.0.0.1"

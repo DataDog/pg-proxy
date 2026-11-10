@@ -29,7 +29,9 @@ const (
 	SQLHealthTimeoutMixed     = "mixed"
 
 	SQLHealthFallbackTimeout           = "timeout"
+	SQLHealthFallbackIndeterminate     = "indeterminate_error"
 	SQLHealthFallbackMultiplePrimaries = "multiple_primaries"
+	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
 )
 
 // LeaderDetectionComparison compares independent SQL and Patroni observations of a new leader.
@@ -49,9 +51,11 @@ type LeaderRoutingComparison struct {
 }
 
 type hybridRoutingDecision struct {
-	routingResult string
-	health        map[string]bool
-	publish       bool
+	// Capture the mode with the decision; hooks run after the policy lock is released.
+	routingEnabled bool
+	routingResult  string
+	health         map[string]bool
+	publish        bool
 
 	fallbackReason string
 	timeoutType    string
@@ -97,6 +101,24 @@ func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
 	}
 }
 
+func (p *hybridHealthPolicy) patroniSnapshot() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.patroniHealth)
+}
+
+func (p *hybridHealthPolicy) isRoutingEnabled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.routingEnabled
+}
+
+func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.routingEnabled = enabled
+}
+
 // observePatroni refreshes the fallback snapshot. Patroni remains authoritative in shadow mode;
 // when SQL routing is enabled it is cached without replacing the active route.
 func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt time.Time) hybridRoutingDecision {
@@ -106,9 +128,10 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	p.patroniHealth = maps.Clone(health)
 	p.patroniUpdatedAt = observedAt
 	decision := hybridRoutingDecision{
-		routingResult: SQLRoutingResultShadow,
-		health:        maps.Clone(health),
-		publish:       !p.routingEnabled,
+		routingEnabled: p.routingEnabled,
+		routingResult:  SQLRoutingResultShadow,
+		health:         maps.Clone(health),
+		publish:        !p.routingEnabled,
 	}
 	decision.leaderDetection = p.observeLeaderLocked("patroni", healthyIPs(health), observedAt)
 	if p.routingEnabled {
@@ -117,10 +140,11 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	return decision
 }
 
-// observeSQL evaluates one complete SQL snapshot. Timeout-classified probe errors and multiple
-// distinct primaries are indeterminate, so routing falls back to the most recent Patroni snapshot.
-// Ordinary non-timeout probe errors are conclusive unhealthy results. candidateIPs includes every
-// address retained for this snapshot, not only addresses returned by its latest DNS lookup.
+// observeSQL evaluates one complete SQL snapshot. SQL routing is conclusive only when every IP has
+// a successful role or a narrowly classified unroutable result. Unknown errors, multiple distinct
+// primaries, or conflicting deterministic roles fall back to the most recent Patroni snapshot.
+// candidateIPs includes every address retained for this snapshot, not only addresses returned by
+// its latest DNS lookup.
 func (p *hybridHealthPolicy) observeSQL(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
@@ -130,7 +154,8 @@ func (p *hybridHealthPolicy) observeSQL(
 	defer p.mu.Unlock()
 
 	decision := hybridRoutingDecision{
-		routingResult: SQLRoutingResultShadow,
+		routingEnabled: p.routingEnabled,
+		routingResult:  SQLRoutingResultShadow,
 	}
 	fallbackReason, timeoutType := sqlHealthFallback(outcome)
 	if fallbackReason == "" {
@@ -180,23 +205,82 @@ func (p *hybridHealthPolicy) observeSQL(
 }
 
 func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {
-	timeoutType := SQLHealthTimeoutNone
+	type ipEvidence struct {
+		deterministicRole    bool
+		primary              bool
+		conclusiveUnroutable bool
+		indeterminate        bool
+		timeoutType          string
+	}
+
+	evidenceByIP := make(map[string]*ipEvidence)
+	conflictingRoles := false
 	for _, result := range outcome.Results {
-		resultTimeoutType := sqlHealthTimeoutType(result.Err)
-		if resultTimeoutType == SQLHealthTimeoutNone {
+		evidence := evidenceByIP[result.IP]
+		if evidence == nil {
+			evidence = &ipEvidence{timeoutType: SQLHealthTimeoutNone}
+			evidenceByIP[result.IP] = evidence
+		}
+		if result.Err != nil {
+			if isConclusiveSQLUnroutableError(result.Err) {
+				evidence.conclusiveUnroutable = true
+				continue
+			}
+			evidence.indeterminate = true
+			resultTimeoutType := sqlHealthTimeoutType(result.Err)
+			if resultTimeoutType == SQLHealthTimeoutNone {
+				continue
+			}
+			if evidence.timeoutType == SQLHealthTimeoutNone {
+				evidence.timeoutType = resultTimeoutType
+			} else if evidence.timeoutType != resultTimeoutType {
+				evidence.timeoutType = SQLHealthTimeoutMixed
+			}
+			continue
+		}
+
+		primary := !result.InRecovery
+		if evidence.deterministicRole && evidence.primary != primary {
+			conflictingRoles = true
+		} else {
+			evidence.deterministicRole = true
+			evidence.primary = primary
+		}
+	}
+	if conflictingRoles {
+		return SQLHealthFallbackConflictingRoles, SQLHealthTimeoutNone
+	}
+	if len(outcome.PrimaryIPs) > 1 {
+		return SQLHealthFallbackMultiplePrimaries, SQLHealthTimeoutNone
+	}
+
+	timeoutType := SQLHealthTimeoutNone
+	hasIndeterminateError := false
+	for _, evidence := range evidenceByIP {
+		// Credential targets describe the same PostgreSQL instance. One successful role, or one
+		// result that conclusively makes the IP unroutable, resolves uncertainty from another
+		// credential on that IP. Uncertainty on a different IP still requires Patroni fallback.
+		if evidence.deterministicRole || evidence.conclusiveUnroutable {
+			continue
+		}
+		if !evidence.indeterminate {
+			continue
+		}
+		if evidence.timeoutType == SQLHealthTimeoutNone {
+			hasIndeterminateError = true
 			continue
 		}
 		if timeoutType == SQLHealthTimeoutNone {
-			timeoutType = resultTimeoutType
-		} else if timeoutType != resultTimeoutType {
+			timeoutType = evidence.timeoutType
+		} else if timeoutType != evidence.timeoutType {
 			timeoutType = SQLHealthTimeoutMixed
 		}
 	}
 	if timeoutType != SQLHealthTimeoutNone {
 		return SQLHealthFallbackTimeout, timeoutType
 	}
-	if len(outcome.PrimaryIPs) > 1 {
-		return SQLHealthFallbackMultiplePrimaries, SQLHealthTimeoutNone
+	if hasIndeterminateError {
+		return SQLHealthFallbackIndeterminate, SQLHealthTimeoutNone
 	}
 	return "", ""
 }

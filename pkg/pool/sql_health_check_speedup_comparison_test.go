@@ -372,6 +372,64 @@ func TestSQLPotentialPatroniTimestampPrecedesCallbacks(t *testing.T) {
 	assert.Less(t, got[0].Speedup, time.Duration(0), "Patroni completed first, even though its callback returned later")
 }
 
+func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
+	const oldIP, newIP = "10.0.0.1", "10.0.0.2"
+	s := &PoolHealth{
+		state: NewHealthState(), sqlHealthState: NewHealthState(),
+		hybridPolicy: newHybridHealthPolicy(true),
+	}
+	s.refreshSQLResolved(true, []string{oldIP, newIP}, 1)
+	target := &sqlHealthTarget{poolHealth: s}
+	baseline := time.Now()
+	recordPotentialPoll(s, target, 0, baseline, SQLHealthCheckResult{IP: oldIP})
+	s.potentialTiming.leaderComparisons.observe(false, leaderTimingIPs(oldIP), baseline)
+	assertUnlocked := func() {
+		unlocked := s.sqlComparisonMu.TryLock()
+		if unlocked {
+			s.sqlComparisonMu.Unlock()
+		}
+		require.True(t, unlocked, "external callbacks must run outside the comparison lock")
+	}
+	var got []SQLPotentialComparison
+	var snapshot SQLPatroniHealthSnapshot
+	var iterations []SQLIteration
+	w := &HealthWorker{
+		hooks: HealthWorkerHooks{
+			SQLPotentialCompared: func(c SQLPotentialComparison, _ []string) {
+				assertUnlocked()
+				got = append(got, c)
+			},
+			SQLPatroniCompared: func(c SQLPatroniHealthSnapshot, _ []string) {
+				assertUnlocked()
+				snapshot = c
+			},
+		},
+		sqlHooks: SQLHealthWorkerHooks{Iteration: func(iteration SQLIteration, _ []string) {
+			assertUnlocked()
+			iterations = append(iterations, iteration)
+		}},
+	}
+	var flagEvaluatedAt time.Time
+	s.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation {
+		assertUnlocked()
+		flagEvaluatedAt = time.Now()
+		// Patroni finishes while the completed SQL poll is evaluating its routing flag.
+		w.observePatroniPotential(s, leaderTimingIPs(newIP), time.Now())
+		return validSQLHealthFeatureFlag(true)
+	}
+	w.completeSQLHealthCheck(target, 0, time.Now(), []string{oldIP, newIP},
+		map[string]struct{}{oldIP: {}, newIP: {}}, SQLHealthCheckOutcome{
+			Results: []SQLHealthCheckResult{{IP: oldIP, InRecovery: true}, {IP: newIP}},
+		})
+	require.Len(t, got, 1)
+	require.Len(t, snapshot.SQLResults, 1)
+	assert.Equal(t, snapshot.SQLResults[0].ObservedAt, got[0].SQLObservedAt)
+	assert.False(t, got[0].SQLObservedAt.After(flagEvaluatedAt))
+	assert.Positive(t, got[0].Speedup, "SQL completed first, even though its routing flag returned later")
+	require.Len(t, iterations, 1, "the same completion must also evaluate the hybrid policy")
+	assert.Equal(t, SQLRoutingResultConclusive, iterations[0].RoutingResult)
+}
+
 func TestSQLPotentialEvictOldLeaderPreservesReplacement(t *testing.T) {
 	for _, sqlFirst := range []bool{true, false} {
 		t.Run(leaderTimingCase(sqlFirst, "B"), func(t *testing.T) {
