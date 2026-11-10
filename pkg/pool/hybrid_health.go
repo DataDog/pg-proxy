@@ -12,10 +12,8 @@ import (
 	"net"
 	"slices"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -38,16 +36,21 @@ const (
 	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
 )
 
-// LeaderDetectionComparison compares independent SQL and Patroni observations of a new leader.
-// A positive Speedup means SQL observed the leader first.
+// LeaderDetectionComparison pairs independent SQL and Patroni observations of a new leader.
+// When HasDowntimeComparison is true, the downtime fields share the first conclusive SQL
+// no-leader observation as their start. DowntimeReductionPercent is
+// (PatroniDowntime-SQLDowntime)/PatroniDowntime*100; no standalone detection speedup is exposed.
 type LeaderDetectionComparison struct {
-	NewLeaderIP       string
-	Speedup           time.Duration
-	SQLRoutingEnabled bool
+	NewLeaderIP              string
+	SQLRoutingEnabled        bool
+	SQLDowntime              time.Duration
+	PatroniDowntime          time.Duration
+	DowntimeReductionPercent float64
+	HasDowntimeComparison    bool
 }
 
-// LeaderRoutingComparison compares when hybrid and Patroni-only routing publish a new leader.
-// A positive Improvement means hybrid routing published first.
+// LeaderRoutingComparison compares when hybrid and Patroni-only routing select a new leader.
+// A positive Improvement means hybrid routing selected the leader first.
 type LeaderRoutingComparison struct {
 	NewLeaderIP  string
 	Improvement  time.Duration
@@ -55,9 +58,11 @@ type LeaderRoutingComparison struct {
 }
 
 type hybridRoutingDecision struct {
-	routingResult string
-	health        map[string]bool
-	publish       bool
+	// Capture the mode with the decision; hooks run after the policy lock is released.
+	routingEnabled bool
+	routingResult  string
+	health         map[string]bool
+	publish        bool
 
 	fallbackReason string
 	timeoutType    string
@@ -68,19 +73,9 @@ type hybridRoutingDecision struct {
 	routingComparison *LeaderRoutingComparison
 }
 
-type leaderObservation struct {
-	primaryIPs map[string]struct{}
-}
-
-type leaderDetectionPair struct {
-	sqlAt     time.Time
-	patroniAt time.Time
-}
-
-type leaderRoutingPair struct {
-	patroniAt    time.Time
-	hybridAt     time.Time
-	hybridSource string
+type sqlDowntimeWindow struct {
+	startedAt   time.Time
+	recoveredAt time.Time
 }
 
 // hybridHealthPolicy owns the state needed to choose between a complete SQL snapshot and the
@@ -110,13 +105,9 @@ type hybridHealthPolicy struct {
 	// Bound this history to current candidates; delayed Patroni B must not replace C.
 	supersededSQLLeaders map[string]struct{}
 
-	patroniLeaderObservation leaderObservation
-	sqlLeaderObservation     leaderObservation
-	pendingLeaderDetections  map[string]leaderDetectionPair
-
-	patroniRoutingLeaderIP string
-	hybridRoutingLeaderIP  string
-	pendingRouting         map[string]leaderRoutingPair
+	detectionTiming      leaderTiming[sqlDowntimeWindow]
+	routingTiming        leaderTiming[string]
+	sqlDowntimeStartedAt time.Time
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
@@ -124,6 +115,29 @@ func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
 		routingEnabled: routingEnabled,
 		patroniHealth:  make(map[string]bool),
 	}
+}
+
+func (p *hybridHealthPolicy) patroniSnapshot() map[string]bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return maps.Clone(p.patroniHealth)
+}
+
+func (p *hybridHealthPolicy) isRoutingEnabled() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.routingEnabled
+}
+
+func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.routingEnabled != enabled {
+		// Comparisons cannot span periods where SQL routing evaluation was disabled. Reset both
+		// baselines so the next observations establish a fresh pair under the new flag state.
+		p.routingTiming = leaderTiming[string]{}
+	}
+	p.routingEnabled = enabled
 }
 
 // observePatroni refreshes the fallback snapshot. Patroni remains authoritative in shadow mode;
@@ -140,11 +154,12 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	p.patroniHealth = maps.Clone(health)
 	p.patroniUpdatedAt = observedAt
 	decision := hybridRoutingDecision{
-		routingResult: SQLRoutingResultShadow,
-		health:        maps.Clone(health),
-		publish:       !p.routingEnabled,
+		routingEnabled: p.routingEnabled,
+		routingResult:  SQLRoutingResultShadow,
+		health:         maps.Clone(health),
+		publish:        !p.routingEnabled,
 	}
-	decision.leaderDetection = p.observeLeaderLocked("patroni", healthyIPs(health), observedAt)
+	decision.leaderDetection = p.observeLeaderLocked("patroni", healthyIPs(health), observedAt, sqlDowntimeWindow{})
 	if p.routingEnabled {
 		decision.routingComparison = p.recordRoutingLeaderLocked("patroni", health, observedAt, "")
 		leader, unique := singleHealthyIP(health)
@@ -203,11 +218,13 @@ func (p *hybridHealthPolicy) observeSQL(
 	defer p.mu.Unlock()
 
 	decision := hybridRoutingDecision{
-		routingResult: SQLRoutingResultShadow,
+		routingEnabled: p.routingEnabled,
+		routingResult:  SQLRoutingResultShadow,
 	}
 	fallbackReason, timeoutType := sqlHealthFallback(outcome)
 	if fallbackReason == "" {
-		decision.leaderDetection = p.observeLeaderLocked("sql", outcome.PrimaryIPs, observedAt)
+		downtime := p.recordSQLDowntimeLocked(outcome.PrimaryIPs, observedAt)
+		decision.leaderDetection = p.observeLeaderLocked("sql", outcome.PrimaryIPs, observedAt, downtime)
 	}
 	if !p.routingEnabled {
 		return decision
@@ -428,31 +445,6 @@ func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {
 	return "", ""
 }
 
-// isConclusiveSQLUnroutableError is intentionally an allowlist. New or ambiguous errors fall back
-// to Patroni unless SQL has already determined that same IP's role through another credential.
-func isConclusiveSQLUnroutableError(err error) bool {
-	if errors.Is(err, syscall.ECONNREFUSED) {
-		return true
-	}
-
-	var postgresErr *pgconn.PgError
-	if !errors.As(err, &postgresErr) {
-		return false
-	}
-	switch postgresErr.Code {
-	case pgerrcode.AdminShutdown,
-		pgerrcode.CrashShutdown,
-		pgerrcode.CannotConnectNow,
-		pgerrcode.DiskFull,
-		pgerrcode.OutOfMemory:
-		return true
-	default:
-		// System (58) and internal (XX) classes describe a failure category,
-		// not whether the whole instance is unavailable. Leave them indeterminate.
-		return false
-	}
-}
-
 func sqlHealthTimeoutType(err error) string {
 	if err == nil {
 		return SQLHealthTimeoutNone
@@ -499,111 +491,75 @@ func singleHealthyIP(health map[string]bool) (string, bool) {
 	return leader, leader != ""
 }
 
-func (p *hybridHealthPolicy) observeLeaderLocked(
-	source string,
-	primaryIPs []string,
-	observedAt time.Time,
-) *LeaderDetectionComparison {
-	if len(primaryIPs) == 0 {
-		return nil
-	}
-	current := make(map[string]struct{}, len(primaryIPs))
-	for _, ip := range primaryIPs {
-		current[ip] = struct{}{}
-	}
-	var observation *leaderObservation
-	switch source {
-	case "patroni":
-		observation = &p.patroniLeaderObservation
-	case "sql":
-		observation = &p.sqlLeaderObservation
-	default:
-		return nil
-	}
-	if observation.primaryIPs == nil {
-		observation.primaryIPs = current
-		return nil
-	}
-	newLeaders := make([]string, 0, len(current))
-	for ip := range current {
-		if _, existed := observation.primaryIPs[ip]; !existed {
-			newLeaders = append(newLeaders, ip)
+func (p *hybridHealthPolicy) recordSQLDowntimeLocked(primaryIPs []string, observedAt time.Time) sqlDowntimeWindow {
+	switch len(primaryIPs) {
+	case 0:
+		if p.sqlDowntimeStartedAt.IsZero() && len(p.detectionTiming.candidate.lastNonempty) > 0 {
+			p.sqlDowntimeStartedAt = observedAt
 		}
+	case 1:
+		if p.sqlDowntimeStartedAt.IsZero() {
+			return sqlDowntimeWindow{}
+		}
+		startedAt := p.sqlDowntimeStartedAt
+		p.sqlDowntimeStartedAt = time.Time{}
+		// Same-leader recovery has no replacement event to compare with Patroni.
+		if p.detectionTiming.candidate.lastNonempty[primaryIPs[0]] {
+			return sqlDowntimeWindow{}
+		}
+		return sqlDowntimeWindow{startedAt: startedAt, recoveredAt: observedAt}
 	}
-	observation.primaryIPs = current
-	if len(newLeaders) != 1 {
-		return nil
-	}
-
-	leaderIP := newLeaders[0]
-	if p.pendingLeaderDetections == nil {
-		p.pendingLeaderDetections = make(map[string]leaderDetectionPair)
-	}
-	pair := p.pendingLeaderDetections[leaderIP]
-	if source == "sql" {
-		pair.sqlAt = observedAt
-	} else {
-		pair.patroniAt = observedAt
-	}
-	if pair.sqlAt.IsZero() || pair.patroniAt.IsZero() {
-		p.pendingLeaderDetections[leaderIP] = pair
-		return nil
-	}
-	delete(p.pendingLeaderDetections, leaderIP)
-	return &LeaderDetectionComparison{
-		NewLeaderIP:       leaderIP,
-		Speedup:           pair.patroniAt.Sub(pair.sqlAt),
-		SQLRoutingEnabled: p.routingEnabled,
-	}
+	return sqlDowntimeWindow{}
 }
 
-func (p *hybridHealthPolicy) recordRoutingLeaderLocked(
-	source string,
-	health map[string]bool,
-	observedAt time.Time,
-	hybridSource string,
-) *LeaderRoutingComparison {
-	leaderIP, unique := singleHealthyIP(health)
-	if !unique {
-		return nil
-	}
-	var previous *string
+func (p *hybridHealthPolicy) observeLeaderLocked(source string, primaryIPs []string, observedAt time.Time, downtime sqlDowntimeWindow) *LeaderDetectionComparison {
+	side := referenceLeaderSource
 	switch source {
+	case "sql":
+		side = candidateLeaderSource
 	case "patroni":
-		previous = &p.patroniRoutingLeaderIP
-	case "hybrid":
-		previous = &p.hybridRoutingLeaderIP
 	default:
 		return nil
 	}
-	if *previous == "" {
-		*previous = leaderIP
+	health := make(map[string]bool, len(primaryIPs))
+	for _, ip := range primaryIPs {
+		health[ip] = true
+	}
+	pairs := p.detectionTiming.observe(side, health, observedAt, downtime, oneNewLeader)
+	if len(pairs) == 0 {
 		return nil
 	}
-	if *previous == leaderIP {
+	pair := pairs[0]
+	comparison := &LeaderDetectionComparison{NewLeaderIP: pair.ip, SQLRoutingEnabled: p.routingEnabled}
+	downtime = pair.candidateData
+	if downtime.startedAt.IsZero() || !downtime.recoveredAt.Equal(pair.candidateAt) {
+		return comparison
+	}
+	patroniDowntime := pair.patroniAt.Sub(downtime.startedAt)
+	sqlDowntime := downtime.recoveredAt.Sub(downtime.startedAt)
+	if patroniDowntime <= 0 || sqlDowntime < 0 {
+		return comparison
+	}
+	comparison.SQLDowntime = sqlDowntime
+	comparison.PatroniDowntime = patroniDowntime
+	comparison.DowntimeReductionPercent = float64(patroniDowntime-sqlDowntime) / float64(patroniDowntime) * 100
+	comparison.HasDowntimeComparison = true
+	return comparison
+}
+
+func (p *hybridHealthPolicy) recordRoutingLeaderLocked(source string, health map[string]bool, observedAt time.Time, hybridSource string) *LeaderRoutingComparison {
+	side := referenceLeaderSource
+	switch source {
+	case "hybrid":
+		side = candidateLeaderSource
+	case "patroni":
+	default:
 		return nil
 	}
-	*previous = leaderIP
-	if p.pendingRouting == nil {
-		p.pendingRouting = make(map[string]leaderRoutingPair)
-	}
-	pair := p.pendingRouting[leaderIP]
-	if source == "patroni" {
-		pair.patroniAt = observedAt
-	} else {
-		pair.hybridAt = observedAt
-		pair.hybridSource = hybridSource
-	}
-	if pair.patroniAt.IsZero() || pair.hybridAt.IsZero() {
-		p.pendingRouting[leaderIP] = pair
+	pairs := p.routingTiming.observe(side, health, observedAt, hybridSource, oneHealthyLeader)
+	if len(pairs) == 0 {
 		return nil
 	}
-	// Complete only this leader. Hybrid can advance again before Patroni catches up, leaving a
-	// newer leader comparison pending in the same map.
-	delete(p.pendingRouting, leaderIP)
-	return &LeaderRoutingComparison{
-		NewLeaderIP:  leaderIP,
-		Improvement:  pair.patroniAt.Sub(pair.hybridAt),
-		HybridSource: pair.hybridSource,
-	}
+	pair := pairs[0]
+	return &LeaderRoutingComparison{NewLeaderIP: pair.ip, Improvement: pair.speedup(), HybridSource: pair.candidateData}
 }

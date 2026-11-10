@@ -162,7 +162,7 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	// and to have observability on the number of connections that are rerouted
 	// even if they fail
 	if rerouted {
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections.rerouted", 1, sessionLinkTags, 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.rerouted", 1, sessionLinkTags, 1)
 	}
 	// Same for the tag, as we want the trace to be marked as rerouted whether it failed or not
 	if request.TraceState != nil {
@@ -177,11 +177,11 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 			// reasons in the future that we'd want visibility into.
 			outcome = "ctx_cancelled"
 		}
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections", 1, append(sessionLinkTags, "outcome:"+outcome), 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections", 1, append(sessionLinkTags, "outcome:"+outcome), 1)
 		return nil, err
 	}
 
-	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections", 1, append(sessionLinkTags, "outcome:successful"), 1)
+	_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections", 1, append(sessionLinkTags, "outcome:successful"), 1)
 	_ = pgproxy.Metrics().Distribution(pgproxy.MetricConnectWait, float64(time.Since(start).Microseconds()), sessionLinkTags, 1)
 
 	opts := link.Options{
@@ -252,7 +252,7 @@ func (r *Runtime) decrementSessionsWaiting() {
 func (r *Runtime) fallbackToPrimary(ctx context.Context) (*pgxpool.Conn, error) {
 	// Check rate limiter before falling back to primary
 	if !r.fallbackRateLimiter.Allow() {
-		_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.replica_acquire_fallback",
+		_ = pgproxy.Metrics().Incr("pg_proxy.replica_acquire_fallback",
 			[]string{
 				fmt.Sprintf("database:%s", r.primaryDatabaseName),
 				fmt.Sprintf("database_cluster:%s", r.clusterName),
@@ -261,7 +261,7 @@ func (r *Runtime) fallbackToPrimary(ctx context.Context) (*pgxpool.Conn, error) 
 		return nil, fmt.Errorf("primary database fallback rate limit exceeded for cluster:%s", r.clusterName)
 	}
 
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.replica_acquire_fallback",
+	_ = pgproxy.Metrics().Incr("pg_proxy.replica_acquire_fallback",
 		[]string{
 			fmt.Sprintf("database:%s", r.primaryDatabaseName),
 			fmt.Sprintf("database_cluster:%s", r.clusterName),
@@ -322,7 +322,7 @@ func (r *Runtime) StartStats() {
 		for {
 			select {
 			case <-ticker.C:
-				_ = pgproxy.Metrics().Gauge("dd.orgstore.pg_proxy.sessions.waiting", float64(r.SessionsWaiting()), tags, 1)
+				_ = pgproxy.Metrics().Gauge("pg_proxy.sessions.waiting", float64(r.SessionsWaiting()), tags, 1)
 				r.selector.primary.ExportStats(tags)
 			case <-r.stopExportStats:
 				return

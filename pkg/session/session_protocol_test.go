@@ -20,7 +20,7 @@ import (
 )
 
 // This file contains simple e2e unit tests using fake channels between the client->session->pg.
-// TODO(ORGSTORE-303): We should use integration tests using a real client and postgres for functional testing.
+// TODO: We should use integration tests using a real client and postgres for functional testing.
 
 func TestSimple(t *testing.T) {
 	t.Run("reused_buffer", func(t *testing.T) {

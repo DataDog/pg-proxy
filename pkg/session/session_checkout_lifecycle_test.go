@@ -203,7 +203,7 @@ func TestDrainDoesNotStartNewTransactionAfterCurrentOneEnds(t *testing.T) {
 	errResp, ok := drainMsg.(*pgproto3.ErrorResponse)
 	assert.True(ok, "expected ErrorResponse but got %#v", drainMsg)
 	assert.Equal(pgerrcode.AdminShutdown, errResp.Code)
-	assert.True(strings.HasPrefix(errResp.Message, orgstoreClientDrainPrefix), errResp.Message)
+	assert.True(strings.HasPrefix(errResp.Message, clientDrainPrefix), errResp.Message)
 
 	// The session terminated cleanly via drain().
 	select {
@@ -314,7 +314,7 @@ func TestDrainWaitsForAutocommitQuery(t *testing.T) {
 			require.True(t, ok, "expected a drain error, got %T", msg)
 			require.Equal(t, "FATAL", drainError.Severity)
 			require.Equal(t, pgerrcode.AdminShutdown, drainError.Code)
-			require.True(t, strings.HasPrefix(drainError.Message, orgstoreClientDrainPrefix), drainError.Message)
+			require.True(t, strings.HasPrefix(drainError.Message, clientDrainPrefix), drainError.Message)
 
 			select {
 			case <-done:

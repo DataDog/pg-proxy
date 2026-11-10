@@ -251,7 +251,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	} else if len(shared.Users) > 0 {
 		return config{}, errors.New("configured users require proxy.password_auth_enabled")
 	}
-	// TODO(OSQQUERY-715): wire shared traffic mirroring settings into the OSS binary.
+	// TODO: wire shared traffic mirroring settings into the OSS binary.
 	if shared.Mirroring != nil {
 		return config{}, errors.New("mirroring configuration is not implemented by the OSS binary")
 	}

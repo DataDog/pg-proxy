@@ -17,6 +17,7 @@ func TestClassifyReadOnly(t *testing.T) {
 		"show":                            "SHOW statement_timeout;",
 		"multiple reads":                  "SELECT * FROM dogs; SELECT * FROM cats;",
 		"read-only tx":                    "BEGIN READ ONLY;",
+		"read-only tx with isolation":     "BEGIN ISOLATION LEVEL REPEATABLE READ, READ ONLY;",
 		"at time zone":                    "SELECT name, check_in AT TIME ZONE 'UTC' FROM dogs;",
 		"timezone call":                   "SELECT timezone('UTC', now);",
 		"count star":                      "SELECT COUNT(*) FROM dogs;",
@@ -54,19 +55,22 @@ func TestClassifyReadOnly(t *testing.T) {
 
 func TestClassifyNotReadOnly(t *testing.T) {
 	queries := map[string]string{
-		"select for update": "SELECT * FROM dogs WHERE name = 'Fido' FOR UPDATE;",
-		"insert":            "INSERT INTO dogs (id, name) VALUES (1, 'Fido');",
-		"update":            "UPDATE dogs SET upvotes = upvotes + 1 WHERE id = 1;",
-		"delete":            "DELETE FROM dogs WHERE id = 1;",
-		"copy":              "COPY dogs FROM '/path.csv' DELIMITER ',' CSV;",
-		"locking CTE":       "WITH var AS (SELECT id FROM dogs) SELECT id FROM var FOR SHARE;",
-		"write outer CTE":   "WITH new_dogs AS (SELECT 1 AS id) INSERT INTO dogs (id) SELECT id FROM new_dogs;",
-		"write CTE":         "WITH changed AS (INSERT INTO dogs (id) VALUES (1) RETURNING *) SELECT * FROM changed;",
-		"nested write CTE":  "WITH outer_cte AS (WITH inner_cte AS (INSERT INTO dogs (id) VALUES (1) RETURNING *) SELECT * FROM inner_cte) SELECT * FROM outer_cte;",
-		"mixed statements":  "SELECT * FROM dogs; INSERT INTO cats (id) VALUES (1);",
-		"unknown function":  "SELECT set_host_tags();",
-		"select into":       "SELECT * INTO new_table FROM old_table;",
-		"begin transaction": "BEGIN;",
+		"select for update":            "SELECT * FROM dogs WHERE name = 'Fido' FOR UPDATE;",
+		"insert":                       "INSERT INTO dogs (id, name) VALUES (1, 'Fido');",
+		"update":                       "UPDATE dogs SET upvotes = upvotes + 1 WHERE id = 1;",
+		"delete":                       "DELETE FROM dogs WHERE id = 1;",
+		"copy":                         "COPY dogs FROM '/path.csv' DELIMITER ',' CSV;",
+		"locking CTE":                  "WITH var AS (SELECT id FROM dogs) SELECT id FROM var FOR SHARE;",
+		"write outer CTE":              "WITH new_dogs AS (SELECT 1 AS id) INSERT INTO dogs (id) SELECT id FROM new_dogs;",
+		"write CTE":                    "WITH changed AS (INSERT INTO dogs (id) VALUES (1) RETURNING *) SELECT * FROM changed;",
+		"nested write CTE":             "WITH outer_cte AS (WITH inner_cte AS (INSERT INTO dogs (id) VALUES (1) RETURNING *) SELECT * FROM inner_cte) SELECT * FROM outer_cte;",
+		"mixed statements":             "SELECT * FROM dogs; INSERT INTO cats (id) VALUES (1);",
+		"unknown function":             "SELECT set_host_tags();",
+		"select into":                  "SELECT * INTO new_table FROM old_table;",
+		"begin transaction":            "BEGIN;",
+		"read-write tx":                "BEGIN READ WRITE;",
+		"read-write tx with isolation": "BEGIN ISOLATION LEVEL REPEATABLE READ, READ WRITE;",
+		"read-write tx with select":    "BEGIN READ WRITE; SELECT 1;",
 	}
 
 	for name, sql := range queries {

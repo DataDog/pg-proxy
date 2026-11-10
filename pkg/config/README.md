@@ -72,19 +72,13 @@ and ordinary Go formatting redact it. Convert with `string(secret)` only where
 the secret is consumed.
 Marshaled config is diagnostic output, not a lossless secret backup.
 
-## Datadog application boundary
+## Embedding applications
 
-The deployed app does **not** decode files into this `Config`. Its persisted
-schema is `PGProxyConfig` in `domains/orgstore/libs/config/go/config.go`, which
-composes the credential-free library settings with internal provider fields.
-The [app config guide (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/pg-proxy/config/README.md) lists its
-additional fields and credential policy.
-
-App database/user types expose Vault references, not passwords or verifiers.
-The app providers and Atlas write paths explicitly apply the internal no-inline-
-secrets policy. Shared JSON decoding is unchanged. Vault resolution stays in the
-app; resolved credentials are passed to connection code in memory. No COBS/protobuf
-version or schema change is needed for these library options.
+An embedding application does not have to decode files into this `Config`. It
+can keep its own persisted schema that composes these credential-free library
+settings with its own provider fields, such as references into a secret store.
+Resolve those references in the application and pass the resulting credentials
+to connection code in memory. Shared JSON decoding is unchanged.
 
 ## Extending the schema
 

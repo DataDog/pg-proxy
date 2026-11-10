@@ -130,8 +130,8 @@ func (c *blockingWriteConn) Write(p []byte) (int, error) {
 }
 
 // Keep this literal independent of drainMessage to catch changes to the
-// prefix that deployed OrgStore clients recognize.
-const orgstoreClientDrainPrefix = "Pg-proxy session has been terminated"
+// prefix that deployed clients recognize.
+const clientDrainPrefix = "Pg-proxy session has been terminated"
 
 func TestRunDrainsCanceledIdleSession(t *testing.T) {
 	metrics := &recordingMetrics{}
@@ -154,7 +154,7 @@ func TestRunDrainsCanceledIdleSession(t *testing.T) {
 
 	require.NoError(t, s.Run())
 	require.Equal(t, []metricCall{{
-		name:  "dd.orgstore.pg_proxy.sessions.drained_connections",
+		name:  "datadog.pg_proxy.sessions.drained_connections",
 		value: 1,
 		tags:  []string{"user:user", "database:database", "client_service_account:service", "passthrough_user:false"},
 	}}, metrics.counts)
@@ -165,7 +165,7 @@ func TestRunDrainsCanceledIdleSession(t *testing.T) {
 	response, ok := client.sent[0].(*pgproto3.ErrorResponse)
 	require.True(t, ok)
 	require.Equal(t, "57P01", response.Code)
-	require.True(t, strings.HasPrefix(response.Message, orgstoreClientDrainPrefix), response.Message)
+	require.True(t, strings.HasPrefix(response.Message, clientDrainPrefix), response.Message)
 }
 
 func TestProtocolErrorResponsesRemainStable(t *testing.T) {

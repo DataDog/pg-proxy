@@ -19,13 +19,13 @@ import (
 
 const testSQLHealthCheckConnString = "host=127.0.0.1 port=1 user=probeuser password=probepass dbname=probedb"
 const testSQLHealthCheckIP = "127.0.0.1"
-const testOrgstoreCluster = "test-cluster"
+const testCluster = "test-cluster"
 
 func newTestSQLHealthCheckPools(t *testing.T) *SQLHealthCheckPools {
 	t.Helper()
 
 	pools := NewSQLHealthCheckPools(context.Background(), SQLHealthCheckPoolsConfig{
-		ApplicationName: testOrgstoreCluster + "-" + DefaultSQLHealthCheckApplicationName,
+		ApplicationName: testCluster + "-" + DefaultSQLHealthCheckApplicationName,
 	})
 	t.Cleanup(pools.Close)
 	return pools
@@ -40,7 +40,7 @@ func TestSQLHealthCheckPoolsApplySettings(t *testing.T) {
 	assert.EqualValues(t, sqlHealthCheckMaxConns, cfg.MaxConns)
 	assert.EqualValues(t, sqlHealthCheckMinConns, cfg.MinConns)
 	assert.Equal(t, SQLHealthCheckConnectTimeout, cfg.ConnConfig.ConnectTimeout)
-	assert.Equal(t, testOrgstoreCluster+"-"+DefaultSQLHealthCheckApplicationName, cfg.ConnConfig.RuntimeParams["application_name"])
+	assert.Equal(t, testCluster+"-"+DefaultSQLHealthCheckApplicationName, cfg.ConnConfig.RuntimeParams["application_name"])
 	assert.Equal(t, strconv.FormatInt(SQLHealthCheckStatementTimeout.Milliseconds(), 10), cfg.ConnConfig.RuntimeParams["statement_timeout"])
 }
 

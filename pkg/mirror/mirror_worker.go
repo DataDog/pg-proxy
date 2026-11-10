@@ -280,5 +280,5 @@ func (w *mirrorWorker) count(metric string, extraTags ...string) {
 	if len(extraTags) > 0 {
 		tags = append(append([]string(nil), w.tags...), extraTags...)
 	}
-	_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.session."+metric, 1, tags, 1)
+	_ = pgproxy.Metrics().Count("pg_proxy.session."+metric, 1, tags, 1)
 }

@@ -380,7 +380,7 @@ func TestClientEOFMarksClientDisconnectedAndCountsDestroyedBackend(t *testing.T)
 	assert.True(t, s.ClientDisconnected())
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Equal(t, []int64{1}, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{idle: 1, release: 1})
 }
 
@@ -406,7 +406,7 @@ func TestTerminateMarksClientDisconnectedAndCountsDestroyedBackend(t *testing.T)
 	assert.True(t, s.ClientDisconnected())
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Equal(t, []int64{1}, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{idle: 1, release: 1})
 }
 
@@ -425,7 +425,7 @@ func TestCloseDoesNotCountIdleBackendOnClientDisconnect(t *testing.T) {
 	s.Close(io.EOF)
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Empty(t, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{idle: 1, release: 1})
 }
 
@@ -441,7 +441,7 @@ func TestCloseDoesNotCountBackendEOFAsClientDisconnect(t *testing.T) {
 	s.Close(fmt.Errorf("backend receive failed: %w", io.EOF))
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Empty(t, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{release: 1})
 }
 
@@ -477,7 +477,7 @@ func TestClientWriteFailureCountsDestroyedBackendBeforeMonitor(t *testing.T) {
 		s.Close(err)
 
 		tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-		assert.Equal(t, []int64{1}, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+		assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 		backendLink.assertCalls(t, testLinkCalls{flush: 1, receive: 1, nextExpectation: 1, idle: 1, release: 1})
 	})
 }
@@ -515,7 +515,7 @@ func TestAfterFlushActionWriteFailureCountsDestroyedBackendBeforeMonitor(t *test
 	s.Close(err)
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Equal(t, []int64{1}, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{send: 1, flush: 1, nextExpectation: 1, idle: 1, release: 1})
 }
 
@@ -552,7 +552,7 @@ func TestSyntheticParseCompleteWriteFailureCountsDestroyedBackendBeforeMonitor(t
 	s.Close(err)
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Equal(t, []int64{1}, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{send: 1, flush: 1, nextExpectation: 1, idle: 1, release: 1, hasExisting: 1})
 }
 
@@ -578,10 +578,10 @@ func TestCloseDoesNotDoubleCountBackendDestroyedByClientMonitor(t *testing.T) {
 	s.Close(io.EOF)
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:force_close")
-	assert.Equal(t, []int64{1}, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 
 	releaseTags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Empty(t, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", releaseTags))
+	assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", releaseTags))
 	backendLink.assertCalls(t, testLinkCalls{idle: 1, release: 1, forceClose: 1})
 }
 
@@ -596,7 +596,7 @@ func TestFailedForceCloseDoesNotCountBackendDestroyed(t *testing.T) {
 	s.ForceCloseBackendOnClientDisconnect(backendLink)
 
 	tags := append(s.MetricTags(), "reason:client_disconnect", "path:force_close")
-	assert.Empty(t, metrics.countValues("dd.orgstore.pg_proxy.sessions.connections.destroyed", tags))
+	assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
 	backendLink.assertCalls(t, testLinkCalls{forceClose: 1})
 }
 

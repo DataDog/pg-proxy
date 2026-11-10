@@ -16,8 +16,8 @@ import (
 
 // LeaderSwitchoverHint is appended to error messages that match IsSwitchoverSignature,
 // both when annotating a proxied ErrorResponse and when building a FATAL response to
-// the client directly (see closeErrorResponse in the app).
-const LeaderSwitchoverHint = " (A postgres leader switchover may be in progress, errors are expected to last between 10 to 30 seconds. Page OrgStore team otherwise)"
+// the client directly (see closeErrorResponse in pkg/session).
+const LeaderSwitchoverHint = " (a PostgreSQL leader switchover may be in progress; retry shortly)"
 
 // IsSwitchoverSignature matches the three switchover SQLSTATEs by code+message.
 // Message check is required: same code can mean different root causes (e.g. 57P03 "starting up" vs "shutting down").

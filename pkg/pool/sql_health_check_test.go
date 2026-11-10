@@ -301,11 +301,14 @@ func TestAggregateSQLHealthCheckOutcomesPreservesEarliestStart(t *testing.T) {
 	}
 }
 
-func TestAggregateSQLHealthCheckOutcomesLeavesTimeoutOnlyIPUnknown(t *testing.T) {
-	aggregation := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{{
-		Results: []SQLHealthCheckResult{{IP: "10.0.0.1", Err: context.DeadlineExceeded}},
-	}})
-
-	assert.NotContains(t, aggregation.Health, "10.0.0.1")
-	assert.Len(t, aggregation.Outcome.Results, 1, "raw timeout remains available to routing policy")
+func TestAggregateSQLHealthCheckOutcomesLeavesIndeterminateIPUnknown(t *testing.T) {
+	for _, err := range []error{context.DeadlineExceeded, errors.New("unknown"), &pgconn.PgError{Code: "28P01"}} {
+		t.Run(err.Error(), func(t *testing.T) {
+			aggregation := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{{
+				Results: []SQLHealthCheckResult{{IP: "10.0.0.1", Err: err}},
+			}})
+			assert.NotContains(t, aggregation.Health, "10.0.0.1")
+			assert.Len(t, aggregation.Outcome.Results, 1, "raw evidence remains available to routing policy")
+		})
+	}
 }

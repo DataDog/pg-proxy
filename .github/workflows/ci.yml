@@ -86,16 +86,16 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Vet
-        run: go vet ./...
-      - name: Unit tests on minimum Go (Docker tests excluded)
+        run: go vet -tags=integration ./...
+      - name: Unit tests on minimum Go
         if: matrix.toolchain == 'minimum'
-        run: go test -skip '^TestProxyAgainstPostgres$' -count=1 -timeout=10m ./...
-      - name: Unit tests with race detection (Docker tests excluded)
+        run: go test -count=1 -timeout=10m ./...
+      - name: Unit tests with race detection on stable Go
         if: matrix.toolchain == 'stable'
-        run: go test -race -skip '^TestProxyAgainstPostgres$' -count=1 -timeout=10m ./...
+        run: go test -race -count=1 -timeout=10m ./...
 
-  integration-build:
-    name: Compile integration tests
+  integration:
+    name: PostgreSQL integration
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -107,29 +107,30 @@ jobs:
           go-version: stable
           check-latest: true
           cache-dependency-path: go.sum
-      # Execute Docker-backed tests after portable fixtures are configured.
-      - name: Compile integration tests without running them
-        run: go test -tags=integration -run '^$' ./...
+      - name: Check Docker
+        run: docker info
+      - name: Integration tests
+        run: go test -tags=integration -race -count=1 -timeout=15m -v ./...
 
-  client-integration:
-    name: Client authentication and TLS integration
+  docs:
+    name: Documentation site
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: docs/site
     env:
-      PG_PROXY_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable
+      ASTRO_TELEMETRY_DISABLED: '1'
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
-          go-version: stable
-          cache-dependency-path: go.sum
-      - name: Start disposable PostgreSQL
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql
-          sudo systemctl start postgresql
-          sudo -u postgres psql -c "ALTER USER postgres PASSWORD 'postgres'"
-      - name: Run real client integration tests with race detection
-        run: go test -race -run '^TestProxyAgainstPostgres$' -count=1 -timeout=5m ./cmd/pg-proxy
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/site/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Build static site and check links
+        run: npm run build:static

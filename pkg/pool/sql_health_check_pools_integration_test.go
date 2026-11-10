@@ -21,9 +21,9 @@ import (
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
-)
 
-const sqlHealthCheckIntegrationPostgresImage = "registry.ddbuild.io/images/postgres-official:14-gbi"
+	"github.com/DataDog/pg-proxy/internal/itest"
+)
 
 type integrationHealthProber struct {
 	mu  sync.Mutex
@@ -84,12 +84,10 @@ func (p *delayedIntegrationSQLHealthProber) blockNext(ip string) {
 
 func startSQLHealthCheckIntegrationPostgres(t *testing.T) (context.Context, string, *pgx.ConnConfig) {
 	t.Helper()
-	testcontainers.SkipIfProviderIsNotHealthy(t)
-	t.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "")
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
-	postgresContainer, err := postgres.Run(ctx, sqlHealthCheckIntegrationPostgresImage,
+	postgresContainer, err := postgres.Run(ctx, itest.PostgresImage(),
 		postgres.WithDatabase("sql_health_check_integration"),
 		postgres.WithUsername("postgres"),
 		postgres.WithPassword("postgres"),
@@ -154,7 +152,7 @@ func TestSQLHealthCheckPoolAgainstPostgres(t *testing.T) {
 	assert.Equal(t, 1, healthCheckConnections)
 }
 
-func TestSQLHealthWorkerHostWideRoundPreventsStaleCredentialOverlap(t *testing.T) {
+func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T) {
 	ctx, connString, connConfig := startSQLHealthCheckIntegrationPostgres(t)
 	oldIP := connConfig.Host
 	replacementIP := "127.0.0.1"
