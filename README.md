@@ -239,9 +239,9 @@ go test -race -tags=integration -count=1 ./cmd/pg-proxy ./pkg/pool
 ```
 
 Integration tests pull public Docker Hub images pinned by digest in
-[`internal/itest/images.go`](internal/itest/images.go). Datadog developers can set
-`PG_PROXY_ITEST_INTERNAL_IMAGES=true` to pull them from `registry.ddbuild.io`
-instead. Tests fail if Docker is unavailable.
+[`internal/itest/images.go`](internal/itest/images.go). To use a Docker Hub
+mirror, set Testcontainers' standard `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX`.
+Tests fail if Docker is unavailable.
 
 The standalone-command suite also accepts an explicit disposable PostgreSQL URL
 through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
@@ -271,8 +271,8 @@ path. A prebuilt binary is used as is, so build it with `-race` yourself if need
 
 | Variable | Effect |
 | --- | --- |
-| `PG_PROXY_ITEST_INTERNAL_IMAGES` | `true` pulls images from `registry.ddbuild.io` instead of Docker Hub. Images without a registry host, including Testcontainers' own, go through its Docker Hub mirror |
-| `PG_PROXY_ITEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default. With internal images, use a fully qualified name to bypass the mirror |
+| `PG_PROXY_TEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
+| `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX` | Docker Hub mirror for images without a registry host, including Testcontainers' own. A fully qualified image name bypasses it |
 | `PG_PROXY_ITEST_BINARY` | Absolute path to a prebuilt pg-proxy binary instead of building one |
 
 Readiness uses a timed TCP port probe, not startup log parsing. Captured output

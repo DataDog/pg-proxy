@@ -16,9 +16,9 @@
 //
 // Environment variables:
 //
-//   - PG_PROXY_ITEST_INTERNAL_IMAGES=true pulls images from registry.ddbuild.io
-//     instead of Docker Hub (see images.go).
-//   - PG_PROXY_ITEST_POSTGRES_IMAGE overrides PostgresImage.
+//   - PG_PROXY_TEST_POSTGRES_IMAGE overrides PostgresImage.
+//   - TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX, Testcontainers' standard setting,
+//     pulls images through a Docker Hub mirror (see images.go).
 //   - PG_PROXY_ITEST_BINARY uses a prebuilt pg-proxy binary, given as an
 //     absolute path, instead of building one.
 package itest

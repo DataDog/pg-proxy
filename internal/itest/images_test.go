@@ -9,47 +9,27 @@ package itest
 
 import (
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
-// unsetEnv removes name for the test and restores its previous value afterward.
-func unsetEnv(t *testing.T, name string) {
-	t.Helper()
-	t.Setenv(name, "")
-	require.NoError(t, os.Unsetenv(name))
+func TestImagesArePinnedPublicImages(t *testing.T) {
+	t.Setenv("PG_PROXY_TEST_POSTGRES_IMAGE", "")
+	require.NoError(t, os.Unsetenv("PG_PROXY_TEST_POSTGRES_IMAGE"))
+
+	for _, image := range []string{PostgresImage(), DebianImage()} {
+		name, digest, pinned := strings.Cut(image, "@sha256:")
+		require.True(t, pinned, "%s must be pinned by digest", image)
+		require.Len(t, digest, 64)
+		require.NotContains(t, strings.SplitN(name, "/", 2)[0], ".", "%s must be a Docker Hub image", image)
+	}
 }
 
-func TestImagesDefaultToPublicRegistry(t *testing.T) {
-	unsetEnv(t, "PG_PROXY_ITEST_INTERNAL_IMAGES")
-	unsetEnv(t, "PG_PROXY_ITEST_POSTGRES_IMAGE")
-	unsetEnv(t, "TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX")
-
-	require.Equal(t, publicPostgresImage, PostgresImage())
-	require.Equal(t, publicDebianImage, DebianImage())
-	UseImageRegistry()
-	_, prefixed := os.LookupEnv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX")
-	require.False(t, prefixed, "public images must not be pulled through the internal mirror")
-}
-
-func TestInternalImagesAreOptIn(t *testing.T) {
-	t.Setenv("PG_PROXY_ITEST_INTERNAL_IMAGES", "true")
-	unsetEnv(t, "PG_PROXY_ITEST_POSTGRES_IMAGE")
-	unsetEnv(t, "TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX")
-
-	require.Equal(t, internalPostgresImage, PostgresImage())
-	require.Equal(t, internalDebianImage, DebianImage())
-	UseImageRegistry()
-	require.Equal(t, internalHubMirror, os.Getenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX"))
-}
-
-func TestExplicitHubPrefixTakesPrecedence(t *testing.T) {
-	t.Setenv("PG_PROXY_ITEST_INTERNAL_IMAGES", "true")
-	t.Setenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX", "mirror.example.com")
-
-	UseImageRegistry()
-	require.Equal(t, "mirror.example.com", os.Getenv("TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX"))
+func TestPostgresImageOverride(t *testing.T) {
+	t.Setenv("PG_PROXY_TEST_POSTGRES_IMAGE", "registry.example.com/postgres:17")
+	require.Equal(t, "registry.example.com/postgres:17", PostgresImage())
 }
 
 func TestPrebuiltBinaryMustBeAbsolute(t *testing.T) {

@@ -28,7 +28,6 @@ func postgresTestConnectionString(t *testing.T, ctx context.Context) func(contex
 	t.Helper()
 	value, supplied := os.LookupEnv("PG_PROXY_TEST_DATABASE_URL")
 	if !supplied {
-		itest.UseImageRegistry()
 		pg, err := itest.StartPostgres(ctx)
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, pg.Terminate(context.Background())) })

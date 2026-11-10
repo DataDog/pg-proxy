@@ -84,7 +84,6 @@ func (p *delayedIntegrationSQLHealthProber) blockNext(ip string) {
 
 func startSQLHealthCheckIntegrationPostgres(t *testing.T) (context.Context, string, *pgx.ConnConfig) {
 	t.Helper()
-	itest.UseImageRegistry()
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	t.Cleanup(cancel)
 
