@@ -383,6 +383,9 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 	baseline := time.Now()
 	recordPotentialPoll(s, target, 0, baseline, SQLHealthCheckResult{IP: oldIP})
 	s.potentialTiming.leaderComparisons.observe(false, leaderTimingIPs(oldIP), baseline)
+	s.hybridPolicy.observePatroni(leaderTimingIPs(oldIP), baseline)
+	s.hybridPolicy.observeSQL([]string{oldIP, newIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, baseline)
+	s.hybridPolicy.observeSQL([]string{oldIP, newIP}, SQLHealthCheckOutcome{}, time.Now())
 	assertUnlocked := func() {
 		unlocked := s.sqlComparisonMu.TryLock()
 		if unlocked {
@@ -393,6 +396,8 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 	var got []SQLPotentialComparison
 	var snapshot SQLPatroniHealthSnapshot
 	var iterations []SQLIteration
+	var detections []LeaderDetectionComparison
+	var routings []LeaderRoutingComparison
 	w := &HealthWorker{
 		hooks: HealthWorkerHooks{
 			SQLPotentialCompared: func(c SQLPotentialComparison, _ []string) {
@@ -404,10 +409,20 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 				snapshot = c
 			},
 		},
-		sqlHooks: SQLHealthWorkerHooks{Iteration: func(iteration SQLIteration, _ []string) {
-			assertUnlocked()
-			iterations = append(iterations, iteration)
-		}},
+		sqlHooks: SQLHealthWorkerHooks{
+			Iteration: func(iteration SQLIteration, _ []string) {
+				assertUnlocked()
+				iterations = append(iterations, iteration)
+			},
+			LeaderDetectionCompared: func(c LeaderDetectionComparison, _ []string) {
+				assertUnlocked()
+				detections = append(detections, c)
+			},
+			LeaderRoutingCompared: func(c LeaderRoutingComparison, _ []string) {
+				assertUnlocked()
+				routings = append(routings, c)
+			},
+		},
 	}
 	var flagEvaluatedAt time.Time
 	s.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation {
@@ -415,6 +430,7 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 		flagEvaluatedAt = time.Now()
 		// Patroni finishes while the completed SQL poll is evaluating its routing flag.
 		w.observePatroniPotential(s, leaderTimingIPs(newIP), time.Now())
+		w.reportHybridDecision(s, s.hybridPolicy.observePatroni(leaderTimingIPs(newIP), time.Now()), false)
 		return validSQLHealthFeatureFlag(true)
 	}
 	w.completeSQLHealthCheck(target, 0, time.Now(), []string{oldIP, newIP},
@@ -428,6 +444,12 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 	assert.Positive(t, got[0].Speedup, "SQL completed first, even though its routing flag returned later")
 	require.Len(t, iterations, 1, "the same completion must also evaluate the hybrid policy")
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[0].RoutingResult)
+	require.Len(t, detections, 1)
+	assert.Equal(t, newIP, detections[0].NewLeaderIP)
+	assert.True(t, detections[0].HasDowntimeComparison)
+	require.Len(t, routings, 1)
+	assert.Equal(t, newIP, routings[0].NewLeaderIP)
+	assert.Equal(t, SQLRoutingResultConclusive, routings[0].HybridSource)
 }
 
 func TestSQLPotentialEvictOldLeaderPreservesReplacement(t *testing.T) {
@@ -792,26 +814,6 @@ func TestSQLPotentialReappearingPrimaryPreservesFirstObservation(t *testing.T) {
 			require.Empty(t, p.observe(!sqlFirst, leaderTimingIPs("B"), leaderTimingAt(7)))
 		})
 	}
-}
-
-func leaderTimingAt(seconds int) time.Time { return time.Unix(100+int64(seconds), 0) }
-func leaderTimingIPs(ips ...string) map[string]bool {
-	m := make(map[string]bool, len(ips))
-	for _, ip := range ips {
-		m[ip] = true
-	}
-	return m
-}
-
-func leaderTimingCase(sqlFirst bool, next string) string {
-	prefix := "Patroni"
-	if sqlFirst {
-		prefix = "SQL"
-	}
-	if next == "" {
-		next = "none"
-	}
-	return prefix + " leaves B for " + next
 }
 
 func TestSQLPotentialComparesEachNewPrimary(t *testing.T) {
