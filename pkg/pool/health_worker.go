@@ -1126,6 +1126,12 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		// Capture membership and roles only after that retention update.
 		snapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		if len(snapshot.retainedIPs) == 0 {
+			poolHealth.routingMu.Lock()
+			if poolHealth.sqlRoutingActive {
+				poolHealth.sqlRoutingActive = false
+				poolHealth.publishRoutingSnapshot(poolHealth.patroniHealthState.Snapshot(), poolHealth.patroniHealthState.Resolved())
+			}
+			poolHealth.routingMu.Unlock()
 			return false
 		}
 		// DNS can discover another IP while this credential is running. An older poll
@@ -1295,10 +1301,7 @@ func (w *HealthWorker) checkSQLHealth(
 			}, true
 		}
 
-		patroniHealth := make(map[string]bool, len(toProbe))
-		for _, ip := range toProbe {
-			patroniHealth[ip] = poolHealth.IsHealthy(ip)
-		}
+		patroniHealth := poolHealth.patroniHealthState.Snapshot()
 		outcome = target.checker.Check(
 			ctx,
 			toProbe,
