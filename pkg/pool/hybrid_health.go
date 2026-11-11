@@ -11,6 +11,7 @@ import (
 	"maps"
 	"net"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,7 +33,17 @@ const (
 	SQLHealthFallbackIndeterminate     = "indeterminate_error"
 	SQLHealthFallbackMultiplePrimaries = "multiple_primaries"
 	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
+
+	SQLRoutingBanReasonPostgresShutdown   = "postgres_shutdown"
+	SQLRoutingUnbanReasonConclusiveResult = "conclusive_result"
+	SQLRoutingUnbanReasonDNSRemoved       = "dns_removed"
 )
+
+// SQLRoutingBanChange reports one IP entering or leaving the SQL routing banlist.
+type SQLRoutingBanChange struct {
+	IP     string
+	Reason string
+}
 
 // LeaderDetectionComparison pairs independent SQL and Patroni observations of a new leader.
 // When HasDowntimeComparison is true, the downtime fields share the first conclusive SQL
@@ -69,6 +80,10 @@ type hybridRoutingDecision struct {
 
 	leaderDetection   *LeaderDetectionComparison
 	routingComparison *LeaderRoutingComparison
+
+	routingBanned    []SQLRoutingBanChange
+	routingUnbanned  []SQLRoutingBanChange
+	routingBannedIPs map[string]time.Time
 }
 
 type sqlDowntimeWindow struct {
@@ -89,12 +104,14 @@ type hybridHealthPolicy struct {
 	detectionTiming      leaderTiming[sqlDowntimeWindow]
 	routingTiming        leaderTiming[string]
 	sqlDowntimeStartedAt time.Time
+	routingBannedIPs     map[string]time.Time
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
 	return &hybridHealthPolicy{
-		routingEnabled: routingEnabled,
-		patroniHealth:  make(map[string]bool),
+		routingEnabled:   routingEnabled,
+		patroniHealth:    make(map[string]bool),
+		routingBannedIPs: make(map[string]time.Time),
 	}
 }
 
@@ -146,12 +163,26 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 // a successful role or a narrowly classified unroutable result. Unknown errors, multiple distinct
 // primaries, or conflicting deterministic roles fall back to the most recent Patroni snapshot.
 // candidateIPs includes every address retained for this snapshot, not only addresses returned by
-// its latest DNS lookup.
+// its latest DNS lookup. Banlisted IPs remain probed for recovery but are excluded from SQL
+// decisions and cached Patroni fallback. Raw comparison snapshots remain unchanged.
 func (p *hybridHealthPolicy) observeSQL(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
 	observedAt time.Time,
 ) hybridRoutingDecision {
+	return p.observeSQLRound(candidateIPs, outcome, SQLHealthResultsSnapshot{
+		ScheduledAt: observedAt, ObservedAt: observedAt, Results: outcome.Results,
+	})
+}
+
+// observeSQLRound distinguishes this completed poll from cached credential evidence. Only a
+// successful poll started after a ban may clear it; an older success is not recovery evidence.
+func (p *hybridHealthPolicy) observeSQLRound(
+	candidateIPs []string,
+	outcome SQLHealthCheckOutcome,
+	fresh SQLHealthResultsSnapshot,
+) hybridRoutingDecision {
+	observedAt := fresh.ObservedAt
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -159,10 +190,13 @@ func (p *hybridHealthPolicy) observeSQL(
 		routingEnabled: p.routingEnabled,
 		routingResult:  SQLRoutingResultShadow,
 	}
-	fallbackReason, timeoutType := sqlHealthFallback(outcome)
+	decision.routingBanned, decision.routingUnbanned = p.updateRoutingBanlistLocked(candidateIPs, outcome, fresh)
+	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
+	routingOutcome := p.routingEligibleOutcomeLocked(outcome)
+	fallbackReason, timeoutType := sqlHealthFallback(routingOutcome)
 	if fallbackReason == "" {
-		downtime := p.recordSQLDowntimeLocked(outcome.PrimaryIPs, observedAt)
-		decision.leaderDetection = p.observeLeaderLocked("sql", outcome.PrimaryIPs, observedAt, downtime)
+		downtime := p.recordSQLDowntimeLocked(routingOutcome.PrimaryIPs, observedAt)
+		decision.leaderDetection = p.observeLeaderLocked("sql", routingOutcome.PrimaryIPs, observedAt, downtime)
 	}
 	if !p.routingEnabled {
 		return decision
@@ -174,6 +208,7 @@ func (p *hybridHealthPolicy) observeSQL(
 	if decision.fallbackReason != "" {
 		decision.routingResult = SQLRoutingResultCachedFallback
 		decision.health = maps.Clone(p.patroniHealth)
+		p.applyRoutingBanlistLocked(decision.health)
 		if !p.patroniUpdatedAt.IsZero() {
 			decision.cachedAge = observedAt.Sub(p.patroniUpdatedAt)
 			if decision.cachedAge < 0 {
@@ -195,9 +230,10 @@ func (p *hybridHealthPolicy) observeSQL(
 	for _, ip := range candidateIPs {
 		decision.health[ip] = false
 	}
-	if len(outcome.PrimaryIPs) == 1 {
-		decision.health[outcome.PrimaryIPs[0]] = true
+	if len(routingOutcome.PrimaryIPs) == 1 {
+		decision.health[routingOutcome.PrimaryIPs[0]] = true
 	}
+	p.applyRoutingBanlistLocked(decision.health)
 	decision.routingComparison = p.recordRoutingLeaderLocked(
 		"hybrid",
 		decision.health,
@@ -205,6 +241,117 @@ func (p *hybridHealthPolicy) observeSQL(
 		SQLRoutingResultConclusive,
 	)
 	return decision
+}
+
+func (p *hybridHealthPolicy) routingEligibleOutcomeLocked(outcome SQLHealthCheckOutcome) SQLHealthCheckOutcome {
+	routingOutcome := SQLHealthCheckOutcome{
+		Results:    make([]SQLHealthCheckResult, 0, len(outcome.Results)),
+		PrimaryIPs: make([]string, 0, len(outcome.PrimaryIPs)),
+	}
+	for _, result := range outcome.Results {
+		if _, banned := p.routingBannedIPs[result.IP]; !banned {
+			routingOutcome.Results = append(routingOutcome.Results, result)
+		}
+	}
+	for _, ip := range outcome.PrimaryIPs {
+		if _, banned := p.routingBannedIPs[ip]; !banned {
+			routingOutcome.PrimaryIPs = append(routingOutcome.PrimaryIPs, ip)
+		}
+	}
+	return routingOutcome
+}
+
+func (p *hybridHealthPolicy) updateRoutingBanlistLocked(
+	candidateIPs []string,
+	outcome SQLHealthCheckOutcome,
+	fresh SQLHealthResultsSnapshot,
+) ([]SQLRoutingBanChange, []SQLRoutingBanChange) {
+	candidates := make(map[string]struct{}, len(candidateIPs))
+	for _, ip := range candidateIPs {
+		candidates[ip] = struct{}{}
+	}
+	successfulResults := make(map[string]struct{})
+	shutdownResults := make(map[string]struct{})
+	for _, result := range fresh.Results {
+		if result.Err == nil {
+			successfulResults[result.IP] = struct{}{}
+		}
+	}
+	// Conflicting successful roles cannot establish recovery.
+	_, conflictingIPs := aggregateSQLComparisonRoles(outcome.Results)
+	for _, ip := range conflictingIPs {
+		delete(successfulResults, ip)
+	}
+	for _, result := range outcome.Results {
+		if isPostgresShutdownError(result.Err) {
+			shutdownResults[result.IP] = struct{}{}
+		}
+	}
+
+	var banned []SQLRoutingBanChange
+	var unbanned []SQLRoutingBanChange
+	for ip := range p.routingBannedIPs {
+		if _, retained := candidates[ip]; !retained {
+			delete(p.routingBannedIPs, ip)
+			unbanned = append(unbanned, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonDNSRemoved})
+		}
+	}
+	for ip := range shutdownResults {
+		if _, retained := candidates[ip]; !retained {
+			continue
+		}
+		if _, alreadyBanned := p.routingBannedIPs[ip]; !alreadyBanned {
+			p.routingBannedIPs[ip] = fresh.ObservedAt
+			banned = append(banned, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingBanReasonPostgresShutdown})
+		}
+	}
+	// Repeated fresh shutdown evidence moves the recovery boundary without emitting another
+	// transition. Cached shutdown results must not keep moving that boundary on unrelated polls.
+	for _, result := range fresh.Results {
+		if isPostgresShutdownError(result.Err) {
+			if bannedAt, banned := p.routingBannedIPs[result.IP]; banned && fresh.ObservedAt.After(bannedAt) {
+				p.routingBannedIPs[result.IP] = fresh.ObservedAt
+			}
+		}
+	}
+	for ip := range successfulResults {
+		// Credential checks for one host run concurrently, so a success and shutdown result in the
+		// same round have no reliable ordering. Keep the IP banned until a later clean round proves
+		// that it can conclusively report a PostgreSQL role again.
+		if _, shuttingDown := shutdownResults[ip]; shuttingDown {
+			continue
+		}
+		if bannedAt, wasBanned := p.routingBannedIPs[ip]; wasBanned && fresh.ScheduledAt.After(bannedAt) {
+			delete(p.routingBannedIPs, ip)
+			unbanned = append(unbanned, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult})
+		}
+	}
+	slices.SortFunc(banned, func(a, b SQLRoutingBanChange) int { return strings.Compare(a.IP, b.IP) })
+	slices.SortFunc(unbanned, func(a, b SQLRoutingBanChange) int { return strings.Compare(a.IP, b.IP) })
+	return banned, unbanned
+}
+
+func (p *hybridHealthPolicy) applyRoutingBanlistLocked(health map[string]bool) {
+	for ip := range p.routingBannedIPs {
+		if _, present := health[ip]; present {
+			health[ip] = false
+		}
+	}
+}
+
+func isPostgresShutdownError(err error) bool {
+	var postgresErr *pgconn.PgError
+	if !errors.As(err, &postgresErr) {
+		return false
+	}
+	switch postgresErr.Code {
+	case sqlHealthCheckCrashShutdown:
+		return true
+	case sqlHealthCheckCannotConnectNow:
+		return strings.Contains(postgresErr.Message, "the database system is shutting down")
+	default:
+		return false
+	}
 }
 
 func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {

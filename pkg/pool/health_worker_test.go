@@ -2572,3 +2572,58 @@ func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
 	assert.Equal(t, 1, prober.callCount("conn"), "a fresh enabled tick must still run")
 	assert.Equal(t, int32(1), comparisons.Load())
 }
+
+func TestReportConclusiveErrorsSkipsRoutingBannedIPs(t *testing.T) {
+	const (
+		bannedIP   = "10.0.0.1"
+		eligibleIP = "10.0.0.2"
+	)
+	w := &HealthWorker{}
+	var reported []string
+	w.sqlHooks.ConclusiveError = func(result SQLHealthCheckResult, _ []string) {
+		reported = append(reported, result.IP)
+	}
+	checks := []completedSQLHealthCheck{{
+		target: &sqlHealthTarget{tags: []string{"database:test"}},
+		outcome: SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
+			{IP: bannedIP, Err: context.DeadlineExceeded},
+			{IP: eligibleIP, Err: &pgconn.PgError{Code: "57P01"}},
+		}},
+	}}
+	decision := hybridRoutingDecision{
+		routingResult:    SQLRoutingResultConclusive,
+		routingBannedIPs: map[string]time.Time{bannedIP: time.Now()},
+	}
+
+	w.reportConclusiveErrors(checks, decision)
+
+	assert.Equal(t, []string{eligibleIP}, reported)
+}
+
+func TestReportHybridDecisionReportsBanTransitionsOnce(t *testing.T) {
+	const ip = "10.0.0.1"
+	at := time.Now()
+	policy := newHybridHealthPolicy(true)
+	var banned, unbanned []SQLRoutingBanChange
+	w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
+		RoutingBanned: func(change SQLRoutingBanChange, tags []string) {
+			banned = append(banned, change)
+			assert.Contains(t, tags, "cluster:test")
+			assert.Contains(t, tags, "sql_health_routing_enabled:true")
+		},
+		RoutingUnbanned: func(change SQLRoutingBanChange, _ []string) { unbanned = append(unbanned, change) },
+	}}
+	poolHealth := &PoolHealth{patroniTags: []string{"cluster:test"}}
+	for i, result := range []SQLHealthCheckResult{
+		{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		{IP: ip, Err: context.DeadlineExceeded},
+		{IP: ip, InRecovery: true},
+		{IP: ip, InRecovery: true},
+	} {
+		decision := policy.observeSQL([]string{ip}, aggregateSQLHealthCheckResults([]SQLHealthCheckResult{result}).Outcome, at.Add(time.Duration(i)*time.Second))
+		w.reportHybridDecision(poolHealth, decision, true)
+	}
+	assert.Equal(t, []SQLRoutingBanChange{{IP: ip, Reason: SQLRoutingBanReasonPostgresShutdown}}, banned)
+	assert.Equal(t, []SQLRoutingBanChange{{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult}}, unbanned)
+}

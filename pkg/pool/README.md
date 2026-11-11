@@ -28,6 +28,28 @@ latency includes the initial refresh.
 Discovery and cleanup scenarios live in `pgk_setup_test.go`. Shared-worker
 subscription, probing, and cleanup tests live in `health_worker_test.go`.
 
+## SQL shutdown banlist
+
+The hybrid policy remembers an IP after a PostgreSQL `57P02` crash-shutdown
+response, or `57P03` containing `the database system is shutting down`.
+Timeouts, connection refusal, authentication failures, startup responses, and
+`57P01` administrative connection termination do not create a ban.
+
+Banned IPs remain discovery candidates and continue to be probed. Their results
+do not force SQL fallback, and cached Patroni fallback cannot select them. A
+successful role result from a poll started after the latest observed shutdown clears it, provided
+the current credential evidence contains neither shutdown nor conflicting roles
+for that IP. Cached successes and polls already in flight when the ban was
+observed cannot clear it. Removing an IP from the retained SQL candidate set also
+removes its ban; the map is bounded by that set, rather than growing with every
+historical address. There is no time-based expiry.
+
+`SQLHealthWorkerHooks.RoutingBanned` and `RoutingUnbanned` report transitions,
+including during shadow evaluation. Banned IPs are excluded from repeated
+`ConclusiveError` callbacks. The raw SQL/Patroni comparison and Patroni-only
+shadow routing remain unchanged. This policy does not itself wire SQL decisions
+into client routing or filter mismatch metrics.
+
 ## SQL snapshot timing
 
 The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed

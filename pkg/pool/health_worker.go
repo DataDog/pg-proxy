@@ -209,6 +209,9 @@ type SQLHealthWorkerHooks struct {
 	CachedFallback          func(SQLFallback, []string)
 	LeaderDetectionCompared func(LeaderDetectionComparison, []string)
 	LeaderRoutingCompared   func(LeaderRoutingComparison, []string)
+	// RoutingBanned and RoutingUnbanned report transitions, including during shadow evaluation.
+	RoutingBanned   func(SQLRoutingBanChange, []string)
+	RoutingUnbanned func(SQLRoutingBanChange, []string)
 }
 
 // HealthWorkerConfig supplies the application policy for a shared worker.
@@ -1073,7 +1076,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			}
 		}
 		policy.setRoutingEnabled(routingEnabled)
-		decision = policy.observeSQL(snapshot.retainedIPs, aggregateSQLHealthCheckResults(results).Outcome, time.Now())
+		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckResults(results).Outcome, SQLHealthResultsSnapshot{
+			ScheduledAt: scheduledAt, ObservedAt: observedAt, Results: outcome.Results,
+		})
 		return true
 	}()
 	w.reportSQLPatroniComparison(poolHealth, snapshot)
@@ -1123,6 +1128,9 @@ func (w *HealthWorker) reportConclusiveErrors(
 			if !isConclusiveSQLUnroutableError(result.Err) {
 				continue
 			}
+			if _, banned := decision.routingBannedIPs[result.IP]; banned {
+				continue
+			}
 			w.sqlHooks.ConclusiveError(result, w.sqlRoutingTags(check.target.tags, decision.routingEnabled))
 		}
 	}
@@ -1154,6 +1162,16 @@ func (w *HealthWorker) reportHybridDecision(
 	}
 	if decision.routingComparison != nil && w.sqlHooks.LeaderRoutingCompared != nil {
 		w.sqlHooks.LeaderRoutingCompared(*decision.routingComparison, tags)
+	}
+	if w.sqlHooks.RoutingBanned != nil {
+		for _, change := range decision.routingBanned {
+			w.sqlHooks.RoutingBanned(change, tags)
+		}
+	}
+	if w.sqlHooks.RoutingUnbanned != nil {
+		for _, change := range decision.routingUnbanned {
+			w.sqlHooks.RoutingUnbanned(change, tags)
+		}
 	}
 }
 

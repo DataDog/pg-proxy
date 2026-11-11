@@ -8,6 +8,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"syscall"
 	"testing"
 	"time"
@@ -775,4 +776,243 @@ func TestHybridHealthAgreementDiscardsUnmatchedExcursions(t *testing.T) {
 			assert.Nil(t, got.routingComparison)
 		})
 	}
+}
+
+func TestHybridHealthRoutingBanlistPersistsUntilConclusiveResult(t *testing.T) {
+	const (
+		oldPrimary = "10.0.0.1"
+		standby    = "10.0.0.2"
+	)
+	policy := newHybridHealthPolicy(true)
+	policy.observePatroni(map[string]bool{oldPrimary: true, standby: false}, time.Now())
+
+	shutdown := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{
+			{IP: oldPrimary, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+			{IP: standby, InRecovery: true},
+		},
+	}, time.Now())
+	require.Equal(t, []SQLRoutingBanChange{{
+		IP:     oldPrimary,
+		Reason: SQLRoutingBanReasonPostgresShutdown,
+	}}, shutdown.routingBanned)
+	assert.Empty(t, shutdown.routingUnbanned)
+
+	replacementPrimary := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{
+			{IP: oldPrimary, Err: context.DeadlineExceeded},
+			{IP: standby},
+		},
+		PrimaryIPs: []string{standby},
+	}, time.Now())
+	assert.Equal(t, SQLRoutingResultConclusive, replacementPrimary.routingResult)
+	assert.Empty(t, replacementPrimary.fallbackReason)
+	assert.Empty(t, replacementPrimary.timeoutType)
+	assert.Equal(t, map[string]bool{oldPrimary: false, standby: true}, replacementPrimary.health)
+	assert.Empty(t, replacementPrimary.routingBanned, "repeated failures must not emit duplicate ban events")
+	assert.Empty(t, replacementPrimary.routingUnbanned)
+
+	eligibleTimeout := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{
+			{IP: oldPrimary, Err: context.DeadlineExceeded},
+			{IP: standby, Err: context.DeadlineExceeded},
+		},
+	}, time.Now())
+	assert.Equal(t, SQLRoutingResultCachedFallback, eligibleTimeout.routingResult)
+	assert.Equal(t, SQLHealthFallbackTimeout, eligibleTimeout.fallbackReason)
+	assert.Equal(t, SQLHealthTimeoutContext, eligibleTimeout.timeoutType)
+	assert.Equal(t, map[string]bool{oldPrimary: false, standby: false}, eligibleTimeout.health)
+	assert.Empty(t, eligibleTimeout.routingBanned)
+	assert.Empty(t, eligibleTimeout.routingUnbanned)
+
+	recovered := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{
+			{IP: oldPrimary, InRecovery: true},
+			{IP: standby},
+		},
+		PrimaryIPs: []string{standby},
+	}, time.Now())
+	assert.Equal(t, SQLRoutingResultConclusive, recovered.routingResult)
+	assert.Equal(t, map[string]bool{oldPrimary: false, standby: true}, recovered.health)
+	assert.Equal(t, []SQLRoutingBanChange{{
+		IP:     oldPrimary,
+		Reason: SQLRoutingUnbanReasonConclusiveResult,
+	}}, recovered.routingUnbanned)
+}
+
+func TestHybridHealthRoutingBanlistShutdownWinsOverSameRoundSuccess(t *testing.T) {
+	const primary = "10.0.0.1"
+	policy := newHybridHealthPolicy(true)
+	policy.observePatroni(map[string]bool{primary: true}, time.Now())
+
+	mixed := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{
+			{IP: primary, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+			{IP: primary},
+		},
+		PrimaryIPs: []string{primary},
+	}, time.Now())
+	require.Equal(t, []SQLRoutingBanChange{{
+		IP:     primary,
+		Reason: SQLRoutingBanReasonPostgresShutdown,
+	}}, mixed.routingBanned)
+	assert.Empty(t, mixed.routingUnbanned)
+	assert.Equal(t, map[string]bool{primary: false}, mixed.health)
+
+	recovered := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
+		Results:    []SQLHealthCheckResult{{IP: primary}},
+		PrimaryIPs: []string{primary},
+	}, time.Now())
+	assert.Empty(t, recovered.routingBanned)
+	assert.Equal(t, []SQLRoutingBanChange{{
+		IP:     primary,
+		Reason: SQLRoutingUnbanReasonConclusiveResult,
+	}}, recovered.routingUnbanned)
+	assert.Equal(t, map[string]bool{primary: true}, recovered.health)
+}
+
+func TestHybridHealthRoutingBanlistClearsWhenDNSDropsIP(t *testing.T) {
+	const (
+		oldPrimary = "10.0.0.1"
+		standby    = "10.0.0.2"
+	)
+	policy := newHybridHealthPolicy(true)
+	policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{
+			{IP: oldPrimary, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+			{IP: standby, InRecovery: true},
+		},
+	}, time.Now())
+
+	dropped := policy.observeSQL([]string{standby}, SQLHealthCheckOutcome{
+		Results: []SQLHealthCheckResult{{IP: standby, InRecovery: true}},
+	}, time.Now())
+	assert.Equal(t, []SQLRoutingBanChange{{
+		IP:     oldPrimary,
+		Reason: SQLRoutingUnbanReasonDNSRemoved,
+	}}, dropped.routingUnbanned)
+}
+
+func TestIsPostgresShutdownError(t *testing.T) {
+	tests := map[string]struct {
+		err  error
+		want bool
+	}{
+		"crash shutdown": {
+			err:  &pgconn.PgError{Code: sqlHealthCheckCrashShutdown},
+			want: true,
+		},
+		"cannot connect while shutting down": {
+			err: &pgconn.PgError{
+				Code:    sqlHealthCheckCannotConnectNow,
+				Message: "the database system is shutting down",
+			},
+			want: true,
+		},
+		"cannot connect while starting up": {
+			err: &pgconn.PgError{
+				Code:    sqlHealthCheckCannotConnectNow,
+				Message: "the database system is starting up",
+			},
+		},
+		"admin termination":      {err: &pgconn.PgError{Code: "57P01"}},
+		"generic cannot connect": {err: &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}},
+		"authentication failure": {err: &pgconn.PgError{Code: "28P01"}},
+		"connection refused":     {err: syscall.ECONNREFUSED},
+		"wrapped crash":          {err: fmt.Errorf("probe: %w", &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}), want: true},
+		"non-Postgres error":     {err: context.DeadlineExceeded},
+	}
+	for name, test := range tests {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, test.want, isPostgresShutdownError(test.err))
+		})
+	}
+}
+
+func TestHybridHealthRoutingBanRequiresFreshUnambiguousRecovery(t *testing.T) {
+	const ip = "10.0.0.1"
+	for _, tc := range []struct {
+		name             string
+		fresh            SQLHealthCheckResult
+		startedBeforeBan bool
+		conflicting      bool
+		wantRecovered    bool
+	}{
+		{name: "cached success does not clear ban", fresh: SQLHealthCheckResult{IP: ip, Err: context.DeadlineExceeded}},
+		{name: "in-flight success does not clear ban", fresh: SQLHealthCheckResult{IP: ip}, startedBeforeBan: true},
+		{name: "conflicting roles do not clear ban", fresh: SQLHealthCheckResult{IP: ip}, conflicting: true},
+		{name: "fresh primary clears ban", fresh: SQLHealthCheckResult{IP: ip}, wantRecovered: true},
+		{name: "fresh standby clears ban", fresh: SQLHealthCheckResult{IP: ip, InRecovery: true}, wantRecovered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			at := time.Now()
+			policy := newHybridHealthPolicy(true)
+			policy.observeSQL([]string{ip}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
+				{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+			}}, at)
+			startedAt := at.Add(time.Second)
+			if tc.startedBeforeBan {
+				startedAt = at.Add(-time.Second)
+			}
+			cachedSuccess := SQLHealthCheckResult{IP: ip, InRecovery: tc.fresh.InRecovery}
+			if tc.conflicting {
+				cachedSuccess.InRecovery = !tc.fresh.InRecovery
+			}
+			outcome := aggregateSQLHealthCheckResults([]SQLHealthCheckResult{cachedSuccess, tc.fresh}).Outcome
+			decision := policy.observeSQLRound([]string{ip}, outcome, SQLHealthResultsSnapshot{
+				ScheduledAt: startedAt, ObservedAt: at.Add(2 * time.Second), Results: []SQLHealthCheckResult{tc.fresh},
+			})
+			if tc.wantRecovered {
+				require.Len(t, decision.routingUnbanned, 1)
+				assert.Empty(t, decision.routingBannedIPs)
+				assert.Equal(t, !tc.fresh.InRecovery, decision.health[ip])
+			} else {
+				assert.Empty(t, decision.routingUnbanned)
+				assert.Contains(t, decision.routingBannedIPs, ip)
+				assert.False(t, decision.health[ip])
+			}
+		})
+	}
+}
+
+func TestHybridHealthRoutingBanPreservesPatroniShadowAndRawEvidence(t *testing.T) {
+	const ip = "10.0.0.1"
+	policy := newHybridHealthPolicy(false)
+	patroni := map[string]bool{ip: true}
+	policy.observePatroni(patroni, time.Now())
+	outcome := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
+		{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		{IP: ip},
+	}, PrimaryIPs: []string{ip}}
+	decision := policy.observeSQL([]string{ip}, outcome, time.Now())
+	require.Len(t, decision.routingBanned, 1)
+	assert.False(t, decision.publish)
+	assert.Nil(t, decision.health)
+	assert.Equal(t, []string{ip}, outcome.PrimaryIPs)
+	assert.Len(t, outcome.Results, 2)
+	assert.Equal(t, patroni, policy.patroniSnapshot())
+	refresh := policy.observePatroni(patroni, time.Now())
+	assert.True(t, refresh.publish)
+	assert.Equal(t, patroni, refresh.health)
+}
+
+func TestHybridHealthRepeatedShutdownAdvancesRecoveryBoundary(t *testing.T) {
+	const ip = "10.0.0.1"
+	at := time.Now()
+	policy := newHybridHealthPolicy(true)
+	shutdown := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}}}}
+	policy.observeSQL([]string{ip}, shutdown, at)
+	repeated := policy.observeSQL([]string{ip}, shutdown, at.Add(2*time.Second))
+	assert.Empty(t, repeated.routingBanned)
+	success := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}, PrimaryIPs: []string{ip}}
+	late := policy.observeSQLRound([]string{ip}, success, SQLHealthResultsSnapshot{
+		ScheduledAt: at.Add(time.Second), ObservedAt: at.Add(3 * time.Second), Results: success.Results,
+	})
+	assert.Empty(t, late.routingUnbanned)
+	assert.False(t, late.health[ip])
+	recovered := policy.observeSQLRound([]string{ip}, success, SQLHealthResultsSnapshot{
+		ScheduledAt: at.Add(3 * time.Second), ObservedAt: at.Add(4 * time.Second), Results: success.Results,
+	})
+	require.Len(t, recovered.routingUnbanned, 1)
+	assert.True(t, recovered.health[ip])
 }
