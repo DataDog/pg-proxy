@@ -555,6 +555,9 @@ func TestPingShortcutBoundaries(t *testing.T) {
 				PreparedStatements:       prepared.CreateProxyPreparedStmtsState(nil),
 			}, Hooks{})
 			assert.NoError(t, err)
+			// The session's shedder bypass must agree with the local-reply decision.
+			repliedLocally := !tc.discard && tc.wantExpectation == query.NoReply
+			assert.Equal(t, repliedLocally, IsIdlePGXPing(tc.msg, State{HasLink: tc.hasLink, DiscardUntilSync: tc.discard}))
 			if tc.discard {
 				assert.Equal(t, ClientMessageAction{DiscardUntilSync: true}, action)
 			} else if tc.wantExpectation != query.NoReply {

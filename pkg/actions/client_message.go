@@ -121,7 +121,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			AddReplyExpectation: query.QueryReply,
 			FlushPostgres:       true,
 		}
-		return handleClientQuery(m.String, SimpleQueryProtocol, action, state, hooks)
+		return handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
 
 	case *pgproto3.Parse:
 		clientName := m.Name
@@ -137,7 +137,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		if !prepared.IsNamedPreparedStmt(m.Name) && !state.AutoPreparedStmtsEnabled {
 			// TODO: track unnamed prepared statements across backend releases
 			// instead of treating them as one-off queries.
-			return handleClientQuery(m.Query, ExtendedQueryProtocol, action, state, hooks)
+			return handleClientQuery(m, m.Query, ExtendedQueryProtocol, action, state, hooks)
 		}
 		if hooks.NamedPreparedStmtObserved != nil {
 			hooks.NamedPreparedStmtObserved(m.Name, m.Query)
@@ -262,14 +262,11 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 
 // handleClientQuery processes a sql string received as either a Query or Parse FrontendMessage.
 // Classification failures still return the original action so the query is forwarded.
-func handleClientQuery(sql string, protocol PGQueryProtocolType, action ClientMessageAction, state State, hooks Hooks) (ClientMessageAction, error) {
+func handleClientQuery(msg pgproto3.FrontendMessage, sql string, protocol PGQueryProtocolType, action ClientMessageAction, state State, hooks Hooks) (ClientMessageAction, error) {
 	if hooks.QueryObserved != nil {
 		hooks.QueryObserved(sql, protocol)
 	}
-	if protocol == SimpleQueryProtocol && !state.HasLink && IsPGXPing(sql) {
-		// Avoid redundant pgx health checks only at an idle boundary. A held link
-		// may have an active/failed transaction or buffered extended-protocol work;
-		// let Postgres process those pings in order and report its transaction state.
+	if IsIdlePGXPing(msg, state) {
 		return ClientMessageAction{ReplyMsgsToClient: []pgproto3.BackendMessage{
 			&pgproto3.EmptyQueryResponse{},
 			&pgproto3.ReadyForQuery{TxStatus: 'I'},
@@ -415,3 +412,16 @@ func BuildPreparedStatementDoesNotExistErrorResponse(name string) *pgproto3.Erro
 
 // IsPGXPing reports whether sql is pgx's health-check query.
 func IsPGXPing(sql string) bool { return sql == "-- ping" }
+
+// IsIdlePGXPing reports whether msg is a pgx health-check ping that the proxy
+// answers locally. Only pings at an idle boundary qualify: a held link may have
+// an active/failed transaction or buffered extended-protocol work, so those
+// pings go to Postgres in order and report its transaction state; during error
+// recovery pings are discarded until Sync.
+//
+// Session uses this to bypass the load shedder, and DecideClientMessageAction
+// uses it to reply locally, so the two decisions cannot drift apart.
+func IsIdlePGXPing(msg pgproto3.FrontendMessage, state State) bool {
+	q, ok := msg.(*pgproto3.Query)
+	return ok && !state.HasLink && !state.DiscardUntilSync && IsPGXPing(q.String)
+}

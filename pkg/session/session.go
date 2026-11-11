@@ -638,7 +638,7 @@ func (s *Session) interceptBypassingMessage(msg pgproto3.FrontendMessage) (bool,
 		s.close(err)
 		return true, err
 	}
-	if q, ok := msg.(*pgproto3.Query); ok && s.link == nil && !s.discardUntilSync && isPgxPing(q.String) {
+	if actions.IsIdlePGXPing(msg, s.actionState()) {
 		return true, s.handleOneMessage(msg)
 	}
 	return false, nil
@@ -757,10 +757,11 @@ func (s *Session) receiveAndHandleMessage() error {
 		return nil
 	}
 
-	// Bypass the load shedder for Terminate and pgx health-check pings.
+	// Bypass the load shedder for Terminate and idle pgx health-check pings.
 	// Terminate must not reach the shedder — it would reply with an ErrorResponse
-	// instead of cleanly closing the connection. pgx pings are bypassed so they
-	// don't count against load; empty queries and ";" are NOT bypassed.
+	// instead of cleanly closing the connection. Idle pgx pings (no held link, not
+	// discarding until Sync) are answered locally so they don't count against load;
+	// pings on a held link, empty queries and ";" are NOT bypassed.
 	if intercepted, err := s.interceptBypassingMessage(msg); intercepted {
 		return err
 	}
