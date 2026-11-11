@@ -171,6 +171,29 @@ func (q *mirrorQueue) dequeue() (mirrorItem, bool) {
 	return it, true
 }
 
+// tryReserveRaw reserves n bytes the worker produced itself (a Parse it injected),
+// which never passed through tryEnqueueFunc. Without it the cap stops bounding the
+// shadow buffer. Released with the batch, like any dequeued item's reservation.
+func (q *mirrorQueue) tryReserveRaw(n int) bool {
+	if n <= 0 {
+		return true
+	}
+	q.mu.Lock()
+	if q.byteCount+q.inFlight+n > q.byteCap {
+		q.mu.Unlock()
+		return false
+	}
+	q.inFlight += n
+	q.mu.Unlock()
+	if q.budget != nil && !q.budget.tryReserve(n) {
+		q.mu.Lock()
+		q.inFlight -= n
+		q.mu.Unlock()
+		return false
+	}
+	return true
+}
+
 // releaseBudget releases one finished item's bytes (size + overhead) from in-flight and the budget.
 func (q *mirrorQueue) releaseBudget(size int) {
 	q.releaseInFlight(size + mirrorItemStructOverhead)
