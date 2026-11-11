@@ -130,6 +130,29 @@ func TestRequireTLSRejectsPlaintext(t *testing.T) {
 	}
 }
 
+func TestRequireTLSLogsFallbackHint(t *testing.T) {
+	var logs startupLogBuffer
+	restore := pgproxy.Bootstrap(pgproxy.Dependencies{LogHandler: slog.NewTextHandler(&logs, nil)})
+	defer restore()
+	engine, _, _, err := newTestListener(t.Context())
+	require.NoError(t, err)
+	defer engine.Close()
+	engine.cfg.RequireTLS = true
+	engine.cfg.TLSConfig, _ = testTLSConfigs(t)
+	forbidStartupHooks(engine)
+	conn := testListenerConn(t, engine)
+	frontend := pgproto3.NewFrontend(conn, conn)
+	frontend.Send(&pgproto3.StartupMessage{ProtocolVersion: pgproto3.ProtocolVersionNumber, Parameters: map[string]string{"user": "testuser"}})
+	require.NoError(t, frontend.Flush())
+	message, err := frontend.Receive()
+	require.NoError(t, err)
+	require.Equal(t, &pgproto3.ErrorResponse{Severity: "FATAL", Code: pgerrcode.ConnectionFailure, Message: "TLS is required"}, message)
+	_, err = frontend.Receive()
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Contains(t, logs.String(), "reason=tls_required")
+	assert.Contains(t, logs.String(), "if this client's TLS attempt failed just before, that failure is the cause")
+}
+
 func TestRequireTLSRejectsIncompleteHandshake(t *testing.T) {
 	engine, _, _, err := newTestListener(t.Context())
 	require.NoError(t, err)

@@ -23,6 +23,17 @@ const (
 
 func (e AuthenticationError) Error() string { return string(e) }
 
+// StartupError identifies a known ResolveStartup failure for server-side
+// diagnostics. Client responses remain generic.
+type StartupError string
+
+const (
+	ErrLogicalDatabaseNotConfigured StartupError = "logical database is not configured in this pg-proxy"
+	ErrBackendNotReady              StartupError = "backend cluster for this logical database has no ready connection pool"
+)
+
+func (e StartupError) Error() string { return string(e) }
+
 var (
 	errTLSRequired  = errors.New("TLS is required")
 	errLoadShedding = errors.New("This pg-proxy instance is experiencing high load and has rejected the connection as a protection. Please retry.")
@@ -64,7 +75,8 @@ func startupFailureDetails(err error, placement string) (stage, reason, message,
 		stage, reason, diagnostic = "cancel", "incorrect_secret", "failed to cancel request: "+incorrectSecret.Error()
 	case errors.Is(err, errTLSRequired):
 		stage, reason, message = "tls", "tls_required", "TLS is required"
-		diagnostic = message
+		// Clients using sslmode=prefer land here after a failed TLS attempt.
+		diagnostic = "TLS is required: plaintext startup rejected; if this client's TLS attempt failed just before, that failure is the cause"
 	case errors.Is(err, errLoadShedding):
 		stage, reason, message = "load_shedding", "overloaded", errLoadShedding.Error()
 		diagnostic = message
@@ -76,6 +88,10 @@ func startupFailureDetails(err error, placement string) (stage, reason, message,
 		reason, diagnostic = "unsupported_auth_option", ErrUnsupportedAuthOption.Error()
 	case errors.Is(err, ErrJWTExpired):
 		reason, message, diagnostic = "token_expired", ErrJWTExpired.Error(), ErrJWTExpired.Error()
+	case errors.Is(err, ErrLogicalDatabaseNotConfigured):
+		reason, diagnostic = "logical_database_not_configured", ErrLogicalDatabaseNotConfigured.Error()
+	case errors.Is(err, ErrBackendNotReady):
+		reason, diagnostic = "backend_not_ready", ErrBackendNotReady.Error()+` (see "failed to create state for cluster" logs)`
 	}
 	return stage, reason, message, diagnostic
 }
