@@ -794,9 +794,9 @@ func TestHybridHealthRoutingBanlistPersistsUntilConclusiveResult(t *testing.T) {
 	}, time.Now())
 	require.Equal(t, []SQLRoutingBanChange{{
 		IP:     oldPrimary,
+		Banned: true,
 		Reason: SQLRoutingBanReasonPostgresShutdown,
-	}}, shutdown.routingBanned)
-	assert.Empty(t, shutdown.routingUnbanned)
+	}}, shutdown.routingBanChanges)
 
 	replacementPrimary := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
 		Results: []SQLHealthCheckResult{
@@ -809,8 +809,7 @@ func TestHybridHealthRoutingBanlistPersistsUntilConclusiveResult(t *testing.T) {
 	assert.Empty(t, replacementPrimary.fallbackReason)
 	assert.Empty(t, replacementPrimary.timeoutType)
 	assert.Equal(t, map[string]bool{oldPrimary: false, standby: true}, replacementPrimary.health)
-	assert.Empty(t, replacementPrimary.routingBanned, "repeated failures must not emit duplicate ban events")
-	assert.Empty(t, replacementPrimary.routingUnbanned)
+	assert.Empty(t, replacementPrimary.routingBanChanges, "repeated failures must not emit duplicate ban events")
 
 	eligibleTimeout := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
 		Results: []SQLHealthCheckResult{
@@ -822,8 +821,7 @@ func TestHybridHealthRoutingBanlistPersistsUntilConclusiveResult(t *testing.T) {
 	assert.Equal(t, SQLHealthFallbackTimeout, eligibleTimeout.fallbackReason)
 	assert.Equal(t, SQLHealthTimeoutContext, eligibleTimeout.timeoutType)
 	assert.Equal(t, map[string]bool{oldPrimary: false, standby: false}, eligibleTimeout.health)
-	assert.Empty(t, eligibleTimeout.routingBanned)
-	assert.Empty(t, eligibleTimeout.routingUnbanned)
+	assert.Empty(t, eligibleTimeout.routingBanChanges)
 
 	recovered := policy.observeSQL([]string{oldPrimary, standby}, SQLHealthCheckOutcome{
 		Results: []SQLHealthCheckResult{
@@ -837,7 +835,7 @@ func TestHybridHealthRoutingBanlistPersistsUntilConclusiveResult(t *testing.T) {
 	assert.Equal(t, []SQLRoutingBanChange{{
 		IP:     oldPrimary,
 		Reason: SQLRoutingUnbanReasonConclusiveResult,
-	}}, recovered.routingUnbanned)
+	}}, recovered.routingBanChanges)
 }
 
 func TestHybridHealthRoutingBanlistShutdownWinsOverSameRoundSuccess(t *testing.T) {
@@ -854,20 +852,19 @@ func TestHybridHealthRoutingBanlistShutdownWinsOverSameRoundSuccess(t *testing.T
 	}, time.Now())
 	require.Equal(t, []SQLRoutingBanChange{{
 		IP:     primary,
+		Banned: true,
 		Reason: SQLRoutingBanReasonPostgresShutdown,
-	}}, mixed.routingBanned)
-	assert.Empty(t, mixed.routingUnbanned)
+	}}, mixed.routingBanChanges)
 	assert.Equal(t, map[string]bool{primary: false}, mixed.health)
 
 	recovered := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
 		Results:    []SQLHealthCheckResult{{IP: primary}},
 		PrimaryIPs: []string{primary},
 	}, time.Now())
-	assert.Empty(t, recovered.routingBanned)
 	assert.Equal(t, []SQLRoutingBanChange{{
 		IP:     primary,
 		Reason: SQLRoutingUnbanReasonConclusiveResult,
-	}}, recovered.routingUnbanned)
+	}}, recovered.routingBanChanges)
 	assert.Equal(t, map[string]bool{primary: true}, recovered.health)
 }
 
@@ -890,7 +887,7 @@ func TestHybridHealthRoutingBanlistClearsWhenDNSDropsIP(t *testing.T) {
 	assert.Equal(t, []SQLRoutingBanChange{{
 		IP:     oldPrimary,
 		Reason: SQLRoutingUnbanReasonDNSRemoved,
-	}}, dropped.routingUnbanned)
+	}}, dropped.routingBanChanges)
 }
 
 func TestIsPostgresShutdownError(t *testing.T) {
@@ -963,11 +960,11 @@ func TestHybridHealthRoutingBanRequiresFreshUnambiguousRecovery(t *testing.T) {
 				ScheduledAt: startedAt, ObservedAt: at.Add(2 * time.Second), Results: []SQLHealthCheckResult{tc.fresh},
 			})
 			if tc.wantRecovered {
-				require.Len(t, decision.routingUnbanned, 1)
+				require.Len(t, decision.routingBanChanges, 1)
 				assert.Empty(t, decision.routingBannedIPs)
 				assert.Equal(t, !tc.fresh.InRecovery, decision.health[ip])
 			} else {
-				assert.Empty(t, decision.routingUnbanned)
+				assert.Empty(t, decision.routingBanChanges)
 				assert.Contains(t, decision.routingBannedIPs, ip)
 				assert.False(t, decision.health[ip])
 			}
@@ -985,7 +982,7 @@ func TestHybridHealthRoutingBanPreservesPatroniShadowAndRawEvidence(t *testing.T
 		{IP: ip},
 	}, PrimaryIPs: []string{ip}}
 	decision := policy.observeSQL([]string{ip}, outcome, time.Now())
-	require.Len(t, decision.routingBanned, 1)
+	require.Len(t, decision.routingBanChanges, 1)
 	assert.False(t, decision.publish)
 	assert.Nil(t, decision.health)
 	assert.Equal(t, []string{ip}, outcome.PrimaryIPs)
@@ -1003,16 +1000,42 @@ func TestHybridHealthRepeatedShutdownAdvancesRecoveryBoundary(t *testing.T) {
 	shutdown := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}}}}
 	policy.observeSQL([]string{ip}, shutdown, at)
 	repeated := policy.observeSQL([]string{ip}, shutdown, at.Add(2*time.Second))
-	assert.Empty(t, repeated.routingBanned)
+	assert.Empty(t, repeated.routingBanChanges)
 	success := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}, PrimaryIPs: []string{ip}}
 	late := policy.observeSQLRound([]string{ip}, success, SQLHealthResultsSnapshot{
 		ScheduledAt: at.Add(time.Second), ObservedAt: at.Add(3 * time.Second), Results: success.Results,
 	})
-	assert.Empty(t, late.routingUnbanned)
+	assert.Empty(t, late.routingBanChanges)
 	assert.False(t, late.health[ip])
 	recovered := policy.observeSQLRound([]string{ip}, success, SQLHealthResultsSnapshot{
 		ScheduledAt: at.Add(3 * time.Second), ObservedAt: at.Add(4 * time.Second), Results: success.Results,
 	})
-	require.Len(t, recovered.routingUnbanned, 1)
+	require.Len(t, recovered.routingBanChanges, 1)
 	assert.True(t, recovered.health[ip])
+}
+
+func TestHybridHealthRoutingBanChangesDoNotAccumulate(t *testing.T) {
+	policy := newHybridHealthPolicy(true)
+	at := time.Now()
+	for i := range 1000 {
+		ip := fmt.Sprintf("instance-%d", i)
+		decision := policy.observeSQL([]string{ip}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
+			{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		}}, at.Add(time.Duration(i)*time.Second))
+		// Churn replaces the candidate each round: only its ban persists, while the
+		// current decision reports at most one removal and one addition.
+		require.Len(t, policy.routingBannedIPs, 1)
+		require.Contains(t, policy.routingBannedIPs, ip)
+		wantChanges := 2
+		if i == 0 {
+			wantChanges = 1
+		}
+		require.Len(t, decision.routingBanChanges, wantChanges)
+	}
+	removed := policy.observeSQL(nil, SQLHealthCheckOutcome{}, at.Add(1001*time.Second))
+	require.Empty(t, policy.routingBannedIPs)
+	require.Len(t, removed.routingBanChanges, 1)
+	assert.False(t, removed.routingBanChanges[0].Banned)
+	next := policy.observeSQL(nil, SQLHealthCheckOutcome{}, at.Add(1002*time.Second))
+	assert.Empty(t, next.routingBanChanges, "previous unban events are not retained")
 }

@@ -2604,14 +2604,13 @@ func TestReportHybridDecisionReportsBanTransitionsOnce(t *testing.T) {
 	const ip = "10.0.0.1"
 	at := time.Now()
 	policy := newHybridHealthPolicy(true)
-	var banned, unbanned []SQLRoutingBanChange
+	var changes []SQLRoutingBanChange
 	w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
-		RoutingBanned: func(change SQLRoutingBanChange, tags []string) {
-			banned = append(banned, change)
+		RoutingBanChanged: func(change SQLRoutingBanChange, tags []string) {
+			changes = append(changes, change)
 			assert.Contains(t, tags, "cluster:test")
 			assert.Contains(t, tags, "sql_health_routing_enabled:true")
 		},
-		RoutingUnbanned: func(change SQLRoutingBanChange, _ []string) { unbanned = append(unbanned, change) },
 	}}
 	poolHealth := &PoolHealth{patroniTags: []string{"cluster:test"}}
 	for i, result := range []SQLHealthCheckResult{
@@ -2624,6 +2623,8 @@ func TestReportHybridDecisionReportsBanTransitionsOnce(t *testing.T) {
 		decision := policy.observeSQL([]string{ip}, aggregateSQLHealthCheckResults([]SQLHealthCheckResult{result}).Outcome, at.Add(time.Duration(i)*time.Second))
 		w.reportHybridDecision(poolHealth, decision, true)
 	}
-	assert.Equal(t, []SQLRoutingBanChange{{IP: ip, Reason: SQLRoutingBanReasonPostgresShutdown}}, banned)
-	assert.Equal(t, []SQLRoutingBanChange{{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult}}, unbanned)
+	assert.Equal(t, []SQLRoutingBanChange{
+		{IP: ip, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown},
+		{IP: ip, Banned: false, Reason: SQLRoutingUnbanReasonConclusiveResult},
+	}, changes)
 }

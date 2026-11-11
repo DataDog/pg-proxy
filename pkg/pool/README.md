@@ -44,9 +44,10 @@ observed cannot clear it. Removing an IP from the retained SQL candidate set als
 removes its ban; the map is bounded by that set, rather than growing with every
 historical address. There is no time-based expiry.
 
-`SQLHealthWorkerHooks.RoutingBanned` and `RoutingUnbanned` report transitions,
-including during shadow evaluation. Banned IPs are excluded from repeated
-`ConclusiveError` callbacks. The raw SQL/Patroni comparison and Patroni-only
+`SQLHealthWorkerHooks.RoutingBanChanged` reports transitions with the IP, new
+`Banned` state, and reason, including during shadow evaluation. The event list is
+local to each evaluation and discarded after reporting; no event history is kept.
+Banned IPs are excluded from repeated `ConclusiveError` callbacks. The raw SQL/Patroni comparison and Patroni-only
 shadow routing remain unchanged. This policy does not itself wire SQL decisions
 into client routing or filter mismatch metrics.
 

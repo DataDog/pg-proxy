@@ -42,6 +42,7 @@ const (
 // SQLRoutingBanChange reports one IP entering or leaving the SQL routing banlist.
 type SQLRoutingBanChange struct {
 	IP     string
+	Banned bool // New state: true on entry, false on recovery or candidate removal.
 	Reason string
 }
 
@@ -81,9 +82,9 @@ type hybridRoutingDecision struct {
 	leaderDetection   *LeaderDetectionComparison
 	routingComparison *LeaderRoutingComparison
 
-	routingBanned    []SQLRoutingBanChange
-	routingUnbanned  []SQLRoutingBanChange
-	routingBannedIPs map[string]time.Time
+	// Per-evaluation events, discarded after reporting; this is not retained history.
+	routingBanChanges []SQLRoutingBanChange
+	routingBannedIPs  map[string]time.Time
 }
 
 type sqlDowntimeWindow struct {
@@ -190,7 +191,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		routingEnabled: p.routingEnabled,
 		routingResult:  SQLRoutingResultShadow,
 	}
-	decision.routingBanned, decision.routingUnbanned = p.updateRoutingBanlistLocked(candidateIPs, outcome, fresh)
+	decision.routingBanChanges = p.updateRoutingBanlistLocked(candidateIPs, outcome, fresh)
 	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
 	routingOutcome := p.routingEligibleOutcomeLocked(outcome)
 	fallbackReason, timeoutType := sqlHealthFallback(routingOutcome)
@@ -265,7 +266,7 @@ func (p *hybridHealthPolicy) updateRoutingBanlistLocked(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
 	fresh SQLHealthResultsSnapshot,
-) ([]SQLRoutingBanChange, []SQLRoutingBanChange) {
+) []SQLRoutingBanChange {
 	candidates := make(map[string]struct{}, len(candidateIPs))
 	for _, ip := range candidateIPs {
 		candidates[ip] = struct{}{}
@@ -288,12 +289,11 @@ func (p *hybridHealthPolicy) updateRoutingBanlistLocked(
 		}
 	}
 
-	var banned []SQLRoutingBanChange
-	var unbanned []SQLRoutingBanChange
+	var changes []SQLRoutingBanChange
 	for ip := range p.routingBannedIPs {
 		if _, retained := candidates[ip]; !retained {
 			delete(p.routingBannedIPs, ip)
-			unbanned = append(unbanned, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonDNSRemoved})
+			changes = append(changes, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonDNSRemoved})
 		}
 	}
 	for ip := range shutdownResults {
@@ -302,7 +302,7 @@ func (p *hybridHealthPolicy) updateRoutingBanlistLocked(
 		}
 		if _, alreadyBanned := p.routingBannedIPs[ip]; !alreadyBanned {
 			p.routingBannedIPs[ip] = fresh.ObservedAt
-			banned = append(banned, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingBanReasonPostgresShutdown})
+			changes = append(changes, SQLRoutingBanChange{IP: ip, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown})
 		}
 	}
 	// Repeated fresh shutdown evidence moves the recovery boundary without emitting another
@@ -323,12 +323,11 @@ func (p *hybridHealthPolicy) updateRoutingBanlistLocked(
 		}
 		if bannedAt, wasBanned := p.routingBannedIPs[ip]; wasBanned && fresh.ScheduledAt.After(bannedAt) {
 			delete(p.routingBannedIPs, ip)
-			unbanned = append(unbanned, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult})
+			changes = append(changes, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult})
 		}
 	}
-	slices.SortFunc(banned, func(a, b SQLRoutingBanChange) int { return strings.Compare(a.IP, b.IP) })
-	slices.SortFunc(unbanned, func(a, b SQLRoutingBanChange) int { return strings.Compare(a.IP, b.IP) })
-	return banned, unbanned
+	slices.SortFunc(changes, func(a, b SQLRoutingBanChange) int { return strings.Compare(a.IP, b.IP) })
+	return changes
 }
 
 func (p *hybridHealthPolicy) applyRoutingBanlistLocked(health map[string]bool) {
