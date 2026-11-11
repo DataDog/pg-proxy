@@ -1731,6 +1731,55 @@ func TestTrackNewIPs_AddsNewAndDedupes(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, got, "existing IPs not duplicated")
 }
 
+func TestRoutingSnapshotPreservesIndependentPatroniDiscoveryAndComparisons(t *testing.T) {
+	const primary, standby = "10.0.0.1", "10.0.0.2"
+	prober := newMockProber(map[string][]string{"primary.local": {primary, standby}}, primary)
+	w := newTestWorker(prober)
+	sqlProber := &fakeSQLHealthProber{
+		responses: map[string][]fakeSQLHealthProbeResponse{
+			primary: {{inRecovery: true}},
+			standby: {{inRecovery: false}},
+		},
+		calls: make(map[string]int),
+	}
+	var comparisonMu sync.Mutex
+	comparedPatroniHealth := make(map[string]bool)
+	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+		return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{
+			ProbeFinished: func(result SQLHealthCheckResult, patroniHealthy bool, _ time.Duration, _ []string) {
+				comparisonMu.Lock()
+				defer comparisonMu.Unlock()
+				comparedPatroniHealth[result.IP] = patroniHealthy
+			},
+		})
+	}
+	updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+		ConnStringForIP: func(ip string) string { return ip },
+	})
+	health := receivePoolHealth(t, updates)
+	t.Cleanup(func() { w.Unsubscribe(updates) })
+	require.NotSame(t, health.state, health.patroniHealthState)
+
+	// Simulate a different published route without modifying Patroni's source snapshot.
+	health.routingMu.Lock()
+	health.publishRoutingSnapshot(map[string]bool{standby: true}, []string{standby})
+	health.routingMu.Unlock()
+	assert.ElementsMatch(t, []string{primary, standby}, health.patroniHealthState.Resolved())
+	assert.True(t, health.patroniHealthState.IsHealthy(primary))
+	w.RefreshSQL()
+	assert.Equal(t, map[string]bool{primary: true, standby: false}, comparedPatroniHealth)
+
+	// Patroni retains and probes its known primary even when it disappears from DNS
+	// and from the client-visible route, then publishes its independent result again.
+	prober.mu.Lock()
+	prober.ipsByHost["primary.local"] = []string{standby}
+	prober.mu.Unlock()
+	w.Refresh()
+	assert.True(t, health.IsHealthy(primary))
+	assert.False(t, health.IsHealthy(standby))
+	assert.ElementsMatch(t, []string{primary, standby}, health.Resolved())
+}
+
 func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
 	w := newTestWorker(nil)
 	s := newTestPoolHealth("10.0.0.1", "10.0.0.2")
@@ -3228,4 +3277,38 @@ func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
 	w.RefreshSQL()
 	assert.Equal(t, 1, prober.callCount("conn"), "a fresh enabled tick must still run")
 	assert.Equal(t, int32(1), comparisons.Load())
+}
+
+func TestSQLPatroniMismatchReason(t *testing.T) {
+	cases := []struct {
+		name      string
+		sql       map[string]bool
+		patroni   map[string]bool
+		retained  []string
+		conflicts []string
+		want      SQLPatroniMismatchReason
+	}{
+		{name: "agreement", sql: map[string]bool{"B": true, "C": false}, patroni: map[string]bool{"B": true, "C": false}, want: SQLPatroniMatch},
+		{name: "old unhealthy Patroni IP", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": false, "B": true}, want: SQLPatroniMembershipDifference},
+		{name: "extra SQL standby", sql: map[string]bool{"B": true, "C": false}, patroni: map[string]bool{"B": true}, want: SQLPatroniMembershipDifference},
+		{name: "different leaders", sql: map[string]bool{"A": false, "B": true}, patroni: map[string]bool{"A": true, "B": false}, want: SQLPatroniPrimaryDisagreement},
+		{name: "Patroni timeout on leader", sql: map[string]bool{"B": true}, patroni: map[string]bool{"B": false}, want: SQLPatroniPrimaryDisagreement},
+		{name: "SQL leader missing from Patroni", sql: map[string]bool{"B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "Patroni leader missing from SQL candidates", patroni: map[string]bool{"B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "additional Patroni primary", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": true, "B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "additional SQL primary", sql: map[string]bool{"A": true, "B": true}, patroni: map[string]bool{"B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "role conflict despite common leader", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": false, "B": true}, conflicts: []string{"A"}, want: SQLPatroniSQLRoleConflict},
+		{name: "unknown retained SQL IP is neutral", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": false, "B": true}, retained: []string{"A", "B"}, want: SQLPatroniMatch},
+		{name: "unknown SQL leader is neutral", patroni: map[string]bool{"B": true}, retained: []string{"B"}, want: SQLPatroniMatch},
+		{name: "membership without a primary", sql: map[string]bool{"A": false}, want: SQLPatroniMembershipDifference},
+		{name: "primary disagreement precedes membership", sql: map[string]bool{"A": false, "B": true}, patroni: map[string]bool{"B": false, "C": false}, want: SQLPatroniPrimaryDisagreement},
+		{name: "empty snapshots", want: SQLPatroniMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := SQLPatroniHealthSnapshot{SQLHealth: tc.sql, PatroniHealth: tc.patroni, SQLRetainedIPs: tc.retained, SQLConflictingIPs: tc.conflicts}
+			assert.Equal(t, tc.want, snapshot.MismatchReason())
+			assert.Equal(t, tc.want == SQLPatroniMatch, snapshot.Matches())
+		})
+	}
 }

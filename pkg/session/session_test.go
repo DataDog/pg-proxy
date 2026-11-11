@@ -184,15 +184,15 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 			want      []string
 			wantError bool
 		}{
-			{name: "success", want: []string{"observe", "send", "flush", "flush_succeeded"}},
-			{name: "failure", flushErr: flushErr, want: []string{"observe", "send", "flush"}, wantError: true},
+			{name: "success", want: []string{"observe", "send", "observe", "send", "flush", "flush_succeeded"}},
+			{name: "failure", flushErr: flushErr, want: []string{"observe", "send", "observe", "send", "flush"}, wantError: true},
 		} {
 			t.Run(test.name, func(t *testing.T) {
 				var events []string
 				client := &testClient{events: &events, flushErr: test.flushErr}
 				hooks := flushRecordingHooks{events: &events}.hooks()
 				session := New(Config{Client: client, Hooks: hooks})
-				err := session.handleAction(ClientMessageAction{ReplyMsgToClient: &pgproto3.ReadyForQuery{TxStatus: 'I'}})
+				err := session.handleAction(ClientMessageAction{ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.EmptyQueryResponse{}, &pgproto3.ReadyForQuery{TxStatus: 'I'}}})
 				require.Equal(t, test.wantError, err != nil)
 				require.Equal(t, test.want, events)
 			})

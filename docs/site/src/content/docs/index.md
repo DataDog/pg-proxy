@@ -31,6 +31,7 @@ Complete a specific task once you know the basics.
 
 - [Local development](how-to/local-development/): Build, run, and test the OSS binary.
 - [Send OTel metrics to Datadog](how-to/otel-metrics-to-datadog/): Configure the Collector to export event counters as rates.
+- [Contribute to PG Proxy](how-to/contributing/): Report bugs, propose changes, and prepare a pull request.
 - [Contribute to the documentation](how-to/documentation-contributing/): Edit, preview, and validate the documentation site.
 - [Set connection and session limits](how-to/set-pool-limits/): Configure the connection pool and client-session cap.
 

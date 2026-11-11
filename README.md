@@ -236,6 +236,32 @@ The standalone-command suite also accepts an explicit disposable PostgreSQL URL
 through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
 See the [client integration test instructions](docs/client-authentication.md#integration-tests).
 
+#### Ping protocol behavior
+
+`TestProxyAgainstPostgres/ping_protocol` sends identical raw protocol messages
+to PostgreSQL and to the proxy, and requires the same replies from both:
+
+- `ping_idle`: `EmptyQueryResponse`, then `ReadyForQuery(I)`.
+- `ping_in_transaction`: the same empty response, then `ReadyForQuery(T)`.
+- `ping_in_failed_transaction`: the same empty response, then `ReadyForQuery(E)`;
+  a rollback restores `I`.
+- `extended_ping` and `named_extended_ping`: Parse/Flush returns `ParseComplete`;
+  Bind/Execute/Sync returns `BindComplete`, `EmptyQueryResponse`, `ReadyForQuery(I)`.
+- Pending Parse messages and error recovery: replies stay in order, and pings
+  discarded before Sync produce no reply of their own.
+
+Every scenario ends with another query to detect stray replies. The test uses a
+raw protocol client because a comment passed to `psql`, or driver statement
+caching, can hide the exchange being checked. Run just these scenarios with:
+
+```sh
+go test -race -tags=integration -count=1 -v ./cmd/pg-proxy \
+  -run 'TestProxyAgainstPostgres/ping_protocol'
+```
+
+The idle ping's load-shedding bypass is covered by unit tests in `pkg/actions`
+and `pkg/session`, which need no Docker.
+
 #### Black-box integration tests
 
 `test/integration` runs the `cmd/pg-proxy` binary as a black box. Each test starts
@@ -404,6 +430,12 @@ go test -race -count=1 ./...
 Docker-backed tests require the `integration` build tag. Run the Docker checks
 above when needed. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[Contribute to PG Proxy](docs/site/src/content/docs/how-to/contributing.md).
+<!-- TODO: once the documentation site is published, link to the contributing page's site URL instead of its source file. -->
 
 ## License
 

@@ -617,7 +617,7 @@ func (s *Session) handleOneMessage(msg pgproto3.FrontendMessage) error {
 // interceptBypassingMessage handles messages that must not go through the standard
 // per-message dispatcher, returning (intercepted, err):
 //   - Terminate: closes the session and returns (true, wrapped io.EOF) — terminal.
-//   - pgx ping health check: handled directly via handleOneMessage; returns
+//   - pgx ping health check at an idle boundary: handled via handleOneMessage; returns
 //     (true, err) where err is nil on success.
 //   - any other message: returns (false, nil).
 //
@@ -626,9 +626,8 @@ func (s *Session) handleOneMessage(msg pgproto3.FrontendMessage) error {
 // caller must stop (return err). When intercepted && err == nil the message was
 // handled and processing may continue — the top-level loop returns nil to fetch the
 // next message, and the inner loops (handleTransaction, drainUntilSync) `continue`.
-// During a discard-until-sync drain, the ping's handleOneMessage call is turned into
-// a no-op discard by DecideClientMessageAction, so this same path correctly ignores
-// pings (and everything else) until Sync.
+// Pings with a held link follow the normal dispatcher, preserving pending work
+// and transaction state. During error recovery they are discarded until Sync.
 func (s *Session) interceptBypassingMessage(msg pgproto3.FrontendMessage) (bool, error) {
 	if _, ok := msg.(*pgproto3.Terminate); ok {
 		err := fmt.Errorf("client requested terminate: %w", io.EOF)
@@ -639,7 +638,7 @@ func (s *Session) interceptBypassingMessage(msg pgproto3.FrontendMessage) (bool,
 		s.close(err)
 		return true, err
 	}
-	if q, ok := msg.(*pgproto3.Query); ok && isPgxPing(q.String) {
+	if actions.IsIdlePGXPing(msg, s.actionState()) {
 		return true, s.handleOneMessage(msg)
 	}
 	return false, nil
@@ -666,9 +665,7 @@ func (s *Session) handleTransaction(initialMsg pgproto3.FrontendMessage) error {
 		if s.handleStateRemapping() {
 			return nil
 		}
-		// A handled ping (intercepted, no error) must NOT end the checkout: continue the
-		// loop so the RIF stays held until the link is actually released. Only a terminal
-		// interception (Terminate) returns.
+		// Terminate must close the session even while the checkout is held.
 		if intercepted, err := s.interceptBypassingMessage(msg); intercepted {
 			if err != nil {
 				return err
@@ -760,10 +757,11 @@ func (s *Session) receiveAndHandleMessage() error {
 		return nil
 	}
 
-	// Bypass the load shedder for Terminate and pgx health-check pings.
+	// Bypass the load shedder for Terminate and idle pgx health-check pings.
 	// Terminate must not reach the shedder — it would reply with an ErrorResponse
-	// instead of cleanly closing the connection. pgx pings are bypassed so they
-	// don't count against load; empty queries and ";" are NOT bypassed.
+	// instead of cleanly closing the connection. Idle pgx pings (no held link, not
+	// discarding until Sync) are answered locally so they don't count against load;
+	// pings on a held link, empty queries and ";" are NOT bypassed.
 	if intercepted, err := s.interceptBypassingMessage(msg); intercepted {
 		return err
 	}
@@ -972,11 +970,13 @@ func (s *Session) flushClientConn() error {
 func (s *Session) handleAction(action ClientMessageAction) error {
 	s.setDiscardUntilSync(action.DiscardUntilSync)
 
-	if action.ReplyMsgToClient != nil {
-		if s.hooks.BackendMessage != nil {
-			s.hooks.BackendMessage(action.ReplyMsgToClient)
+	if len(action.ReplyMsgsToClient) > 0 {
+		for _, msg := range action.ReplyMsgsToClient {
+			if s.hooks.BackendMessage != nil {
+				s.hooks.BackendMessage(msg)
+			}
+			s.clientConn.Send(msg)
 		}
-		s.clientConn.Send(action.ReplyMsgToClient)
 		err := s.flushClientConn()
 		if err != nil {
 			return fmt.Errorf("error flushing proxied msg(s) to client: %w", err)
