@@ -215,3 +215,22 @@ func (s *HealthState) SetHealth(health map[string]bool) {
 	defer s.mu.Unlock()
 	s.health = maps.Clone(health)
 }
+
+// ReplaceRoutingSnapshot replaces the client-visible address and health snapshots with one
+// complete routing decision. The caller supplies addresses retained by the active discovery
+// policy, so no additional DNS absence policy is applied here.
+func (s *HealthState) ReplaceRoutingSnapshot(
+	health map[string]bool,
+	resolved []string,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nextResolved := make(map[string]struct{}, len(resolved))
+	for _, ip := range resolved {
+		nextResolved[ip] = struct{}{}
+	}
+	s.resolved = nextResolved
+	s.lookupAbsences = make(map[string]int, len(nextResolved))
+	s.recordHealthLocked(health)
+}
