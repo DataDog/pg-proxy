@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package warden
 
 import (
@@ -13,6 +18,14 @@ import (
 func TestSettledFuture(t *testing.T) {
 	pending := newSettledFuture(1)
 	assert.True(t, pending.IsReady())
+	readyAt, ready := pending.ReadyAt()
+	assert.True(t, ready)
+	assert.False(t, readyAt.IsZero())
+	select {
+	case <-pending.Done():
+	default:
+		t.Fatal("settled future did not close Done")
+	}
 	value, err := pending.Get()
 	assert.NoError(t, err)
 	assert.Equal(t, 1, value)

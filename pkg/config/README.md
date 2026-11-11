@@ -41,7 +41,6 @@ users:
     username: alice
     password: replace-with-client-password
   databases: [orders]
-  pg_roles: [reader]
 - static_credentials:
     username: bob
     scram_sha_256: 'SCRAM-SHA-256$4096:<base64-salt>$<base64-stored-key>:<base64-server-key>'
@@ -49,7 +48,7 @@ users:
 ```
 
 The verifier above shows the format, not a usable value. Supply a PostgreSQL
-SCRAM-SHA-256 stored verifier with a positive iteration count, base64 salt, and
+SCRAM-SHA-256 stored verifier with 1–1,000,000 iterations, a 1–1024-byte base64-decoded salt, and
 two 32-byte keys. JSON calls the field `scramSHA256`.
 A user may supply either a password or a verifier, never both.
 
@@ -57,8 +56,11 @@ The OSS binary uses `-config` for direct backend credentials, connection
 and pool settings, primary/logical routes, and loopback listener settings,
 including optional or required client TLS through `tls_cert_file`, `tls_key_file`,
 and `tls_required`. See [client TLS](../../docs/client-connections.md#standalone-tls).
-It rejects configured users, mirroring, and other unsupported options with
-explicit startup errors. TODO: wire client SCRAM support.
+Set `password_auth_enabled: true` (JSON: `passwordAuthEnabled`) with required TLS
+to enable static users and non-loopback listeners. Each user needs an explicit
+logical-database list. Proxy usernames are independent of backend accounts.
+See [client authentication](../../docs/client-authentication.md).
+It rejects JWT, mirroring, and other unsupported options with explicit startup errors.
 The library schema remains broader than this command.
 
 [`pool.PGXConfig`](../pool/config.go) consumes a `Database` and returns a pgx pool
@@ -70,19 +72,13 @@ and ordinary Go formatting redact it. Convert with `string(secret)` only where
 the secret is consumed.
 Marshaled config is diagnostic output, not a lossless secret backup.
 
-## Datadog application boundary
+## Embedding applications
 
-The deployed app does **not** decode files into this `Config`. Its persisted
-schema is `PGProxyConfig` in `domains/orgstore/libs/config/go/config.go`, which
-composes the credential-free library settings with internal provider fields.
-The [app config guide (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/pg-proxy/config/README.md) lists its
-additional fields and credential policy.
-
-App database/user types expose Vault references, not passwords or verifiers.
-The app providers and Atlas write paths explicitly apply the internal no-inline-
-secrets policy. Shared JSON decoding is unchanged. Vault resolution stays in the
-app; resolved credentials are passed to connection code in memory. No COBS/protobuf
-version or schema change is needed for these library options.
+An embedding application does not have to decode files into this `Config`. It
+can keep its own persisted schema that composes these credential-free library
+settings with its own provider fields, such as references into a secret store.
+Resolve those references in the application and pass the resulting credentials
+to connection code in memory. Shared JSON decoding is unchanged.
 
 ## Extending the schema
 

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package classifier
 
 import (
@@ -150,7 +155,8 @@ func isBeginReadOnlyTx(txStmt *pg_query.TransactionStmt) bool {
 	for _, opt := range txStmt.GetOptions() {
 		elem := opt.GetDefElem()
 		if elem != nil && elem.GetDefname() == txReadOnly {
-			return true
+			// READ ONLY and READ WRITE use the same option name, with values 1 and 0.
+			return elem.GetArg().GetAConst().GetIval().GetIval() == 1
 		}
 	}
 	return false

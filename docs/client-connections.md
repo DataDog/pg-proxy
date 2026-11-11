@@ -1,3 +1,10 @@
+<!--
+Unless explicitly stated otherwise all files in this repository are licensed
+under the Apache-2.0 License.
+This product includes software developed at Datadog (https://www.datadoghq.com/)
+Copyright 2026-Present Datadog, Inc.
+-->
+
 # Client connections
 
 Both the [standalone command](../README.md#oss-binary) and Go library support
@@ -54,10 +61,11 @@ For a CA-issued server certificate, use that CA's root bundle as `sslrootcert`.
 Client `sslmode=require` requests encryption without guaranteeing hostname
 verification; prefer `verify-full` when verifying the proxy's identity.
 
-The command still requires a loopback listener and trusts clients that use the
-configured backend username. TLS encrypts that connection and lets clients
-verify the proxy's identity. Client certificate authentication (mTLS) and
-password/JWT authentication are not implemented by the command.
+The command defaults to loopback trust using the configured backend username.
+Opt-in [password/SCRAM authentication](client-authentication.md) allows non-loopback
+listeners with required TLS and explicit database grants. TLS encrypts connections
+and lets clients verify the proxy's identity. Client certificate authentication
+(mTLS) and JWT authentication remain unsupported by the command.
 
 ### Other poolers
 
@@ -93,6 +101,5 @@ requires the session's PID and secret key. Cancellation over TLS also works.
 See [listener configuration](../pkg/listener/listener.go) and
 [server configuration](../pkg/server/server.go).
 
-Certificate sourcing stays with the application. Datadog's dd-source app uses
-Emissary SDS to supply and rotate its `tls.Config`; it does not use the command's
-PEM file loader. This command feature needs no dd-source TLS changes.
+Certificate sourcing stays with the application. An embedder can supply and
+rotate its own `tls.Config` instead of using the command's PEM file loader.

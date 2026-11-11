@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 // Command pg-proxy runs the OSS PostgreSQL transaction pooler.
 package main
 
@@ -10,7 +15,6 @@ import (
 	"log/slog"
 	"maps"
 	"net"
-	"net/netip"
 	"os"
 	"os/signal"
 	"slices"
@@ -39,6 +43,7 @@ type config struct {
 	messageBufferSize int
 	tlsConfig         *tls.Config
 	requireTLS        bool
+	authenticate      authenticationHook
 	databases         map[string]*pgxpool.Config
 	clusters          map[string]string
 	logicalDatabases  map[string]topology.LogicalDatabase
@@ -61,15 +66,11 @@ func main() {
 }
 
 func (c config) validate() error {
-	address, err := netip.ParseAddrPort(c.listenAddress)
-	if err != nil || !address.Addr().IsLoopback() {
-		return errors.New("proxy.listener_address must use a loopback IP: the OSS binary does not authenticate clients")
+	if err := c.validateListener(c.authenticate != nil); err != nil {
+		return err
 	}
 	if c.messageBufferSize < 0 {
 		return errors.New("postgres_msg_buffer_size must not be negative")
-	}
-	if c.requireTLS && c.tlsConfig == nil {
-		return errors.New("proxy.tls_required requires tls_cert_file and tls_key_file")
 	}
 	if len(c.databases) == 0 || len(c.clusters) == 0 || len(c.logicalDatabases) == 0 {
 		return errors.New("databases, clusters, and logical_databases must not be empty")
@@ -101,7 +102,7 @@ func run(ctx context.Context, cfg config) error {
 	if err != nil {
 		return err
 	}
-	pgproxy.Logger().Info("local proxy ready; clients are trusted", "address", proxy.server.Addr(), "clusters", len(cfg.clusters))
+	pgproxy.Logger().Info("proxy ready", "address", proxy.server.Addr(), "clusters", len(cfg.clusters), "client_authentication", cfg.authenticate != nil)
 	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
 }
 
@@ -118,7 +119,7 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
-	// TODO(OSQQUERY-714): support configuration refresh through the library Warden.
+	// TODO: support configuration refresh through the library Warden.
 	// File changes currently require a restart.
 	inventory := &staticInventory{
 		logicalDatabases: cfg.logicalDatabases,
@@ -152,15 +153,22 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 		users[name] = cfg.databases[cfg.clusters[logical.Cluster]].ConnConfig.User
 	}
 	sessions := newSessionRegistry()
+	authenticate := cfg.authenticate
+	if authenticate == nil {
+		authenticate = localUser(users)
+	}
 	proxy, err := server.NewServer(ctx, server.Config{
-		ListenAddress: cfg.listenAddress,
-		TLSConfig:     cfg.tlsConfig,
-		RequireTLS:    cfg.requireTLS,
-		// TODO(OSQQUERY-713): configure session admission limits independently of backend pool sizes.
+		ListenAddress:              cfg.listenAddress,
+		TLSConfig:                  cfg.tlsConfig,
+		RequireTLS:                 cfg.requireTLS,
+		AuthenticationMessageLimit: 16 << 10,
+		StartupTimeout:             10 * time.Second,
+		MaxPendingConnections:      100,
+		// TODO: configure session admission limits independently of backend pool sizes.
 		Admission: limiter.New(limiter.Params{
 			GlobalLimit: 100, DefaultServiceMax: 100,
 		}),
-		Authenticate: localUser(users),
+		Authenticate: authenticate,
 		Sessions:     sessions,
 		Runtime: server.RuntimeConfig{
 			Inventory:             inventory,
@@ -221,7 +229,7 @@ func localUser(users map[string]string) func(context.Context, listener.StartupRe
 			return listener.AuthenticationResult{}, errors.New("client user must match the configured backend user")
 		}
 		if request.Options.PassthroughUser {
-			return listener.AuthenticationResult{}, errors.New("passthrough_user is not supported by the OSS binary")
+			return listener.AuthenticationResult{}, listener.ErrUnsupportedAuthOption
 		}
 		return listener.AuthenticationResult{Service: user}, nil
 	}

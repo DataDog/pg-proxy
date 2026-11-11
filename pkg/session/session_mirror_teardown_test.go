@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package session
 
 import (
@@ -14,13 +19,14 @@ import (
 
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/mirror"
+	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
 const mirrorTestDatabase = "logical"
 
 // mirrorTestSession builds a session whose mirroring policy is toggled through the
-// returned flag, so a test can flip mirroring off the way a COBS change would.
+// returned flag, so a test can flip mirroring off the way a configuration change would.
 func mirrorTestSession(t *testing.T, budget *mirror.Budget, acquireShadow func(context.Context, string, LinkRequest) (link.Link, error)) (*Session, *atomic.Bool) {
 	t.Helper()
 	enabled := &atomic.Bool{}
@@ -207,4 +213,59 @@ func TestMirroringLinkFor_DisableDoesNotWaitOnWedgedShadow(t *testing.T) {
 	require.Eventually(t, func() bool { return forceCloses.Load() > 0 && releases.Load() > 0 },
 		2*mirror.TeardownDrainTimeout, 10*time.Millisecond,
 		"the detached stop must force-close and release the wedged shadow link")
+}
+
+// TestMirroringLinkFor_RebuiltWorkerIsSeededWithConfirmedStmts: teardown destroys the
+// worker, and its statement catalog is a local in the worker's goroutine, so a rebuilt
+// worker starts empty. The client has already prepared and will never send Parse again,
+// so without the seed every later Bind reaches the shadow as a bare Bind and errors 26000.
+func TestMirroringLinkFor_RebuiltWorkerIsSeededWithConfirmedStmts(t *testing.T) {
+	const proxyName = "ddproxy_seeded"
+	stmt := prepared.CreatePreparedStatement("client_stmt", proxyName, "select $1::int", []uint32{23})
+
+	shadowSent := make(chan pgproto3.FrontendMessage, 4)
+	shadow := &testLink{
+		send:        func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) { shadowSent <- msg },
+		hasExisting: func(prepared.PreparedStatement) bool { return false }, // a freshly borrowed shadow conn holds nothing
+	}
+	acquireShadow := func(context.Context, string, LinkRequest) (link.Link, error) { return shadow, nil }
+	s, enabled := mirrorTestSession(t, mirror.NewBudget(1<<20), acquireShadow)
+	require.NoError(t, s.pStmtState.AddConfirmedNamedStmt(stmt), "the source connection holds the statement before mirroring is toggled")
+
+	s.mirroringLinkFor(&testLink{})
+	enabled.Store(false)
+	s.mirroringLinkFor(&testLink{})
+	require.Nil(t, s.mirrorWorker, "disabling must tear the worker, and its catalog, down")
+
+	enabled.Store(true)
+	mirrored := s.mirroringLinkFor(&testLink{})
+	require.NotNil(t, s.mirrorWorker, "re-enabling must build a fresh worker")
+
+	// The client prepared before the toggle, so it now sends Bind alone: nothing on this
+	// batch tells the worker what proxyName means except the seed.
+	mirrored.Send(&pgproto3.Bind{PreparedStatement: proxyName}, query.BindReply)
+	require.NoError(t, mirrored.Flush())
+
+	parse, ok := receiveFrontendMsg(t, shadowSent).(*pgproto3.Parse)
+	require.True(t, ok, "the rebuilt worker must inject the Parse before the Bind, or the shadow answers 26000")
+	require.Equal(t, proxyName, parse.Name)
+	require.Equal(t, stmt.GetSQLQuery(), parse.Query)
+	require.Equal(t, stmt.GetParamOIDs(), parse.ParameterOIDs)
+
+	bind, ok := receiveFrontendMsg(t, shadowSent).(*pgproto3.Bind)
+	require.True(t, ok, "the Bind must follow its injected Parse")
+	require.Equal(t, proxyName, bind.PreparedStatement)
+}
+
+// receiveFrontendMsg takes the next message the worker sent to the shadow, failing the
+// test rather than hanging when the worker sent nothing.
+func receiveFrontendMsg(t *testing.T, sent <-chan pgproto3.FrontendMessage) pgproto3.FrontendMessage {
+	t.Helper()
+	select {
+	case msg := <-sent:
+		return msg
+	case <-time.After(5 * time.Second):
+		t.Fatal("the worker sent nothing to the shadow link")
+		return nil
+	}
 }

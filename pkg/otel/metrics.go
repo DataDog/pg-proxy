@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package otel
 
 import (
@@ -45,7 +50,7 @@ func attributes(tags []string) attribute.Set {
 	return attribute.NewSet(attrs...)
 }
 func (m *Metrics) Count(name string, value int64, tags []string, _ float64) error {
-	// TODO(OSQQUERY-730): Validate Datadog dashboards and monitors with mixed
+	// TODO: Validate Datadog dashboards and monitors with mixed
 	// OTLP/DogStatsD submissions. docs/otel-collector-datadog.yaml maps our delta
 	// counters to RATE; these generic counters keep their OTel semantics.
 	m.mu.Lock()
@@ -95,7 +100,7 @@ func (m *Metrics) histogram(name string, value float64, tags []string, timing bo
 		if timing {
 			opts = append(opts, metric.WithUnit("ms"))
 		} else {
-			switch name {
+			switch strings.TrimPrefix(name, pgproxy.MetricNamespace()) {
 			case pgproxy.MetricMessageLatency, pgproxy.MetricQueryParseLatency,
 				pgproxy.MetricFlushPostgresLatency, pgproxy.MetricConnectWait:
 				// Keep the SDK's fine buckets for fast operations, then extend them

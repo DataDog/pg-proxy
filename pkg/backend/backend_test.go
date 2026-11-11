@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package backend
 
 import (
@@ -268,7 +273,7 @@ func TestAcquireBuildsLinkWithInjectedDependencies(t *testing.T) {
 	assert.Equal(t, []string{"service:test"}, baseTags, "base tags must not be mutated")
 	assert.IsType(t, fakeRole{}, gotOptions.Role)
 	require.NotEmpty(t, metrics.counts)
-	assert.Equal(t, "dd.orgstore.pg_proxy.sessions.connections", metrics.counts[0].name)
+	assert.Equal(t, "datadog.pg_proxy.sessions.connections", metrics.counts[0].name)
 	assert.Contains(t, metrics.counts[0].tags, "outcome:successful")
 }
 
@@ -415,7 +420,7 @@ func TestFallbackMetricIdentity(t *testing.T) {
 	require.Error(t, err)
 	require.Len(t, metrics.counts, 2)
 	for i, outcome := range []string{"allowed", "rate_limited"} {
-		assert.Equal(t, "dd.orgstore.pg_proxy.replica_acquire_fallback", metrics.counts[i].name)
+		assert.Equal(t, "datadog.pg_proxy.replica_acquire_fallback", metrics.counts[i].name)
 		assert.ElementsMatch(t, []string{"database:primary", "database_cluster:test-cluster", "outcome:" + outcome}, metrics.counts[i].tags)
 	}
 }

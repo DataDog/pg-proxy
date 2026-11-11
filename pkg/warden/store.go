@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package warden
 
 import (
@@ -8,9 +13,8 @@ import (
 // TODO: Revisit whether these stores remain necessary once all compatibility
 // inventory is owned directly by the portable Warden.
 
-// This is heavily inspired by the ConcurrentMap implementation in
-// domains/runtime-efficiency/libs/go/util/data_structures, but exposing an
-// iterator and initializing constructor.
+// ConcurrentMap follows a common lock-guarded map pattern, adding an iterator
+// and an initializing constructor.
 
 // ConcurrentMap is a generic, thread-safe implementation of a map[K]V.
 // It exposes methods to interact with the wrapped value that ensure it is
@@ -87,8 +91,7 @@ func (m *ConcurrentMap[K, V]) Length() int {
 	return len(m.innerMap)
 }
 
-// This is heavily inspired by the ConcurrentValue implementation in
-// domains/runtime-efficiency/libs/go/util/data_structures, but exposing a
+// ConcurrentValue follows a common lock-guarded value pattern, adding a
 // method to allow borrowing.
 
 // ConcurrentValue is a generic, thread-safe implementation of a single value.

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package link
 
 import (
@@ -114,6 +119,10 @@ func (link *SessionLink) ResolveNextExpectation() {
 // If we don't yet have a reply expectation for a SyncReply, we need to set
 // an addition flag discardingUntilSync indicating we also need to drop future
 // expectations until we see a Sync.
+// DiscardingUntilSync reports the extended-query error state: Postgres is dropping
+// everything until a Sync, so nothing sent now reaches it.
+func (link *SessionLink) DiscardingUntilSync() bool { return link.discardingUntilSync }
+
 func (link *SessionLink) DiscardUntilSync() {
 	nDrop := 0
 	for ; nDrop < len(link.replyExpectations); nDrop++ {
@@ -165,7 +174,7 @@ func (link *SessionLink) Cancel() error {
 	}
 	pgConn := link.conn.Conn().PgConn()
 	pgproxy.Logger().Debug("Canceling PG connection", "PID", pgConn.PID())
-	_ = pgproxy.Metrics().Incr("dd.orgstore.pg_proxy.sessions.connections.cancellation_attempt", link.sessionLinkTags, 1)
+	_ = pgproxy.Metrics().Incr("pg_proxy.sessions.connections.cancellation_attempt", link.sessionLinkTags, 1)
 	return pgConn.CancelRequest(context.Background())
 }
 
@@ -190,7 +199,7 @@ func (link *SessionLink) Release() error {
 	// role-reset failure instead.
 	if computedState := link.getComputedState(); computedState != sessionLinkStateIdle && link.conn != nil {
 		metricTags := append(slices.Clone(link.sessionLinkTags), "state:"+computedState)
-		_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections.destroyed.release_non_idle", 1, metricTags, 1)
+		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.destroyed.release_non_idle", 1, metricTags, 1)
 		pid := link.conn.Conn().PgConn().PID() // read before Close so the log can be matched against Postgres' own logs
 		link.conn.Conn().Close(context.Background())
 		link.logNonIdleRelease(computedState, pid)
@@ -222,7 +231,7 @@ func (link *SessionLink) Release() error {
 		_, err := link.conn.Exec(resetCtx, "RESET ALL")
 		cancel()
 		if err != nil {
-			_ = pgproxy.Metrics().Count("dd.orgstore.pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
+			_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
 			link.conn.Conn().Close(context.Background())
 			pgproxy.Logger().Warn("Closing connection due to RESET ALL failure", "error", err)
 			return err
@@ -265,7 +274,7 @@ func (link *SessionLink) logNonIdleRelease(computedState string, pid uint32) {
 
 func (link *SessionLink) nonIdleReleaseLogMessage(computedState string, pid uint32) string {
 	return fmt.Sprintf(
-		"Releasing non-idle session link. state: %s, backend PID: %d, expectations: %q, tags: %q. Read more about this error: https://datadoghq.atlassian.net/wiki/x/rAC3PgE",
+		"Releasing non-idle session link. state: %s, backend PID: %d, expectations: %q, tags: %q.",
 		computedState,
 		pid,
 		link.DebugExpectationString(),

@@ -6,37 +6,31 @@ Runtime integrations — configuration, feature flags, authentication, and load
 shedding — are supplied by the embedder through Go interfaces, so the proxy can
 run standalone or inside a larger system.
 
-**Status: early.** Most of the proxy still lives in Datadog's monorepo
-(`domains/orgstore/apps/pg-proxy`) and is being moved here package by package.
-What is here is in use, but the API is not yet stable.
+**Status: early.** What is here is in use, but the API is not yet stable.
+
+## Documentation
+
+Guides, reference, and design explanations live in the documentation site under
+[`docs/site`](docs/site). Its pages are Markdown in
+[`docs/site/src/content/docs`](docs/site/src/content/docs), starting with the
+[introduction](docs/site/src/content/docs/index.md). To build and preview the
+site locally, see [`docs/site/README.md`](docs/site/README.md).
 
 ## Dependency policy
 
-This library must build and run without any Datadog-internal code, so it stays
-extractable into a standalone public repository. Concretely, imports beginning
-with `github.com/DataDog/` are rejected unless they are:
-
-| Allowed | Example |
-| --- | --- |
-| Packages in this library | `…/domains/orgstore/libs/pg-proxy/…` |
-| Publicly released Datadog modules | `github.com/DataDog/datadog-go/v5/…` |
-
-Everything else under `github.com/DataDog/` is off limits, including the rest of
-the monorepo and private modules such as `go-service-authn`. Third-party
-dependencies outside `github.com/DataDog/` are allowed.
-
-While the library lives in the monorepo, a linter enforces this: it reads the
-imports of every Go file in the tree — library, test, and generated alike — and
-fails `bzl test` on a disallowed one. After extraction the constraint is no
-longer needed, since none of the forbidden code is reachable.
+This library builds and runs with public dependencies only. Imports beginning
+with `github.com/DataDog/` are limited to publicly released Datadog modules, such
+as `github.com/DataDog/datadog-go/v5/…` and `github.com/DataDog/dd-trace-go/v2/…`.
+Other third-party dependencies are allowed.
 
 Optional integrations using public Datadog SDKs live in `pkg/datadog`.
-Implementations requiring private Datadog dependencies stay in the consuming app.
+Integrations that need private services or credentials belong in the embedding
+application.
 
 ## Layout
 
-Add or remove a row when a `pkg/` directory lands or leaves. Do not rewrite this
-as prose — one-line rows keep each extraction PR's doc diff small.
+Add or remove a row when a `pkg/` directory is added or removed. Keep one row per
+package.
 
 | Package | Role |
 | --- | --- |
@@ -44,6 +38,7 @@ as prose — one-line rows keep each extraction PR's doc diff small.
 | `pkg/datadog` | Native Datadog tracing, DogStatsD metrics, and JSON log setup using public SDKs |
 | `pkg/otel` | OpenTelemetry trace, metric, and slog adapters using caller-owned providers |
 | `pkg/actions` | Portable frontend-message decision state machine |
+| `pkg/auth` | Static SCRAM users and explicit database grants |
 | `pkg/backend` | Within-cluster routing, connection checkout, and session-link construction |
 | `pkg/config` | Portable database, routing, listener, user, and mirroring configuration |
 | `pkg/classifier` | SQL read-routing classification and statement counting |
@@ -52,7 +47,7 @@ as prose — one-line rows keep each extraction PR's doc diff small.
 | `pkg/server` | Startup resolution, read routing, session construction, and listener/inventory composition |
 | `pkg/query` | Post-auth message decisions and query tracing |
 | `pkg/prepared` | Prepared-statement name mapping for txn pooling |
-| `pkg/pool` | Direct, discovered (PGK), static cloud, and replica pool runtimes; instance health, selection, and pgx adapters |
+| `pkg/pool` | Direct, discovered, static cloud, and replica pool runtimes; instance health, selection, and pgx adapters |
 | `pkg/link` | Session↔Postgres link: expectations, prepared-on-conn, release |
 | `pkg/limiter` | Portable global and per-service session caps |
 | `pkg/listener` | TCP/TLS negotiation, startup, admission, and session lifecycle |
@@ -61,21 +56,16 @@ as prose — one-line rows keep each extraction PR's doc diff small.
 | `pkg/topology` | Portable logical-database routing and runtime configuration |
 | `pkg/warden` | Versioned configuration refresh, backend reconciliation, runtime inventory, and shutdown coordination |
 
-Target as more code moves: public API under `pkg/`, internals under `internal/`,
-OSS binary under `cmd/pg-proxy`.
+Public API lives under `pkg/` and the OSS binary under `cmd/pg-proxy`. Code that
+embedders no longer import may move under `internal/`.
 
 Auth mechanisms here are given the password to verify against and only perform
 the exchange — credential storage stays with the embedder.
 
-Anything the monorepo still imports has to stay under `pkg/`: Go only allows
-`internal/` to be imported from within this library, so code moves there once its
-subsystem no longer has callers in `apps/pg-proxy`.
-
 ## Configuration
 
 Start with [`pkg/config/config.go`](pkg/config/config.go) and the
-[config guide](pkg/config/README.md). The [app config guide (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/pg-proxy/config/README.md)
-lists app-only settings and credential rules. For new settings, follow the
+[config guide](pkg/config/README.md). For new settings, follow the
 [configuration extension guide](docs/extending-configuration.md).
 The OSS binary consumes a limited subset, described below. Applications can
 use `pool.PGXConfig(config.Database)` to build a direct backend pool configuration;
@@ -132,20 +122,33 @@ With `RequireTLS=false`, both optional TLS and plaintext startup remain supporte
 Before rollout, check client TLS modes, trusted certificate authorities, server
 names, and certificate-provider configuration. Clients that previously connected
 in plaintext despite `RequireTLS=true` must enable TLS. The OSS binary
-uses loopback trust with optional or required TLS. See the
+supports loopback trust and opt-in [password/SCRAM authentication](docs/client-authentication.md). See the
 [client TLS guide](docs/client-connections.md#standalone-tls) for certificate
 configuration and verified connections.
 
 ## Development
 
+### License headers
+
+CI checks every repository Go file against the header in [.licenserc.yaml](.licenserc.yaml),
+including tests and files behind build tags. Vendored dependencies keep their own notices.
+Check headers locally with:
+
+```sh
+go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
+```
+
+To add missing headers, run the same command with `header fix` instead of
+`header check`. Review the resulting diff before committing.
+
 ### OSS binary
 
 `cmd/pg-proxy` runs the portable library against configured PostgreSQL backends, with
-static routing and transaction pooling. It needs no COBS, Vault, or experiments
-service. Client connections use **local trust with optional or required TLS**: the command accepts
-only loopback IP listen addresses and the selected backend's username. Any local
-process using that username can access the backend with its configured privileges.
-Use a disposable development database. This is not a production server.
+static routing and transaction pooling. It needs no external configuration,
+secrets, or experiment service. Client connections default to loopback trust using the selected backend's
+username. Opt-in password/SCRAM authentication requires TLS and allows non-loopback
+listeners with explicit per-user database access. See the
+[authentication guide](docs/client-authentication.md) for complete YAML/JSON examples.
 
 With PostgreSQL running locally, save this configuration as `proxy.yaml`:
 
@@ -192,7 +195,7 @@ Add entries to `databases`, `clusters`, and `logical_databases` for more backend
 Each cluster selects one primary database. Each logical database selects a cluster.
 Multiple logical databases can select the same cluster.
 
-The OSS binary accepts direct connection settings, inline backend credentials, pool sizing/lifetimes, a loopback
+The OSS binary accepts direct connection settings, inline backend credentials, pool sizing/lifetimes, a configured
 listener address, and the message buffer size. Omitted listener and buffer settings
 use `127.0.0.1:15432` and 10240 bytes. Zero pool settings use pgx defaults; negative
 values and minimum connections above the maximum are rejected. Backend connection
@@ -203,9 +206,9 @@ Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS. Set
 `proxy.tls_required: true` to reject plaintext startup. See the
 [client TLS guide](docs/client-connections.md#standalone-tls) for examples.
 
-File mode rejects users/JWT, mirroring sections, replicas, read clusters, and
+File mode rejects JWT, mirroring sections, replicas, read clusters, and
 discovery/Envoy/load-balanced database options with explicit startup errors.
-**TODO:** wire client SCRAM support. Backend TLS is available through the
+Backend TLS is available through the
 database's `sslmode` setting.
 
 `-config` is required and accepts `.yaml`, `.yml`, or `.json` files. All database
@@ -224,9 +227,48 @@ transactions, pool reuse, startup cleanup, cancellation, and shutdown:
 go test -race -tags=integration -count=1 ./cmd/pg-proxy ./pkg/pool
 ```
 
-These tests require Docker and access to Datadog's container registry. They use
-the existing private PostgreSQL images. The consuming Datadog repository runs
-them in CI against its pinned module version; GitHub Actions compiles them here.
+Integration tests pull public Docker Hub images pinned by digest in
+[`internal/itest/images.go`](internal/itest/images.go). To use a Docker Hub
+mirror, set Testcontainers' standard `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX`.
+Tests fail if Docker is unavailable.
+
+The standalone-command suite also accepts an explicit disposable PostgreSQL URL
+through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
+See the [client integration test instructions](docs/client-authentication.md#integration-tests).
+
+#### Black-box integration tests
+
+`test/integration` runs the `cmd/pg-proxy` binary as a black box. Each test starts
+a proxy process from a YAML configuration and connects to it with pgx, against
+a PostgreSQL container shared by the package. The harness lives in `internal/itest`:
+
+- `itest.Main` builds the binary once and starts shared fixtures from `TestMain`.
+- `itest.StartPostgres` starts a PostgreSQL container. `Postgres.Database`
+  returns a `pkg/config` database entry pointing at it.
+- `itest.StartProxy` / `itest.MustStartProxy` write a `pkg/config.Config` to a
+  file, start the binary on a free loopback port, and stop it with SIGTERM.
+  `MustStartProxy` fails the test if the process does not exit cleanly and logs
+  its output when the test fails.
+
+```sh
+go test -tags=integration ./test/integration
+```
+
+Running with `-race` also builds the proxy binary with `-race`. For custom build
+flags, build the binary separately and set `PG_PROXY_ITEST_BINARY` to its absolute
+path. A prebuilt binary is used as is, so build it with `-race` yourself if needed.
+
+| Variable | Effect |
+| --- | --- |
+| `PG_PROXY_TEST_POSTGRES_IMAGE` | PostgreSQL image instead of the pinned default |
+| `TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX` | Docker Hub mirror for images without a registry host, including Testcontainers' own. A fully qualified image name bypasses it |
+| `PG_PROXY_ITEST_BINARY` | Absolute path to a prebuilt pg-proxy binary instead of building one |
+
+Readiness uses a timed TCP port probe, not startup log parsing. Captured output
+is printed only for failure diagnostics.
+
+GitHub Actions runs unit tests on minimum and stable Go and Docker-backed
+integration tests with race detection.
 
 ### Telemetry
 
@@ -237,8 +279,10 @@ Proxy logs default to INFO in every mode. Add `-log-level DEBUG` to include debu
 records on stderr and, when enabled, through OTLP. SDK diagnostics keep their own settings.
 
 The examples below use Bash or Zsh, `pg-proxy` on your PATH, and the database
-configuration above. See the [telemetry reference (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/libs/pg-proxy/docs/src/content/docs/reference/observability/index.md)
-for all supported selectors, defaults, destination settings, and SDK configuration links.
+configuration above. Exporter selection, defaults, and destinations follow the
+standard [Datadog](https://docs.datadoghq.com/tracing/trace_collection/library_config/go/)
+and [OpenTelemetry](https://opentelemetry.io/docs/languages/sdk-configuration/)
+SDK environment variables.
 
 #### Datadog
 
@@ -259,7 +303,7 @@ env -u OTEL_TRACES_EXPORTER \
 
 This mode sends traces to the Agent and metrics through DogStatsD. It writes
 JSON logs to stderr. The SDKs read the `DD_*` settings; PG Proxy rejects ambiguous
-`OTEL_TRACES_EXPORTER` settings as described in the telemetry reference.
+`OTEL_TRACES_EXPORTER` settings.
 
 #### OpenTelemetry
 
@@ -281,8 +325,8 @@ omit `-telemetry` and set `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, and
 `-telemetry none` disables export while retaining text logs on stderr.
 `-telemetry` and `-tracing` cannot be used together; startup rejects the combination.
 
-For OTel metrics sent to Datadog, follow [Send OTel metrics to Datadog (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/libs/pg-proxy/docs/src/content/docs/how-to/otel-metrics-to-datadog.md).
-It uses the [Collector configuration](docs/otel-collector-datadog.yaml), delta
+To send OTel metrics to Datadog, use the
+[Collector configuration](docs/otel-collector-datadog.yaml). It uses delta
 export, and the Collector's interval-inference feature gate to convert counts to
 rates. Local validation confirms that 100 events over 10 seconds exports as
 10/s. Live coexistence with DogStatsD still needs dashboard and monitor validation.
@@ -294,9 +338,9 @@ parameter capture is off by default. Add `-trace-parameters=true` to a command
 that enables tracing to include raw values as `db.parameters`. This changes only
 trace data; PostgreSQL receives the same parameter values.
 
-For application trace propagation, send W3C context in SQL comments. See
-[Tracing (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/libs/pg-proxy/docs/src/content/docs/reference/observability/tracing.md)
-for client instrumentation, recorded fields, and prepared-statement limitations.
+For application trace propagation, send W3C context (`traceparent`) in SQL
+comments. Span fields are recorded in
+[`pkg/query/trace_state.go`](pkg/query/trace_state.go).
 
 #### Go library configuration
 
@@ -309,11 +353,34 @@ flush and stop them after sessions drain.
 | OpenTelemetry | Create providers, then use `pkg/otel.NewTracer`, `NewMetrics`, and `NewLogHandler` to populate `pgproxy.Dependencies`. The adapters do not install global OTel providers. |
 | Datadog | Call `pkg/datadog.Start`, handle its error, and pass the returned dependencies to `Bootstrap`. After sessions stop, call the returned shutdown function. Supplied clients stay caller-owned. |
 
-See [Go telemetry configuration (Datadog internal)](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/libs/pg-proxy/docs/src/content/docs/reference/configuration/library.md#telemetry-settings)
-for adapter and ownership options. Bind parameter capture uses
-`server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTraceParameters`)
-and defaults to `false`. The internal Datadog app explicitly enables it and
-retains its existing logger, StatsD client, tracer startup, and propagation.
+Bind parameter capture uses `server.RuntimeConfig.EnableTraceParameters` (or
+`session.Config.EnableTraceParameters`) and defaults to `false`. Embedders that
+already own a logger, StatsD client, or tracer can pass them through
+`pgproxy.Dependencies` instead of using the helpers.
+
+#### Metric names
+
+Metrics are named `datadog.pg_proxy.*`, for example
+`datadog.pg_proxy.sessions.connections`. The same names are used with
+DogStatsD and OpenTelemetry. Library code emits bare names (`pg_proxy.…`), and
+the metrics client installed by `pgproxy.Bootstrap` adds the namespace exactly
+once.
+
+Set `pgproxy.Dependencies.MetricNamespace` to replace the `datadog.` prefix:
+
+- Empty selects `datadog.`.
+- A missing trailing dot is added, so `"acme"` emits
+  `acme.pg_proxy.sessions.connections`.
+- It must start with a letter and contain only letters, digits, `_` and `.`.
+  `Bootstrap` panics on an invalid value; call `pgproxy.NormalizeMetricNamespace`
+  first to get the same check as an error.
+
+A custom `session.Metrics` sink receives bare names. Forward them through
+`pgproxy.Metrics()`, or wrap them with `pgproxy.MetricName` when sending to
+another client. Do not also set a namespace on the client, such as
+`statsd.WithNamespace`, or names are prefixed twice. If you change the
+namespace, update the filter in the
+[Collector configuration](docs/otel-collector-datadog.yaml) to match.
 
 #### Test coverage
 
@@ -331,9 +398,14 @@ From the repository root, run the build, static checks, and unit tests:
 ```sh
 go build ./...
 go vet ./...
-go test -race -skip '^TestProxyAgainstPostgres$' -count=1 ./...
+go test -race -count=1 ./...
 ```
 
-The unit command excludes the Docker-backed CLI test. Run the Docker checks
-above when registry access is available. Format changed Go files with `gofmt -w`;
+Docker-backed tests require the `integration` build tag. Run the Docker checks
+above when needed. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
+
+## License
+
+PG Proxy is licensed under [Apache-2.0](LICENSE). Third-party licenses and
+attributions are listed in [LICENSE-3rdparty.csv](LICENSE-3rdparty.csv).

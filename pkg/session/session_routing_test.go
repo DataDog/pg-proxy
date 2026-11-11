@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package session
 
 import (
@@ -79,7 +84,7 @@ func TestIdleSessionRemappingIsTransparentToClient(t *testing.T) {
 		_, closer := runTestSession(t, session, fakeClient)
 		defer closer()
 
-		// Simulate logical database re-mapping by the COBS poller
+		// Simulate logical database re-mapping by a configuration refresh
 		session.RemapBackend(newBackend)
 
 		// RemapState doesn't immediately change original state from NewTestSession
@@ -208,7 +213,7 @@ func TestSessionRemappingReturnsErrorDuringTransaction(t *testing.T) {
 		assert.NoError(err)
 		assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'T'}, readyForQueryMessage)
 
-		// Simulate logical database re-mapping by the COBS poller
+		// Simulate logical database re-mapping by a configuration refresh
 		newBackend := &fixedBackend{backendLink: &testLink{}, loadShedder: &passthroughLoadShedder{}}
 		session.RemapBackend(newBackend)
 

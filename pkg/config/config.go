@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 // Package config describes pg-proxy backends and routing independently of their
 // configuration source. Config is the complete portable file schema.
 // See README.md for credential handling and the field-change checklist.
@@ -94,8 +99,11 @@ type ProxySettings struct {
 // The pg-proxy executable loads the certificate and key at startup.
 type Proxy struct {
 	ProxySettings `yaml:",inline" mapstructure:",squash"`
-	TLSCertFile   string `json:"tlsCertFile,omitempty" yaml:"tls_cert_file,omitempty"`
-	TLSKeyFile    string `json:"tlsKeyFile,omitempty" yaml:"tls_key_file,omitempty"`
+	// PasswordAuthEnabled selects standalone SCRAM authentication independently of
+	// JWTAuthEnabled. Applications using ProxySettings keep their own selection.
+	PasswordAuthEnabled bool   `json:"passwordAuthEnabled,omitempty" yaml:"password_auth_enabled,omitempty"`
+	TLSCertFile         string `json:"tlsCertFile,omitempty" yaml:"tls_cert_file,omitempty"`
+	TLSKeyFile          string `json:"tlsKeyFile,omitempty" yaml:"tls_key_file,omitempty"`
 }
 
 // UserSettings retains access and session-limit settings. Authentication is caller-owned.

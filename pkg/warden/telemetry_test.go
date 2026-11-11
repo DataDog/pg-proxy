@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package warden
 
 import (
@@ -125,14 +130,14 @@ func TestControllerTelemetry(t *testing.T) {
 
 	metrics := telemetry.metrics()
 	require.Len(t, metrics, 4)
-	assert.Equal(t, "dd.orgstore.pg_proxy.warden.accept.duration", metrics[0].name)
+	assert.Equal(t, "datadog.pg_proxy.warden.accept.duration", metrics[0].name)
 	assert.GreaterOrEqual(t, metrics[0].duration, time.Duration(0))
 	assert.Nil(t, metrics[0].tags)
 	assert.Equal(t, float64(1), metrics[0].rate)
 	assert.Equal(t, []metricEvent{
-		{name: "dd.orgstore.pg_proxy.warden.accept.count", count: 1, tags: []string{"outcome:success"}, rate: 1},
-		{name: "dd.orgstore.pg_proxy.warden.accept.count", count: 1, tags: []string{"outcome:skipped"}, rate: 1},
-		{name: "dd.orgstore.pg_proxy.warden.accept.count", count: 1, tags: []string{"outcome:error"}, rate: 1},
+		{name: "datadog.pg_proxy.warden.accept.count", count: 1, tags: []string{"outcome:success"}, rate: 1},
+		{name: "datadog.pg_proxy.warden.accept.count", count: 1, tags: []string{"outcome:skipped"}, rate: 1},
+		{name: "datadog.pg_proxy.warden.accept.count", count: 1, tags: []string{"outcome:error"}, rate: 1},
 	}, metrics[1:])
 }
 

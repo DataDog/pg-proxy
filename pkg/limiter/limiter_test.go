@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package limiter
 
 import (
@@ -80,9 +85,9 @@ func TestExportGaugesUsesBootstrappedMetricsAndStops(t *testing.T) {
 
 	calls := metrics.snapshot()
 	assert.Equal(t, []limiterGaugeCall{
-		{name: "dd.orgstore.pg_proxy.listener.service_connections_open", value: 1, tags: []string{"client_service_account:service-a"}, rate: 1},
-		{name: "dd.orgstore.pg_proxy.listener.connections_open", value: 1, tags: []string{}, rate: 1},
-		{name: "dd.orgstore.pg_proxy.session_limit.global", value: 10, tags: []string{}, rate: 1},
+		{name: "datadog.pg_proxy.listener.service_connections_open", value: 1, tags: []string{"client_service_account:service-a"}, rate: 1},
+		{name: "datadog.pg_proxy.listener.connections_open", value: 1, tags: []string{}, rate: 1},
+		{name: "datadog.pg_proxy.session_limit.global", value: 10, tags: []string{}, rate: 1},
 	}, calls[:3])
 }
 

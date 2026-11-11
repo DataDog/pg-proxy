@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package mirror
 
 import (
@@ -164,6 +169,29 @@ func (q *mirrorQueue) dequeue() (mirrorItem, bool) {
 		q.items = nil // don't pin the backing array on an idle queue
 	}
 	return it, true
+}
+
+// tryReserveRaw reserves n bytes the worker produced itself (a Parse it injected),
+// which never passed through tryEnqueueFunc. Without it the cap stops bounding the
+// shadow buffer. Released with the batch, like any dequeued item's reservation.
+func (q *mirrorQueue) tryReserveRaw(n int) bool {
+	if n <= 0 {
+		return true
+	}
+	q.mu.Lock()
+	if q.byteCount+q.inFlight+n > q.byteCap {
+		q.mu.Unlock()
+		return false
+	}
+	q.inFlight += n
+	q.mu.Unlock()
+	if q.budget != nil && !q.budget.tryReserve(n) {
+		q.mu.Lock()
+		q.inFlight -= n
+		q.mu.Unlock()
+		return false
+	}
+	return true
 }
 
 // releaseBudget releases one finished item's bytes (size + overhead) from in-flight and the budget.

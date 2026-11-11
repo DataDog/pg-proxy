@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package main
 
 import (
@@ -231,11 +236,22 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		return config{}, err
 	}
 	cfg.requireTLS = shared.Proxy.TLSRequired
-	// TODO: wire library SCRAM support into the OSS binary.
-	if shared.Proxy.JWTAuthEnabled || len(shared.Users) > 0 {
-		return config{}, errors.New("configured client authentication is not implemented by the OSS binary")
+	cfg.authenticate = nil
+	if shared.Proxy.JWTAuthEnabled && shared.Proxy.PasswordAuthEnabled {
+		return config{}, errors.New("password_auth_enabled and jwt_auth_enabled are mutually exclusive")
 	}
-	// TODO(OSQQUERY-715): wire shared traffic mirroring settings into the OSS binary.
+	if shared.Proxy.JWTAuthEnabled {
+		return config{}, errors.New("JWT authentication is not implemented by the OSS binary")
+	}
+	if shared.Proxy.PasswordAuthEnabled {
+		cfg.authenticate, err = passwordAuthentication(shared)
+		if err != nil {
+			return config{}, err
+		}
+	} else if len(shared.Users) > 0 {
+		return config{}, errors.New("configured users require proxy.password_auth_enabled")
+	}
+	// TODO: wire shared traffic mirroring settings into the OSS binary.
 	if shared.Mirroring != nil {
 		return config{}, errors.New("mirroring configuration is not implemented by the OSS binary")
 	}

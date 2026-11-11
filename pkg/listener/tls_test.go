@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package listener
 
 import (
@@ -40,7 +45,7 @@ func testListenerConn(t *testing.T, engine *Listener[struct{}]) net.Conn {
 		conn, err := engine.ln.Accept()
 		if assert.NoError(t, err) {
 			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-			engine.handleConn(conn)
+			engine.handleConn(conn, func() {})
 		}
 	}()
 	conn, err := net.Dial("tcp", engine.Addr().String())
@@ -132,7 +137,7 @@ func TestRequireTLSRejectsIncompleteHandshake(t *testing.T) {
 	engine.cfg.RequireTLS = true
 	forbidStartupHooks(engine)
 	conn := tls.Server(newBufferConn(nil), &tls.Config{})
-	_, err = engine.handleStartup(t.Context(), conn, &pgproto3.StartupMessage{})
+	_, err = engine.handleStartup(t.Context(), t.Context(), conn, &pgproto3.StartupMessage{})
 	require.EqualError(t, err, "TLS is required")
 }
 

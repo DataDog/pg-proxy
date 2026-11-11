@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package actions
 
 import (
@@ -131,8 +136,8 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 
 		// handle unnamed prepared statements (and that are not autocached)
 		if !prepared.IsNamedPreparedStmt(m.Name) && !state.AutoPreparedStmtsEnabled {
-			// TODO: https://datadoghq.atlassian.net/browse/ORGSTORE-1124
-			// Update in Phase 2
+			// TODO: track unnamed prepared statements across backend releases
+			// instead of treating them as one-off queries.
 			return handleClientQuery(m.Query, ExtendedQueryProtocol, action, state, hooks)
 		}
 		if hooks.NamedPreparedStmtObserved != nil {

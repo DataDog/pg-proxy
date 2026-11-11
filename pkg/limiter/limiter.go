@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package limiter
 
 import (
@@ -102,20 +107,20 @@ func (sl *Limiter) ExportGauges(ctx context.Context) {
 		case <-ticker.C:
 			sl.ForEachService(func(service string, count int32) {
 				_ = pgproxy.Metrics().Gauge(
-					"dd.orgstore.pg_proxy.listener.service_connections_open",
+					"pg_proxy.listener.service_connections_open",
 					float64(count),
 					[]string{"client_service_account:" + service},
 					1,
 				)
 			})
 			_ = pgproxy.Metrics().Gauge(
-				"dd.orgstore.pg_proxy.listener.connections_open",
+				"pg_proxy.listener.connections_open",
 				float64(sl.GetGlobalCount()),
 				[]string{},
 				1,
 			)
 			_ = pgproxy.Metrics().Gauge(
-				"dd.orgstore.pg_proxy.session_limit.global",
+				"pg_proxy.session_limit.global",
 				float64(sl.globalLimit.Load()),
 				[]string{},
 				1,
@@ -129,7 +134,7 @@ func (sl *Limiter) ExportGauges(ctx context.Context) {
 func (sl *Limiter) RegisterSession(service string) error {
 	serviceState, found := sl.lookup(service)
 	if !found {
-		// When service is not in the supplied quotas, e.g. orgstore-devenv-toolbox.
+		// When service is not in the supplied quotas, e.g. an ad hoc tooling client.
 		serviceState = sl.RegisterService(service, sl.defaultServiceMax)
 	}
 

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package session
 
 import (
@@ -15,7 +20,7 @@ import (
 )
 
 // This file contains simple e2e unit tests using fake channels between the client->session->pg.
-// TODO(ORGSTORE-303): We should use integration tests using a real client and postgres for functional testing.
+// TODO: We should use integration tests using a real client and postgres for functional testing.
 
 func TestSimple(t *testing.T) {
 	t.Run("reused_buffer", func(t *testing.T) {

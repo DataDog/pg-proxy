@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 // Package session owns the portable PostgreSQL client session engine.
 package session
 
@@ -160,9 +165,9 @@ type Session struct {
 
 	mirroring Mirroring
 
-	mirror         *mirror.Queue  // per-session mirror queue (OSQQUERY-92); nil until the first mirrored link
+	mirror         *mirror.Queue  // per-session mirror queue; nil until the first mirrored link
 	mirrorBudget   *mirror.Budget // shared, process-wide byte budget for all mirror queues (set by the listener)
-	mirrorWorker   *mirror.Worker // drains s.mirror onto the shadow DB (OSQQUERY-93); started with s.mirror
+	mirrorWorker   *mirror.Worker // drains s.mirror onto the shadow DB; started with s.mirror
 	hooksCloseOnce sync.Once
 }
 
@@ -230,7 +235,7 @@ type MirrorPolicy struct {
 	QueueSize      int
 }
 
-// Mirroring keeps COBS, experiments and shadow state resolution in the app.
+// Mirroring leaves policy sources, experiments, and shadow state resolution to the embedder.
 type Mirroring struct {
 	Policy        func(context.Context) MirrorPolicy
 	AcquireShadow func(context.Context, string, LinkRequest) (link.Link, error)
@@ -550,7 +555,7 @@ func (s *Session) setDiscardUntilSync(discard bool) {
 	}
 }
 func (s *Session) Cancel() error {
-	// TODO(OSQQUERY-311): this reads s.link without holding s.linkMu,
+	// TODO: this reads s.link without holding s.linkMu,
 	// which races with the session goroutine's synchronized writes. Pre-existing
 	// issue; should be fixed by holding linkMu here.
 	if s.link == nil {
@@ -804,10 +809,11 @@ func (s *Session) Run() error {
 	}
 }
 
-// drainMessage identifies a drain error that OrgStore clients may retry.
+// drainMessage identifies a drain error that clients may retry on a new connection.
 // Send it only between calls, after any open transaction has finished.
-// Keep the prefix and this behavior compatible with deployed clients.
-const drainMessage = "Pg-proxy session has been terminated. For more information, see https://datadoghq.atlassian.net/wiki/spaces/ORGSTORE/pages/5672075405/Postgres+Client+Connection+Behavior"
+// Keep the "Pg-proxy session has been terminated" prefix and this behavior
+// compatible with deployed clients, which match on it.
+const drainMessage = "Pg-proxy session has been terminated. Reconnect to continue."
 
 // drain finishes the active call or transaction, then sends drainMessage
 // and closes the client connection.
@@ -915,12 +921,11 @@ func (s *Session) handleStateRemapping() bool {
 		s.hooks.ClientFlushSucceeded()
 	}
 
-	// TODO(OSQQUERY-558): this abort does not drain an in-flight extended-query pipeline
+	// TODO: this abort does not drain an in-flight extended-query pipeline
 	// nor reset checkout-scoped state (pending prepared statements, root trace). After this
 	// ReadyForQuery, a pipeline tail (Bind/Execute/Sync) can be admitted as a new
 	// checkout out of protocol order, and can be independently load-shed. This is a
-	// pre-existing gap (not introduced by the connection-checkout RIF change) and
-	// is tracked separately in OSQQUERY-558.
+	// pre-existing gap, not introduced by the connection-checkout RIF change.
 	// Skip processing the message
 	return true
 }
@@ -1071,7 +1076,11 @@ func (s *Session) startMirrorWorker(tags []string) {
 		defer cancel()
 		return s.mirroring.AcquireShadow(ctx, shadowDB, req)
 	}
-	s.mirrorWorker = mirror.NewWorker(s.mirror, acquire, tags)
+	// Snapshot on the session goroutine: the worker must not read pStmtState itself.
+	// Confirmed-only is enough: this runs only with s.link == nil, and the release path
+	// invalidates pending stmts just before clearing the link. The backend-remap abort does
+	// not (OSQQUERY-558), so a stmt left pending there costs one batch, counted by catalog_miss.
+	s.mirrorWorker = mirror.NewWorker(s.mirror, acquire, tags, s.pStmtState.ListConfirmedNamedStmts())
 	go s.mirrorWorker.Run()
 }
 
@@ -1080,7 +1089,7 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 		return nil
 	}
 	if s.link == nil {
-		// TODO(OSQQUERY-556): RIF acquired on s.state (primary) in receiveAndHandleMessage;
+		// TODO: RIF acquired on s.state (primary) in receiveAndHandleMessage;
 		// read-routed links held on different cluster. Revisit when cross-cluster routing is active.
 		routed := s.router(action.HandleReadQuery)
 
@@ -1153,6 +1162,16 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 	}
 	// if the connection already has this pending named statement, can just send back ParseComplete
 	if preparedStatement.IsProxyNamedPreparedStmt() && s.link.HasExistingNamedPreparedStmt(preparedStatement) {
+		if m, ok := s.link.(mirror.StmtDefMirror); ok {
+			// No Parse is forwarded, but the shadow uses a different connection that may
+			// lack it. Must precede the flush below, or the batch can end on an
+			// unanswered ParseReply and release a non-idle shadow link.
+			m.MirrorParse(&pgproto3.Parse{
+				Name:          preparedStatement.GetProxyName(),
+				Query:         preparedStatement.GetSQLQuery(),
+				ParameterOIDs: preparedStatement.GetParamOIDs(),
+			})
+		}
 		// first flush all buffered messages to Postgres
 		s.link.Send(&pgproto3.Flush{}, query.NoReply)
 		discardedUntilSync, err := s.flushPostgres()

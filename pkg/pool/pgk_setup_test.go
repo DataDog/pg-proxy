@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package pool
 
 import (
@@ -7,8 +12,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// These scenarios moved from apps/pg-proxy/pools with the original inventory
-// and health expectations. Discover supplies the health worker's retained set,
+// These scenarios cover discovery and cleanup with their inventory and
+// health expectations. Discover supplies the health worker's retained set,
 // so the pool must not apply a second DNS-miss threshold.
 func TestSetupPool_PGK(t *testing.T) {
 	const repeatedHealthChecks = 3

@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package main
 
 import (
@@ -127,6 +132,7 @@ func TestTelemetryEnvironmentConfig(t *testing.T) {
 func TestSharedConfigRejectsUnsupportedFeatures(t *testing.T) {
 	for name, modify := range map[string]func(*pgconfig.Config){
 		"JWT":                      func(c *pgconfig.Config) { c.Proxy.JWTAuthEnabled = true },
+		"password authentication":  func(c *pgconfig.Config) { c.Proxy.PasswordAuthEnabled = true },
 		"users":                    func(c *pgconfig.Config) { c.Users = []pgconfig.User{{}} },
 		"mirroring":                func(c *pgconfig.Config) { c.Mirroring = &pgconfig.Mirroring{} },
 		"no databases":             func(c *pgconfig.Config) { c.Databases = nil },

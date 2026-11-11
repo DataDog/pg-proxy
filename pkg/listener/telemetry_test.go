@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 package listener
 
 import (
@@ -83,7 +88,7 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 
 	admission.RegisterService("limited", 0)
 	rejected := newBufferConn(nil)
-	_, err = engine.handleStartup(t.Context(), rejected, &pgproto3.StartupMessage{Parameters: map[string]string{
+	_, err = engine.handleStartup(t.Context(), t.Context(), rejected, &pgproto3.StartupMessage{Parameters: map[string]string{
 		"user": "limited", "database": "testdb",
 	}})
 	require.Error(t, err)
@@ -93,23 +98,23 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 		Parameters:      map[string]string{"user": "successful", "database": "testdb"},
 	}).Encode(nil)
 	require.NoError(t, err)
-	engine.handleConn(newBufferConn(startup))
+	engine.handleConn(newBufferConn(startup), func() {})
 
 	assert.Equal(t, []listenerMetricCall{
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"outcome:error", "placement:tls_upgrade_failure"}, rate: 1,
 		},
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"outcome:error", "placement:load_shedding"}, rate: 1,
 		},
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"user:limited", "database:testdb", "client_service_account:limited", "passthrough_user:false", "outcome:error", "error_type:service_limit_exceeded", "placement:register_session", "client_notified:true"}, rate: 1,
 		},
 		{
-			name: "dd.orgstore.pg_proxy.listener.connection_attempt", value: 1,
+			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"user:successful", "database:testdb", "client_service_account:successful", "passthrough_user:false", "outcome:successful", "with_dynamic_routing:false"}, rate: 1,
 		},
 	}, metrics.counts)
