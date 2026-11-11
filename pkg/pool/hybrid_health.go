@@ -143,7 +143,8 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 }
 
 // observePublishedPatroniRouting records hybrid publication when Patroni owns routing (including
-// cached fallback). This happens on the Patroni loop, not at the next SQL completion.
+// cached fallback). Record the publication itself, including when empty SQL discovery restores
+// Patroni ownership, rather than waiting for the next refresh.
 func (p *hybridHealthPolicy) observePublishedPatroniRouting(health map[string]bool, observedAt time.Time) *LeaderRoutingComparison {
 	p.mu.Lock()
 	defer p.mu.Unlock()

@@ -2563,6 +2563,22 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 	require.False(t, health.IsHealthy(primary))
 	require.False(t, health.IsHealthy(standby))
 
+	var comparisons []LeaderRoutingComparison
+	w.sqlHooks.LeaderRoutingCompared = func(c LeaderRoutingComparison, _ []string) {
+		if assert.True(t, health.sqlComparisonMu.TryLock(), "comparison hooks must run outside the SQL snapshot lock") {
+			health.sqlComparisonMu.Unlock()
+		}
+		if assert.True(t, health.routingMu.TryLock(), "comparison hooks must run outside the routing lock") {
+			health.routingMu.Unlock()
+		}
+		comparisons = append(comparisons, c)
+	}
+	// Patroni learns a new leader while SQL still owns the all-standby route.
+	patroniObservedAt := time.Now()
+	w.applyPatroniHealth(health, map[string]bool{primary: false, standby: true}, nil, []string{primary, standby}, patroniObservedAt)
+	require.False(t, health.IsHealthy(standby))
+	require.Empty(t, comparisons)
+
 	patroniProber.mu.Lock()
 	patroniProber.ipsByHost["primary.local"] = nil
 	patroniProber.mu.Unlock()
@@ -2571,29 +2587,41 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 		require.True(t, health.sqlRoutingActive, "empty DNS must not restore Patroni while SQL candidates are retained")
 		require.False(t, health.IsHealthy(primary))
 	}
+	beforeFallback := time.Now()
 	w.RefreshSQL()
+	afterFallback := time.Now()
 	require.Empty(t, health.sqlHealthState.Resolved())
 	require.False(t, health.sqlRoutingActive, "evicting every SQL candidate must restore Patroni ownership")
-	require.True(t, health.IsHealthy(primary))
+	require.True(t, health.IsHealthy(standby))
 	assert.ElementsMatch(t, []string{primary, standby}, health.Resolved())
 	assert.False(t, health.sqlRoutingDisabled, "empty discovery must not latch the routing kill switch")
+	require.Len(t, comparisons, 1, "record fallback publication without waiting for another Patroni refresh")
+	assert.Equal(t, standby, comparisons[0].NewLeaderIP)
+	assert.Equal(t, SQLRoutingResultCachedFallback, comparisons[0].HybridSource)
+	assert.GreaterOrEqual(t, comparisons[0].Improvement, patroniObservedAt.Sub(afterFallback))
+	assert.LessOrEqual(t, comparisons[0].Improvement, patroniObservedAt.Sub(beforeFallback))
+
+	// Empty SQL rounds and a later Patroni refresh must not repeat the comparison.
+	w.RefreshSQL()
+	w.applyPatroniHealth(health, map[string]bool{primary: false, standby: true}, nil, []string{primary, standby}, time.Now())
+	assert.Len(t, comparisons, 1)
 
 	// Patroni continues publishing leader changes while SQL discovery is empty.
-	w.applyPatroniHealth(health, map[string]bool{primary: false, standby: true}, nil, []string{primary, standby}, time.Now())
-	require.False(t, health.IsHealthy(primary))
-	require.True(t, health.IsHealthy(standby))
+	w.applyPatroniHealth(health, map[string]bool{primary: true, standby: false}, nil, []string{primary, standby}, time.Now())
+	require.True(t, health.IsHealthy(primary))
+	require.False(t, health.IsHealthy(standby))
 
 	// SQL can take ownership again after discovery recovers.
 	patroniProber.mu.Lock()
 	patroniProber.ipsByHost["primary.local"] = []string{primary, standby}
 	patroniProber.mu.Unlock()
 	sqlProber.mu.Lock()
-	sqlProber.responses[primary] = fakeSQLHealthProbeResponse{inRecovery: false}
+	sqlProber.responses[standby] = fakeSQLHealthProbeResponse{inRecovery: false}
 	sqlProber.mu.Unlock()
 	w.RefreshSQL()
 	assert.True(t, health.sqlRoutingActive)
-	assert.True(t, health.IsHealthy(primary))
-	assert.False(t, health.IsHealthy(standby))
+	assert.False(t, health.IsHealthy(primary))
+	assert.True(t, health.IsHealthy(standby))
 }
 
 func TestSQLRoutingDoesNotReplacePatroniDiscoveryState(t *testing.T) {
