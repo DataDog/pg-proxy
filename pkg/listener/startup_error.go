@@ -75,8 +75,8 @@ func startupFailureDetails(err error, placement string) (stage, reason, message,
 		stage, reason, diagnostic = "cancel", "incorrect_secret", "failed to cancel request: "+incorrectSecret.Error()
 	case errors.Is(err, errTLSRequired):
 		stage, reason, message = "tls", "tls_required", "TLS is required"
-		// Clients using sslmode=prefer land here after a failed TLS attempt.
-		diagnostic = "TLS is required: plaintext startup rejected; if this client's TLS attempt failed just before, that failure is the cause"
+		// Clients using sslmode=prefer retry in plaintext after any startup failure over TLS.
+		diagnostic = "TLS is required: plaintext startup rejected; if this client first connected over TLS, the preceding startup failure from the same remote is the cause"
 	case errors.Is(err, errLoadShedding):
 		stage, reason, message = "load_shedding", "overloaded", errLoadShedding.Error()
 		diagnostic = message
@@ -91,7 +91,7 @@ func startupFailureDetails(err error, placement string) (stage, reason, message,
 	case errors.Is(err, ErrLogicalDatabaseNotConfigured):
 		reason, diagnostic = "logical_database_not_configured", ErrLogicalDatabaseNotConfigured.Error()
 	case errors.Is(err, ErrBackendNotReady):
-		reason, diagnostic = "backend_not_ready", ErrBackendNotReady.Error()+` (see "failed to create state for cluster" logs)`
+		reason, diagnostic = "backend_not_ready", ErrBackendNotReady.Error()+` (if cluster creation failed, see "failed to create state for cluster" logs)`
 	}
 	return stage, reason, message, diagnostic
 }

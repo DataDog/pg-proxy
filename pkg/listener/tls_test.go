@@ -150,7 +150,7 @@ func TestRequireTLSLogsFallbackHint(t *testing.T) {
 	_, err = frontend.Receive()
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
 	assert.Contains(t, logs.String(), "reason=tls_required")
-	assert.Contains(t, logs.String(), "if this client's TLS attempt failed just before, that failure is the cause")
+	assert.Contains(t, logs.String(), "if this client first connected over TLS, the preceding startup failure from the same remote is the cause")
 }
 
 func TestRequireTLSRejectsIncompleteHandshake(t *testing.T) {
