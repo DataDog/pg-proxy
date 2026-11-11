@@ -431,6 +431,12 @@ Docker-backed tests require the `integration` build tag. Run the Docker checks
 above when needed. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[Contribute to PG Proxy](docs/site/src/content/docs/how-to/contributing.md).
+<!-- TODO: once the documentation site is published, link to the contributing page's site URL instead of its source file. -->
+
 ## License
 
 PG Proxy is licensed under [Apache-2.0](LICENSE). Third-party licenses and
