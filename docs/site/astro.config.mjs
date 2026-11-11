@@ -33,6 +33,7 @@ export default defineConfig({
       { label: 'How-to guides', items: [
         { slug: 'how-to/local-development' },
         { slug: 'how-to/otel-metrics-to-datadog' },
+        { slug: 'how-to/contributing' },
         { slug: 'how-to/documentation-contributing' },
         { slug: 'how-to/set-pool-limits' },
       ] },
