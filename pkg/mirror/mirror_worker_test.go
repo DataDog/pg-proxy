@@ -178,7 +178,7 @@ func drainClosedWithSeed(q *mirrorQueue, acquire func() (Link, error), seed []pr
 }
 
 func TestMirrorWorker_ReplaysBatchAndDropsReplies(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Parse{Name: "p"}, expectation: query.ParseReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Bind{}, expectation: query.BindReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
@@ -214,7 +214,7 @@ func TestMirrorWorker_ReplaysBatchAndDropsReplies(t *testing.T) {
 }
 
 func TestMirrorWorker_SeparateBatchesReacquire(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	// Two batches, each ending in release.
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "a"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
@@ -237,7 +237,7 @@ func TestMirrorWorker_SeparateBatchesReacquire(t *testing.T) {
 }
 
 func TestMirrorWorker_FlushErrorSkipsToNextBatch(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	// Batch 1 flush fails; its trailing Execute must be skipped.
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Parse{}, expectation: query.ParseReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
@@ -276,7 +276,7 @@ func TestMirrorWorker_FlushErrorSkipsToNextBatch(t *testing.T) {
 }
 
 func TestMirrorWorker_AcquireErrorSkipsBatch(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "a"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
 	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
@@ -310,7 +310,7 @@ func TestMirrorWorker_AcquireErrorSkipsBatch(t *testing.T) {
 // CommandComplete, ReadyForQuery). The worker must consume all of them, not one
 // per expectation, or leftover rows break RESET ALL when the link is released.
 func TestMirrorWorker_DrainsFullResultSet(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "select 1"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
 	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
@@ -341,7 +341,7 @@ func TestMirrorWorker_DrainsFullResultSet(t *testing.T) {
 // drop) makes the worker skip the rest of that batch, so a transaction missing a
 // dropped statement is never partially replayed, and that skip resets at release.
 func TestMirrorWorker_PoisonSkipsBatch(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	// Batch 1: begin replays, then a drop poisons it, so the trailing insert is skipped.
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "begin"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
@@ -380,7 +380,7 @@ func TestMirrorWorker_WatchdogResetsOnProgress(t *testing.T) {
 	mirrorShadowDrainTimeout = 200 * time.Millisecond
 	defer func() { mirrorShadowDrainTimeout = orig }()
 
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "select *"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
 	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
@@ -416,7 +416,7 @@ func TestMirrorWorker_WatchdogResetsOnProgress(t *testing.T) {
 // expectations up to the Sync, whose ReadyForQuery resolves the rest, so the
 // worker never blocks on a reply that will not come and leaves the link idle.
 func TestMirrorWorker_ErrorResponseDiscardsUntilSync(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Parse{}, expectation: query.ParseReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Bind{}, expectation: query.BindReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Sync{}, expectation: query.SyncReply, size: 10})
@@ -441,7 +441,7 @@ func TestMirrorWorker_ErrorResponseDiscardsUntilSync(t *testing.T) {
 // TestMirrorWorker_StopForceClosesHungLink verifies stop() force-closes a link
 // stuck in Receive so the worker exits within the timeout.
 func TestMirrorWorker_StopForceClosesHungLink(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "a"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
 	// No release sentinel: the worker blocks in flushAndDrain's Receive.
@@ -503,7 +503,7 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 // contained to the worker goroutine (not propagated, which would crash the whole
 // process) and the worker still exits cleanly, releasing its link.
 func TestMirrorWorker_RecoversFromPanic(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "boom"}, expectation: query.QueryReply, size: 10})
 	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
 
@@ -603,7 +603,7 @@ func enqueueBatch(q *mirrorQueue, msgs ...mirrorItem) {
 
 // 42P05 guard: a Parse for a statement the connection has must not reach the wire.
 func TestMirrorWorker_DuplicateParseNotResent(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
@@ -627,7 +627,7 @@ func TestMirrorWorker_DuplicateParseNotResent(t *testing.T) {
 }
 
 func TestMirrorWorker_ReparsesOnFreshConnection(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply},
@@ -654,7 +654,7 @@ func TestMirrorWorker_ReparsesOnFreshConnection(t *testing.T) {
 
 // The catalog has it but so does the connection, so nothing is re-sent.
 func TestMirrorWorker_NoReparseWhenConnectionHasStmt(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply},
@@ -679,7 +679,7 @@ func TestMirrorWorker_NoReparseWhenConnectionHasStmt(t *testing.T) {
 
 // A Bind whose definition the worker never saw must not skip the batch.
 func TestMirrorWorker_CatalogMissContinuesBatch(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "unknown"}, expectation: query.BindReply},
 		mirrorItem{msg: &pgproto3.Execute{}, expectation: query.ExecuteReply},
@@ -720,7 +720,7 @@ func TestStmtCatalog_EvictsOldest(t *testing.T) {
 
 // Forwards a client Describe on a named statement, so a batch can open with one on a cold connection.
 func TestMirrorWorker_DescribeStatementReparses(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply},
@@ -751,7 +751,7 @@ func TestMirrorWorker_DescribeStatementReparses(t *testing.T) {
 // A client that prepared before mirroring was enabled never sends Parse again, so
 // the seeded catalog is the only thing standing between its Binds and 26000.
 func TestMirrorWorker_SeededCatalogReparsesWithoutParse(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply})
 
 	seed := []prepared.PreparedStatement{prepared.CreatePreparedStatement("c1", "s1", "select 1", nil)}
@@ -771,7 +771,7 @@ func TestMirrorWorker_SeededCatalogReparsesWithoutParse(t *testing.T) {
 
 // Without the seed the same batch is exactly the staging failure: a bare Bind.
 func TestMirrorWorker_UnseededCatalogSendsBareBind(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply})
 
 	f := newLinkFactory(func(l *fakeShadowLink) {
@@ -787,7 +787,7 @@ func TestMirrorWorker_UnseededCatalogSendsBareBind(t *testing.T) {
 // A batch that never got a shadow link still carries its Parse definitions, so the
 // next batch can repair its Binds instead of missing the catalog forever.
 func TestMirrorWorker_CatalogSurvivesAcquireFailure(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply},
@@ -819,7 +819,7 @@ func TestMirrorWorker_CatalogSurvivesAcquireFailure(t *testing.T) {
 // record cannot be retracted. If that batch errored, the connection must not go back
 // to the pool claiming a statement it may not have.
 func TestMirrorWorker_ErrorAfterRecordingDiscardsConnection(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select bogus"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Sync{}, expectation: query.SyncReply},
@@ -844,7 +844,7 @@ func TestMirrorWorker_ErrorAfterRecordingDiscardsConnection(t *testing.T) {
 // and nothing recorded in the erroring window, so the sawError && recorded guard stays
 // out of the way and the discard state is what is under test.
 func TestMirrorWorker_NoClaimWhileDiscardingUntilSync(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	// First window: an Execute fails, so Postgres starts discarding. Nothing recorded.
 	q.tryEnqueue(mirrorItem{typ: mirrorMsg, size: 10, msg: &pgproto3.Execute{}, expectation: query.ExecuteReply})
 	q.enqueueSentinel(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
@@ -875,7 +875,7 @@ func TestMirrorWorker_NoClaimWhileDiscardingUntilSync(t *testing.T) {
 // normally only ever reached through Bind after its one Parse, so a cache hit here must
 // refresh usage or the statement looks unused and is deallocated ahead of cold ones.
 func TestMirrorWorker_BindOnExistingStatementRefreshesUsage(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q,
 		mirrorItem{msg: &pgproto3.Parse{Name: "s1", Query: "select 1"}, expectation: query.ParseReply},
 		mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply},
@@ -902,7 +902,7 @@ func TestMirrorWorker_BindOnExistingStatementRefreshesUsage(t *testing.T) {
 // puts the panic after tryReserveRaw, which is the window under test.
 func TestMirrorWorker_PanicAfterReparseReservationReleasesBudget(t *testing.T) {
 	b := NewBudget(1 << 20)
-	q := newMirrorQueue(1<<20, b)
+	q := newMirrorQueue(queueCapRoomy, b)
 	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply})
 
 	seed := []prepared.PreparedStatement{prepared.CreatePreparedStatement("", "s1", "select 1", nil)}

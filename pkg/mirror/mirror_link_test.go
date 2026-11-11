@@ -9,6 +9,10 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
+// queueCapRoomy is a session byte cap large enough that nothing is dropped, for the
+// tests whose subject is not admission control.
+const queueCapRoomy = 1 << 20 // 1 MiB
+
 // queuedTypes snapshots the item types currently queued, in FIFO order, without
 // draining (dequeue would block on an empty queue and close would drop the tail).
 func queuedTypes(q *mirrorQueue) []mirrorItemType {
@@ -28,7 +32,7 @@ func mirrorLinkOver(q *mirrorQueue) *mirroringLink {
 // TestMirroringLink_DataBatchEnqueuesBoundaries: a batch that admits data enqueues
 // its flush and release sentinels in order.
 func TestMirroringLink_DataBatchEnqueuesBoundaries(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	l := mirrorLinkOver(q)
 
 	l.Send(&pgproto3.Query{String: "x"}, query.QueryReply)
@@ -42,7 +46,7 @@ func TestMirroringLink_DataBatchEnqueuesBoundaries(t *testing.T) {
 // last one is skipped (an empty flush is a no-op on the shadow), but a flush after
 // fresh data is enqueued again.
 func TestMirroringLink_CoalescesEmptyFlush(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	l := mirrorLinkOver(q)
 
 	l.Send(&pgproto3.Query{String: "x"}, query.QueryReply)
@@ -58,7 +62,7 @@ func TestMirroringLink_CoalescesEmptyFlush(t *testing.T) {
 // and drops nothing (so it isn't poisoned) never makes the worker acquire a link, so
 // its flush and release sentinels are skipped and nothing is queued.
 func TestMirroringLink_EmptyBatchEnqueuesNothing(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	l := mirrorLinkOver(q)
 
 	assert.NoError(t, l.Flush()) // no data buffered
@@ -118,7 +122,7 @@ func TestMirroringLink_DataLessPoisonedBatchEnqueuesNothing(t *testing.T) {
 // A Parse the session did not forward reaches the queue with the ParseReply
 // expectation the worker's drain needs. A plain link offers no such entry point.
 func TestMirroringLink_MirrorParseEnqueuesWithParseReply(t *testing.T) {
-	q := newMirrorQueue(1<<20, nil)
+	q := newMirrorQueue(queueCapRoomy, nil)
 	l := mirrorLinkOver(q)
 
 	m, ok := any(l).(StmtDefMirror)
