@@ -159,9 +159,9 @@ func TestSessionLoadShedding(t *testing.T) {
 }
 
 // TestPingBypassesLoadShedding verifies that pgx ping queries ("-- ping") are
-// answered with ReadyForQuery even when the load shedder is active. Pings must
-// never be rejected: pgxpool destroys and recreates the connection on error,
-// amplifying load during shedding.
+// answered with EmptyQueryResponse and ReadyForQuery when idle, even while the
+// load shedder is active. Idle pings must never be rejected: pgxpool destroys
+// and recreates the connection on error, amplifying load during shedding.
 func TestPingBypassesLoadShedding(t *testing.T) {
 	assert := assert.New(t)
 	session, fakeClient, _, backend, closer := newRunningTestSessionWithBackend(t)
@@ -171,7 +171,11 @@ func TestPingBypassesLoadShedding(t *testing.T) {
 	assert.NoError(fakeClient.Flush())
 	msg, err := fakeClient.Receive()
 	assert.NoError(err)
-	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, msg, "ping must receive ReadyForQuery, not an error")
+	assert.Equal(&pgproto3.EmptyQueryResponse{}, msg)
+	msg, err = fakeClient.Receive()
+	assert.NoError(err)
+	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, msg)
+	assert.Equal(int64(0), backend.loadShedder.runCount.Load())
 	// No backend connection should have been acquired.
 	assert.Nil(session.CurrentLink())
 }
@@ -681,6 +685,9 @@ func TestCheapQueryDoesNotAcquireRIF(t *testing.T) {
 	// pgx ping is intercepted and bypasses the shedder.
 	fakeClient.Send(&pgproto3.Query{String: "-- ping"})
 	assert.NoError(fakeClient.Flush())
+	empty, err := fakeClient.Receive()
+	assert.NoError(err)
+	assert.Equal(&pgproto3.EmptyQueryResponse{}, empty)
 	rfq, err := fakeClient.Receive()
 	assert.NoError(err)
 	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, rfq)
@@ -702,8 +709,8 @@ func TestCheapQueryDoesNotAcquireRIF(t *testing.T) {
 }
 
 // TestPgxPingDuringHeldLinkKeepsRIFUntilRelease verifies that a pgx ping received
-// while a backend connection is held (link != nil) is answered with ReadyForQuery{I}
-// but does NOT release the checkout/RIF. The shedder's Run count stays at 1
+// while a backend connection is held is forwarded and preserves its transaction
+// status without releasing the checkout/RIF. The shedder's Run count stays at 1
 // throughout, and a subsequent in-transaction message is still forwarded to PG
 // through the same link rather than being treated as a new checkout.
 func TestPgxPingDuringHeldLinkKeepsRIFUntilRelease(t *testing.T) {
@@ -715,9 +722,18 @@ func TestPgxPingDuringHeldLinkKeepsRIFUntilRelease(t *testing.T) {
 	// pgx ping while the link is held: must be answered but NOT release the RIF.
 	fakeClient.Send(&pgproto3.Query{String: "-- ping"})
 	assert.NoError(fakeClient.Flush())
+	ping, err := fakePg.Receive()
+	assert.NoError(err)
+	assert.Equal(&pgproto3.Query{String: "-- ping"}, ping)
+	fakePg.Send(&pgproto3.EmptyQueryResponse{})
+	fakePg.Send(&pgproto3.ReadyForQuery{TxStatus: 'T'})
+	assert.NoError(fakePg.Flush())
+	empty, err := fakeClient.Receive()
+	assert.NoError(err)
+	assert.Equal(&pgproto3.EmptyQueryResponse{}, empty)
 	rfq, err := fakeClient.Receive()
 	assert.NoError(err)
-	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, rfq, "ping must receive ReadyForQuery{I}")
+	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'T'}, rfq)
 	// RIF is still held: the shedder was not called again and the link is non-nil.
 	assert.Equal(int64(1), backend.loadShedder.runCount.Load(), "shedder must not be called again after ping")
 	assert.NotNil(session.CurrentLink(), "link must still be held after ping")

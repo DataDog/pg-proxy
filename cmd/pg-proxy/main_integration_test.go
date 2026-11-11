@@ -121,6 +121,9 @@ proxy:
 		}
 	})
 	proxyURL := "postgres://postgres@" + proxy.server.Addr().String() + "/local_db?sslmode=disable"
+	t.Run("ping_protocol", func(t *testing.T) {
+		testPingProtocolAgainstPostgres(t, adminURL, proxyURL)
+	})
 	client, err := pgx.Connect(ctx, proxyURL)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close(context.Background()) })
