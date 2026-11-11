@@ -1151,6 +1151,17 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		// Capture membership and roles only after that retention update.
 		snapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		if len(snapshot.retainedIPs) == 0 {
+			poolHealth.routingMu.Lock()
+			if poolHealth.sqlRoutingActive {
+				poolHealth.sqlRoutingActive = false
+				patroniHealth := poolHealth.patroniHealthState.Snapshot()
+				poolHealth.publishRoutingSnapshot(patroniHealth, poolHealth.patroniHealthState.Resolved())
+				if policy := poolHealth.hybridPolicy; policy != nil {
+					decision.routingEnabled = policy.isRoutingEnabled()
+					decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth, time.Now())
+				}
+			}
+			poolHealth.routingMu.Unlock()
 			return false
 		}
 		// DNS can discover another IP while this credential is running. An older poll
@@ -1196,7 +1207,10 @@ func (w *HealthWorker) completeSQLHealthCheck(
 	if applied {
 		// Cached errors remain evidence for the decision, but are not new probe events.
 		w.reportConclusiveErrors([]completedSQLHealthCheck{{target: target, outcome: outcome}}, decision)
-		w.reportHybridDecision(poolHealth, decision, true)
+	}
+	// Empty discovery can publish a Patroni route without evaluating a SQL iteration.
+	if applied || decision.routingComparison != nil {
+		w.reportHybridDecision(poolHealth, decision, applied)
 	}
 }
 
@@ -1320,10 +1334,7 @@ func (w *HealthWorker) checkSQLHealth(
 			}, true
 		}
 
-		patroniHealth := make(map[string]bool, len(toProbe))
-		for _, ip := range toProbe {
-			patroniHealth[ip] = poolHealth.IsHealthy(ip)
-		}
+		patroniHealth := poolHealth.patroniHealthState.Snapshot()
 		outcome = target.checker.Check(
 			ctx,
 			toProbe,
