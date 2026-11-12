@@ -555,7 +555,7 @@ func TestStateRemapDuringHeldLink(t *testing.T) {
 
 	// State was remapped; link was released.
 	assert.Equal(newBackend, session.Backend())
-	assert.Nil(session.CurrentLink())
+	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
 	// The old shedder's fn was called exactly once (for BEGIN); the remap
 	// happened inside the inner loop and did NOT call Run again.
 	assert.Equal(int64(1), oldShedder.getRunCount())
@@ -607,6 +607,6 @@ func TestClientDisconnectDuringHeldLink(t *testing.T) {
 	_, err = fakeClient.Receive()
 	assert.NoError(err)
 
-	assert.Nil(session.CurrentLink())
+	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
 	assert.True(session.ClientDisconnected())
 }

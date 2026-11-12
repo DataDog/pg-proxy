@@ -512,7 +512,11 @@ func (s *Session) MetricTags() []string        { return s.obsVals.metricTags }
 func (s *Session) TraceState() *query.TraceState {
 	return s.obsVals.traceState
 }
-func (s *Session) CurrentLink() link.Link { return s.link }
+func (s *Session) CurrentLink() link.Link {
+	s.linkMu.Lock()
+	defer s.linkMu.Unlock()
+	return s.link
+}
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
 }
@@ -1387,6 +1391,21 @@ func (s *Session) flushPostgres() (bool, error) {
 		return nil
 	}
 
+	// finishClientFlush writes the rest of the reply, if any, and ends its trace span.
+	finishClientFlush := func() error {
+		if !flushClient {
+			return nil
+		}
+		flushClient = false
+		if err := flushToClient(); err != nil {
+			s.obsVals.traceState.FinishTrace(err)
+			return fmt.Errorf("error flushing messages to client: %w", err)
+		}
+		s.recordBufferFlushFinished(timesFlushed + 1)
+		s.obsVals.traceState.FinishTrace()
+		return nil
+	}
+
 	s.obsVals.traceState.StartTrace(query.QueryExecutionAndProxying)
 	for {
 		expectation := s.link.NextExpectation()
@@ -1457,6 +1476,14 @@ func (s *Session) flushPostgres() (bool, error) {
 			pgSkippingUntilSync = false
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
+			// Reply before Release runs its RESET ALL round trip, so the client
+			// gets its result one round trip sooner. The session keeps the link
+			// until Release returns and reads the client's next message only after
+			// that, so no message reaches a backend that has not been reset. If the
+			// write fails, close releases the link the session still holds.
+			if err := finishClientFlush(); err != nil {
+				return discardedUntilSync, err
+			}
 			s.invalidatePendingStmts(false)
 			err := s.link.Release()
 			if err != nil {
@@ -1469,14 +1496,8 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 	}
 	// ensure any remaining messages are also flushed
-	if flushClient {
-		err := flushToClient()
-		if err != nil {
-			s.obsVals.traceState.FinishTrace(err)
-			return discardedUntilSync, fmt.Errorf("error flushing messages to client: %w", err)
-		}
-		s.recordBufferFlushFinished(timesFlushed + 1)
-		s.obsVals.traceState.FinishTrace()
+	if err := finishClientFlush(); err != nil {
+		return discardedUntilSync, err
 	}
 	s.obsVals.traceState.FinishRootTrace()
 	if clientWriteSucceeded && s.hooks.ClientFlushSucceeded != nil {

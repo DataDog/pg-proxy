@@ -688,3 +688,131 @@ func TestClientMonitorConcurrentLinkAccess(t *testing.T) {
 		assert.True(t, s.ClientDisconnected())
 	})
 }
+
+func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
+	largeRow := &pgproto3.DataRow{Values: [][]byte{[]byte(strings.Repeat("x", 128))}}
+	for _, test := range []struct {
+		name       string
+		bufferSize int
+		reply      []pgproto3.BackendMessage
+		wantEvents []string
+	}{
+		{
+			name:       "single flush",
+			bufferSize: 1 << 20,
+			reply:      []pgproto3.BackendMessage{&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")}, &pgproto3.ReadyForQuery{TxStatus: 'I'}},
+			wantEvents: []string{"client_write", "release", "flush_succeeded"},
+		},
+		{
+			// Each row fills the buffer and flushes mid-reply; the ReadyForQuery
+			// left over must still reach the client before Release.
+			name:       "buffer fills",
+			bufferSize: 128,
+			reply:      []pgproto3.BackendMessage{largeRow, largeRow, &pgproto3.ReadyForQuery{TxStatus: 'I'}},
+			wantEvents: []string{"client_write", "client_write", "client_write", "release", "flush_succeeded"},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var wantWritten []byte
+			for _, msg := range test.reply {
+				var err error
+				wantWritten, err = msg.Encode(wantWritten)
+				require.NoError(t, err)
+			}
+
+			var events []string
+			clientConn := &writeRecordingConn{events: &events}
+			received := 0
+			var s *Session
+			backendLink := &testLink{
+				nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
+				receive: func() (pgproto3.BackendMessage, error) {
+					msg := test.reply[received]
+					received++
+					return msg, nil
+				},
+			}
+			backendLink.release = func() error {
+				events = append(events, "release")
+				// The client has the whole reply, and the session still owns the
+				// link while it is reset.
+				assert.Equal(t, wantWritten, clientConn.written)
+				assert.Same(t, backendLink, s.link)
+				return nil
+			}
+			s = New(Config{
+				Context:               context.Background(),
+				Client:                &testClient{},
+				ClientConn:            clientConn,
+				InitialLink:           backendLink,
+				PostgresMsgBufferSize: test.bufferSize,
+				Hooks:                 flushRecordingHooks{events: &events}.hooks(),
+			})
+
+			_, err := s.FlushPostgres()
+			require.NoError(t, err)
+			require.Equal(t, test.wantEvents, withoutObserve(events))
+			require.Equal(t, wantWritten, clientConn.written)
+			require.Nil(t, s.link)
+			assert.Equal(t, 1, backendLink.calls.release)
+		})
+	}
+}
+
+func TestFlushPostgresClientWriteFailureBeforeReleaseLeavesLinkForClose(t *testing.T) {
+	metrics := newLifecycleRecordingMetrics(t)
+	writeErr := errors.New("client write failed")
+	clientConn := &writeRecordingConn{writeErr: writeErr}
+	backendLink := &testLink{
+		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
+		receive: func() (pgproto3.BackendMessage, error) {
+			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
+		},
+	}
+	flushSucceeded := 0
+	s := New(Config{
+		Context:     context.Background(),
+		Client:      &testClient{},
+		ClientConn:  clientConn,
+		InitialLink: backendLink,
+		MetricTags:  []string{"user:testuser", "database:testdatabase", "client_service_account:testclient"},
+		// Large enough that the reply is written only before Release, not mid-reply.
+		PostgresMsgBufferSize: 1 << 20,
+		Hooks:                 Hooks{ClientFlushSucceeded: func() { flushSucceeded++ }},
+	})
+
+	_, err := s.FlushPostgres()
+	require.ErrorIs(t, err, writeErr)
+	require.True(t, s.ClientDisconnected())
+	require.Zero(t, flushSucceeded)
+	// The failed write returns before Release, so the session still holds the link.
+	require.Same(t, backendLink, s.link)
+	require.Zero(t, backendLink.calls.release)
+
+	s.Close(err)
+
+	require.Nil(t, s.link)
+	// The link was idle, so close resets it and returns it to the pool.
+	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
+	assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
+	backendLink.assertCalls(t, testLinkCalls{
+		flush: 1, receive: 1, nextExpectation: 1, resolveNextExpectation: 1, handleReadyForQuery: 1, idle: 2, release: 1,
+	})
+}
+
+// linkReleased reports whether the session has released its link. The client
+// receives a reply before the session finishes releasing the link, so tests
+// wait for the release instead of asserting it as soon as the reply arrives.
+func linkReleased(s *Session) func() bool {
+	return func() bool { return s.CurrentLink() == nil }
+}
+
+func withoutObserve(events []string) []string {
+	filtered := []string{}
+	for _, event := range events {
+		if event != "observe" {
+			filtered = append(filtered, event)
+		}
+	}
+	return filtered
+}
