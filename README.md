@@ -80,10 +80,9 @@ Connect through the proxy from another terminal:
 psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' -c 'select 1'
 ```
 
-Clients connect to a logical database (`local_db`), and the proxy routes them to
-the cluster behind it. By default the proxy listens only on loopback and trusts
-the backend username, so use this setup only for local development. To run it
-anywhere else, turn on [TLS and password authentication](docs/client-authentication.md).
+This setup is for local development: the proxy listens on loopback and trusts
+the backend username. To deploy it, follow
+[Run in production](docs/site/src/content/docs/how-to/run-in-production.md).
 
 ## Documentation
 
