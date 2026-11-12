@@ -86,6 +86,15 @@ retaining B but does not restore A solely from Patroni's superseded view. A diff
 eligible Patroni leader can restore routing through the immediate recovery path;
 a fresh conclusive SQL selection can establish A as primary again.
 
+SQL leadership history also survives fallback and conclusive no-primary gaps.
+For A -> B -> C, losing C must not restore cached Patroni B. For B -> no primary
+-> C, the no-primary observation records B as retired so a delayed Patroni B
+cannot replace C. Both the original Patroni leader and retired SQL leaders are
+excluded from fallback and recovery. Recovery to another eligible Patroni leader
+preserves those exclusions; agreement with SQL clears the catch-up history.
+A fresh conclusive SQL selection can re-establish an excluded leader independently
+of Patroni. Retired SQL history is pruned to the current SQL candidate set.
+
 There is no timeout that silently restores the superseded leader. This trades
 continued use of the last conclusive SQL leader during uncertainty against
 returning to an unconfirmed old leader. Future banlist integration must apply its

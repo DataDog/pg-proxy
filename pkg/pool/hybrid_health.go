@@ -101,7 +101,7 @@ type hybridHealthPolicy struct {
 	awaitingPatroniLeader   string
 	supersededPatroniLeader string
 	sqlLeaderSelectedAt     time.Time
-	// Intermediate SQL leaders superseded before Patroni caught up (A -> B -> C).
+	// SQL leaders retired before Patroni caught up, including across no-primary gaps.
 	// Bound this history to current candidates; delayed Patroni B must not replace C.
 	supersededSQLLeaders map[string]struct{}
 
@@ -184,7 +184,7 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 		patroniAdvancedPastSQLLeader := p.awaitingPatroniLeader != "" && unique && !supersededSQLLeader &&
 			leader != p.awaitingPatroniLeader && leader != p.supersededPatroniLeader &&
 			observedAt.After(p.sqlLeaderSelectedAt)
-		p.excludeSupersededPatroniLeaderLocked(decision.health)
+		p.excludeSupersededLeadersLocked(decision.health)
 		// Excluding a superseded leader must not make an ambiguous snapshot
 		// eligible to recover routing and clear that exclusion.
 		eligibleLeader := unique && decision.health[leader]
@@ -198,9 +198,10 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 			}
 			p.patroniRecoveryActive = true
 			if eligibleLeader {
+				// Recovery establishes a new route, not agreement on old SQL leaders.
+				// Keep their exclusions until SQL establishes the topology again.
+				p.rememberSupersededSQLLeaderLocked(p.awaitingPatroniLeader)
 				p.awaitingPatroniLeader = ""
-				p.supersededPatroniLeader = ""
-				p.supersededSQLLeaders = nil
 			}
 			decision.publish = true
 			decision.routingResult = SQLRoutingResultPatroniRecovery
@@ -271,13 +272,16 @@ func (p *hybridHealthPolicy) observeSQL(
 			decision.routingComparison = p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult)
 			return decision
 		}
+		if slices.Contains(candidateIPs, p.awaitingPatroniLeader) {
+			// Losing the retained route must not let delayed Patroni revive it.
+			p.rememberSupersededSQLLeaderLocked(p.awaitingPatroniLeader)
+		}
 		p.awaitingPatroniLeader = ""
 		decision.routingResult = SQLRoutingResultCachedFallback
-		p.supersededSQLLeaders = nil
 		decision.health = maps.Clone(p.patroniHealth)
-		p.excludeSupersededPatroniLeaderLocked(decision.health)
-		if p.supersededPatroniLeader != "" && len(healthyIPs(decision.health)) == 0 {
-			// The old leader remains excluded, but a different Patroni leader can
+		p.excludeSupersededLeadersLocked(decision.health)
+		if (p.supersededPatroniLeader != "" || len(p.supersededSQLLeaders) > 0) && len(healthyIPs(decision.health)) == 0 {
+			// Superseded leaders remain excluded, but a different Patroni leader can
 			// restore routing immediately through the case-2 recovery path.
 			p.sqlNoPrimaryAt = observedAt
 		}
@@ -307,19 +311,19 @@ func (p *hybridHealthPolicy) observeSQL(
 			p.supersededSQLLeaders = nil
 		} else {
 			if previousSQLLeader != "" && previousSQLLeader != leader && slices.Contains(candidateIPs, previousSQLLeader) {
-				if p.supersededSQLLeaders == nil {
-					p.supersededSQLLeaders = make(map[string]struct{})
-				}
-				p.supersededSQLLeaders[previousSQLLeader] = struct{}{}
+				p.rememberSupersededSQLLeaderLocked(previousSQLLeader)
 			}
+			// Fresh conclusive SQL can establish a formerly superseded leader again.
+			delete(p.supersededSQLLeaders, leader)
 			p.awaitingPatroniLeader = leader
 			p.sqlLeaderSelectedAt = observedAt
 			if unique && p.supersededPatroniLeader == "" {
 				p.supersededPatroniLeader = patroniLeader
 			}
 		}
-	} else {
-		p.supersededSQLLeaders = nil
+	} else if slices.Contains(candidateIPs, previousSQLLeader) {
+		// B -> no primary -> C must remember B just like B -> C does.
+		p.rememberSupersededSQLLeaderLocked(previousSQLLeader)
 	}
 	decision.routingResult = SQLRoutingResultConclusive
 	decision.health = make(map[string]bool, len(candidateIPs))
@@ -365,9 +369,24 @@ func (p *hybridHealthPolicy) canRetainSQLLeaderLocked(candidateIPs []string, out
 	return primary || !unroutable
 }
 
-func (p *hybridHealthPolicy) excludeSupersededPatroniLeaderLocked(health map[string]bool) {
+func (p *hybridHealthPolicy) rememberSupersededSQLLeaderLocked(leader string) {
+	if leader == "" {
+		return
+	}
+	if p.supersededSQLLeaders == nil {
+		p.supersededSQLLeaders = make(map[string]struct{})
+	}
+	p.supersededSQLLeaders[leader] = struct{}{}
+}
+
+func (p *hybridHealthPolicy) excludeSupersededLeadersLocked(health map[string]bool) {
 	if _, present := health[p.supersededPatroniLeader]; present {
 		health[p.supersededPatroniLeader] = false
+	}
+	for ip := range p.supersededSQLLeaders {
+		if _, present := health[ip]; present {
+			health[ip] = false
+		}
 	}
 }
 
