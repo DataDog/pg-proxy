@@ -214,7 +214,9 @@ func startBackend(t *testing.T, v *pgVersion) (*itest.Postgres, string) {
 	defer cancel()
 	volume := "pg-proxy-regress-" + strconv.Itoa(os.Getpid()) + "-" + strings.ToLower(strings.ReplaceAll(t.Name(), "/", "-"))
 	t.Cleanup(func() { _ = exec.Command("docker", "volume", "rm", "--force", volume).Run() })
-	backend, err := itest.StartPostgres(ctx, itest.WithImage(v.image),
+	// The image's entrypoint runs initdb and then starts the server once, so it
+	// logs "ready" once, unlike the official image.
+	backend, err := itest.StartPostgres(ctx, itest.WithImage(v.image), itest.WithReadyLogs(1),
 		itest.WithContainerOptions(testcontainers.WithMounts(resultsMount(volume))))
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = backend.Terminate(context.Background()) })
