@@ -55,6 +55,8 @@ proxy:
   password_auth_enabled: true
   tls_required: true
   shutdown_grace_period: 30s
+  max_sessions: 100000
+  default_max_user_sessions: 10000
   tls_cert_file: /etc/pg-proxy/server.crt
   tls_key_file: /etc/pg-proxy/server.key
 users:
@@ -83,10 +85,11 @@ Three limits are involved:
 | Limit | Where it is set | What it caps |
 | --- | --- | --- |
 | `databases[].max_conns` | Configuration file | Backend connections per pool, per proxy instance |
-| Client-session cap | Fixed at 100 per proxy instance | Open client sessions per proxy instance |
+| Global client sessions | `proxy.max_sessions` (default `100000`) | Open client sessions per proxy instance |
+| Per-user client sessions | `proxy.default_max_user_sessions` (default `10000`), overridden by `users[].max_sessions` | Open sessions for one client user across logical databases |
 | `max_connections` | PostgreSQL | Total connections the server accepts |
 
-Keep `max_conns` × the number of proxy instances below PostgreSQL's `max_connections`, and leave headroom for administrative and other connections. To serve more than 100 client sessions, run more proxy instances.
+Keep `max_conns` × the number of proxy instances below PostgreSQL's `max_connections`, and leave headroom for administrative and other connections. Size client-session limits for the proxy's memory budget and expected workload. These caps do not open backend connections or change `max_conns`.
 
 A client that sits idle inside an open transaction keeps its backend connection. Set `idle_in_transaction_session_timeout` on the backend so stuck transactions do not hold the pool. See [Set connection and session limits](../set-pool-limits/) and [Transaction pooling](../../explanation/pooling/).
 

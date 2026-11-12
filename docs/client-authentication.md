@@ -116,8 +116,14 @@ logs and client errors.
 Cancellation still uses the session PID and secret on a separate connection.
 Both TLS cancellation and legacy plaintext cancellation work when TLS is required.
 No new password exchange is performed for cancellation. Configuration and
-credential changes require a restart. The existing global and per-user default
-session limits remain 100.
+credential changes require a restart.
+
+The global session cap defaults to 100,000 (`proxy.max_sessions`); the per-user
+default is 10,000 (`proxy.default_max_user_sessions`). Set `users[].max_sessions`
+to override one user's limit across all allowed logical databases. Omitted or
+zero values use the applicable default; negative values fail at startup. JSON
+uses `maxSessions` and `defaultMaxUserSessions`. These caps are independent of
+backend pool sizes and the 100 pending-startup slots.
 
 ## Integration tests
 

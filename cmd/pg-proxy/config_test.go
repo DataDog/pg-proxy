@@ -393,3 +393,40 @@ func TestShutdownGracePeriodConfig(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionLimitConfig(t *testing.T) {
+	for _, tc := range []struct {
+		name                 string
+		global, perUser      int32
+		wantGlobal, wantUser int32
+		invalid              string
+	}{
+		{name: "defaults", wantGlobal: 100_000, wantUser: 10_000},
+		{name: "configured", global: 50, perUser: 7, wantGlobal: 50, wantUser: 7},
+		{name: "negative global", global: -1, invalid: "proxy.max_sessions"},
+		{name: "negative user default", perUser: -1, invalid: "proxy.default_max_user_sessions"},
+	} {
+		for _, format := range []string{"json", "yaml"} {
+			t.Run(format+"/"+tc.name, func(t *testing.T) {
+				shared := ossConfig()
+				shared.Proxy.MaxSessions, shared.Proxy.DefaultMaxUserSessions = tc.global, tc.perUser
+				var data []byte
+				var err error
+				if format == "json" {
+					data, err = json.Marshal(shared)
+				} else {
+					data, err = yaml.Marshal(shared)
+				}
+				require.NoError(t, err)
+				cfg, err := parseConfig([]string{"-config", writeConfig(t, format, string(data)), "-telemetry", "none"})
+				if tc.invalid != "" {
+					require.ErrorContains(t, err, tc.invalid)
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tc.wantGlobal, cfg.sessionLimits.GlobalLimit)
+				require.Equal(t, tc.wantUser, cfg.sessionLimits.DefaultServiceMax)
+			})
+		}
+	}
+}
