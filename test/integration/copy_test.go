@@ -16,9 +16,9 @@ import (
 // Known COPY bugs. Each case that hits one still runs against PostgreSQL
 // directly; remove proxySkip to reproduce it through the proxy.
 const (
-	copyInUnderExecute = "TODO OSQQUERY-xxx: proxy rejects CopyInResponse while it expects ExecuteReply " +
+	copyInUnderExecute = "TODO: proxy rejects CopyInResponse while it expects ExecuteReply " +
 		"and closes the client connection without an ErrorResponse (#12 reported 08006)"
-	copyFailNotFlushed = "TODO OSQQUERY-xxx: proxy does not flush CopyFail to PostgreSQL, " +
+	copyFailNotFlushed = "TODO: proxy does not flush CopyFail to PostgreSQL, " +
 		"so the client waits for the ErrorResponse until its read deadline"
 )
 
