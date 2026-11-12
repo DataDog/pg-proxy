@@ -56,6 +56,10 @@ type ClientMessageAction struct {
 	// If EnsureUnnamedPreparedStmt is true, the client's unnamed prepared statement is re-created on the
 	// SessionLink's connection before the message is proxied, if that connection does not have it.
 	EnsureUnnamedPreparedStmt bool
+	// If InvalidateUnnamedPreparedStmt is true, the message destroys the client's unnamed prepared
+	// statement in PostgreSQL: a simple Query, including one the proxy answers locally, or a Close
+	// of the unnamed statement. The Session must forget it before replying or proxying the message.
+	InvalidateUnnamedPreparedStmt bool
 	// If DeallocatePreparedStmt is not nil, deallocate the prepared statement with the given client name.
 	DeallocatePreparedStmt prepared.PreparedStatement
 	// If UpdateAutoCachedUnnamedPreparedStmt is not nil, update the prepared statement in the Session's state.
@@ -124,7 +128,9 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			AddReplyExpectation: query.QueryReply,
 			FlushPostgres:       true,
 		}
-		return handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
+		action, err := handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
+		action.InvalidateUnnamedPreparedStmt = true
+		return action, err
 
 	case *pgproto3.Parse:
 		clientName := m.Name
@@ -212,7 +218,11 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 				},
 			}, nil
 		}
-		return ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.CloseReply}, nil
+		return ClientMessageAction{
+			ProxyMsgToPg:                  m,
+			AddReplyExpectation:           query.CloseReply,
+			InvalidateUnnamedPreparedStmt: m.ObjectType == 'S' && clientName == "",
+		}, nil
 
 	case *pgproto3.Bind:
 		// TODO handle tracing named prepared statements

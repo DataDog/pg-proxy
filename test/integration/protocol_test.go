@@ -74,6 +74,53 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			requireErrorCode(t, replies[2], "26000")
 		},
 	}, {
+		// pgx sends "-- ping" as a health check; the proxy answers it locally
+		// when idle, but it is still a simple Query.
+		name: "local ping drops it",
+		steps: []step{
+			ready(parse, &pgproto3.Sync{}),
+			ready(&pgproto3.Query{String: "-- ping"}),
+			ready(bindExecute...),
+		},
+		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			requireErrorCode(t, replies[2], "26000")
+		},
+	}, {
+		name: "close drops it",
+		steps: []step{
+			ready(parse, &pgproto3.Sync{}),
+			ready(&pgproto3.Close{ObjectType: 'S'}, &pgproto3.Sync{}),
+			ready(bindExecute...),
+		},
+		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			requireNoError(t, replies[1])
+			requireErrorCode(t, replies[2], "26000")
+		},
+	}, {
+		// The ParseComplete arrives after the Close was sent; it must not
+		// restore the closed statement.
+		name: "close in the same batch drops it",
+		steps: []step{
+			ready(parse, &pgproto3.Close{ObjectType: 'S'}, &pgproto3.Sync{}),
+			ready(bindExecute...),
+		},
+		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			requireNoError(t, replies[0])
+			requireErrorCode(t, replies[1], "26000")
+		},
+	}, {
+		// PostgreSQL drops the first statement before parsing the second, which
+		// fails. The first ParseComplete must not restore the dropped statement.
+		name: "failed parse in the same batch drops the previous one",
+		steps: []step{
+			ready(parse, &pgproto3.Parse{Query: "SELEC 1"}, &pgproto3.Sync{}),
+			ready(bindExecute...),
+		},
+		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			requireErrorCode(t, replies[0], "42601")
+			requireErrorCode(t, replies[1], "26000")
+		},
+	}, {
 		name: "failed parse drops the previous one",
 		steps: []step{
 			ready(parse, &pgproto3.Sync{}),
