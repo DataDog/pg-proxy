@@ -104,6 +104,9 @@ type Proxy struct {
 	PasswordAuthEnabled bool   `json:"passwordAuthEnabled,omitempty" yaml:"password_auth_enabled,omitempty"`
 	TLSCertFile         string `json:"tlsCertFile,omitempty" yaml:"tls_cert_file,omitempty"`
 	TLSKeyFile          string `json:"tlsKeyFile,omitempty" yaml:"tls_key_file,omitempty"`
+	// ShutdownGracePeriod bounds standalone session and pool cleanup after a stop.
+	// Empty uses the command default; nonempty values are positive Go durations.
+	ShutdownGracePeriod string `json:"shutdownGracePeriod,omitempty" yaml:"shutdown_grace_period,omitempty"`
 }
 
 // UserSettings retains access and session-limit settings. Authentication is caller-owned.

@@ -6,11 +6,15 @@
 package main
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	"github.com/DataDog/pg-proxy/pkg/limiter"
+	"github.com/DataDog/pg-proxy/pkg/server"
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
@@ -46,5 +50,63 @@ func backendConfig(t *testing.T, url string) config {
 		databases:        map[string]*pgxpool.Config{"primary": settings},
 		clusters:         map[string]string{"local": "primary"},
 		logicalDatabases: map[string]topology.LogicalDatabase{"local_db": {Cluster: "local"}},
+	}
+}
+
+// A registry entry models a session still finishing a transaction. It does not
+// need a backend, so both shutdown paths can be checked without PostgreSQL.
+func TestServeShutdownGracePeriod(t *testing.T) {
+	for _, timeout := range []bool{false, true} {
+		name := "drained"
+		if timeout {
+			name = "deadline exceeded"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx, stop := context.WithCancel(t.Context())
+			defer stop()
+			sessions := newSessionRegistry()
+			proxy, err := server.NewServer(ctx, server.Config{
+				ListenAddress: "127.0.0.1:0",
+				Admission:     limiter.New(limiter.Params{GlobalLimit: 100, DefaultServiceMax: 100}),
+				Sessions:      sessions,
+				Runtime:       server.RuntimeConfig{Inventory: &staticInventory{}},
+			})
+			require.NoError(t, err)
+			defer proxy.Close()
+			sessions.Register("pending", nil)
+			defer sessions.Delete("pending")
+			cleaned := make(chan struct{})
+			done := make(chan error, 1)
+			grace := time.Second
+			if timeout {
+				grace = 50 * time.Millisecond
+			}
+			go func() { done <- serve(ctx, stop, proxy, sessions, func() { close(cleaned) }, grace) }()
+			stop()
+			if !timeout {
+				sessions.Delete("pending")
+			}
+			select {
+			case err := <-done:
+				if timeout {
+					require.ErrorContains(t, err, "shutdown timed out waiting for client sessions")
+					select {
+					case <-cleaned:
+						t.Fatal("backend cleanup ran before the session finished")
+					default:
+					}
+				} else {
+					require.NoError(t, err)
+				}
+			case <-time.After(5 * time.Second):
+				t.Fatal("shutdown did not respect its grace period")
+			}
+			sessions.Delete("pending")
+			select {
+			case <-cleaned:
+			case <-time.After(5 * time.Second):
+				t.Fatal("shutdown cleanup did not finish")
+			}
+		})
 	}
 }
