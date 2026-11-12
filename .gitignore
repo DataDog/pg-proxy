@@ -4,3 +4,4 @@
 # Copyright 2026-Present Datadog, Inc.
 
 /bin/
+/pgbench-results/
