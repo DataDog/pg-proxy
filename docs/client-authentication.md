@@ -22,8 +22,8 @@ Each `users` entry requires a unique `static_credentials.username`, exactly one
 `password` or `scram_sha_256`, and an explicit list of logical `databases`.
 JSON uses `staticCredentials` and `scramSHA256`. Names match exactly, including
 case. Unknown users and databases outside the user's list are denied. Wildcards
-have no special meaning. Static mode rejects `email`, `group`, `pg_roles`, and
-nonzero `max_sessions` rather than ignoring them.
+have no special meaning. Static mode rejects `email`, `group`, and `pg_roles` rather than ignoring them.
+Optional `max_sessions` sets a per-user admission cap.
 
 Proxy users are independent of backend accounts. Alice and Bob may both connect
 to `orders`, sharing its configured pool and backend account. Their sessions and
