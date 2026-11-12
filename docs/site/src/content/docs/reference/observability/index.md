@@ -85,7 +85,7 @@ An endpoint configures where data goes; it does not enable export.
 
 ### Export timing and sampling
 
-Metrics export every 60 seconds by default. For local development, set `OTEL_METRIC_EXPORT_INTERVAL=1000` to export every second. Exporting metrics does not schedule [pool-stat collection](metrics/#connection-pool-gauges).
+Metrics export every 60 seconds by default. For local development, set `OTEL_METRIC_EXPORT_INTERVAL=1000` to export every second. The binary collects [connection-pool gauges](metrics/#connection-pool-gauges) every 2 seconds. Each export sends their latest values.
 
 The default trace sampler follows an incoming parent's sampling decision and samples new root traces. Application trace context comes from [SQL comments](tracing/#propagation).
 
