@@ -296,6 +296,18 @@ path. A prebuilt binary is used as is, so build it with `-race` yourself if need
 Readiness uses a timed TCP port probe, not startup log parsing. Captured output
 is printed only for failure diagnostics.
 
+Custom tests cover transaction pooling, backend reuse, session-state isolation,
+transaction status, client disconnects, and process startup/shutdown. Assertions
+use query results, wire responses, connection state, and process exit status.
+
+Detecting a client that disconnects while waiting for a backend connection relies
+on Linux `POLLRDHUP`, so that test is skipped on other platforms. To run the
+full suite from macOS, run it in a Linux container that uses the host's Docker:
+
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
+```
+
 GitHub Actions runs unit tests on minimum and stable Go and Docker-backed
 integration tests with race detection.
 
