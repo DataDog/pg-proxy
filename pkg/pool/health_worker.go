@@ -137,8 +137,6 @@ type HealthWorkerHooks struct {
 // SQLHealthResultsSnapshot is one credential target's raw result set for retained IPs. Errors remain wrapped
 // so observability hooks can inspect PostgreSQL SQLSTATEs and errors.Is/errors.As chains.
 type SQLHealthResultsSnapshot struct {
-	// StartedAt is the probe start time used to order evidence against Patroni recovery.
-	StartedAt    time.Time
 	ScheduledAt  time.Time
 	ObservedAt   time.Time
 	CandidateIPs []string
@@ -450,7 +448,6 @@ func (s *PoolHealth) recordSQLComparisonPollLocked(
 		return !retained
 	})
 	s.sqlComparisonLatest[target] = SQLHealthResultsSnapshot{
-		StartedAt:    outcome.StartedAt,
 		ScheduledAt:  scheduledAt,
 		ObservedAt:   observedAt,
 		CandidateIPs: retainedCandidates,
@@ -1092,20 +1089,16 @@ func (w *HealthWorker) completeSQLHealthCheck(
 				return false
 			}
 		}
-		outcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
+		results := make([]SQLHealthCheckResult, 0)
 		for _, credential := range snapshot.results {
-			var results []SQLHealthCheckResult
 			for _, result := range credential.Results {
 				if slices.Contains(snapshot.retainedIPs, result.IP) {
 					results = append(results, result)
 				}
 			}
-			if len(results) != 0 {
-				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: credential.StartedAt, Results: results})
-			}
 		}
 		policy.setRoutingEnabled(routingEnabled)
-		decision = policy.observeSQL(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, time.Now())
+		decision = policy.observeSQL(snapshot.retainedIPs, aggregateSQLHealthCheckResults(results).Outcome, time.Now())
 		return true
 	}()
 	w.reportSQLPatroniComparison(poolHealth, snapshot)

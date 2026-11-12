@@ -738,12 +738,12 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	assert.NoError(t, health.sqlComparisonLatest[b].Results[0].Err)
 	assert.Empty(t, conclusiveErrors, "a timeout resolved by another credential is still an indeterminate error")
 
-	// Once all latest credential results are unknown, the raw comparison becomes unknown
-	// while the hybrid policy retains its last SQL leader.
+	// Once all latest credential results are unknown, comparison and hybrid evaluation must
+	// both stop relying on the previous successful observations.
 	complete(a, t0.Add(2*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	complete(b, t0.Add(2*time.Second), context.DeadlineExceeded)
-	assert.Equal(t, SQLRoutingResultRetainedSQL, iterations[len(iterations)-1].RoutingResult)
+	assert.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
 	assert.Equal(t, SQLHealthFallbackTimeout, iterations[len(iterations)-1].FallbackReason)
 	snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{ip: {}}, health.sqlComparisonLatest)
 	assert.Empty(t, snapshot.health, "comparison must derive roles from the latest credential results")
@@ -807,9 +807,9 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			t.Cleanup(func() { w.Unsubscribe(updates) })
 			policy, _ := health.routingPolicy()
 			scheduledAt := time.Now()
-			policy.observePatroni(map[string]bool{oldIP: true}, scheduledAt)
-			policy.observeSQL([]string{oldIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, scheduledAt)
-			policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(time.Nanosecond))
+			policy.observePatroni(map[string]bool{oldIP: true}, scheduledAt.Add(-2*time.Second))
+			policy.observeSQL([]string{oldIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, scheduledAt.Add(-2*time.Second))
+			policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(-time.Second))
 			var iterations, comparisons int
 			w.sqlHooks.Iteration = func(SQLIteration, []string) { iterations++ }
 			w.sqlHooks.LeaderDetectionCompared = func(LeaderDetectionComparison, []string) { comparisons++ }
@@ -2571,50 +2571,6 @@ func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
 	w.RefreshSQL()
 	assert.Equal(t, 1, prober.callCount("conn"), "a fresh enabled tick must still run")
 	assert.Equal(t, int32(1), comparisons.Load())
-}
-
-// Per-credential caching must preserve the oldest probe start time, including unknown
-// timestamps, so a fresh credential cannot admit SQL evidence from before recovery.
-func TestHybridEvaluationPreservesCredentialStartTimesAfterPatroniRecovery(t *testing.T) {
-	for _, unknown := range []bool{false, true} {
-		t.Run(fmt.Sprintf("unknown_start_%t", unknown), func(t *testing.T) {
-			const a, b = "10.0.0.1", "10.0.0.2"
-			state := NewHealthState()
-			state.Track([]string{a, b})
-			health := &PoolHealth{
-				sqlHealthState:   state,
-				hybridPolicy:     newHybridHealthPolicy(true),
-				routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
-			}
-			policy := health.hybridPolicy
-			before := time.Now().Add(-time.Second)
-			policy.observePatroni(map[string]bool{a: true}, before)
-			policy.observeSQL([]string{a, b}, SQLHealthCheckOutcome{}, before.Add(time.Millisecond))
-			policy.observePatroni(map[string]bool{b: true}, before.Add(2*time.Millisecond))
-			var iterations []SQLIteration
-			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{Iteration: func(i SQLIteration, _ []string) { iterations = append(iterations, i) }}}
-			first, second := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
-			complete := func(target *sqlHealthTarget, started time.Time) {
-				w.completeSQLHealthCheck(target, 0, time.Now(), []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
-					StartedAt: started,
-					Results:   []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b}},
-				})
-			}
-			oldStart := before
-			if unknown {
-				oldStart = time.Time{}
-			}
-			complete(first, oldStart)
-			assert.Equal(t, oldStart, health.sqlComparisonLatest[first].StartedAt)
-			complete(second, time.Now())
-			require.Len(t, iterations, 2)
-			assert.Equal(t, SQLRoutingResultPatroniRecovery, iterations[0].RoutingResult)
-			assert.Equal(t, SQLRoutingResultPatroniRecovery, iterations[1].RoutingResult)
-			complete(first, time.Now())
-			require.Len(t, iterations, 3)
-			assert.Equal(t, SQLRoutingResultConclusive, iterations[2].RoutingResult)
-		})
-	}
 }
 
 func TestSQLPatroniMismatchReason(t *testing.T) {

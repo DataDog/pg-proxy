@@ -50,10 +50,6 @@ func (r SQLHealthCheckResult) HealthyPrimary() bool {
 
 // SQLHealthCheckOutcome is one complete concurrent cluster snapshot.
 type SQLHealthCheckOutcome struct {
-	// StartedAt is captured before probing. When combining credential snapshots,
-	// retain the earliest start time of all included evidence. A zero value cannot
-	// establish freshness after Patroni restores a hybrid route.
-	StartedAt  time.Time
 	Results    []SQLHealthCheckResult
 	PrimaryIPs []string
 }
@@ -69,18 +65,10 @@ type sqlHealthCheckAggregation struct {
 
 func aggregateSQLHealthCheckOutcomes(outcomes []SQLHealthCheckOutcome) sqlHealthCheckAggregation {
 	results := make([]SQLHealthCheckResult, 0)
-	var startedAt time.Time
-	for i, outcome := range outcomes {
+	for _, outcome := range outcomes {
 		results = append(results, outcome.Results...)
-		// Unknown start times must remain unknown; later evidence cannot make
-		// an older credential snapshot fresh enough to supersede recovery.
-		if i == 0 || outcome.StartedAt.Before(startedAt) {
-			startedAt = outcome.StartedAt
-		}
 	}
-	aggregation := aggregateSQLHealthCheckResults(results)
-	aggregation.Outcome.StartedAt = startedAt
-	return aggregation
+	return aggregateSQLHealthCheckResults(results)
 }
 
 func aggregateSQLHealthCheckResults(results []SQLHealthCheckResult) sqlHealthCheckAggregation {
@@ -229,7 +217,6 @@ func (c *SQLHealthChecker) Check(
 	tags []string,
 	onResult func(SQLHealthCheckResult),
 ) SQLHealthCheckOutcome {
-	startedAt := time.Now()
 	tags = append(slices.Clone(tags), "pool_role:primary")
 	results := make([]SQLHealthCheckResult, len(ips))
 	var wg sync.WaitGroup
@@ -253,7 +240,7 @@ func (c *SQLHealthChecker) Check(
 	if len(primaryIPs) > 1 && c.hooks.MultiplePrimaries != nil {
 		c.hooks.MultiplePrimaries(primaryIPs, tags)
 	}
-	return SQLHealthCheckOutcome{StartedAt: startedAt, Results: results, PrimaryIPs: primaryIPs}
+	return SQLHealthCheckOutcome{Results: results, PrimaryIPs: primaryIPs}
 }
 
 func (c *SQLHealthChecker) checkIP(
