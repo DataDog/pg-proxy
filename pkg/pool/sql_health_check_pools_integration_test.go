@@ -279,7 +279,7 @@ func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T)
 	// absence cleanup and closes both old probe pools.
 	w.RefreshSQL()
 	w.RefreshSQL()
-	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Resolved())
+	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Snapshot().Resolved)
 	assert.Equal(t, 1, slowPools.Len())
 	assert.Equal(t, 1, fastPools.Len())
 	for _, oldPool := range []*pgxpool.Pool{slowOldPool, fastOldPool} {
