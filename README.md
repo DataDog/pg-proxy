@@ -89,7 +89,10 @@ caller's context. Identity and resource fields are structured and capped at
 The listener records the startup stage without formatting arbitrary hook errors.
 Known listener failures and `listener.AuthenticationError` constants retain
 specific server-side diagnostics while client responses remain generic except
-for the fixed JWT-expiry response. Hooks
+for the fixed JWT-expiry response. Resolver hooks should wrap
+`listener.ErrLogicalDatabaseNotConfigured` or `listener.ErrBackendNotReady` so
+these failures log `reason=logical_database_not_configured` or
+`reason=backend_not_ready` instead of a generic diagnostic. Hooks
 log safe resource and verified identity details where they are available.
 Unknown failures retain `08006` and a generic diagnostic.
 Cancellation failures retain the previous missing-session and incorrect-secret
