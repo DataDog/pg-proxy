@@ -7,8 +7,6 @@ share a smaller pool of backend connections, and each connection goes back to
 the pool when its transaction ends. Datadog's PostgreSQL Platform team built it
 and runs it in production.
 
-> **Status:** early. The proxy is in use, but the Go API is still changing.
-
 ## Features
 
 - **Transaction pooling.** Keep many more client sessions open than backend connections.
