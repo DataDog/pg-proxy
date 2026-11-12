@@ -8,6 +8,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"fmt"
 	"syscall"
 	"testing"
 	"time"
@@ -655,6 +656,75 @@ func TestHybridHealthResetsRoutingComparisonWhenRoutingFlagChanges(t *testing.T)
 	assert.Nil(t, patroniDecision.routingComparison)
 	assert.Empty(t, policy.routingTiming.pending)
 	assert.Contains(t, policy.routingTiming.reference.lastNonempty, "10.0.0.2")
+}
+
+func TestHybridHealthRoutingFlagToggleDropsRetainedSQLLeader(t *testing.T) {
+	policy, started := policyWithSQLAheadOfPatroni(t)
+	uncertain := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
+		{IP: "A", Err: context.DeadlineExceeded},
+		{IP: "B", Err: context.DeadlineExceeded},
+	}}
+	// Ordinary flag evaluations must preserve retention within the same mode.
+	policy.setRoutingEnabled(true)
+	retained := policy.observeSQL([]string{"A", "B"}, uncertain, started.Add(2*time.Second))
+	require.Equal(t, SQLRoutingResultRetainedSQL, retained.routingResult)
+	require.Equal(t, []string{"B"}, healthyIPs(retained.health))
+
+	policy.setRoutingEnabled(false)
+	confirmed := policy.observePatroni(map[string]bool{"A": false, "B": true}, started.Add(3*time.Second))
+	require.True(t, confirmed.publish)
+	current := map[string]bool{"A": true, "B": false}
+	returned := policy.observePatroni(current, started.Add(4*time.Second))
+	require.True(t, returned.publish)
+	require.Equal(t, current, returned.health)
+
+	policy.setRoutingEnabled(true)
+	fallback := policy.observeSQL([]string{"A", "B"}, uncertain, started.Add(5*time.Second))
+	assert.True(t, fallback.publish)
+	assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
+	assert.Equal(t, current, fallback.health, "do not resurrect SQL B or exclude current Patroni A")
+}
+
+func TestHybridHealthRoutingFlagToggleDropsSupersededSQLHistory(t *testing.T) {
+	policy, started := policyWithSQLAheadOfPatroni(t)
+	candidates := []string{"A", "B", "C", "D"}
+	policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"C"}}, started.Add(2*time.Second))
+	policy.setRoutingEnabled(false)
+	policy.observePatroni(map[string]bool{"A": true}, started.Add(3*time.Second))
+	policy.setRoutingEnabled(true)
+	policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"D"}}, started.Add(4*time.Second))
+
+	// B was superseded in the old mode, but is a valid newer Patroni leader now.
+	recovered := policy.observePatroni(map[string]bool{"B": true}, started.Add(5*time.Second))
+	assert.True(t, recovered.publish)
+	assert.Equal(t, SQLRoutingResultPatroniRecovery, recovered.routingResult)
+	assert.Equal(t, []string{"B"}, healthyIPs(recovered.health))
+}
+
+func TestHybridHealthRoutingFlagToggleDropsRecoveryState(t *testing.T) {
+	for _, recovered := range []bool{false, true} {
+		t.Run(fmt.Sprintf("recovered_%t", recovered), func(t *testing.T) {
+			policy, started := policyWithSQLAheadOfPatroni(t)
+			policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{}, started.Add(2*time.Second))
+			if recovered {
+				recovery := policy.observePatroni(map[string]bool{"B": true}, started.Add(3*time.Second))
+				require.Equal(t, SQLRoutingResultPatroniRecovery, recovery.routingResult)
+			}
+			policy.setRoutingEnabled(false)
+			policy.observePatroni(map[string]bool{"A": true}, started.Add(4*time.Second))
+			policy.setRoutingEnabled(true)
+
+			patroni := policy.observePatroni(map[string]bool{"B": true}, started.Add(5*time.Second))
+			assert.False(t, patroni.publish, "old no-primary or active recovery state must not initiate recovery")
+			assert.Equal(t, SQLRoutingResultShadow, patroni.routingResult)
+			// With no recovery in the new mode, its first SQL observation needs no
+			// timestamp comparison against a recovery from the previous mode.
+			sql := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: []string{"B"}}, started.Add(6*time.Second))
+			assert.True(t, sql.publish)
+			assert.Equal(t, SQLRoutingResultConclusive, sql.routingResult)
+			assert.Equal(t, []string{"B"}, healthyIPs(sql.health))
+		})
+	}
 }
 
 func TestHybridHealthPreservesNewerPendingRoutingComparison(t *testing.T) {

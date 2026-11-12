@@ -136,6 +136,16 @@ func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
 		// Comparisons cannot span periods where SQL routing evaluation was disabled. Reset both
 		// baselines so the next observations establish a fresh pair under the new flag state.
 		p.routingTiming = leaderTiming[string]{}
+		// Leadership history belongs to one uninterrupted routing mode. Keep the
+		// latest Patroni snapshot for fallback, but do not carry retention,
+		// exclusions, or recovery decisions across a flag transition.
+		p.awaitingPatroniLeader = ""
+		p.supersededPatroniLeader = ""
+		p.sqlLeaderSelectedAt = time.Time{}
+		p.supersededSQLLeaders = nil
+		p.sqlNoPrimaryAt = time.Time{}
+		p.patroniRecoveryActive = false
+		p.patroniRecoveryAt = time.Time{}
 	}
 	p.routingEnabled = enabled
 }

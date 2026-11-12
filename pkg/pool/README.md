@@ -91,6 +91,12 @@ continued use of the last conclusive SQL leader during uncertainty against
 returning to an unconfirmed old leader. Future banlist integration must apply its
 eligibility checks to retained SQL routes and immediate Patroni recovery too.
 
+Routing-flag transitions clear retained leaders, superseded-leader exclusions,
+and recovery state while preserving the latest Patroni snapshot for fallback.
+Re-enabling evaluation therefore starts from current evidence instead of
+resurrecting leadership history from before the disabled interval. Repeated
+evaluations of the same flag value preserve the current policy state.
+
 ## SQL snapshot timing
 
 The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed
