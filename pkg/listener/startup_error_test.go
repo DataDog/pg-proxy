@@ -67,6 +67,9 @@ func TestStartupFailureSanitization(t *testing.T) {
 		cause         error
 	}{
 		{"resolve_startup", "startup_failure", errors.New(secret)},
+		{"resolve_startup", "logical_database_not_configured", ErrLogicalDatabaseNotConfigured},
+		{"resolve_startup", "backend_not_ready", ErrBackendNotReady},
+		{"resolve_startup", "startup_failure", StartupError(secret)},
 		{"authenticate", "startup_failure", errors.New(secret)},
 		{"authenticate", "authentication_failed", ErrAuthenticationFailed},
 		{"authenticate", "invalid_credentials", ErrInvalidCredentials},
