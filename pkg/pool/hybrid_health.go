@@ -101,7 +101,7 @@ type hybridHealthPolicy struct {
 	awaitingPatroniLeader   string
 	supersededPatroniLeader string
 	sqlLeaderSelectedAt     time.Time
-	// SQL leaders retired before Patroni caught up, including across no-primary gaps.
+	// Older leaders superseded before the sources agreed, including across no-primary gaps.
 	// Bound this history to current candidates; delayed Patroni B must not replace C.
 	supersededSQLLeaders map[string]struct{}
 
@@ -317,7 +317,12 @@ func (p *hybridHealthPolicy) observeSQL(
 			delete(p.supersededSQLLeaders, leader)
 			p.awaitingPatroniLeader = leader
 			p.sqlLeaderSelectedAt = observedAt
-			if unique && p.supersededPatroniLeader == "" {
+			if unique {
+				previousPatroniLeader := p.supersededPatroniLeader
+				if previousPatroniLeader != leader && previousPatroniLeader != patroniLeader &&
+					slices.Contains(candidateIPs, previousPatroniLeader) {
+					p.rememberSupersededSQLLeaderLocked(previousPatroniLeader)
+				}
 				p.supersededPatroniLeader = patroniLeader
 			}
 		}

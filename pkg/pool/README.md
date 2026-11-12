@@ -95,6 +95,11 @@ preserves those exclusions; agreement with SQL clears the catch-up history.
 A fresh conclusive SQL selection can re-establish an excluded leader independently
 of Patroni. Retired SQL history is pruned to the current SQL candidate set.
 
+When fresh SQL supersedes a leader reached through Patroni recovery, the current
+Patroni leader becomes the new superseded Patroni leader. Older exclusions move
+into the bounded history instead of being discarded. An unchanged Patroni poll
+therefore cannot undo the newer SQL selection.
+
 There is no timeout that silently restores the superseded leader. This trades
 continued use of the last conclusive SQL leader during uncertainty against
 returning to an unconfirmed old leader. Future banlist integration must apply its

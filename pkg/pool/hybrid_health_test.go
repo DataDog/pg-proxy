@@ -176,6 +176,47 @@ func TestHybridHealthPatroniAdvancesPastRetainedSQLLeader(t *testing.T) {
 	}
 }
 
+func TestHybridHealthSQLSupersedesRecoveredPatroniLeader(t *testing.T) {
+	policy, started := policyWithSQLAheadOfPatroni(t)
+	candidates := []string{"A", "B", "C", "D"}
+	recovered := policy.observePatroni(map[string]bool{"C": true}, started.Add(2*time.Second))
+	require.True(t, recovered.publish)
+	require.Equal(t, []string{"C"}, healthyIPs(recovered.health))
+
+	// This complete SQL round starts after recovery and establishes D as the
+	// new primary, while Patroni's current snapshot still reports C.
+	selected := policy.observeSQL(candidates, SQLHealthCheckOutcome{
+		StartedAt:  started.Add(2500 * time.Millisecond),
+		PrimaryIPs: []string{"D"},
+		Results: []SQLHealthCheckResult{
+			{IP: "A", InRecovery: true}, {IP: "B", InRecovery: true},
+			{IP: "C", InRecovery: true}, {IP: "D"},
+		},
+	}, started.Add(3*time.Second))
+	require.True(t, selected.publish)
+	require.Equal(t, SQLRoutingResultConclusive, selected.routingResult)
+	require.Equal(t, []string{"D"}, healthyIPs(selected.health))
+
+	// Unchanged Patroni C must not look like a new leader after D. Moving
+	// C into the current exclusion must also preserve older exclusions A/B.
+	for tick, leader := range []string{"C", "C", "A", "B"} {
+		delayed := policy.observePatroni(map[string]bool{leader: true}, started.Add(time.Duration(4+tick)*time.Second))
+		assert.False(t, delayed.publish, "superseded Patroni %s must not replace SQL D", leader)
+		assert.Nil(t, delayed.routingComparison)
+	}
+
+	retained := policy.observeSQL(candidates, SQLHealthCheckOutcome{
+		StartedAt: started.Add(7500 * time.Millisecond),
+		Results: []SQLHealthCheckResult{
+			{IP: "A", InRecovery: true}, {IP: "B", InRecovery: true},
+			{IP: "C", InRecovery: true}, {IP: "D", Err: context.DeadlineExceeded},
+		},
+	}, started.Add(8*time.Second))
+	assert.True(t, retained.publish)
+	assert.Equal(t, SQLRoutingResultRetainedSQL, retained.routingResult)
+	assert.Equal(t, []string{"D"}, healthyIPs(retained.health))
+}
+
 func TestHybridHealthPatroniAdvanceRequiresFreshUniqueNewLeader(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
