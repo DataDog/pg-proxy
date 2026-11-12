@@ -96,6 +96,8 @@ func (l *testLink) ResolveNextExpectation() {
 		l.resolveNextExpectation()
 	}
 }
+func (l *testLink) DiscardingUntilSync() bool { return false }
+
 func (l *testLink) DiscardUntilSync() {
 	l.calls.discardUntilSync++
 	if l.discardUntilSync != nil {
@@ -506,7 +508,7 @@ func TestAfterFlushActionWriteFailureCountsDestroyedBackendBeforeMonitor(t *test
 		ProxyMsgToPg:  &pgproto3.Flush{},
 		FlushPostgres: true,
 		AfterFlushAction: &actions.ClientMessageAction{
-			ReplyMsgToClient: &pgproto3.CloseComplete{},
+			ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.CloseComplete{}},
 		},
 	})
 	assert.ErrorContains(t, err, "error flushing proxied msg(s) to client")

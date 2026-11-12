@@ -36,13 +36,7 @@ func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (Clien
 			s.obsVals.traceState.SetTag("db.parameters", params)
 		}
 	}
-	return actions.DecideClientMessageAction(msg, actions.State{
-		DiscardUntilSync:         s.discardUntilSync,
-		HasLink:                  s.link != nil,
-		DynamicRoutingEnabled:    s.dynamicRoutingEnabled,
-		AutoPreparedStmtsEnabled: s.autoPreparedStatementsEnabled(),
-		PreparedStatements:       s.pStmtState,
-	}, actions.Hooks{
+	return actions.DecideClientMessageAction(msg, s.actionState(), actions.Hooks{
 		MessageObserved: func(msg pgproto3.FrontendMessage) {
 			s.obsVals.traceState.AddMessage(msg)
 			if s.hooks.FrontendMessage != nil {
@@ -69,8 +63,15 @@ func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (Clien
 	})
 }
 
-func isPgxPing(sql string) bool {
-	return actions.IsPGXPing(sql)
+// actionState snapshots the session state the actions layer decides on.
+func (s *Session) actionState() actions.State {
+	return actions.State{
+		DiscardUntilSync:         s.discardUntilSync,
+		HasLink:                  s.link != nil,
+		DynamicRoutingEnabled:    s.dynamicRoutingEnabled,
+		AutoPreparedStmtsEnabled: s.autoPreparedStatementsEnabled(),
+		PreparedStatements:       s.pStmtState,
+	}
 }
 
 // NewFlushErrorAction returns a ClientMessageAction that ensures PostgreSQL flushes pending messages

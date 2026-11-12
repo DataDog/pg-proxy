@@ -164,8 +164,26 @@ type SQLPatroniHealthSnapshot struct {
 // the same conclusive address membership. Unknown SQL roles are neutral; conflicting roles
 // always produce a mismatch.
 func (s SQLPatroniHealthSnapshot) Matches() bool {
+	return s.MismatchReason() == SQLPatroniMatch
+}
+
+// SQLPatroniMismatchReason classifies comparison evidence without inferring its cause.
+type SQLPatroniMismatchReason string
+
+const (
+	SQLPatroniMatch                SQLPatroniMismatchReason = "none"
+	SQLPatroniPrimaryDisagreement  SQLPatroniMismatchReason = "primary_disagreement"
+	SQLPatroniMembershipDifference SQLPatroniMismatchReason = "membership_difference"
+	SQLPatroniSQLRoleConflict      SQLPatroniMismatchReason = "sql_role_conflict"
+)
+
+// MismatchReason preserves Matches' unknown-role handling. Role conflicts take
+// precedence over primary disagreements, which take precedence over differences
+// consisting only of extra non-primary addresses. A membership difference does
+// not establish that DNS is stale or that the difference is transient.
+func (s SQLPatroniHealthSnapshot) MismatchReason() SQLPatroniMismatchReason {
 	if len(s.SQLConflictingIPs) > 0 {
-		return false
+		return SQLPatroniSQLRoleConflict
 	}
 	unknownIPs := make(map[string]struct{})
 	for _, ip := range s.SQLRetainedIPs {
@@ -173,21 +191,28 @@ func (s SQLPatroniHealthSnapshot) Matches() bool {
 			unknownIPs[ip] = struct{}{}
 		}
 	}
+	reason := SQLPatroniMatch
 	for ip, sqlHealthy := range s.SQLHealth {
 		patroniHealthy, ok := s.PatroniHealth[ip]
-		if !ok || patroniHealthy != sqlHealthy {
-			return false
+		if ok && patroniHealthy != sqlHealthy || !ok && sqlHealthy {
+			return SQLPatroniPrimaryDisagreement
+		}
+		if !ok {
+			reason = SQLPatroniMembershipDifference
 		}
 	}
-	for ip := range s.PatroniHealth {
+	for ip, patroniHealthy := range s.PatroniHealth {
 		if _, unknown := unknownIPs[ip]; unknown {
 			continue
 		}
 		if _, ok := s.SQLHealth[ip]; !ok {
-			return false
+			if patroniHealthy {
+				return SQLPatroniPrimaryDisagreement
+			}
+			reason = SQLPatroniMembershipDifference
 		}
 	}
-	return true
+	return reason
 }
 
 type SQLIteration struct {

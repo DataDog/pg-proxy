@@ -2616,3 +2616,37 @@ func TestHybridEvaluationPreservesCredentialStartTimesAfterPatroniRecovery(t *te
 		})
 	}
 }
+
+func TestSQLPatroniMismatchReason(t *testing.T) {
+	cases := []struct {
+		name      string
+		sql       map[string]bool
+		patroni   map[string]bool
+		retained  []string
+		conflicts []string
+		want      SQLPatroniMismatchReason
+	}{
+		{name: "agreement", sql: map[string]bool{"B": true, "C": false}, patroni: map[string]bool{"B": true, "C": false}, want: SQLPatroniMatch},
+		{name: "old unhealthy Patroni IP", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": false, "B": true}, want: SQLPatroniMembershipDifference},
+		{name: "extra SQL standby", sql: map[string]bool{"B": true, "C": false}, patroni: map[string]bool{"B": true}, want: SQLPatroniMembershipDifference},
+		{name: "different leaders", sql: map[string]bool{"A": false, "B": true}, patroni: map[string]bool{"A": true, "B": false}, want: SQLPatroniPrimaryDisagreement},
+		{name: "Patroni timeout on leader", sql: map[string]bool{"B": true}, patroni: map[string]bool{"B": false}, want: SQLPatroniPrimaryDisagreement},
+		{name: "SQL leader missing from Patroni", sql: map[string]bool{"B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "Patroni leader missing from SQL candidates", patroni: map[string]bool{"B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "additional Patroni primary", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": true, "B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "additional SQL primary", sql: map[string]bool{"A": true, "B": true}, patroni: map[string]bool{"B": true}, want: SQLPatroniPrimaryDisagreement},
+		{name: "role conflict despite common leader", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": false, "B": true}, conflicts: []string{"A"}, want: SQLPatroniSQLRoleConflict},
+		{name: "unknown retained SQL IP is neutral", sql: map[string]bool{"B": true}, patroni: map[string]bool{"A": false, "B": true}, retained: []string{"A", "B"}, want: SQLPatroniMatch},
+		{name: "unknown SQL leader is neutral", patroni: map[string]bool{"B": true}, retained: []string{"B"}, want: SQLPatroniMatch},
+		{name: "membership without a primary", sql: map[string]bool{"A": false}, want: SQLPatroniMembershipDifference},
+		{name: "primary disagreement precedes membership", sql: map[string]bool{"A": false, "B": true}, patroni: map[string]bool{"B": false, "C": false}, want: SQLPatroniPrimaryDisagreement},
+		{name: "empty snapshots", want: SQLPatroniMatch},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			snapshot := SQLPatroniHealthSnapshot{SQLHealth: tc.sql, PatroniHealth: tc.patroni, SQLRetainedIPs: tc.retained, SQLConflictingIPs: tc.conflicts}
+			assert.Equal(t, tc.want, snapshot.MismatchReason())
+			assert.Equal(t, tc.want == SQLPatroniMatch, snapshot.Matches())
+		})
+	}
+}

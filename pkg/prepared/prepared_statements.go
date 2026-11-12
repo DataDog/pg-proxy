@@ -239,6 +239,9 @@ type PreparedStatementState interface {
 	// DeallocateNamedStmtFromClientName deletes the named prepared statement associated with the client name
 	// from the PreparedStatementState confirmed named statements. It is a no-op if it does not exist.
 	DeallocateNamedStmtFromClientName(clientName string)
+
+	// ListConfirmedNamedStmts returns every confirmed named prepared statement, in no particular order.
+	ListConfirmedNamedStmts() []PreparedStatement
 }
 
 func CreateProxyPreparedStmtsState(metricTags []string) PreparedStatementState {
@@ -366,4 +369,12 @@ func (p *proxyPreparedStmtsState) DeallocateNamedStmtFromClientName(clientName s
 	}
 	_ = pgproxy.Metrics().Incr("pg_proxy.session.prepared_stmt.deallocated", tags, 1)
 	_ = pgproxy.Metrics().Gauge(confirmedCountMetric, float64(len(p.confirmedNamedPreparedStmtsMap)), p.metricTags, 1)
+}
+
+func (p *proxyPreparedStmtsState) ListConfirmedNamedStmts() []PreparedStatement {
+	stmts := make([]PreparedStatement, 0, len(p.confirmedNamedPreparedStmtsMap))
+	for _, preparedStmt := range p.confirmedNamedPreparedStmtsMap {
+		stmts = append(stmts, preparedStmt)
+	}
+	return stmts
 }
