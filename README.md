@@ -37,7 +37,7 @@ You need Go 1.26+, a C compiler (CGO is required), Docker, and `psql`.
 Start a disposable PostgreSQL:
 
 ```sh
-docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=postgres postgres:17
+docker run -d --name pg -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD=postgres postgres:18
 ```
 
 Build the proxy:

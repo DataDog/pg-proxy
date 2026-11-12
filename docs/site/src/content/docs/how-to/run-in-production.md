@@ -61,6 +61,10 @@ users:
       username: orders_app
       scram_sha_256: "<SCRAM verifier>"
     databases: [orders]
+  - static_credentials:
+      username: monitor
+      scram_sha_256: "<monitor SCRAM verifier>"
+    databases: [orders]
 ```
 
 **Backends.** Use `sslmode: verify-full` so the proxy checks the backend's certificate. Every client of a logical database shares that database's backend account, so its PostgreSQL permissions apply to all of them. Use separate backend accounts and routes when clients need different permissions. Set server-side limits such as `statement_timeout` in `connection_options`; see [Timeouts](../../reference/configuration/timeouts/).
@@ -92,11 +96,11 @@ Choose Datadog or OpenTelemetry:
 ```sh
 # Datadog Agent: traces, DogStatsD metrics, and JSON logs on stderr
 DD_SERVICE=pg-proxy DD_ENV=prod DD_AGENT_HOST=127.0.0.1 \
-  pg-proxy -config /etc/pg-proxy/proxy.yaml -telemetry datadog
+  ./bin/pg-proxy -config /etc/pg-proxy/proxy.yaml -telemetry datadog
 
 # OpenTelemetry: OTLP/HTTP traces, metrics, and logs
 OTEL_SERVICE_NAME=pg-proxy OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 \
-  pg-proxy -config /etc/pg-proxy/proxy.yaml -telemetry otel
+  ./bin/pg-proxy -config /etc/pg-proxy/proxy.yaml -telemetry otel
 ```
 
 Traces include SQL text with literal values. Restrict access to them accordingly, and leave `-trace-parameters` off unless you need bind values. See [Telemetry configuration](../../reference/observability/).
@@ -117,11 +121,12 @@ See [Metrics](../../reference/observability/metrics/) for more.
 The binary has no HTTP health endpoint. Use one of these instead:
 
 - **TCP check** on the listener port. This confirms the proxy is accepting connections.
-- **Query check:** connect as a monitoring user and run `select 1`. This also confirms the backend is reachable.
+- **Query check:** connect as the configured `monitor` user and run `select 1`. This also confirms the backend is reachable. Store the password matching its SCRAM verifier in a libpq password file with mode `0600`, and set `PGPASSFILE` to that file for unattended checks.
 
 ```sh
-psql "host=proxy.example.com port=15432 dbname=orders user=monitor sslmode=verify-full sslrootcert=/path/to/ca.crt" \
-  -At -c 'select 1'
+PGPASSFILE=/path/to/monitor.pgpass \
+  psql "host=proxy.example.com port=15432 dbname=orders user=monitor sslmode=verify-full sslrootcert=/path/to/ca.crt" \
+  -w -At -c 'select 1'
 ```
 
 ## 7. Restart and roll out changes
