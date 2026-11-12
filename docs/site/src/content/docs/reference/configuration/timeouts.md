@@ -59,6 +59,6 @@ PostgreSQL documents the exact [statement timeout semantics](https://www.postgre
 
 ## Shutdown grace period
 
-The OSS binary's `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) bounds session and pool cleanup after `SIGINT` or `SIGTERM`. It accepts a positive Go duration string, such as `30s` or `2m`. Omitted or empty values use `5s`; zero, negative, invalid, and overflowing durations fail at startup.
+The OSS binary's `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) bounds session and pool cleanup after `SIGINT` or `SIGTERM`. It accepts a positive Go duration string, such as `30s` or `2m`. Omitted or empty values use `30s`; zero, negative, invalid, and overflowing durations fail at startup.
 
 This limit starts when shutdown begins, not when a transaction starts. It does not change statement or connection timeouts. Give the service manager a longer stop timeout so it does not kill the process before cleanup and telemetry flushing finish. See [Run in production](../../../how-to/run-in-production/#7-restart-and-roll-out-changes).

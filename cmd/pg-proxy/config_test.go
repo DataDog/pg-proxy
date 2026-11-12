@@ -359,7 +359,7 @@ func TestShutdownGracePeriodConfig(t *testing.T) {
 		want    time.Duration
 		invalid bool
 	}{
-		{value: "", want: 5 * time.Second},
+		{value: "", want: 30 * time.Second},
 		{value: "30s", want: 30 * time.Second},
 		{value: "2m", want: 2 * time.Minute},
 		{value: "250ms", want: 250 * time.Millisecond},

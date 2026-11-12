@@ -35,7 +35,7 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
-const defaultShutdownGracePeriod = 5 * time.Second
+const defaultShutdownGracePeriod = 30 * time.Second
 
 // config holds validated startup settings for the OSS binary.
 type config struct {

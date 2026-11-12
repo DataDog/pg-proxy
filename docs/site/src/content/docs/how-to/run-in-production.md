@@ -132,7 +132,7 @@ PGPASSFILE=/path/to/monitor.pgpass \
 
 ## 7. Restart and roll out changes
 
-All configuration, credential, and certificate changes need a restart. On `SIGTERM` or `SIGINT`, the proxy stops accepting connections, drains sessions at transaction boundaries, and waits for sessions and pools to close for up to `proxy.shutdown_grace_period` (30 seconds in the example above). If cleanup exceeds that deadline, the process exits with an error and unfinished work is cut off. Omitted or empty values keep the five-second default.
+All configuration, credential, and certificate changes need a restart. On `SIGTERM` or `SIGINT`, the proxy stops accepting connections, drains sessions at transaction boundaries, and waits for sessions and pools to close for up to `proxy.shutdown_grace_period` (30 seconds in the example above). If cleanup exceeds that deadline, the process exits with an error and unfinished work is cut off. Omitted or empty values keep the 30-second default.
 
 Set the grace period to cover normal transaction durations. Give your service manager or container a longer stop timeout to allow cleanup and telemetry flushing; for Kubernetes, set `terminationGracePeriodSeconds` above the proxy grace period and allow time for any pre-stop hooks.
 
