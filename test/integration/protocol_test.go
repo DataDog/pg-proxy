@@ -10,11 +10,15 @@ package integration
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 
@@ -268,17 +272,31 @@ type protocolCase struct {
 	name  string
 	steps []step
 	check func(t *testing.T, replies [][]pgproto3.BackendMessage)
+	// database is the logical database the proxy run connects to; empty means dbDefault.
+	database string
+	// setup runs on the backend before each run, for example to recreate a table.
+	setup []string
+	// proxySkip, if set, skips the proxy run: it names a known proxy bug.
+	proxySkip string
 }
 
 func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 	t.Helper()
-	targets := map[string]string{
-		"direct": backend.URL("postgres"),
-		"proxy":  proxy.URL(dbDefault, itest.PostgresUser),
-	}
 	for _, tc := range cases {
+		database := tc.database
+		if database == "" {
+			database = dbDefault
+		}
+		targets := map[string]string{
+			"direct": backend.URL("postgres"),
+			"proxy":  proxy.URL(database, itest.PostgresUser),
+		}
 		for target, url := range targets {
 			t.Run(tc.name+"/"+target, func(t *testing.T) {
+				if target == "proxy" && tc.proxySkip != "" {
+					t.Skip(tc.proxySkip)
+				}
+				require.NoError(t, backend.Exec(t.Context(), tc.setup...))
 				tc.check(t, exchange(t, url, tc.steps))
 			})
 		}
@@ -289,35 +307,53 @@ func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 type replyEnd int
 
 const (
-	untilReady replyEnd = iota // up to and including ReadyForQuery
-	untilError                 // up to and including an ErrorResponse
-	untilQuiet                 // whatever arrives before the server goes quiet
+	untilReady  replyEnd = iota // up to and including ReadyForQuery
+	untilError                  // up to and including an ErrorResponse
+	untilQuiet                  // whatever arrives before the server goes quiet
+	untilCopyIn                 // up to and including CopyInResponse or an ErrorResponse
 )
 
 // step is a batch of messages sent together and how far to read the replies.
 type step struct {
 	send  []pgproto3.FrontendMessage
 	until replyEnd
+	// client is the connection that sends the step, for cases with several.
+	client int
+	// before, if set, runs before the step is sent.
+	before func(t *testing.T)
 }
 
 func ready(msgs ...pgproto3.FrontendMessage) step   { return step{send: msgs, until: untilReady} }
 func failing(msgs ...pgproto3.FrontendMessage) step { return step{send: msgs, until: untilError} }
 func quiet(msgs ...pgproto3.FrontendMessage) step   { return step{send: msgs, until: untilQuiet} }
+func copyIn(msgs ...pgproto3.FrontendMessage) step  { return step{send: msgs, until: untilCopyIn} }
 
-// exchange connects to url, sends each step's messages and collects its replies.
+// exchange opens one connection to url per client the steps name, sends each
+// step's messages on its client's connection and collects its replies.
 func exchange(t *testing.T, url string, steps []step) [][]pgproto3.BackendMessage {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
-	conn, err := pgx.Connect(ctx, url)
-	require.NoError(t, err)
-	defer conn.Close(context.Background())
-	pgConn := conn.PgConn()
-	require.NoError(t, pgConn.Conn().SetDeadline(time.Now().Add(20*time.Second)))
-	frontend := pgConn.Frontend()
+	clients := 1
+	for _, step := range steps {
+		clients = max(clients, step.client+1)
+	}
+	pgConns := make([]*pgconn.PgConn, clients)
+	for i := range pgConns {
+		conn, err := pgx.Connect(ctx, url)
+		require.NoError(t, err)
+		defer conn.Close(context.Background())
+		pgConns[i] = conn.PgConn()
+		require.NoError(t, pgConns[i].Conn().SetDeadline(time.Now().Add(20*time.Second)))
+	}
 
 	var replies [][]pgproto3.BackendMessage
 	for _, step := range steps {
+		if step.before != nil {
+			step.before(t)
+		}
+		pgConn := pgConns[step.client]
+		frontend := pgConn.Frontend()
 		for _, msg := range step.send {
 			frontend.Send(msg)
 		}
@@ -337,7 +373,9 @@ func exchange(t *testing.T, url string, steps []step) [][]pgproto3.BackendMessag
 			reply = append(reply, copyBackendMessage(t, msg))
 			_, isReady := msg.(*pgproto3.ReadyForQuery)
 			_, isError := msg.(*pgproto3.ErrorResponse)
-			if (step.until == untilReady && isReady) || (step.until == untilError && isError) {
+			_, isCopyIn := msg.(*pgproto3.CopyInResponse)
+			if (step.until == untilReady && isReady) || (step.until == untilError && isError) ||
+				(step.until == untilCopyIn && (isCopyIn || isError)) {
 				break
 			}
 		}
@@ -346,26 +384,58 @@ func exchange(t *testing.T, url string, steps []step) [][]pgproto3.BackendMessag
 	return replies
 }
 
-// copyBackendMessage detaches msg from the frontend's reused buffers.
+// copyBackendMessage detaches msg from the frontend's reused messages and
+// buffers, such as the single ReadyForQuery it decodes every one into.
 func copyBackendMessage(t *testing.T, msg pgproto3.BackendMessage) pgproto3.BackendMessage {
 	t.Helper()
 	encoded, err := msg.Encode(nil)
 	require.NoError(t, err)
-	copied := msg
-	switch msg.(type) {
-	case *pgproto3.DataRow:
-		copied = &pgproto3.DataRow{}
-	case *pgproto3.ErrorResponse:
-		copied = &pgproto3.ErrorResponse{}
-	case *pgproto3.RowDescription:
-		copied = &pgproto3.RowDescription{}
-	case *pgproto3.ParameterDescription:
-		copied = &pgproto3.ParameterDescription{}
-	default:
-		return msg
-	}
+	copied := reflect.New(reflect.TypeOf(msg).Elem()).Interface().(pgproto3.BackendMessage)
 	require.NoError(t, copied.Decode(encoded[5:]))
 	return copied
+}
+
+// summarize renders each message of reply as its type and the fields that
+// identify it, for example "CommandComplete SELECT 1" or "DataRow 1|NULL".
+func summarize(reply []pgproto3.BackendMessage) []string {
+	lines := make([]string, 0, len(reply))
+	for _, msg := range reply {
+		line := reflect.TypeOf(msg).Elem().Name()
+		switch msg := msg.(type) {
+		case *pgproto3.CommandComplete:
+			line += " " + string(msg.CommandTag)
+		case *pgproto3.ReadyForQuery:
+			line += " " + string(msg.TxStatus)
+		case *pgproto3.ErrorResponse:
+			line += " " + msg.Code
+		case *pgproto3.DataRow:
+			values := make([]string, len(msg.Values))
+			for i, value := range msg.Values {
+				values[i] = string(value)
+				if value == nil {
+					values[i] = "NULL"
+				}
+			}
+			line += " " + strings.Join(values, "|")
+		case *pgproto3.CopyInResponse:
+			line += fmt.Sprintf(" %d %v", msg.OverallFormat, msg.ColumnFormatCodes)
+		case *pgproto3.CopyOutResponse:
+			line += fmt.Sprintf(" %d %v", msg.OverallFormat, msg.ColumnFormatCodes)
+		case *pgproto3.CopyData:
+			line += fmt.Sprintf(" %q", msg.Data)
+		}
+		lines = append(lines, line)
+	}
+	return lines
+}
+
+// requireReplies checks the summary of each reply in order.
+func requireReplies(t *testing.T, replies [][]pgproto3.BackendMessage, want ...[]string) {
+	t.Helper()
+	require.Len(t, replies, len(want))
+	for i := range want {
+		require.Equal(t, want[i], summarize(replies[i]), "reply %d", i)
+	}
 }
 
 func requireNoError(t *testing.T, reply []pgproto3.BackendMessage) {
