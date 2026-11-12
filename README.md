@@ -2,18 +2,33 @@
 
 A PostgreSQL proxy and transaction-level connection pooler, written in Go.
 
-PG Proxy sits between your applications and PostgreSQL. Many client sessions
-share a smaller pool of backend connections, and each connection goes back to
-the pool when its transaction ends. Datadog's PostgreSQL Platform team built it
-and runs it in production.
+Every PostgreSQL connection is a backend process with its own memory, so a
+server can only hold so many. Applications often open far more connections
+than they actively use, and most of them sit idle between queries.
+
+PG Proxy sits between your applications and PostgreSQL. Client sessions share a
+smaller pool of backend connections: a session holds a connection only for the
+length of a transaction, then returns it to the pool. Datadog's PostgreSQL
+Platform team built it and runs it in production.
+
+## Two ways to use it
+
+- **Run the binary.** `cmd/pg-proxy` reads a YAML or JSON config file that maps
+  databases, clusters, and listener settings. See the [quick start](#quick-start).
+- **Embed the Go library.** Build your own proxy and supply configuration,
+  authentication, routing, load shedding, and telemetry through Go interfaces.
+  See [Go library configuration](docs/site/src/content/docs/reference/configuration/library.md).
 
 ## Features
 
-- **Transaction pooling.** Keep many more client sessions open than backend connections.
-- **Prepared statements.** Named prepared statements keep working when transactions run on different backend connections.
-- **Routing.** Map client-facing database names to clusters, and send eligible reads to replicas.
-- **Observability.** Logs, metrics, and query traces through OpenTelemetry or native Datadog.
-- **Embeddable.** Use the Go library to plug in your own configuration, authentication, and load shedding.
+- [**Transaction pooling.**](docs/site/src/content/docs/explanation/pooling.md) Keep many more client sessions open than backend connections.
+- [**Prepared statements.**](docs/site/src/content/docs/explanation/prepared-statements.md) Named prepared statements keep working when transactions run on different backend connections.
+- [**Read routing.**](docs/site/src/content/docs/explanation/read-routing.md) Map client-facing database names to clusters, and send eligible reads to replicas.
+- [**Session limits and load shedding.**](docs/site/src/content/docs/how-to/set-pool-limits.md) Cap client sessions separately from backend connections.
+- [**Traffic mirroring.**](docs/site/src/content/docs/explanation/traffic-mirroring.md) Replay live traffic against a separate database without slowing clients.
+- [**Graceful shutdown.**](docs/site/src/content/docs/explanation/graceful-shutdown.md) Drain sessions at transaction boundaries during a planned stop.
+- [**TLS and SCRAM authentication.**](docs/site/src/content/docs/explanation/authentication.md) Secure client connections and verify passwords with SCRAM-SHA-256.
+- [**Observability.**](docs/site/src/content/docs/reference/observability/index.md) Logs, metrics, and query traces through OpenTelemetry or native Datadog.
 
 ## Quick start
 
@@ -81,22 +96,11 @@ The full docs live in [`docs/site`](docs/site/src/content/docs/index.md):
 - [Using the Go library](docs/site/src/content/docs/reference/configuration/library.md) and [package overview](docs/site/src/content/docs/reference/packages.md)
 - [How PG Proxy compares](docs/site/src/content/docs/explanation/pooler-comparison.md) with PgBouncer, Pgpool-II, Odyssey, and PgDog
 
-## Development
-
-```sh
-go build ./...
-go vet ./...
-go test -race ./...
-go test -race -tags=integration ./...   # needs Docker
-```
-
-See [Local development](docs/site/src/content/docs/how-to/local-development.md)
-for the full workflow.
-
 ## Contributing
 
 We welcome bug reports, fixes, and docs improvements. Please open an issue
-before starting non-trivial work. See [CONTRIBUTING.md](CONTRIBUTING.md).
+before starting non-trivial work. See [CONTRIBUTING.md](CONTRIBUTING.md) for
+development setup and the checks to run before a pull request.
 
 To report a security issue, email security@datadoghq.com. Do not open a public issue.
 
