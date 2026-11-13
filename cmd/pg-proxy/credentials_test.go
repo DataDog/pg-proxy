@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -241,4 +242,16 @@ logical_databases: {client-db: {cluster: orders}}
 `), "-telemetry", "none"})
 	require.NoError(t, err)
 	require.Equal(t, "backend-env-secret", cfg.databases["primary"].ConnConfig.Password)
+}
+
+// resolve copies each top-level section by name. If pgconfig.ConfigSections
+// gains a field, update resolve and this list, or the OSS binary will accept
+// the new section and silently drop it.
+func TestResolveCopiesEverySection(t *testing.T) {
+	handled := []string{"Users", "LogicalDatabases", "Clusters", "Databases", "Proxy", "Mirroring"}
+	var fields []string
+	for field := range reflect.TypeFor[pgconfig.Config]().Fields() {
+		fields = append(fields, field.Name)
+	}
+	require.ElementsMatch(t, handled, fields, "update fileConfig.resolve in credentials.go")
 }

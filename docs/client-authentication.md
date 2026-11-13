@@ -131,6 +131,8 @@ Rules:
   password that ends with a newline must therefore have one more newline in the
   file. The verifier helper above uses the same rule. Environment values are
   used as-is.
+- Relative `*_file` paths are resolved from the proxy's working directory, not
+  from the directory of the configuration file. Use absolute paths.
 - Errors name the setting, not the path, the variable, or the value. Resolved
   values are redacted like inline ones.
 
