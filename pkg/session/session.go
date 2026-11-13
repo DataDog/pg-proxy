@@ -1265,8 +1265,9 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 // handleEnsureUnnamedPreparedStmt re-creates the client's unnamed prepared statement
 // on the link's connection before a Bind or Describe that refers to it. The client
 // may have parsed it on a link that has since been released (for example psql's
-// \gdesc sends Parse+Sync, then Describe+Sync), and releasing a link runs RESET ALL,
-// which discards it. The ParseComplete is not forwarded to the client.
+// \gdesc sends Parse+Sync, then Describe+Sync). Releasing a link runs RESET ALL as a
+// simple Query, and any simple Query discards the unnamed statement. The
+// ParseComplete is not forwarded to the client.
 func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
 		return
@@ -1344,9 +1345,9 @@ func (s *Session) flushPostgres() (bool, error) {
 	timesFlushed := 0
 	clientWriteSucceeded := false
 	discardedUntilSync := false
-	// awaitingSync is whether Postgres reported an error that no ReadyForQuery has
-	// followed, so it is discarding messages until the client's Sync.
-	awaitingSync := false
+	// pgSkippingUntilSync is whether Postgres reported an error that no ReadyForQuery
+	// has followed, so Postgres is skipping messages until the client's Sync.
+	pgSkippingUntilSync := false
 
 	// replyBuf accumulates encoded messages destined for the client. It is seeded from the
 	// connection's retained buffer (so small replies don't re-allocate) and reused across the
@@ -1448,12 +1449,12 @@ func (s *Session) flushPostgres() (bool, error) {
 			// there can only have up to one sync message buffered at once, so no additional messages can be processed.
 			// this means there is no possible state where discardedUntilSync becomes false before this loop exits.
 			discardedUntilSync = true
-			awaitingSync = true
+			pgSkippingUntilSync = true
 			s.invalidatePendingStmts(true)
 		}
 		if action.SetTxStatus != query.NoTxStatus {
 			s.link.HandleReadyForQuery(action.SetTxStatus)
-			awaitingSync = false
+			pgSkippingUntilSync = false
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
 			s.invalidatePendingStmts(false)
@@ -1481,7 +1482,7 @@ func (s *Session) flushPostgres() (bool, error) {
 	if clientWriteSucceeded && s.hooks.ClientFlushSucceeded != nil {
 		s.hooks.ClientFlushSucceeded()
 	}
-	if awaitingSync {
+	if pgSkippingUntilSync {
 		// The error came before the client's Sync, as in a pipeline flushed with
 		// Flush. Postgres ignores the client's messages until that Sync, so the
 		// session must too: it must not reply to them or record their effects.
