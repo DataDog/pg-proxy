@@ -10,8 +10,6 @@
 // pg-proxy builds on the same settings, rotating their order between repeats.
 //
 //	go run -tags integration ./test/perf/pgbench -a main -b HEAD
-//
-// See docs/site/src/content/docs/how-to/run-pgbench-benchmarks.md.
 package main
 
 import (

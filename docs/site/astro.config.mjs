@@ -36,7 +36,6 @@ export default defineConfig({
         { slug: 'how-to/contributing' },
         { slug: 'how-to/documentation-contributing' },
         { slug: 'how-to/set-pool-limits' },
-        { slug: 'how-to/run-pgbench-benchmarks' },
       ] },
       { label: 'Reference', items: [
         { label: 'Configuration', items: [
