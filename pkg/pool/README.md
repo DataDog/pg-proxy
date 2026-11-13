@@ -28,6 +28,25 @@ latency includes the initial refresh.
 Discovery and cleanup scenarios live in `pgk_setup_test.go`. Shared-worker
 subscription, probing, and cleanup tests live in `health_worker_test.go`.
 
+## Hybrid SQL evidence precedence
+
+Credential results are reconciled per IP. A successful role query takes
+precedence over an allowlisted error from another credential on the same IP.
+For example, `primary + 57P01` remains primary, and `standby + 57P01` remains
+standby, in either credential-result order. This rule expresses evidence
+precedence, not which observation is newer. Unresolved evidence on another IP,
+conflicting successful roles, or multiple primaries still requires Patroni
+fallback.
+
+`TestHybridHealthPrimaryTakesPrecedenceOverAdminShutdownOnSameIP` covers both
+orders with Patroni selecting a different IP, ensuring the policy actually uses
+the successful SQL role rather than falling back to the cached Patroni snapshot.
+
+System (`58`) and internal (`XX`) SQLSTATE classes are indeterminate. They
+identify error categories, not instance-wide unavailability. They require the
+same fallback handling as other indeterminate errors unless
+another credential resolves that IP's role.
+
 ## SQL snapshot timing
 
 The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed

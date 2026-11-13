@@ -260,9 +260,12 @@ func sqlHealthFallback(outcome SQLHealthCheckOutcome) (string, string) {
 	timeoutType := SQLHealthTimeoutNone
 	hasIndeterminateError := false
 	for _, evidence := range evidenceByIP {
-		// Credential targets describe the same PostgreSQL instance. One successful role, or one
-		// result that conclusively makes the IP unroutable, resolves uncertainty from another
-		// credential on that IP. Uncertainty on a different IP still requires Patroni fallback.
+		// Reconcile credentials per IP before aggregating across IPs. A successful role
+		// takes precedence over an allowlisted error on the same IP: primary + 57P01
+		// remains primary, and standby + 57P01 remains standby, in either result order.
+		// A successful role or an allowlisted error resolves uncertainty from another
+		// credential on that IP. Unresolved evidence on another IP still requires
+		// Patroni fallback; conflicting successful roles are handled above.
 		if evidence.deterministicRole || evidence.conclusiveUnroutable {
 			continue
 		}

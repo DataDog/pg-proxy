@@ -619,11 +619,11 @@ func TestConclusiveSQLUnroutableErrorAllowlist(t *testing.T) {
 		},
 		"system IO error": {
 			err:  &pgconn.PgError{Code: "58030"},
-			want: true,
+			want: false,
 		},
 		"internal error": {
 			err:  &pgconn.PgError{Code: "XX000"},
-			want: true,
+			want: false,
 		},
 		"connection reset": {
 			err:  syscall.ECONNRESET,
@@ -645,16 +645,23 @@ func TestConclusiveSQLUnroutableErrorAllowlist(t *testing.T) {
 	}
 }
 
-func TestHybridHealthTreatsConclusiveSystemErrorAsUnroutable(t *testing.T) {
-	policy := newHybridHealthPolicy(true)
-	policy.observePatroni(map[string]bool{"10.0.0.1": true}, time.Now())
-	decision := policy.observeSQL([]string{"10.0.0.1"}, SQLHealthCheckOutcome{
-		Results: []SQLHealthCheckResult{{IP: "10.0.0.1", Err: &pgconn.PgError{Code: "58030"}}},
-	}, time.Now())
+func TestHybridHealthTreatsSystemAndInternalErrorsAsIndeterminate(t *testing.T) {
+	for _, code := range []string{"58000", "58030", "58P01", "58P02", "58P03", "XX000", "XX001", "XX002"} {
+		t.Run(code, func(t *testing.T) {
+			policy := newHybridHealthPolicy(true)
+			patroniHealth := map[string]bool{"10.0.0.1": true}
+			policy.observePatroni(patroniHealth, time.Now())
+			decision := policy.observeSQL([]string{"10.0.0.1"}, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{{IP: "10.0.0.1", Err: &pgconn.PgError{Code: code}}},
+			}, time.Now())
 
-	assert.Equal(t, SQLRoutingResultConclusive, decision.routingResult)
-	assert.Equal(t, map[string]bool{"10.0.0.1": false}, decision.health)
-	assert.Empty(t, decision.fallbackReason)
+			assert.True(t, decision.publish)
+			assert.Equal(t, SQLRoutingResultCachedFallback, decision.routingResult)
+			assert.Equal(t, patroniHealth, decision.health)
+			assert.Equal(t, SQLHealthFallbackIndeterminate, decision.fallbackReason)
+			assert.Equal(t, SQLHealthTimeoutNone, decision.timeoutType)
+		})
+	}
 }
 
 func TestHybridHealthFallsBackOnInvalidPassword(t *testing.T) {
@@ -684,6 +691,36 @@ func TestHybridHealthUsesSuccessfulRoleWhenOtherCredentialHasInvalidPasswordOnSa
 	assert.Equal(t, SQLRoutingResultConclusive, decision.routingResult)
 	assert.Equal(t, map[string]bool{"10.0.0.1": true}, decision.health)
 	assert.Empty(t, decision.fallbackReason)
+}
+
+func TestHybridHealthPrimaryTakesPrecedenceOverAdminShutdownOnSameIP(t *testing.T) {
+	const primaryIP, otherIP = "10.0.0.1", "10.0.0.2"
+	primary := SQLHealthCheckResult{IP: primaryIP}
+	terminated := SQLHealthCheckResult{IP: primaryIP, Err: &pgconn.PgError{Code: "57P01"}}
+	for _, tc := range []struct {
+		name    string
+		results []SQLHealthCheckResult
+	}{
+		{name: "primary then admin shutdown", results: []SQLHealthCheckResult{primary, terminated}},
+		{name: "admin shutdown then primary", results: []SQLHealthCheckResult{terminated, primary}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			policy := newHybridHealthPolicy(true)
+			observedAt := time.Now()
+			// Patroni selects a different IP, so falling back cannot satisfy the SQL routing assertion.
+			policy.observePatroni(map[string]bool{primaryIP: false, otherIP: true}, observedAt)
+			outcome := SQLHealthCheckOutcome{
+				Results:    append(tc.results, SQLHealthCheckResult{IP: otherIP, InRecovery: true}),
+				PrimaryIPs: []string{primaryIP},
+			}
+			decision := policy.observeSQL([]string{primaryIP, otherIP}, outcome, observedAt.Add(time.Second))
+			assert.True(t, decision.publish)
+			assert.Equal(t, SQLRoutingResultConclusive, decision.routingResult)
+			assert.Empty(t, decision.fallbackReason)
+			assert.Empty(t, decision.timeoutType)
+			assert.Equal(t, map[string]bool{primaryIP: true, otherIP: false}, decision.health)
+		})
+	}
 }
 
 func TestHybridHealthFallsBackWhenInvalidPasswordAndTimeoutOnSameIP(t *testing.T) {
