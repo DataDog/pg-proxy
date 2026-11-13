@@ -11,12 +11,13 @@ PG Proxy records query and protocol spans with either Datadog or OpenTelemetry. 
 | --- | --- |
 | `Proxy forwarding ` | Root operation; the current name includes a trailing space. |
 | `Handling messages` | Client-message handling. |
-| `Forwarding to postgres` | Forwarding messages to the backend. |
+| `Forwarding to postgres` | Sending buffered messages to the backend. |
+| `postgres.request` | Client span for a backend exchange, from send through response completion. |
 | `Query Execution and proxying` | Query execution and proxy work. |
 | `Batch execution and proxying` | Grouped batch execution. |
 | `Returning rows to client` | Returning results. |
 
-The OpenTelemetry adapter marks the incoming request span as `SERVER` and its processing child spans as `INTERNAL`. The native Datadog adapter preserves its existing `server` kind for both root and child spans. Both adapters set the database system to `postgres`. The exact query `-- ping` does not start a root trace.
+Both adapters mark incoming root spans as `server`, processing stage spans as `internal`, and `postgres.request` spans as `client`. Native Datadog database spans use type `sql` and `db.system:postgres`; OpenTelemetry database spans use `db.system:postgresql`. The exact query `-- ping` does not start a root trace.
 
 ## Propagation
 
@@ -65,13 +66,21 @@ The session code warns when named prepared statements contain per-query trace co
 
 ## Interpreting durations
 
+`postgres.request` starts after connection acquisition and before the buffered send. It ends after the expected backend responses are consumed, before pool release and the final client flush. It measures a wire-protocol exchange, which may contain multiple statements or only part of an extended-query interaction. Streaming results can include time waiting for the client to consume earlier rows; this is not server-only SQL execution time.
+
+PostgreSQL `ErrorResponse` messages mark both the database span and the root request as errors, including errors followed by a successful `ReadyForQuery`. Transport failures also finish the database span with an error. A client write failure after backend completion does not change the completed database span.
+
+The acquired connection supplies the actual database name, host, and port. Native Datadog spans use `db.instance`, `out.host`, and `out.port`; OpenTelemetry spans use `db.namespace` (also `db.name` for compatibility), `server.address`, and `server.port`. These fields do not contain credentials or connection strings. If a custom link does not supply destination metadata, these tags are omitted.
+
+Custom tracers keep the existing `Tracer` and `Span` interfaces. To emit database spans, their root spans must also implement `pgproxy.DatabaseSpanStarter`. The built-in adapters implement it. Embedders that decorate links should capture destination metadata through the library backend's checkout path; that path saves it before applying the decorator.
+
 `Query Execution and proxying` covers the wait for backend results and proxy work; it is not a pure measurement of PostgreSQL execution time. `Returning rows to client` helps separate result delivery from that work. Large results or a slow-reading client can increase delivery time without a slow SQL plan.
 
 For batches, use `Batch execution and proxying` rather than assuming every query has its own complete span tree. Trace visibility also depends on the application's tracer setup and sampling.
 
 ## Recorded data
 
-The root span receives the query text as `db.statement`. The trace state tracks up to 15 protocol-message types; `DataRow` and `CopyData` messages are excluded from that list. Additional messages set `messages_truncated`.
+The root span receives the query text as `db.statement`. The database span receives that statement when known, except for batches where naming only the first statement would be misleading. The trace state tracks up to 15 protocol-message types; `DataRow` and `CopyData` messages are excluded from that list. Additional messages set `messages_truncated`.
 
 For OTel export, SQL and captured parameter strings containing invalid UTF-8 are quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
 

@@ -105,7 +105,11 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	require.Len(t, finishedSpans, 2)
 	var rootSpan, childSpan exportedSpan
 	for _, span := range finishedSpans {
-		require.Equal(t, "server", span.Meta["span.kind"])
+		if span.Name == "Proxy forwarding" {
+			require.Equal(t, "server", span.Meta["span.kind"])
+		} else {
+			require.Equal(t, "internal", span.Meta["span.kind"])
+		}
 		require.Equal(t, "proxy-test", span.Service)
 		require.Equal(t, "test", span.Meta["env"])
 		require.Equal(t, "1.2.3", span.Meta["version"])

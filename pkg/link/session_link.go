@@ -60,6 +60,16 @@ func (link *SessionLink) Conn() *pgxpool.Conn {
 	return link.conn
 }
 
+// DatabaseInfo returns only non-secret destination fields from the acquired
+// connection, rather than the logical database requested by the proxy client.
+func (link *SessionLink) DatabaseInfo() pgproxy.DatabaseInfo {
+	if link.conn == nil {
+		return pgproxy.DatabaseInfo{}
+	}
+	cfg := link.conn.Conn().Config()
+	return pgproxy.DatabaseInfo{Name: cfg.Database, Host: cfg.Host, Port: cfg.Port}
+}
+
 // RoleToken returns the opaque role token from RoleSession.Set, if any.
 func (link *SessionLink) RoleToken() string {
 	return link.token

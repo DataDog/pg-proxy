@@ -22,6 +22,7 @@ import (
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/pool"
+	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/DataDog/pg-proxy/pkg/session"
 )
 
@@ -462,4 +463,28 @@ func TestFallbackMetricIdentity(t *testing.T) {
 		assert.Equal(t, "datadog.pg_proxy.replica_acquire_fallback", metrics.counts[i].name)
 		assert.ElementsMatch(t, []string{"database:primary", "database_cluster:test-cluster", "outcome:" + outcome}, metrics.counts[i].tags)
 	}
+}
+
+type databaseMetadataLink struct{ link.Link }
+
+func (databaseMetadataLink) DatabaseInfo() pgproxy.DatabaseInfo {
+	return pgproxy.DatabaseInfo{Name: "orders_actual", Host: "replica.example.test", Port: 5433}
+}
+
+// A decorator can hide optional methods, but must retain its own capabilities.
+type opaqueLinkDecorator struct{ link.Link }
+
+func TestAcquireKeepsDatabaseMetadataBeforeDecoration(t *testing.T) {
+	original := databaseMetadataLink{}
+	decorated := &opaqueLinkDecorator{Link: original}
+	runtime := New(Config{
+		Primary:       &fakePool{},
+		LinkFactory:   func(*pgxpool.Conn, link.Options) (link.Link, error) { return original, nil },
+		LinkDecorator: func(link.Link, pool.Pool, *pgxpool.Conn, session.LinkRequest) link.Link { return decorated },
+	})
+	state := &query.TraceState{}
+	result, err := runtime.Acquire(context.Background(), session.LinkRequest{TraceState: state, DecorateLink: true})
+	require.NoError(t, err)
+	require.Same(t, decorated, result)
+	require.Equal(t, original.DatabaseInfo(), state.DatabaseInfo())
 }

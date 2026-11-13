@@ -1247,11 +1247,18 @@ func (s *Session) handleDeallocatePreparedStmt(action ClientMessageAction) error
 
 // iterates through messages that it expected PG to send back to the proxy and handles them accordingly.
 // returns whether Postgres had to discard messages until a Sync was received and whether an error occurred.
-func (s *Session) flushPostgres() (bool, error) {
+func (s *Session) flushPostgres() (discarded bool, retErr error) {
 	s.obsVals.traceState.StartTrace(query.ForwardOpName)
 	if s.link == nil {
 		return false, fmt.Errorf("expected non-nil session link to flush")
 	}
+	// Custom links can omit destination metadata without changing the Link API.
+	database := s.obsVals.traceState.DatabaseInfo()
+	if destination, ok := s.link.(interface{ DatabaseInfo() pgproxy.DatabaseInfo }); ok {
+		database = destination.DatabaseInfo()
+	}
+	s.obsVals.traceState.StartDatabaseTrace(database)
+	defer func() { s.obsVals.traceState.FinishDatabaseTrace(retErr) }()
 	start := time.Now()
 	err := s.link.Flush()
 	elapsed := time.Since(start).Microseconds()
@@ -1312,6 +1319,7 @@ func (s *Session) flushPostgres() (bool, error) {
 	for {
 		expectation := s.link.NextExpectation()
 		if expectation == query.NoReply {
+			s.obsVals.traceState.FinishDatabaseTrace(nil)
 			break
 		}
 
@@ -1373,6 +1381,9 @@ func (s *Session) flushPostgres() (bool, error) {
 			s.link.HandleReadyForQuery(action.SetTxStatus)
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
+			// The backend has completed its response. Role reset, pool release,
+			// and the final client flush are outside the database exchange.
+			s.obsVals.traceState.FinishDatabaseTrace(nil)
 			s.pStmtState.InvalidatePendingStmts(false)
 			err := s.link.Release()
 			if err != nil {

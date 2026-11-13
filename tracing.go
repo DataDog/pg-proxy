@@ -25,6 +25,22 @@ type Span interface {
 	Finish(err error)
 }
 
+// DatabaseInfo identifies the database reached by an acquired backend connection.
+// It must not contain a DSN, credentials, or client-supplied connection options.
+type DatabaseInfo struct {
+	Name string
+	Host string
+	Port uint16
+}
+
+// DatabaseSpanStarter is an optional extension implemented by spans from the
+// built-in tracers. Custom spans can implement it to trace backend exchanges;
+// otherwise the proxy retains their existing root and internal stage spans.
+// The returned client span must be a child of the receiver.
+type DatabaseSpanStarter interface {
+	StartDatabaseChild(operation, statement string, database DatabaseInfo) Span
+}
+
 // NoopTracer preserves protocol trace lifecycles without recording or exporting.
 type NoopTracer struct{}
 
@@ -34,6 +50,7 @@ func (NoopTracer) WarnNamedPreparedStatement(string, string, string) {}
 
 type noopSpan struct{}
 
-func (noopSpan) StartChild(string) Span { return noopSpan{} }
-func (noopSpan) SetTag(string, any)     {}
-func (noopSpan) Finish(error)           {}
+func (noopSpan) StartChild(string) Span                               { return noopSpan{} }
+func (noopSpan) SetTag(string, any)                                   {}
+func (noopSpan) Finish(error)                                         {}
+func (noopSpan) StartDatabaseChild(string, string, DatabaseInfo) Span { return noopSpan{} }

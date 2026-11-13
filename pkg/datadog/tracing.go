@@ -51,7 +51,28 @@ func (Tracer) WarnNamedPreparedStatement(name, sql, service string) {
 type span struct{ span *tracer.Span }
 
 func (s span) StartChild(operation string) pgproxy.Span {
-	return span{s.span.StartChild(operation, options()...)}
+	return span{s.span.StartChild(operation, tracer.Tag(ext.SpanKind, ext.SpanKindInternal))}
+}
+
+func (s span) StartDatabaseChild(operation, statement string, database pgproxy.DatabaseInfo) pgproxy.Span {
+	opts := []tracer.StartSpanOption{
+		tracer.Tag(ext.SpanKind, ext.SpanKindClient),
+		tracer.Tag(ext.SpanType, ext.SpanTypeSQL),
+		tracer.Tag(ext.DBSystem, "postgres"),
+	}
+	if statement != "" {
+		opts = append(opts, tracer.ResourceName(statement), tracer.Tag(ext.DBStatement, statement))
+	}
+	if database.Name != "" {
+		opts = append(opts, tracer.Tag("db.instance", database.Name))
+	}
+	if database.Host != "" {
+		opts = append(opts, tracer.Tag(ext.TargetHost, database.Host))
+	}
+	if database.Port != 0 {
+		opts = append(opts, tracer.Tag(ext.TargetPort, database.Port))
+	}
+	return span{s.span.StartChild(operation, opts...)}
 }
 func (s span) SetTag(key string, value any) { s.span.SetTag(key, value) }
 func (s span) Finish(err error) {

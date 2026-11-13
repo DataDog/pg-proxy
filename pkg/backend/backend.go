@@ -196,6 +196,15 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	if err != nil {
 		return nil, err
 	}
+	if request.TraceState != nil {
+		var database pgproxy.DatabaseInfo
+		if destination, ok := backendLink.(interface{ DatabaseInfo() pgproxy.DatabaseInfo }); ok {
+			database = destination.DatabaseInfo()
+		}
+		// A decorator may hide optional methods on the original link. Capture
+		// the destination now without wrapping away its other capabilities.
+		request.TraceState.SetDatabaseInfo(database)
+	}
 	if r.linkDecorator != nil && request.DecorateLink {
 		backendLink = r.linkDecorator(backendLink, selectedPool, conn, request)
 	}

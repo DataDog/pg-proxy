@@ -478,3 +478,11 @@ func (bb *blockingBuffer) Write(p []byte) (int, error) {
 	bb.ch <- cp
 	return len(p), nil
 }
+
+func TestDatabaseInfoUsesAcquiredConnection(t *testing.T) {
+	conn := newSessionLinkTestPoolConn(t)
+	t.Cleanup(conn.Release)
+	backend := &SessionLink{conn: conn}
+	require.Equal(t, pgproxy.DatabaseInfo{Name: "test", Host: "127.0.0.1", Port: 5432}, backend.DatabaseInfo())
+	require.Equal(t, pgproxy.DatabaseInfo{}, (&SessionLink{}).DatabaseInfo())
+}

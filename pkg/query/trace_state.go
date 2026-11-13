@@ -25,6 +25,7 @@ const (
 	TransactionOpName         string      = "Proxy forwarding "
 	HandlingMessagesOpName    string      = "Handling messages"
 	ForwardOpName             string      = "Forwarding to postgres"
+	DatabaseRequestOpName     string      = "postgres.request"
 	QueryExecutionAndProxying string      = "Query Execution and proxying"
 	BatchExecutionAndProxying string      = "Batch execution and proxying"
 	DataRoundTrips                        = "Returning rows to client"
@@ -41,6 +42,10 @@ type TraceState struct {
 	isBatch              bool
 	trace                pgproxy.Span
 	rootTrace            pgproxy.Span
+	databaseTrace        pgproxy.Span
+	databaseError        error
+	queryError           error
+	databaseInfo         pgproxy.DatabaseInfo
 	rowsNumber           int
 	rowsSize             int
 	// Fixed-size buffer for messages - keeps first MaxTrackedMessages messages
@@ -262,11 +267,74 @@ func (t *TraceState) FinishTrace(errs ...error) {
 
 func (t *TraceState) FinishRootTrace(errs ...error) {
 	t.FinishTrace(errs...) // Ensure trace is cleaned up first
-	t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)
+	t.FinishDatabaseTrace(errors.Join(errs...))
+	if t.queryError != nil && t.rootTrace != nil {
+		// A backend failure is not a benign client EOF. SQL errors may have
+		// arrived as protocol messages rather than a returned Go error.
+		t.rootTrace.Finish(errors.Join(t.queryError, errors.Join(errs...)))
+		t.rootTrace = nil
+	} else {
+		t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)
+	}
 
 	t.rootQuery = ""
 	t.isBatch = false
 	t.usingFullPropagation = false
+	t.queryError = nil
+}
+
+// StartDatabaseTrace begins a backend exchange after connection acquisition.
+// The exchange ends when its expected responses have been consumed, independently
+// of the shorter send, execution, and result-delivery stage spans.
+func (t *TraceState) StartDatabaseTrace(database pgproxy.DatabaseInfo) {
+	if t.rootTrace == nil || t.databaseTrace != nil {
+		return
+	}
+	if starter, ok := t.rootTrace.(pgproxy.DatabaseSpanStarter); ok {
+		statement := t.rootQuery
+		if t.isBatch {
+			// The first statement alone would mislabel a multi-query exchange.
+			statement = ""
+		}
+		t.databaseTrace = starter.StartDatabaseChild(DatabaseRequestOpName, statement, database)
+	}
+}
+
+// SetDatabaseInfo saves the acquired connection's destination before an embedder
+// decorates the link. It remains valid while that connection is retained.
+func (t *TraceState) SetDatabaseInfo(database pgproxy.DatabaseInfo) { t.databaseInfo = database }
+
+// DatabaseInfo returns the destination of the latest successful checkout.
+func (t *TraceState) DatabaseInfo() pgproxy.DatabaseInfo { return t.databaseInfo }
+
+// RecordDatabaseError retains an ErrorResponse until the backend exchange and
+// root request finish. A later successful Sync must not erase the query failure.
+func (t *TraceState) RecordDatabaseError(err error, code string) {
+	if t.rootTrace == nil {
+		return
+	}
+	if t.queryError == nil {
+		t.queryError = err
+	}
+	if t.databaseError == nil {
+		t.databaseError = err
+		if t.databaseTrace != nil && code != "" {
+			t.databaseTrace.SetTag("db.response.status_code", code)
+		}
+	}
+}
+
+// FinishDatabaseTrace closes an exchange once, preserving backend protocol and
+// transport errors even when the client-facing request later completes normally.
+func (t *TraceState) FinishDatabaseTrace(err error) {
+	if t.databaseTrace != nil {
+		if err != nil {
+			t.RecordDatabaseError(err, "")
+		}
+		t.databaseTrace.Finish(errors.Join(t.databaseError, err))
+		t.databaseTrace = nil
+	}
+	t.databaseError = nil
 }
 
 func finishSpan(span pgproxy.Span, messages []string, rowsNumber int, rowsTotalSize int, errs ...error) pgproxy.Span {
