@@ -20,6 +20,9 @@
 #   depends-on-skipped   Uses objects that a skipped test creates.
 #   statement-names      pg-proxy renames named prepared statements on backend connections,
 #                        which pg_prepared_statements and some error messages show.
+#   switchover-hint      pg-proxy appends a leader switchover hint to read-only transaction
+#                        errors. Temporary while the hint's future is decided; remove these
+#                        entries if the hint leaves the library.
 skip aggregates                   # backend-reuse: relation "t1" already exists
 skip alter_generic                # backend-reuse: function alt_func2(integer) already exists in schema "public"
 skip alter_table                  # session-reset: cannot delete from table "attmp3" because it does not have a replica i
@@ -119,4 +122,5 @@ fail amutils                      # depends-on-skipped: indexes from skipped tes
 fail create_index                 # session-reset: output differs (runs: later tests use its objects)
 fail float8                       # session-reset: output differs (runs: later tests use its objects)
 fail rangetypes                   # session-reset: output differs (runs: later tests use its objects)
+fail sequence                     # switchover-hint: hint appended to nextval()/setval() read-only errors
 fail transactions                 # session-reset: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
