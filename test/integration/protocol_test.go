@@ -296,7 +296,9 @@ func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 				if target == "proxy" && tc.proxySkip != "" {
 					t.Skip(tc.proxySkip)
 				}
-				require.NoError(t, backend.Exec(t.Context(), tc.setup...))
+				if len(tc.setup) > 0 {
+					require.NoError(t, backend.Exec(t.Context(), tc.setup...))
+				}
 				tc.check(t, exchange(t, url, tc.steps))
 			})
 		}

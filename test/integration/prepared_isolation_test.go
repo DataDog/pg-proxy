@@ -60,12 +60,13 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 		for i, c := range clients {
 			var send []pgproto3.FrontendMessage
 			var reply []string
-			if i == 0 && segment == 2 {
+			reparse := i == 0 && segment == 2
+			if reparse {
 				send = append(send, &pgproto3.Close{ObjectType: 'S', Name: "shared"})
 				reply = append(reply, "CloseComplete")
 				c.sql = "SELECT $1::int4 * 2 AS value"
 			}
-			if segment == 0 || i == 0 && segment == 2 {
+			if segment == 0 || reparse {
 				send = append(send, &pgproto3.Parse{Name: "shared", Query: c.sql, ParameterOIDs: []uint32{c.oid}})
 				reply = append(reply, "ParseComplete")
 			}
@@ -102,10 +103,12 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 // terminatePooledBackend terminates the proxy's idle backend connection for
 // dbPooled, if it has one, and waits for it to exit, so that the proxy's next
 // checkout opens a new connection that has none of the clients' statements.
+// The direct run has no such connection, so there it does nothing.
 //
 // pgxpool pings a connection before handing it out only once it has been idle
-// for over a second, so terminatePooledBackend then waits that long. Without
-// the wait the proxy hands out the dead connection and the client's session fails.
+// for over a second, so after a termination terminatePooledBackend waits that
+// long. Without the wait the proxy hands out the dead connection and the
+// client's session fails.
 func terminatePooledBackend(t *testing.T) {
 	t.Helper()
 	ctx := t.Context()
@@ -115,11 +118,15 @@ func terminatePooledBackend(t *testing.T) {
 	rows, err := conn.Query(ctx,
 		"SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = $1", pooledApplicationName)
 	require.NoError(t, err)
+	found := false
 	for rows.Next() {
 		var terminated bool
 		require.NoError(t, rows.Scan(&terminated))
 		require.True(t, terminated, "pooled backend did not exit within 5s")
+		found = true
 	}
 	require.NoError(t, rows.Err())
-	time.Sleep(1100 * time.Millisecond)
+	if found {
+		time.Sleep(1100 * time.Millisecond)
+	}
 }
