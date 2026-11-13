@@ -31,7 +31,8 @@ const (
 // from a client to their Session. (See ClientMessageAction docs for the set of actions.)
 func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (ClientMessageAction, error) {
 	var observeParameters func(string)
-	if s.enableTraceParameters {
+	// A nil hook skips joining the parameters, which is most of the cost.
+	if s.enableTraceParameters && s.obsVals.traceState.Sampled() {
 		observeParameters = func(params string) {
 			s.obsVals.traceState.SetTag("db.parameters", params)
 		}

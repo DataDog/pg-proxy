@@ -81,7 +81,7 @@ func parseConfig(args []string) (config, error) {
 	flags := flag.NewFlagSet("pg-proxy", flag.ContinueOnError)
 	flags.StringVar(&telemetry, "telemetry", "", "all-signal preset: datadog, otel, or none (default: OTEL_*_EXPORTER selection)")
 	flags.StringVar(&tracing, "tracing", "none", "query tracing backend: none or otel (overrides OTEL_TRACES_EXPORTER)")
-	flags.BoolVar(&traceParameters, "trace-parameters", false, "include raw bind parameter values in query traces (default: disabled; SQL text is always recorded)")
+	flags.BoolVar(&traceParameters, "trace-parameters", false, "include raw bind parameter values in sampled query traces (default: disabled; SQL text is always recorded)")
 	flags.TextVar(&logLevel, "log-level", slog.LevelInfo, "minimum proxy log level for stderr and OTLP: DEBUG, INFO, WARN, or ERROR")
 	flags.StringVar(&path, "config", "", "JSON or YAML configuration file")
 	if err := flags.Parse(args); err != nil {

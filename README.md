@@ -376,8 +376,9 @@ rates. Local validation confirms that 100 events over 10 seconds exports as
 
 Traces contain SQL text, including literal values, and error messages. Bind
 parameter capture is off by default. Add `-trace-parameters=true` to a command
-that enables tracing to include raw values as `db.parameters`. This changes only
-trace data; PostgreSQL receives the same parameter values.
+that enables tracing to include raw values as `db.parameters`. Values are added
+only to traces the tracer has already decided to keep when the root span starts.
+This changes only trace data; PostgreSQL receives the same parameter values.
 
 For application trace propagation, send W3C context (`traceparent`) in SQL
 comments. Span fields are recorded in

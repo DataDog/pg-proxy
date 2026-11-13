@@ -61,3 +61,14 @@ func (s span) Finish(err error) {
 		s.span.Finish(tracer.WithError(err))
 	}
 }
+
+// Sampled reads the priority the tracer chose when the root started, or the
+// one inherited from the SQL comment. An undecided priority counts as kept. A
+// nil span means the Datadog tracer is not running, so nothing is recorded.
+func (s span) Sampled() bool {
+	if s.span == nil {
+		return false
+	}
+	priority, ok := s.span.Context().SamplingPriority()
+	return !ok || priority > 0
+}
