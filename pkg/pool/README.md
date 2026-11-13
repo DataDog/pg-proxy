@@ -28,6 +28,30 @@ latency includes the initial refresh.
 Discovery and cleanup scenarios live in `pgk_setup_test.go`. Shared-worker
 subscription, probing, and cleanup tests live in `health_worker_test.go`.
 
+## Patroni comparison diagnostics
+
+`HealthWorkerHooks.SQLPatroniCompared` receives a `patroni_probe_result` tag and
+per-IP `SQLPatroniHealthSnapshot.PatroniProbeResults`, captured with the health
+map from the same completed Patroni refresh. The result describes the final
+`HealthProber.Probe` return after embedder-owned retries:
+
+- `response`: a completed response, including an unhealthy HTTP 503.
+- `timeout`: a deadline or network timeout after retries.
+- `error`: another failure, including cancellation.
+- `unknown`: no completed observation exists for the relevant IP yet.
+
+For `primary_disagreement`, the tag summarizes only IPs whose roles disagree;
+for `membership_difference`, missing IPs; for `sql_role_conflict`, conflicting
+IPs. Matching comparisons summarize all compared IPs, including retained SQL IPs.
+If several relevant IPs have different results, precedence is `timeout`, `error`,
+`unknown`, then `response`. Thus an unrelated standby timeout does not relabel
+a primary disagreement, while matching health booleans can still expose a
+standby timeout. The tag describes observed probe results, not a proven cause.
+Comparison counts, mismatch reasons, and routing decisions are unchanged.
+
+The existing dd-source comparison recorder forwards these callback tags. This
+tag starts appearing after its pinned pg-proxy library is bumped and deployed.
+
 ## SQL snapshot timing
 
 The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed

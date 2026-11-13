@@ -392,7 +392,7 @@ func TestSubscribe_SQLConnectionStringsSharePatroniStateWhenSQLCheckingEnabled(t
 	w.hooks.SQLPatroniCompared = func(comparison SQLPatroniHealthSnapshot, tags []string) {
 		comparisonsMu.Lock()
 		defer comparisonsMu.Unlock()
-		assert.Equal(t, sharedTags, tags)
+		assert.Equal(t, append(slices.Clone(sharedTags), "patroni_probe_result:response"), tags)
 		comparisons = append(comparisons, comparison)
 	}
 	w.RefreshSQL()
@@ -1714,27 +1714,27 @@ func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
 	s := newTestPoolHealth("10.0.0.1", "10.0.0.2")
 
 	// both IPs healthy, both in DNS
-	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"})
+	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, nil, []string{"10.0.0.1", "10.0.0.2"})
 	assert.True(t, s.IsHealthy("10.0.0.1"))
 	assert.True(t, s.IsHealthy("10.0.0.2"))
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved())
 
 	// 10.0.0.2 leaves DNS but stays healthy — grace window, not evicted
 	for i := 0; i < maxFailedHostLookups-1; i++ {
-		w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"})
+		w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, nil, []string{"10.0.0.1"})
 	}
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved(), "still in grace window")
 
 	// 10.0.0.2 now unhealthy and absent from DNS — eligible for eviction
-	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": false}, nil, []string{"10.0.0.1"})
+	w.updateHealthAndCleanup(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": false}, nil, nil, []string{"10.0.0.1"})
 	assert.ElementsMatch(t, []string{"10.0.0.1"}, s.Resolved(), "evicted after grace window and unhealthy")
 	assert.False(t, s.IsHealthy("10.0.0.2"), "evicted IP must not stay healthy")
 
 	// verify lastKnownPgHealth protects an IP that is still healthy
 	s2 := newTestPoolHealth("10.0.0.1", "10.0.0.2")
-	w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"})
+	w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, nil, []string{"10.0.0.1", "10.0.0.2"})
 	for i := 0; i < maxFailedHostLookups+1; i++ {
-		w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"})
+		w.updateHealthAndCleanup(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, nil, []string{"10.0.0.1"})
 	}
 	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s2.Resolved(), "last known healthy IP never evicted")
 }

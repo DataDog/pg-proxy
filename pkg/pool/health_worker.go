@@ -123,10 +123,11 @@ type HealthProber interface {
 // HealthWorkerHooks reports subscription counts and refresh activity.
 // Callbacks may run concurrently across hosts. Evicted must not read the snapshot.
 type HealthWorkerHooks struct {
-	Subscriptions      func(count int, tags []string)
-	CheckStarted       func(tags []string)
-	CheckFinished      func(elapsed time.Duration, tags []string)
-	SQLCheckMissed     func(tags []string)
+	Subscriptions  func(count int, tags []string)
+	CheckStarted   func(tags []string)
+	CheckFinished  func(elapsed time.Duration, tags []string)
+	SQLCheckMissed func(tags []string)
+	// SQLPatroniCompared includes a patroni_probe_result tag summarizing the compared observation.
 	SQLPatroniCompared func(SQLPatroniHealthSnapshot, []string)
 	// SQLPotentialCompared reports signed snapshot speedup, never a routing decision.
 	// It can run concurrently for different hosts and must return promptly.
@@ -156,6 +157,9 @@ type SQLPatroniHealthSnapshot struct {
 	SQLRetainedIPs    []string
 	SQLResults        []SQLHealthResultsSnapshot
 	PatroniHealth     map[string]bool
+	// PatroniProbeResults contains final results after any embedder-owned retries, from the
+	// same completed refresh as PatroniHealth. Missing entries have no observation yet.
+	PatroniProbeResults map[string]PatroniProbeResult
 }
 
 // Matches reports whether every conclusive SQL finding agrees with Patroni and both snapshots have
@@ -294,6 +298,11 @@ type PoolHealth struct {
 	// subscribers wait for it instead of observing an empty snapshot.
 	ready chan struct{}
 	state *HealthState
+
+	// patroniObservationMu keeps comparison health and final probe results from one refresh.
+	// Acquire it before state.mu; release it before notifying subscribers or invoking hooks.
+	patroniObservationMu sync.RWMutex
+	patroniProbeResults  map[string]PatroniProbeResult
 
 	sqlMu          sync.RWMutex
 	sqlHealthState *HealthState
@@ -789,12 +798,22 @@ func (s *PoolHealth) trackNewIPs(ips []string) []string {
 	return s.state.Track(ips)
 }
 
-func (w *HealthWorker) updateHealthAndCleanup(s *PoolHealth, pghealth map[string]bool, systemIDs map[string]string, ips []string) {
+func (w *HealthWorker) updateHealthAndCleanup(s *PoolHealth, pghealth map[string]bool, systemIDs map[string]string, probeResults map[string]PatroniProbeResult, ips []string) {
+	s.patroniObservationMu.Lock()
+	var evicted []string
 	s.state.Update(pghealth, systemIDs, ips, w.absenceThreshold, func(ip string) {
+		evicted = append(evicted, ip)
+	})
+	s.patroniProbeResults = maps.Clone(probeResults)
+	for _, ip := range evicted {
+		delete(s.patroniProbeResults, ip)
+	}
+	s.patroniObservationMu.Unlock()
+	for _, ip := range evicted {
 		if w.hooks.Evicted != nil {
 			w.hooks.Evicted(ip, s.tags)
 		}
-	})
+	}
 	s.notifySubscribers()
 }
 
@@ -825,6 +844,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 
 	pghealth := make(map[string]bool, len(tracked))
 	systemIDs := make(map[string]string, len(tracked))
+	probeResults := make(map[string]PatroniProbeResult, len(tracked))
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	for _, ip := range tracked {
@@ -841,6 +861,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 			mu.Lock()
 			pghealth[ip] = err == nil && ok
 			systemIDs[ip] = systemID
+			probeResults[ip] = classifyPatroniProbeResult(err)
 			mu.Unlock()
 		}(ip)
 	}
@@ -850,7 +871,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 	if w.hooks.CheckFinished != nil {
 		w.hooks.CheckFinished(time.Since(start), poolHealth.patroniTags)
 	}
-	w.updateHealthAndCleanup(poolHealth, pghealth, systemIDs, ips)
+	w.updateHealthAndCleanup(poolHealth, pghealth, systemIDs, probeResults, ips)
 	w.observePatroniPotential(poolHealth, pghealth, observedAt)
 	if policy, routingEnabledFn := poolHealth.routingPolicy(); policy != nil {
 		routingEnabled := false
@@ -1119,14 +1140,17 @@ func (w *HealthWorker) reportSQLPatroniComparison(
 	if snapshot == nil || w.hooks.SQLPatroniCompared == nil {
 		return
 	}
+	patroniHealth, probeResults := poolHealth.patroniComparisonSnapshot()
 	comparison := SQLPatroniHealthSnapshot{
-		SQLHealth:         maps.Clone(snapshot.health),
-		SQLConflictingIPs: slices.Clone(snapshot.conflictingIPs),
-		SQLRetainedIPs:    slices.Clone(snapshot.retainedIPs),
-		SQLResults:        slices.Clone(snapshot.results),
-		PatroniHealth:     poolHealth.state.Snapshot(),
+		SQLHealth:           maps.Clone(snapshot.health),
+		SQLConflictingIPs:   slices.Clone(snapshot.conflictingIPs),
+		SQLRetainedIPs:      slices.Clone(snapshot.retainedIPs),
+		SQLResults:          slices.Clone(snapshot.results),
+		PatroniHealth:       patroniHealth,
+		PatroniProbeResults: probeResults,
 	}
-	w.hooks.SQLPatroniCompared(comparison, poolHealth.patroniTags)
+	tags := append(slices.Clone(poolHealth.patroniTags), "patroni_probe_result:"+string(comparison.PatroniProbeResult()))
+	w.hooks.SQLPatroniCompared(comparison, tags)
 }
 
 func (w *HealthWorker) sqlRoutingTags(tags []string, routingEnabled bool) []string {
