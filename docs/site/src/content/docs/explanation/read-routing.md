@@ -17,11 +17,26 @@ Routing starts with the database name in the client's connection string:
 
 A cluster's `primary` is the default backend for that configured group. A cluster dedicated to reads can point its `primary` at a physical replica.
 
-See the [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md) for the file format. The OSS binary currently accepts one primary per cluster and rejects replicas and read clusters; embedding applications can supply them.
+See the [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md) for the file format. For example, this OSS binary configuration sends eligible reads for `app` to the `main` cluster, which has one replica:
+
+```yaml
+databases:
+  - {name: main-primary, host: 10.0.0.10, dbname: app, username: app, password: example}
+  - {name: main-replica, host: 10.0.0.11, dbname: app, username: app, password: example}
+clusters:
+  main: {primary: main-primary, replicas: [main-replica]}
+logical_databases:
+  app:
+    cluster: main
+    read_clusters:
+      main: {weight: 1}
+```
+
+The OSS binary validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. Its replicas are static: each replica must accept a connection at startup, and there are no replica health checks. A failed replica checkout falls back to the cluster primary, as described below. File changes require a restart. Embedding applications can supply discovered replicas and health checks instead.
 
 ## When routing is enabled
 
-Configured `read_clusters` enable read routing for the logical database. Otherwise, a client can request `pg_proxy.dynamic_routing=true`, provided the backend supports replica routing. The portable example binary has one backend and no replica pools.
+Configured `read_clusters` enable read routing for the logical database. Otherwise, a client can request `pg_proxy.dynamic_routing=true`, provided the backend supports replica routing: its cluster must have at least one replica.
 
 A false client option does not override configured `read_clusters`.
 
@@ -43,6 +58,8 @@ The SQL classifier identifies work eligible for read routing. These examples des
 A string containing multiple statements must have every statement classified as read-only. The classifier also examines common-table expressions and checks function calls against the list below. Classification is a routing heuristic, not a substitute for PostgreSQL permissions or read-only enforcement.
 
 Routing happens when the session needs a backend connection. Once acquired, that connection stays attached for the transaction; the proxy does not move each statement of an active transaction between backends.
+
+The proxy classifies the SQL text in `Query` and `Parse` messages. A `Bind` for a named prepared statement does not carry SQL, so it uses the main backend. Clients that cache prepared statements, such as pgx in its default mode, therefore send repeated reads to the main backend. Use the simple protocol or unnamed statements for reads that should be routed.
 
 ### Known read-only functions
 

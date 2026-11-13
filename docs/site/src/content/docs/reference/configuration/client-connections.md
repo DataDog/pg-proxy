@@ -14,7 +14,7 @@ Place these arguments inside the PostgreSQL startup `options` parameter using th
 | `pg_proxy.dynamic_routing` | `false` client request | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
 | `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. |
 
-These values are read during connection startup. Reconnect to change them. The local executable has one static backend; a routing option does not create read replicas or configure additional backends.
+These values are read during connection startup. Reconnect to change them. A routing option does not create read replicas; configure them in the proxy configuration file. See [Read routing](../../../explanation/read-routing/).
 
 ## Connection examples
 

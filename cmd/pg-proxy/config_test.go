@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
+	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
 func ossConfig() pgconfig.Config {
@@ -147,15 +148,24 @@ func TestSharedConfigRejectsUnsupportedFeatures(t *testing.T) {
 			c.Databases = append(c.Databases, database)
 		},
 		"unknown primary": func(c *pgconfig.Config) { c.Clusters["orders"] = pgconfig.Cluster{Primary: "unknown"} },
-		"replicas": func(c *pgconfig.Config) {
+		"replica is primary": func(c *pgconfig.Config) {
 			c.Clusters["orders"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"primary"}}
+		},
+		"unknown replica": func(c *pgconfig.Config) {
+			c.Clusters["orders"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"unknown"}}
+		},
+		"duplicate replica": func(c *pgconfig.Config) {
+			replica := c.Databases[0]
+			replica.Name = "replica"
+			c.Databases = append(c.Databases, replica)
+			c.Clusters["orders"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"replica", "replica"}}
 		},
 		"no logical databases": func(c *pgconfig.Config) { c.LogicalDatabases = nil },
 		"unknown cluster": func(c *pgconfig.Config) {
 			c.LogicalDatabases["client-db"] = pgconfig.LogicalDatabase{Cluster: "unknown"}
 		},
-		"read clusters": func(c *pgconfig.Config) {
-			c.LogicalDatabases["client-db"] = pgconfig.LogicalDatabase{Cluster: "orders", ReadClusters: map[string]*pgconfig.ReadCluster{"orders": {}}}
+		"unknown read cluster": func(c *pgconfig.Config) {
+			c.LogicalDatabases["client-db"] = pgconfig.LogicalDatabase{Cluster: "orders", ReadClusters: map[string]*pgconfig.ReadCluster{"unknown": {}}}
 		},
 		"public listener": func(c *pgconfig.Config) { c.Proxy.ListenerAddress = "0.0.0.0:15432" },
 		"negative buffer": func(c *pgconfig.Config) { c.Proxy.PostgresMsgBufferSize = -1 },
@@ -213,6 +223,68 @@ func TestMultiplePrimaryBackends(t *testing.T) {
 	require.Equal(t, "reports-primary", cfg.clusters["reports"])
 	require.Equal(t, "reports-user", cfg.databases["reports-primary"].ConnConfig.User)
 	require.Equal(t, cfg.logicalDatabases["client-db"], cfg.logicalDatabases["client-db-alias"])
+}
+
+func TestReplicasAndReadClusters(t *testing.T) {
+	shared := ossConfig()
+	for _, name := range []string{"replica-a", "replica-b", "reports-primary"} {
+		database := shared.Databases[0]
+		database.Name = name
+		shared.Databases = append(shared.Databases, database)
+	}
+	zero := uint8(0)
+	three := uint8(3)
+	shared.Clusters["orders"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"replica-a", "replica-b"}}
+	shared.Clusters["reports"] = pgconfig.Cluster{Primary: "reports-primary"}
+	shared.LogicalDatabases["client-db"] = pgconfig.LogicalDatabase{
+		Cluster: "orders",
+		ReadClusters: map[string]*pgconfig.ReadCluster{
+			"orders":  {Weight: &zero},
+			"reports": {Weight: &three},
+		},
+	}
+	shared.LogicalDatabases["default-weight"] = pgconfig.LogicalDatabase{
+		Cluster:      "orders",
+		ReadClusters: map[string]*pgconfig.ReadCluster{"reports": nil},
+	}
+	cfg, err := (config{}).withSharedConfig(shared)
+	require.NoError(t, err)
+	require.Equal(t, []string{"replica-a", "replica-b"}, cfg.replicas["orders"])
+	require.NotContains(t, cfg.replicas, "reports")
+	require.Equal(t, topology.ReadClusters{
+		"orders":  {Weight: 0},
+		"reports": {Weight: 3},
+	}, cfg.logicalDatabases["client-db"].ReadClusters)
+	require.Equal(t, topology.ReadClusters{
+		"reports": {Weight: topology.DefaultReadClusterWeight},
+	}, cfg.logicalDatabases["default-weight"].ReadClusters)
+}
+
+func TestReadReplicaConfigFile(t *testing.T) {
+	path := writeConfig(t, "yaml", `databases:
+- {name: primary, host: localhost, dbname: postgres, username: postgres, password: test-password}
+- {name: replica, host: localhost, dbname: postgres, username: postgres, password: test-password}
+clusters:
+  orders: {primary: primary, replicas: [replica]}
+logical_databases:
+  client-db:
+    cluster: orders
+    read_clusters:
+      orders: {weight: 2}
+`)
+	cfg, err := parseConfig([]string{"-config", path})
+	require.NoError(t, err)
+	require.Equal(t, []string{"replica"}, cfg.replicas["orders"])
+	require.Equal(t, topology.ReadClusters{"orders": {Weight: 2}}, cfg.logicalDatabases["client-db"].ReadClusters)
+	_, err = parseConfig([]string{"-config", writeConfig(t, "yaml", `databases:
+- {name: primary, host: localhost, dbname: postgres, username: postgres, password: test-password}
+clusters:
+  orders: {primary: primary}
+logical_databases:
+  client-db: {cluster: orders, read_clusters: {orders: {weight: -1}}}
+`)})
+	require.Error(t, err, "negative weights must be rejected")
+	require.NotContains(t, err.Error(), "test-password")
 }
 
 func TestTelemetryPresets(t *testing.T) {

@@ -209,7 +209,13 @@ Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS. Set
 `proxy.tls_required: true` to reject plaintext startup. See the
 [client TLS guide](docs/client-connections.md#standalone-tls) for examples.
 
-File mode rejects JWT, mirroring sections, replicas, read clusters, and
+File mode supports cluster `replicas` and logical-database `read_clusters` for
+read routing. Replicas are static: each must accept a connection at startup, and
+there are no replica health checks. If a replica checkout fails, the read falls
+back to the cluster primary. See
+[read routing](docs/site/src/content/docs/explanation/read-routing.md).
+
+File mode rejects JWT, mirroring sections, and
 discovery/Envoy/load-balanced database options with explicit startup errors.
 Backend TLS is available through the
 database's `sslmode` setting.

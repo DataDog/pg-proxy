@@ -45,7 +45,8 @@ type config struct {
 	requireTLS        bool
 	authenticate      authenticationHook
 	databases         map[string]*pgxpool.Config
-	clusters          map[string]string
+	clusters          map[string]string   // Cluster name to primary database name.
+	replicas          map[string][]string // Cluster name to replica database names.
 	logicalDatabases  map[string]topology.LogicalDatabase
 }
 
@@ -82,9 +83,27 @@ func (c config) validate() error {
 		}
 		usedDatabases[primary] = true
 	}
+	for name, replicas := range c.replicas {
+		seen := make(map[string]bool, len(replicas))
+		for _, replica := range replicas {
+			if c.databases[replica] == nil {
+				return errors.New("each cluster replica must refer to a configured database")
+			}
+			if replica == c.clusters[name] || seen[replica] {
+				return errors.New("cluster replicas must be unique and differ from the cluster primary")
+			}
+			seen[replica] = true
+			usedDatabases[replica] = true
+		}
+	}
 	for name, logical := range c.logicalDatabases {
 		if _, exists := c.clusters[logical.Cluster]; name == "" || !exists {
 			return errors.New("each logical database must have a name and refer to a configured cluster")
+		}
+		for cluster, read := range logical.ReadClusters {
+			if _, exists := c.clusters[cluster]; !exists || read == nil {
+				return errors.New("each read cluster must refer to a configured cluster")
+			}
 		}
 	}
 	for name := range c.databases {
@@ -143,9 +162,14 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 			primary.Close()
 			return nil, fmt.Errorf("connect to backend %q: %w", name, err)
 		}
+		replicas, err := newReplicaPools(ctx, cfg, name)
+		if err != nil {
+			primary.Close()
+			return nil, err
+		}
 		inventory.backends[name] = &clusterBackend{backend.New(backend.Config{
 			ClusterName: name, PrimaryDatabaseName: settings.ConnConfig.Database,
-			Primary: primary, ParameterStatuses: parameters,
+			Primary: primary, Replicas: replicas, ParameterStatuses: parameters,
 		})}
 	}
 	users := make(map[string]string, len(cfg.logicalDatabases))
@@ -186,6 +210,32 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	}
 	ready = true
 	return &localProxy{server: proxy, sessions: sessions, inventory: inventory}, nil
+}
+
+// newReplicaPools opens one pgx pool per replica database of cluster. Replicas
+// are static: there is no health worker. A failed replica checkout falls back to
+// the cluster primary at runtime, but each replica must accept a connection at
+// startup so that a configuration error stops the proxy.
+func newReplicaPools(ctx context.Context, cfg config, cluster string) ([]pool.Pool, error) {
+	var replicas []pool.Pool
+	closeAll := func() {
+		for _, replica := range replicas {
+			replica.Close()
+		}
+	}
+	for _, name := range cfg.replicas[cluster] {
+		pgxPool, err := pgxpool.NewWithConfig(ctx, cfg.databases[name])
+		if err != nil {
+			closeAll()
+			return nil, errors.New("could not create replica pool")
+		}
+		replicas = append(replicas, pool.NewPGXPool(pgxPool, pool.PGXHooks{}))
+		if _, err := backend.RetrieveParameterStatuses(replicas[len(replicas)-1], name); err != nil {
+			closeAll()
+			return nil, fmt.Errorf("connect to replica %q of backend %q: %w", name, cluster, err)
+		}
+	}
+	return replicas, nil
 }
 
 // Explicitly close the socket to wake Accept, then drain sessions before pools.
@@ -247,6 +297,8 @@ type staticInventory struct {
 	backends         map[string]*clusterBackend
 }
 
+// GetLogicalDatabase returns the static routing view. Read clusters were
+// validated against the configured clusters at startup.
 func (i *staticInventory) GetLogicalDatabase(name string) (topology.LogicalDatabase, bool) {
 	database, exists := i.logicalDatabases[name]
 	return database, exists

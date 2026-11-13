@@ -70,6 +70,24 @@ func TestProxyAgainstPostgres(t *testing.T) {
 			return err == nil && connections == 0
 		}, 5*time.Second, 10*time.Millisecond)
 	})
+	t.Run("unreachable replica stops startup and closes pools", func(t *testing.T) {
+		url, err := connectionString(ctx, "sslmode=disable", "application_name=pg-proxy-replica-startup")
+		require.NoError(t, err)
+		cfg := backendConfig(t, url)
+		cfg.databases["reachable"] = cfg.databases["primary"].Copy()
+		unreachable := cfg.databases["primary"].Copy()
+		unreachable.ConnConfig.Port = 1
+		unreachable.ConnConfig.ConnectTimeout = time.Second
+		cfg.databases["unreachable"] = unreachable
+		cfg.replicas = map[string][]string{"local": {"reachable", "unreachable"}}
+		_, err = newProxy(ctx, cfg)
+		require.ErrorContains(t, err, `connect to replica "unreachable" of backend "local"`)
+		require.Eventually(t, func() bool {
+			var connections int
+			err := admin.QueryRow(ctx, "select count(*) from pg_stat_activity where application_name = 'pg-proxy-replica-startup'").Scan(&connections)
+			return err == nil && connections == 0
+		}, 5*time.Second, 10*time.Millisecond)
+	})
 	_, err = admin.Exec(ctx, "CREATE ROLE reports_user LOGIN PASSWORD 'reports-password'")
 	require.NoError(t, err)
 	_, err = admin.Exec(ctx, "CREATE DATABASE reports OWNER reports_user")
