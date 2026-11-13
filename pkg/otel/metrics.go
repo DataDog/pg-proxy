@@ -102,7 +102,8 @@ func (m *Metrics) histogram(name string, value float64, tags []string, timing bo
 		} else {
 			switch strings.TrimPrefix(name, pgproxy.MetricNamespace()) {
 			case pgproxy.MetricMessageLatency, pgproxy.MetricQueryParseLatency,
-				pgproxy.MetricFlushPostgresLatency, pgproxy.MetricConnectWait:
+				pgproxy.MetricFlushPostgresLatency, pgproxy.MetricConnectWait,
+				pgproxy.MetricIdleLinkReleaseLatency:
 				// Keep the SDK's fine buckets for fast operations, then extend them
 				// beyond 10,000 us so slow queries do not all share the overflow bucket.
 				opts = append(opts, metric.WithUnit("us"), metric.WithExplicitBucketBoundaries(

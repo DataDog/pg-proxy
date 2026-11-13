@@ -20,10 +20,11 @@ const DefaultMetricNamespace = "datadog."
 // Values are measured in microseconds. Like every name the library emits, they
 // exclude the namespace, which is added when the metric reaches the client.
 const (
-	MetricMessageLatency       = "pg_proxy.messages.latency_us"
-	MetricQueryParseLatency    = "pg_proxy.messages.parse.latency_us"
-	MetricFlushPostgresLatency = "pg_proxy.flush_postgres.latency_us"
-	MetricConnectWait          = "pg_proxy.sessions.connect_wait_us"
+	MetricMessageLatency         = "pg_proxy.messages.latency_us"
+	MetricQueryParseLatency      = "pg_proxy.messages.parse.latency_us"
+	MetricFlushPostgresLatency   = "pg_proxy.flush_postgres.latency_us"
+	MetricConnectWait            = "pg_proxy.sessions.connect_wait_us"
+	MetricIdleLinkReleaseLatency = "pg_proxy.sessions.idle_link_release.latency_us"
 )
 
 // MetricsClient is the metric subset used by the proxy. Existing StatsD clients

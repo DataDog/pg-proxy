@@ -88,6 +88,7 @@ func TestMicrosecondLatencyHistograms(t *testing.T) {
 		pgproxy.MetricQueryParseLatency,
 		pgproxy.MetricFlushPostgresLatency,
 		pgproxy.MetricConnectWait,
+		pgproxy.MetricIdleLinkReleaseLatency,
 	} {
 		t.Run(name, func(t *testing.T) {
 			reader := sdkmetric.NewManualReader()

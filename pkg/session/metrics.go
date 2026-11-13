@@ -21,7 +21,7 @@ const (
 
 	MetricBufferFlushCount        = "pg_proxy.sessions.buffer_flush.count"
 	MetricFlushPostgresLatency    = pgproxy.MetricFlushPostgresLatency
-	MetricIdleLinkReleaseLatency  = "pg_proxy.sessions.idle_link_release.latency_us"
+	MetricIdleLinkReleaseLatency  = pgproxy.MetricIdleLinkReleaseLatency
 	MetricClientMessageBodyLength = "pg_proxy.client_messages.body_length_bytes"
 	MetricMessages                = "pg_proxy.messages"
 	MetricMessageLatency          = pgproxy.MetricMessageLatency
