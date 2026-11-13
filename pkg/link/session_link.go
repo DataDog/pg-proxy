@@ -8,7 +8,9 @@ package link
 import (
 	"context"
 	"fmt"
+	"net"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -58,6 +60,28 @@ type SessionLink struct {
 // Conn returns the pooled Postgres connection associated with this link.
 func (link *SessionLink) Conn() *pgxpool.Conn {
 	return link.conn
+}
+
+// DatabaseInfo returns only non-secret destination fields from the acquired
+// connection, rather than the logical database requested by the proxy client.
+func (link *SessionLink) DatabaseInfo() pgproxy.DatabaseInfo {
+	if link.conn == nil {
+		return pgproxy.DatabaseInfo{}
+	}
+	conn := link.conn.Conn()
+	database := pgproxy.DatabaseInfo{Name: conn.Config().Database}
+	// Config retains the original host even when pgx selects a fallback.
+	// Attribute the exchange to the connected endpoint instead.
+	remote := conn.PgConn().Conn().RemoteAddr()
+	if address, ok := remote.(*net.UnixAddr); ok {
+		database.Host = address.Name
+	} else if host, port, err := net.SplitHostPort(remote.String()); err == nil {
+		database.Host = host
+		if number, err := strconv.ParseUint(port, 10, 16); err == nil {
+			database.Port = uint16(number)
+		}
+	}
+	return database
 }
 
 // RoleToken returns the opaque role token from RoleSession.Set, if any.

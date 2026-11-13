@@ -66,6 +66,24 @@ func (s otelSpan) StartChild(operation string) pgproxy.Span {
 	ctx, child := s.tracer.Start(s.ctx, operation, trace.WithSpanKind(trace.SpanKindInternal), trace.WithAttributes(attribute.String("db.system", "postgres")))
 	return otelSpan{tracer: s.tracer, ctx: ctx, span: child}
 }
+
+func (s otelSpan) StartDatabaseChild(operation, statement string, database pgproxy.DatabaseInfo) pgproxy.Span {
+	attrs := []attribute.KeyValue{attribute.String("db.system", "postgresql")}
+	if statement != "" {
+		attrs = append(attrs, attribute.String("db.statement", escapeInvalidUTF8(statement)))
+	}
+	if database.Name != "" {
+		attrs = append(attrs, attribute.String("db.namespace", database.Name), attribute.String("db.name", database.Name))
+	}
+	if database.Host != "" {
+		attrs = append(attrs, attribute.String("server.address", database.Host))
+	}
+	if database.Port != 0 {
+		attrs = append(attrs, attribute.Int("server.port", int(database.Port)))
+	}
+	ctx, child := s.tracer.Start(s.ctx, operation, trace.WithSpanKind(trace.SpanKindClient), trace.WithAttributes(attrs...))
+	return otelSpan{tracer: s.tracer, ctx: ctx, span: child}
+}
 func (s otelSpan) SetTag(key string, value any) {
 	var attr attribute.KeyValue
 	switch v := value.(type) {

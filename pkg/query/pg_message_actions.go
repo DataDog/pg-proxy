@@ -193,7 +193,9 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		action.ProxyMsgSize = getParameterStatusByteSize(m)
 
 	case *pgproto3.ErrorResponse:
-		traceState.FinishTrace(fmt.Errorf("code %s: %s", m.Code, m.Message))
+		traceErr := fmt.Errorf("code %s: %s", m.Code, m.Message)
+		traceState.RecordDatabaseError(traceErr, m.Code)
+		traceState.FinishTrace(traceErr)
 		if m.Severity == "FATAL" {
 			// FATAL always closes the session; annotation happens in closeErrorResponse()
 			// to avoid double-appending the hint when the error is forwarded to the client.

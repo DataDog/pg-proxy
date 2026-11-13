@@ -7,11 +7,13 @@ package link
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
@@ -236,7 +238,7 @@ func TestReleaseNonIdleDestroysBeforeRoleReset(t *testing.T) {
 	assert.False(t, emitted, "no role reset should be attempted on a backend being destroyed")
 }
 
-func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
+func newSessionLinkTestPoolConn(t *testing.T, configure ...func(*pgxpool.Config)) *pgxpool.Conn {
 	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
@@ -269,7 +271,10 @@ func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
 	config, err := pgxpool.ParseConfig("postgres://test@127.0.0.1/test?sslmode=disable")
 	require.NoError(t, err)
 	config.ConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
-		return clientConn, nil
+		return endpointTestConn{Conn: clientConn, remote: &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 5432}}, nil
+	}
+	for _, apply := range configure {
+		apply(config)
 	}
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), config)
@@ -477,4 +482,42 @@ func (bb *blockingBuffer) Write(p []byte) (int, error) {
 	copy(cp, p)
 	bb.ch <- cp
 	return len(p), nil
+}
+
+func TestDatabaseInfoUsesAcquiredConnection(t *testing.T) {
+	conn := newSessionLinkTestPoolConn(t)
+	t.Cleanup(conn.Release)
+	backend := &SessionLink{conn: conn}
+	require.Equal(t, pgproxy.DatabaseInfo{Name: "test", Host: "127.0.0.1", Port: 5432}, backend.DatabaseInfo())
+	require.Equal(t, pgproxy.DatabaseInfo{}, (&SessionLink{}).DatabaseInfo())
+}
+
+type endpointTestConn struct {
+	net.Conn
+	remote net.Addr
+}
+
+func (c endpointTestConn) RemoteAddr() net.Addr { return c.remote }
+
+func TestDatabaseInfoUsesSuccessfulFallbackEndpoint(t *testing.T) {
+	conn := newSessionLinkTestPoolConn(t, func(config *pgxpool.Config) {
+		config.ConnConfig.Host = "127.0.0.1"
+		config.ConnConfig.Port = 1
+		config.ConnConfig.Fallbacks = []*pgconn.FallbackConfig{{Host: "127.0.0.2", Port: 5433}}
+		dial := config.ConnConfig.DialFunc
+		config.ConnConfig.DialFunc = func(ctx context.Context, network, address string) (net.Conn, error) {
+			if address == "127.0.0.1:1" {
+				return nil, errors.New("primary unavailable")
+			}
+			c, err := dial(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			return endpointTestConn{Conn: c, remote: &net.TCPAddr{IP: net.ParseIP("127.0.0.2"), Port: 5433}}, nil
+		}
+	})
+	t.Cleanup(conn.Release)
+	require.Equal(t, "127.0.0.1", conn.Conn().Config().Host)
+	require.EqualValues(t, 1, conn.Conn().Config().Port)
+	require.Equal(t, pgproxy.DatabaseInfo{Name: "test", Host: "127.0.0.2", Port: 5433}, (&SessionLink{conn: conn}).DatabaseInfo())
 }

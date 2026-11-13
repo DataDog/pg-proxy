@@ -480,7 +480,7 @@ func TestClientWriteFailureCountsDestroyedBackendBeforeMonitor(t *testing.T) {
 
 		tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
 		assert.Equal(t, []int64{1}, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
-		backendLink.assertCalls(t, testLinkCalls{flush: 1, receive: 1, nextExpectation: 1, idle: 1, release: 1})
+		backendLink.assertCalls(t, testLinkCalls{flush: 1, receive: 1, nextExpectation: 2, resolveNextExpectation: 1, idle: 1, release: 1})
 	})
 }
 

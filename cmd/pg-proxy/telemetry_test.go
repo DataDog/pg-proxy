@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,6 +35,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	proxyquery "github.com/DataDog/pg-proxy/pkg/query"
 )
 
 // Decode real OTLP requests so these tests cover the exporters, not just adapters.
@@ -614,6 +616,16 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	var value string
 	require.NoError(t, client.QueryRow(ctx, query, pgx.QueryExecModeExec, "otel actual parameter").Scan(&value))
 	require.Equal(t, "otel actual parameter", value)
+	const slowTraceID = "1123456789abcdef0123456789abcdef"
+	const errorTraceID = "2123456789abcdef0123456789abcdef"
+	const recoveryTraceID = "3123456789abcdef0123456789abcdef"
+	withParent := func(sql, id string) string { return sql + " /*traceparent='00-" + id + "-" + parentID + "-01'*/" }
+	_, err = client.Exec(ctx, withParent("SELECT pg_sleep(0.1)", slowTraceID), pgx.QueryExecModeSimpleProtocol)
+	require.NoError(t, err)
+	_, err = client.Exec(ctx, withParent("SELECT 1/0", errorTraceID), pgx.QueryExecModeSimpleProtocol)
+	require.ErrorContains(t, err, "division by zero")
+	_, err = client.Exec(ctx, withParent("SELECT 1", recoveryTraceID), pgx.QueryExecModeSimpleProtocol)
+	require.NoError(t, err)
 	// Send binary Bind parameters and request binary results so the PostgreSQL
 	// round trip checks byte-for-byte preservation with capture enabled or disabled.
 	for _, tc := range []struct {
@@ -640,10 +652,18 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
 	var statement, parameters, binaryInt, binaryBytes, queryMetric, listening bool
+	var databaseSpans []*tracepb.Span
+	rootIDs := map[string]string{}
 	for _, resource := range receiver.traces {
 		requireResource(t, resource.Resource.Attributes)
 		for _, scope := range resource.ScopeSpans {
 			for _, span := range scope.Spans {
+				if span.Name == proxyquery.TransactionOpName {
+					rootIDs[hex.EncodeToString(span.TraceId)] = hex.EncodeToString(span.SpanId)
+				}
+				if span.Name == proxyquery.DatabaseRequestOpName {
+					databaseSpans = append(databaseSpans, span)
+				}
 				binaryInt = binaryInt || stringAttribute(span.Attributes, "db.parameters") == "\"\\xff\\xff\\xff\\xff\""
 				binaryBytes = binaryBytes || stringAttribute(span.Attributes, "db.parameters") == "\"\\x00\\xff\\x80\\x01\""
 				if !capture {
@@ -655,7 +675,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 				if hex.EncodeToString(span.TraceId) != traceID {
 					continue
 				}
-				if stringAttribute(span.Attributes, "db.statement") == query {
+				if span.Name == proxyquery.TransactionOpName && stringAttribute(span.Attributes, "db.statement") == query {
 					statement = true
 					require.Equal(t, parentID, hex.EncodeToString(span.ParentSpanId))
 				}
@@ -664,6 +684,34 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 				}
 			}
 		}
+	}
+	backend, err := pgx.ParseConfig(backendURL)
+	require.NoError(t, err)
+	backendAddresses, err := net.DefaultResolver.LookupHost(t.Context(), backend.Host)
+	require.NoError(t, err)
+	seen := map[string]bool{}
+	for _, span := range databaseSpans {
+		id := hex.EncodeToString(span.TraceId)
+		require.Equal(t, tracepb.Span_SPAN_KIND_CLIENT, span.Kind)
+		require.Equal(t, rootIDs[id], hex.EncodeToString(span.ParentSpanId))
+		require.Equal(t, "postgresql", stringAttribute(span.Attributes, "db.system"))
+		require.Equal(t, backend.Database, stringAttribute(span.Attributes, "db.namespace"))
+		require.Contains(t, backendAddresses, stringAttribute(span.Attributes, "server.address"))
+		switch id {
+		case traceID:
+			require.Equal(t, query, stringAttribute(span.Attributes, "db.statement"))
+		case slowTraceID:
+			require.GreaterOrEqual(t, span.EndTimeUnixNano-span.StartTimeUnixNano, uint64(100*time.Millisecond))
+		case errorTraceID:
+			require.Equal(t, tracepb.Status_STATUS_CODE_ERROR, span.Status.GetCode())
+			require.Equal(t, "22012", stringAttribute(span.Attributes, "db.response.status_code"))
+		case recoveryTraceID:
+			require.NotEqual(t, tracepb.Status_STATUS_CODE_ERROR, span.Status.GetCode())
+		}
+		seen[id] = true
+	}
+	for _, id := range []string{traceID, slowTraceID, errorTraceID, recoveryTraceID} {
+		require.True(t, seen[id], "missing backend exchange span for %s", id)
 	}
 	for _, resource := range receiver.metrics {
 		requireResource(t, resource.Resource.Attributes)

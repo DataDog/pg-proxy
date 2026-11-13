@@ -1247,11 +1247,18 @@ func (s *Session) handleDeallocatePreparedStmt(action ClientMessageAction) error
 
 // iterates through messages that it expected PG to send back to the proxy and handles them accordingly.
 // returns whether Postgres had to discard messages until a Sync was received and whether an error occurred.
-func (s *Session) flushPostgres() (bool, error) {
+func (s *Session) flushPostgres() (discarded bool, retErr error) {
 	s.obsVals.traceState.StartTrace(query.ForwardOpName)
 	if s.link == nil {
 		return false, fmt.Errorf("expected non-nil session link to flush")
 	}
+	// Custom links can omit destination metadata without changing the Link API.
+	database := s.obsVals.traceState.DatabaseInfo()
+	if destination, ok := s.link.(interface{ DatabaseInfo() pgproxy.DatabaseInfo }); ok {
+		database = destination.DatabaseInfo()
+	}
+	s.obsVals.traceState.StartDatabaseTrace(database)
+	defer func() { s.obsVals.traceState.FinishDatabaseTrace(retErr) }()
 	start := time.Now()
 	err := s.link.Flush()
 	elapsed := time.Since(start).Microseconds()
@@ -1312,6 +1319,7 @@ func (s *Session) flushPostgres() (bool, error) {
 	for {
 		expectation := s.link.NextExpectation()
 		if expectation == query.NoReply {
+			s.obsVals.traceState.FinishDatabaseTrace(nil)
 			break
 		}
 
@@ -1328,6 +1336,22 @@ func (s *Session) flushPostgres() (bool, error) {
 		action, err := query.DecidePgMessageAction(msg, expectation, s.obsVals.traceState)
 		if err != nil {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
+		}
+
+		if action.ResolveReplyExpectation {
+			s.link.ResolveNextExpectation()
+		}
+		if action.DiscardUntilSync {
+			s.link.DiscardUntilSync()
+			// there can only have up to one sync message buffered at once, so no additional messages can be processed.
+			// this means there is no possible state where discardedUntilSync becomes false before this loop exits.
+			discardedUntilSync = true
+			s.pStmtState.InvalidatePendingStmts(true)
+		}
+		if (action.ResolveReplyExpectation || action.DiscardUntilSync) && s.link.NextExpectation() == query.NoReply {
+			// Completion belongs to receipt of the final backend message,
+			// before even a threshold-triggered client write can block or fail.
+			s.obsVals.traceState.FinishDatabaseTrace(nil)
 		}
 
 		if action.AddNewPreparedStatement {
@@ -1359,20 +1383,13 @@ func (s *Session) flushPostgres() (bool, error) {
 				}
 			}
 		}
-		if action.ResolveReplyExpectation {
-			s.link.ResolveNextExpectation()
-		}
-		if action.DiscardUntilSync {
-			s.link.DiscardUntilSync()
-			// there can only have up to one sync message buffered at once, so no additional messages can be processed.
-			// this means there is no possible state where discardedUntilSync becomes false before this loop exits.
-			discardedUntilSync = true
-			s.pStmtState.InvalidatePendingStmts(true)
-		}
 		if action.SetTxStatus != query.NoTxStatus {
 			s.link.HandleReadyForQuery(action.SetTxStatus)
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
+			// The backend has completed its response. Role reset, pool release,
+			// and the final client flush are outside the database exchange.
+			s.obsVals.traceState.FinishDatabaseTrace(nil)
 			s.pStmtState.InvalidatePendingStmts(false)
 			err := s.link.Release()
 			if err != nil {
