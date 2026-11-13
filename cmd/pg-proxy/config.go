@@ -302,7 +302,11 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
-	return cfg, cfg.validate()
+	if err := cfg.validate(); err != nil {
+		return cfg, err
+	}
+	cfg.routingWarnings = routingWarningsFor(cfg)
+	return cfg, nil
 }
 
 // clientTLSConfig loads the certificate and key used to accept TLS client connections.

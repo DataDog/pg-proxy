@@ -258,6 +258,43 @@ func TestReplicasAndReadClusters(t *testing.T) {
 	require.Equal(t, topology.ReadClusters{
 		"reports": {Weight: topology.DefaultReadClusterWeight},
 	}, cfg.logicalDatabases["default-weight"].ReadClusters)
+	require.Empty(t, cfg.routingWarnings)
+}
+
+func TestRoutingWarnings(t *testing.T) {
+	shared := ossConfig()
+	for _, name := range []string{"replica", "reports-primary"} {
+		database := shared.Databases[0]
+		database.Name = name
+		shared.Databases = append(shared.Databases, database)
+	}
+	shared.Databases[1].DBName = "staging"
+	shared.Databases[1].Username = "reporting"
+	shared.Databases[2].Username = "reporting"
+	zero := uint8(0)
+	shared.Clusters["orders"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"replica"}}
+	shared.Clusters["reports"] = pgconfig.Cluster{Primary: "reports-primary"}
+	shared.LogicalDatabases["client-db"] = pgconfig.LogicalDatabase{
+		Cluster:      "orders",
+		ReadClusters: map[string]*pgconfig.ReadCluster{"orders": {Weight: &zero}, "reports": {Weight: &zero}},
+	}
+	cfg, err := (config{}).withSharedConfig(shared)
+	require.NoError(t, err)
+	require.Equal(t, []string{
+		`replica "replica" of cluster "orders" uses dbname "staging", but database "primary" uses "postgres"`,
+		`replica "replica" of cluster "orders" uses a different username than database "primary"`,
+		`database "reports-primary", the primary of read cluster "reports" for logical database "client-db", uses a different username than database "primary"`,
+		`logical database "client-db": all read_clusters weights are 0, so reads use cluster "orders", including its replicas`,
+	}, cfg.routingWarnings)
+	for _, warning := range cfg.routingWarnings {
+		require.NotContains(t, warning, "reporting", "usernames should not be logged")
+	}
+}
+
+func TestNilReadClusterSettings(t *testing.T) {
+	cfg := backendConfig(t, "postgres://localhost/postgres")
+	cfg.logicalDatabases["local_db"] = topology.LogicalDatabase{Cluster: "local", ReadClusters: topology.ReadClusters{"local": nil}}
+	require.EqualError(t, cfg.validate(), "each read cluster must have routing settings")
 }
 
 func TestReadReplicaConfigFile(t *testing.T) {

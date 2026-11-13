@@ -32,7 +32,11 @@ logical_databases:
       main: {weight: 1}
 ```
 
-The OSS binary validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. Its replicas are static: each replica must accept a connection at startup, and there are no replica health checks. A failed replica checkout falls back to the cluster primary, as described below. File changes require a restart. Embedding applications can supply discovered replicas and health checks instead.
+The OSS binary validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica, or the primary of a read cluster, uses a different `dbname` or username than the main primary. That setup can be intentional, but it can also send reads to the wrong database or role.
+
+Its replicas are static: each replica must accept a connection at startup, and there are no replica health checks. A failed replica checkout falls back to the cluster primary, as described below. File changes require a restart. Embedding applications can supply discovered replicas and health checks instead.
+
+Each cluster opens its own pool for each database it uses. A database used by two clusters, for example as a replica of one and the primary of another, can therefore receive up to the sum of both pools' `max_conns`. Keep that total below the server's `max_connections`. Pool metrics cover primary pools only; replica pools do not export pool gauges.
 
 ## When routing is enabled
 
@@ -82,6 +86,8 @@ The current check examines the first direct function call in the `SELECT` list. 
 ## Two routing decisions
 
 **Choosing a read cluster.** With `read_clusters`, eligible work selects a cluster according to its weight. Weights of `1` and `3` give approximately one quarter and three quarters of selections over time. A zero weight excludes that cluster from weighted selection. When all weights are zero, selection falls back to the logical database's main backend.
+
+Any `read_clusters` entry turns on read routing, including an entry with weight `0`. With routing on, the main backend still sends eligible reads to its own replicas, as described next. To keep all reads on a primary, remove `read_clusters` and do not configure replicas for that cluster. The OSS binary logs a warning when all weights are zero.
 
 **Choosing a pool within a cluster.** The current backend runtime sends roughly 90% of eligible replica-routed acquisitions to replica pools and retains 10% on that cluster's primary pool. Replica selection uses round robin. If replica acquisition fails, fallback to the primary is rate limited and can itself fail.
 
