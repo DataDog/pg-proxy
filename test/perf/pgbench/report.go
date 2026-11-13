@@ -54,8 +54,8 @@ func (r Run) oneLine() string {
 }
 
 // metric is one reported quantity. A metric with a threshold gets a verdict:
-// B regresses when it is worse in every pair and the mean change exceeds the
-// threshold, in percent of A. Allocations are nearly deterministic, so their
+// B regresses when it is worse in every pair, with no ties, and the mean change
+// exceeds the threshold, in percent of A. Allocations are nearly deterministic, so their
 // threshold is tight; timing metrics need more room for host noise.
 type metric struct {
 	name, unit    string
@@ -104,6 +104,8 @@ type Paired struct {
 	MeanPercent float64   `json:"mean_percent_of_a"`
 	// BetterCount counts pairs where B improved on A.
 	BetterCount int `json:"b_better_count"`
+	// WorseCount counts pairs where B was worse than A; ties count in neither.
+	WorseCount int `json:"b_worse_count"`
 	// Verdict is empty for metrics without a threshold.
 	Verdict string `json:"verdict,omitempty"`
 }
@@ -164,8 +166,11 @@ func pairRuns(runs []Run, clients int) []Paired {
 			d := b - a
 			p.Diffs = append(p.Diffs, d)
 			aSum += a
-			if (m.lowerIsBetter && d < 0) || (!m.lowerIsBetter && d > 0) {
+			switch {
+			case (m.lowerIsBetter && d < 0) || (!m.lowerIsBetter && d > 0):
 				p.BetterCount++
+			case d != 0:
+				p.WorseCount++
 			}
 		}
 		n := float64(len(p.Diffs))
@@ -182,7 +187,7 @@ func pairRuns(runs []Run, clients int) []Paired {
 				worsePercent = -worsePercent
 			}
 			switch {
-			case p.BetterCount == 0 && worsePercent > m.threshold:
+			case p.WorseCount == len(p.Diffs) && worsePercent > m.threshold:
 				p.Verdict = verdictRegression
 			case p.BetterCount == len(p.Diffs) && -worsePercent > m.threshold:
 				p.Verdict = verdictImprovement
@@ -221,7 +226,7 @@ func (res *Results) markdown() string {
 		if listed {
 			b.WriteString("\n")
 		}
-		b.WriteString("A metric regresses when B is worse in every pair and the mean change exceeds its threshold. Thresholds: ")
+		b.WriteString("A metric regresses when B is worse in every pair, with no ties, and the mean change exceeds its threshold. Thresholds: ")
 		var thresholds []string
 		for _, m := range metrics {
 			if m.threshold > 0 {

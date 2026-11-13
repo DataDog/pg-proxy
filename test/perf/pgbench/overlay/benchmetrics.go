@@ -18,6 +18,8 @@ import (
 	"os"
 	"runtime"
 	"runtime/metrics"
+	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -46,17 +48,35 @@ func serveBenchMetrics(w http.ResponseWriter, _ *http.Request) {
 	metrics.Read(samples)
 	var usage syscall.Rusage
 	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &usage)
-	maxRSS := uint64(usage.Maxrss)
-	if runtime.GOOS != "darwin" {
-		maxRSS *= 1024 // Linux reports ru_maxrss in KiB, macOS in bytes.
-	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]uint64{
 		"user_ns":            uint64(usage.Utime.Nano()),
 		"sys_ns":             uint64(usage.Stime.Nano()),
-		"max_rss_bytes":      maxRSS,
+		"max_rss_bytes":      peakRSS(usage),
 		"heap_alloc_bytes":   samples[0].Value.Uint64(),
 		"heap_alloc_objects": samples[1].Value.Uint64(),
 		"heap_live_bytes":    samples[2].Value.Uint64(),
 	})
+}
+
+// peakRSS returns the process's peak resident set size in bytes. Linux keeps
+// ru_maxrss across exec, so a proxy started by a large harness process would
+// report the harness's peak; VmHWM is reset by exec. macOS reports ru_maxrss
+// in bytes and does not inherit it.
+func peakRSS(usage syscall.Rusage) uint64 {
+	if runtime.GOOS == "darwin" {
+		return uint64(usage.Maxrss)
+	}
+	status, err := os.ReadFile("/proc/self/status")
+	if err == nil {
+		for _, line := range strings.Split(string(status), "\n") {
+			if value, ok := strings.CutPrefix(line, "VmHWM:"); ok {
+				kib, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimSpace(value), " kB"), 10, 64)
+				if err == nil {
+					return kib * 1024
+				}
+			}
+		}
+	}
+	return uint64(usage.Maxrss) * 1024 // ru_maxrss is in KiB on Linux.
 }

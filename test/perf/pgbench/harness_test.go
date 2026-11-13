@@ -120,3 +120,19 @@ func TestVerdictIgnoresInconsistentOrSmallChanges(t *testing.T) {
 	require.Equal(t, verdictImprovement, p["TPS"].Verdict)
 	require.Equal(t, verdictImprovement, res.Verdict)
 }
+
+func TestVerdictRequiresEveryPairWorse(t *testing.T) {
+	// Two pairs tie and one is 12% worse: the 4% mean exceeds the threshold, but
+	// B is not worse in every pair.
+	res := testResults(
+		pairRun("A", 1, 1000, 100, 2000), pairRun("B", 1, 1000, 100, 2000),
+		pairRun("B", 2, 1000, 100, 2000), pairRun("A", 2, 1000, 100, 2000),
+		pairRun("A", 3, 1000, 100, 2000), pairRun("B", 3, 1000, 112, 2000),
+	)
+	res.summarize()
+	cpu := paired(res)["proxy CPU"]
+	require.InDelta(t, 4.0, cpu.MeanPercent, 1e-9)
+	require.Equal(t, 1, cpu.WorseCount)
+	require.Equal(t, verdictNoChange, cpu.Verdict)
+	require.Equal(t, verdictNoChange, res.Verdict)
+}
