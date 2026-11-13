@@ -21,6 +21,7 @@ const (
 
 	MetricBufferFlushCount        = "pg_proxy.sessions.buffer_flush.count"
 	MetricFlushPostgresLatency    = pgproxy.MetricFlushPostgresLatency
+	MetricIdleLinkReleaseLatency  = "pg_proxy.sessions.idle_link_release.latency_us"
 	MetricClientMessageBodyLength = "pg_proxy.client_messages.body_length_bytes"
 	MetricMessages                = "pg_proxy.messages"
 	MetricMessageLatency          = pgproxy.MetricMessageLatency
@@ -173,6 +174,16 @@ func recordNamedPreparedStatement(name, sql string, traceState *query.TraceState
 	if usingUniqueTraceData {
 		pgproxy.Tracing().WarnNamedPreparedStatement(name, sql, service)
 	}
+}
+
+// recordIdleLinkReleaseFinished records how long Release holds a pool connection
+// after the client already has its reply.
+func (s *Session) recordIdleLinkReleaseFinished(elapsed time.Duration) {
+	s.metrics.Distribution(
+		MetricIdleLinkReleaseLatency,
+		float64(elapsed.Microseconds()),
+		s.obsVals.baseMetricTags(),
+	)
 }
 
 func (s *Session) recordFlushPostgresFinished(elapsed time.Duration) {

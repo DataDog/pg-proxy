@@ -738,6 +738,10 @@ func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
 				// link while it is reset.
 				assert.Equal(t, wantWritten, clientConn.written)
 				assert.Same(t, backendLink, s.link)
+				// A client disconnect seen now must not force-close the backend
+				// being reset for the pool.
+				s.ForceCloseBackendOnClientDisconnect(backendLink)
+				assert.Zero(t, backendLink.calls.forceClose)
 				return nil
 			}
 			s = New(Config{
@@ -755,6 +759,7 @@ func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
 			require.Equal(t, wantWritten, clientConn.written)
 			require.Nil(t, s.link)
 			assert.Equal(t, 1, backendLink.calls.release)
+			assert.False(t, s.releasingIdleLink.Load())
 		})
 	}
 }
@@ -788,13 +793,18 @@ func TestFlushPostgresClientWriteFailureBeforeReleaseLeavesLinkForClose(t *testi
 	// The failed write returns before Release, so the session still holds the link.
 	require.Same(t, backendLink, s.link)
 	require.Zero(t, backendLink.calls.release)
+	// The monitor may see the disconnect before the session closes. It leaves the
+	// idle link for close to reset.
+	s.ForceCloseBackendOnClientDisconnect(backendLink)
 
 	s.Close(err)
 
 	require.Nil(t, s.link)
 	// The link was idle, so close resets it and returns it to the pool.
-	tags := append(s.MetricTags(), "reason:client_disconnect", "path:release")
-	assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
+	for _, path := range []string{"path:release", "path:force_close"} {
+		tags := append(s.MetricTags(), "reason:client_disconnect", path)
+		assert.Empty(t, metrics.countValues("datadog.pg_proxy.sessions.connections.destroyed", tags))
+	}
 	backendLink.assertCalls(t, testLinkCalls{
 		flush: 1, receive: 1, nextExpectation: 1, resolveNextExpectation: 1, handleReadyForQuery: 1, idle: 2, release: 1,
 	})

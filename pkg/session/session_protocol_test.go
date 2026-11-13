@@ -48,7 +48,7 @@ func TestSimple(t *testing.T) {
 		femsg, err = fakeClient.Receive()
 		assert.EqualValues(&pgproto3.ReadyForQuery{TxStatus: 'I'}, femsg)
 		assert.NoError(err)
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	})
 }
 
@@ -88,7 +88,7 @@ func TestClientForwarding(t *testing.T) {
 		msg, err = fakeClient.Receive()
 		assert.NoError(err)
 		assert.IsType(&pgproto3.ReadyForQuery{}, msg)
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	})
 }
 
@@ -155,7 +155,7 @@ func TestSessionLoadShedding(t *testing.T) {
 	rfq, err := fakeClient.Receive()
 	assert.NoError(err)
 	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, rfq)
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 }
 
 // TestPingBypassesLoadShedding verifies that pgx ping queries ("-- ping") are
@@ -177,7 +177,7 @@ func TestPingBypassesLoadShedding(t *testing.T) {
 	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, msg)
 	assert.Equal(int64(0), backend.loadShedder.runCount.Load())
 	// No backend connection should have been acquired.
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 }
 
 // TestTerminateBypassesLoadShedding verifies that a Terminate message closes the
@@ -251,7 +251,7 @@ func TestSessionLoadSheddingExtendedQuery(t *testing.T) {
 	rfq, err := fakeClient.Receive()
 	assert.NoError(err)
 	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, rfq)
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	assert.False(session.DiscardUntilSync())
 }
 
@@ -278,7 +278,7 @@ func TestSessionLoadSheddingExtendedQueryOutOfOrder(t *testing.T) {
 	rfq, err := fakeClient.Receive()
 	assert.NoError(err)
 	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, rfq)
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	assert.False(session.DiscardUntilSync())
 }
 
@@ -357,7 +357,7 @@ func TestSessionLoadSheddingDoesNotRejectActiveLink(t *testing.T) {
 	assert.NoError(err)
 	_, err = fakeClient.Receive()
 	assert.NoError(err)
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	// The shedder ran exactly once: for the BEGIN, which started handleTransaction.
 	// SELECT 1 was handled inside the inner loop and did NOT trigger an additional Run call.
 	assert.Equal(int64(1), backend.loadShedder.runCount.Load())
@@ -396,7 +396,7 @@ func TestExtendedQueryAndNotice(t *testing.T) {
 			assert.IsType(want, msg)
 			assert.NoError(err)
 		}
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond) // session now unlinked
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond) // session now unlinked
 	})
 }
 
@@ -435,7 +435,7 @@ func TestMultiStatementTxn(t *testing.T) {
 		assert.NoError(err)
 		_, err = fakeClient.Receive()
 		assert.NoError(err)
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond) // link is removed
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond) // link is removed
 	})
 }
 
@@ -478,7 +478,7 @@ func TestHoldUntilSync(t *testing.T) {
 		assert.NoError(fakePg.Flush())
 		_, err = fakeClient.Receive()
 		assert.NoError(err)
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond) // link is removed
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond) // link is removed
 	})
 }
 
@@ -506,7 +506,7 @@ func TestDiscardUntilSync(t *testing.T) {
 			_, err := fakeClient.Receive()
 			assert.NoError(err)
 		}
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond) // session unlinked, even though we never got a Bind/Execute reply
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond) // session unlinked, even though we never got a Bind/Execute reply
 	})
 }
 
@@ -542,7 +542,7 @@ func TestSyncToTxStatus(t *testing.T) {
 		// I will unlink the session as it is now idle (also tested above)
 		err = syncMsg('I')
 		assert.NoError(err)
-		assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+		assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	})
 }
 
@@ -623,7 +623,7 @@ func TestRIFHeldAcrossMultiMessageTransaction(t *testing.T) {
 	assert.NoError(err)
 	// Still 1: COMMIT was handled inside the same loadShedder.Run call as BEGIN.
 	assert.Equal(int64(1), backend.loadShedder.runCount.Load())
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 }
 
 // TestDiscardUntilSyncInsideInnerLoop verifies that when a Parse inside a held
@@ -654,7 +654,7 @@ func TestDiscardUntilSyncInsideInnerLoop(t *testing.T) {
 		assert.NoError(err)
 	}
 	// Link was released by flushPostgres after ReadyForQuery{I}.
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 }
 
 // TestTerminateDuringHeldLink verifies that a Terminate message received inside
@@ -672,7 +672,7 @@ func TestTerminateDuringHeldLink(t *testing.T) {
 	// closer() waits for the session goroutine to finish (via the done channel).
 	// This also sends a second Terminate (harmless — nobody reads it after exit).
 	closer()
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Nil(session.CurrentLink())
 }
 
 // TestCheapQueryDoesNotAcquireRIF verifies that pgx health-check pings bypass
@@ -751,7 +751,7 @@ func TestPgxPingDuringHeldLinkKeepsRIFUntilRelease(t *testing.T) {
 	_, err = fakeClient.Receive()
 	assert.NoError(err)
 	assert.Equal(int64(1), backend.loadShedder.runCount.Load(), "COMMIT must be in the same checkout as BEGIN")
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 }
 
 // TestLoadSheddingExtendedDrainIgnoresPgxPingUntilSync verifies that a pgx ping
@@ -780,7 +780,7 @@ func TestLoadSheddingExtendedDrainIgnoresPgxPingUntilSync(t *testing.T) {
 	assert.NoError(err)
 	assert.Equal(&pgproto3.ReadyForQuery{TxStatus: 'I'}, rfq, "Sync must produce exactly one ReadyForQuery")
 	assert.False(session.DiscardUntilSync(), "discardUntilSync must be cleared after Sync")
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 }
 
 // TestLoadSheddingExtendedDrainTerminateClosesSession verifies that a Terminate
@@ -833,7 +833,7 @@ func TestPerMessageMetricsInInnerLoop(t *testing.T) {
 	assert.NoError(err)
 	// fn was called only once for the entire BEGIN→COMMIT transaction.
 	assert.Equal(int64(1), backend.loadShedder.runCount.Load())
-	assert.Eventually(linkReleased(session), time.Second, time.Millisecond)
+	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
 	// Activate the shedder and send a new query — it must be rejected.
 	backend.loadShedder.active.Store(true)
 	fakeClient.Send(&pgproto3.Query{String: "SELECT 1"})

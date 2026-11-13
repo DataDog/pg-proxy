@@ -176,6 +176,7 @@ type Session struct {
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
 	backendDestroyedOnClientDisconnect atomic.Bool     // true after recording that this session destroyed its backend because the client disconnected
+	releasingIdleLink                  atomic.Bool     // true while flushPostgres replies to the client and then releases an idle link
 
 	mirroring Mirroring
 
@@ -1397,9 +1398,9 @@ func (s *Session) flushPostgres() (bool, error) {
 			return nil
 		}
 		flushClient = false
+		// flushToClient already ends the trace span and wraps the error on failure.
 		if err := flushToClient(); err != nil {
-			s.obsVals.traceState.FinishTrace(err)
-			return fmt.Errorf("error flushing messages to client: %w", err)
+			return err
 		}
 		s.recordBufferFlushFinished(timesFlushed + 1)
 		s.obsVals.traceState.FinishTrace()
@@ -1481,17 +1482,25 @@ func (s *Session) flushPostgres() (bool, error) {
 			// until Release returns and reads the client's next message only after
 			// that, so no message reaches a backend that has not been reset. If the
 			// write fails, close releases the link the session still holds.
+			// releasingIdleLink stops the client monitor from force-closing this
+			// healthy backend while the write or the reset runs.
+			s.releasingIdleLink.Store(true)
 			if err := finishClientFlush(); err != nil {
+				// Leave releasingIdleLink set: the session closes on this error,
+				// and close resets the idle link after the monitor stops.
 				return discardedUntilSync, err
 			}
 			s.invalidatePendingStmts(false)
+			releaseStart := time.Now()
 			err := s.link.Release()
+			s.recordIdleLinkReleaseFinished(time.Since(releaseStart))
 			if err != nil {
 				pgproxy.Logger().Warn("error releasing session link", "err", err)
 			}
 			s.linkMu.Lock()
 			s.setLink(nil)
 			s.linkMu.Unlock()
+			s.releasingIdleLink.Store(false)
 			break
 		}
 	}
@@ -1632,6 +1641,11 @@ func (s *Session) close(err error) {
 }
 
 func (s *Session) forceCloseBackendOnClientDisconnect(backendLink link.Link) {
+	// The link is idle and is being reset for the pool, so no Receive needs
+	// unblocking. close() releases it if the session still holds it.
+	if s.releasingIdleLink.Load() {
+		return
+	}
 	if backendLink.ForceClose() {
 		s.recordBackendDestroyedOnClientDisconnect("force_close")
 	}
