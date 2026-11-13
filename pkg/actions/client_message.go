@@ -53,6 +53,13 @@ type ClientMessageAction struct {
 	// If CheckExistingPreparedStmt is not nil, check that the SessionLink's connection has this prepared statement
 	// created, otherwise create it.
 	CheckExistingPreparedStmt prepared.PreparedStatement
+	// If EnsureUnnamedPreparedStmt is true, the client's unnamed prepared statement is re-created on the
+	// SessionLink's connection before the message is proxied, if that connection does not have it.
+	EnsureUnnamedPreparedStmt bool
+	// If InvalidateUnnamedPreparedStmt is true, the message destroys the client's unnamed prepared
+	// statement in PostgreSQL: a simple Query, including one the proxy answers locally, or a Close
+	// of the unnamed statement. The Session must forget it before replying or proxying the message.
+	InvalidateUnnamedPreparedStmt bool
 	// If DeallocatePreparedStmt is not nil, deallocate the prepared statement with the given client name.
 	DeallocatePreparedStmt prepared.PreparedStatement
 	// If UpdateAutoCachedUnnamedPreparedStmt is not nil, update the prepared statement in the Session's state.
@@ -121,7 +128,9 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			AddReplyExpectation: query.QueryReply,
 			FlushPostgres:       true,
 		}
-		return handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
+		action, err := handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
+		action.InvalidateUnnamedPreparedStmt = true
+		return action, err
 
 	case *pgproto3.Parse:
 		clientName := m.Name
@@ -180,7 +189,11 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		// if attempting to describe an unnamed statement or a named portal, no action needed
 		// portals only exist for the duration of the transaction, so there is no risk of conflict
 		clientName := m.Name
-		if m.ObjectType == 'P' || (!prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled) {
+		if m.ObjectType == 'P' {
+			return action, nil
+		}
+		if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
 		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
@@ -205,7 +218,11 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 				},
 			}, nil
 		}
-		return ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.CloseReply}, nil
+		return ClientMessageAction{
+			ProxyMsgToPg:                  m,
+			AddReplyExpectation:           query.CloseReply,
+			InvalidateUnnamedPreparedStmt: m.ObjectType == 'S' && clientName == "",
+		}, nil
 
 	case *pgproto3.Bind:
 		// TODO handle tracing named prepared statements
@@ -218,6 +235,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		// handle unnamed prepared statements with no auto-caching
 		clientName := m.PreparedStatement
 		if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
 		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)

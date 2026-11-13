@@ -1,0 +1,74 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+
+# Builds docs/site and deploys it to GitHub Pages.
+# Set Settings -> Pages -> Source to "GitHub Actions" for this to publish.
+name: Docs Pages
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - docs/site/**
+      - .github/workflows/docs-pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deploy at a time; let an in-progress deploy finish.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: read # configure-pages reads the site's base path
+    defaults:
+      run:
+        working-directory: docs/site
+    env:
+      ASTRO_TELEMETRY_DISABLED: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: docs/site/package-lock.json
+      - id: pages
+        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
+      - name: Install dependencies
+        run: npm ci
+      # base_path is "" for a private or custom-domain site and "/pg-proxy"
+      # for a public project site; build:static wants it wrapped in slashes.
+      - name: Build static site and check links
+        env:
+          BASE_PATH: ${{ steps.pages.outputs.base_path }}
+        run: npm run build:static -- "${BASE_PATH%/}/"
+      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: docs/site/dist-static
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

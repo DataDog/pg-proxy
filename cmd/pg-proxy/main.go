@@ -181,6 +181,9 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	if err != nil {
 		return nil, err
 	}
+	if cfg.telemetry.Metrics != metricNone {
+		inventory.StartStats()
+	}
 	ready = true
 	return &localProxy{server: proxy, sessions: sessions, inventory: inventory}, nil
 }
@@ -252,6 +255,13 @@ func (i *staticInventory) GetLogicalDatabase(name string) (topology.LogicalDatab
 func (i *staticInventory) GetBackend(name string) (server.Backend, bool) {
 	backend, exists := i.backends[name]
 	return backend, exists
+}
+
+// StartStats starts periodic pool and waiting-session gauges; Close stops them.
+func (i *staticInventory) StartStats() {
+	for _, backend := range i.backends {
+		backend.StartStats()
+	}
 }
 
 func (i *staticInventory) Close() {
