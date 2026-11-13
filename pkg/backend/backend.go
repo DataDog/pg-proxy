@@ -77,6 +77,7 @@ type Runtime struct {
 	primaryDatabaseName string
 	sessionsWaiting     atomic.Int32
 	stopExportStats     chan struct{}
+	startStatsOnce      sync.Once
 	closeOnce           sync.Once
 	fallbackRateLimiter *rate.Limiter
 	loadShedder         session.LoadShedder
@@ -311,24 +312,27 @@ func (p *PoolSelector) selectPool(sessionLastWrite time.Time) (pool.Pool, bool) 
 }
 
 // StartStats starts exporting sessions-waiting and primary pool stats every two seconds.
+// Later calls are no-ops, and Close stops the export.
 func (r *Runtime) StartStats() {
-	go func() {
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		tags := []string{
-			fmt.Sprintf("database:%s", r.primaryDatabaseName),
-			fmt.Sprintf("database_cluster:%s", r.clusterName),
+	r.startStatsOnce.Do(func() { go r.exportStats() })
+}
+
+func (r *Runtime) exportStats() {
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	tags := []string{
+		fmt.Sprintf("database:%s", r.primaryDatabaseName),
+		fmt.Sprintf("database_cluster:%s", r.clusterName),
+	}
+	for {
+		select {
+		case <-ticker.C:
+			_ = pgproxy.Metrics().Gauge("pg_proxy.sessions.waiting", float64(r.SessionsWaiting()), tags, 1)
+			r.selector.primary.ExportStats(tags)
+		case <-r.stopExportStats:
+			return
 		}
-		for {
-			select {
-			case <-ticker.C:
-				_ = pgproxy.Metrics().Gauge("pg_proxy.sessions.waiting", float64(r.SessionsWaiting()), tags, 1)
-				r.selector.primary.ExportStats(tags)
-			case <-r.stopExportStats:
-				return
-			}
-		}
-	}()
+	}
 }
 
 // Close stops stats export and closes all pools.
