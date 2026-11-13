@@ -27,7 +27,7 @@ func (Secret) MarshalYAML() (any, error)    { return "[REDACTED]", nil }
 
 func (c StaticCredentials) validate() error {
 	if c.Password != "" && c.SCRAMSHA256 != "" {
-		return errors.New("password and scram_sha_256 are mutually exclusive")
+		return errors.New("password and scram_sha_256 (scramSHA256) are mutually exclusive")
 	}
 	if (c.Password != "" || c.SCRAMSHA256 != "") && c.Username == "" {
 		return errors.New("static credentials require username")

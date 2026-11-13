@@ -133,7 +133,8 @@ Rules:
   used as-is.
 - Relative `*_file` paths are resolved from the proxy's working directory, not
   from the directory of the configuration file. Use absolute paths.
-- Errors name the setting, not the path, the variable, or the value. Resolved
+- Errors name the setting in both forms, such as `password_file (passwordFile)`,
+  not the path, the variable, or the value. Resolved
   values are redacted like inline ones.
 
 The verifier helper above prints a trailing newline, so you can redirect its

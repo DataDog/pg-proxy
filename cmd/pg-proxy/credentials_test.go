@@ -155,32 +155,32 @@ func TestCredentialReferenceErrors(t *testing.T) {
 		"inline and file": {
 			fmt.Sprintf("databases: [{name: db, username: u, password: inline-secret-sentinel, password_file: %q}]", present),
 			fmt.Sprintf(`{"databases":[{"name":"db","username":"u","password":"inline-secret-sentinel","passwordFile":%q}]}`, present),
-			"database 0: password, password_file, and password_env are mutually exclusive",
+			"database 0: password, password_file (passwordFile), and password_env (passwordEnv) are mutually exclusive",
 		},
 		"file and env": {
 			fmt.Sprintf("databases: [{name: db, username: u, password_file: %q, password_env: PG_PROXY_TEST_SET}]", present),
 			fmt.Sprintf(`{"databases":[{"name":"db","username":"u","passwordFile":%q,"passwordEnv":"PG_PROXY_TEST_SET"}]}`, present),
-			"database 0: password, password_file, and password_env are mutually exclusive",
+			"database 0: password, password_file (passwordFile), and password_env (passwordEnv) are mutually exclusive",
 		},
 		"missing file": {
 			fmt.Sprintf("databases: [{name: db, username: u, password_file: %q}]", missing),
 			fmt.Sprintf(`{"databases":[{"name":"db","username":"u","passwordFile":%q}]}`, missing),
-			"database 0: password_file: file not found",
+			"database 0: password_file (passwordFile): file not found",
 		},
 		"empty file": {
 			fmt.Sprintf("databases: [{name: db, username: u, password_file: %q}]", empty),
 			fmt.Sprintf(`{"databases":[{"name":"db","username":"u","passwordFile":%q}]}`, empty),
-			"database 0: password_file: file is empty",
+			"database 0: password_file (passwordFile): file is empty",
 		},
 		"unset env": {
 			"databases: [{name: db, username: u, password_env: PG_PROXY_TEST_UNSET_SENTINEL}]",
 			`{"databases":[{"name":"db","username":"u","passwordEnv":"PG_PROXY_TEST_UNSET_SENTINEL"}]}`,
-			"database 0: password_env: environment variable is not set or empty",
+			"database 0: password_env (passwordEnv): environment variable is not set or empty",
 		},
 		"empty env": {
 			"databases: [{name: db, username: u, password_env: PG_PROXY_TEST_EMPTY}]",
 			`{"databases":[{"name":"db","username":"u","passwordEnv":"PG_PROXY_TEST_EMPTY"}]}`,
-			"database 0: password_env: environment variable is not set or empty",
+			"database 0: password_env (passwordEnv): environment variable is not set or empty",
 		},
 		"referenced password requires username": {
 			"databases: [{name: db, password_env: PG_PROXY_TEST_SET}]",
@@ -190,22 +190,22 @@ func TestCredentialReferenceErrors(t *testing.T) {
 		"user password sources": {
 			fmt.Sprintf("users: [{static_credentials: {username: alice, password_file: %q, password_env: PG_PROXY_TEST_SET}}]", present),
 			fmt.Sprintf(`{"users":[{"staticCredentials":{"username":"alice","passwordFile":%q,"passwordEnv":"PG_PROXY_TEST_SET"}}]}`, present),
-			"user 0: password, password_file, and password_env are mutually exclusive",
+			"user 0: password, password_file (passwordFile), and password_env (passwordEnv) are mutually exclusive",
 		},
 		"user verifier sources": {
 			fmt.Sprintf("users: [{static_credentials: {username: alice, scram_sha_256: inline-secret-sentinel, scram_sha_256_file: %q}}]", present),
 			fmt.Sprintf(`{"users":[{"staticCredentials":{"username":"alice","scramSHA256":"inline-secret-sentinel","scramSHA256File":%q}}]}`, present),
-			"user 0: scram_sha_256, scram_sha_256_file, and scram_sha_256_env are mutually exclusive",
+			"user 0: scram_sha_256 (scramSHA256), scram_sha_256_file (scramSHA256File), and scram_sha_256_env (scramSHA256Env) are mutually exclusive",
 		},
 		"user password and verifier": {
 			"users: [{static_credentials: {username: alice, password_env: PG_PROXY_TEST_SET, scram_sha_256_env: PG_PROXY_TEST_SET}}]",
 			`{"users":[{"staticCredentials":{"username":"alice","passwordEnv":"PG_PROXY_TEST_SET","scramSHA256Env":"PG_PROXY_TEST_SET"}}]}`,
-			"user 0: password and scram_sha_256 are mutually exclusive",
+			"user 0: password and scram_sha_256 (scramSHA256) are mutually exclusive",
 		},
 		"user missing verifier file": {
 			fmt.Sprintf("users: [{static_credentials: {username: alice, scram_sha_256_file: %q}}]", missing),
 			fmt.Sprintf(`{"users":[{"staticCredentials":{"username":"alice","scramSHA256File":%q}}]}`, missing),
-			"user 0: scram_sha_256_file: file not found",
+			"user 0: scram_sha_256_file (scramSHA256File): file not found",
 		},
 		"user invalid verifier file": {
 			fmt.Sprintf("users: [{static_credentials: {username: alice, scram_sha_256_file: %q}}]", invalidVerifier),

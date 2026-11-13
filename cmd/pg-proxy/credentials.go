@@ -87,7 +87,7 @@ func (c fileConfig) resolve() (pgconfig.Config, error) {
 		result.Databases = make([]pgconfig.Database, len(c.Databases))
 	}
 	for i, database := range c.Databases {
-		password, err := resolveSecret("password", database.Password, database.PasswordFile, database.PasswordEnv)
+		password, err := resolveSecret(passwordField, database.Password, database.PasswordFile, database.PasswordEnv)
 		if err != nil {
 			return pgconfig.Config{}, fmt.Errorf("database %d: %w", i, err)
 		}
@@ -99,11 +99,11 @@ func (c fileConfig) resolve() (pgconfig.Config, error) {
 	}
 	for i, user := range c.Users {
 		credentials := user.StaticCredentials
-		password, err := resolveSecret("password", credentials.Password, credentials.PasswordFile, credentials.PasswordEnv)
+		password, err := resolveSecret(passwordField, credentials.Password, credentials.PasswordFile, credentials.PasswordEnv)
 		if err != nil {
 			return pgconfig.Config{}, fmt.Errorf("user %d: %w", i, err)
 		}
-		verifier, err := resolveSecret("scram_sha_256", credentials.SCRAMSHA256, credentials.SCRAMSHA256File, credentials.SCRAMSHA256Env)
+		verifier, err := resolveSecret(scramSHA256Field, credentials.SCRAMSHA256, credentials.SCRAMSHA256File, credentials.SCRAMSHA256Env)
 		if err != nil {
 			return pgconfig.Config{}, fmt.Errorf("user %d: %w", i, err)
 		}
@@ -117,11 +117,34 @@ func (c fileConfig) resolve() (pgconfig.Config, error) {
 	return result, nil
 }
 
+// credentialField holds an inline credential's YAML and JSON names. Errors name
+// both forms, so a message makes sense whichever format the file uses.
+type credentialField struct{ yaml, json string }
+
+var (
+	passwordField    = credentialField{"password", "password"}
+	scramSHA256Field = credentialField{"scram_sha_256", "scramSHA256"}
+)
+
+// names returns the inline, file, and environment setting names.
+func (f credentialField) names() (inline, file, env string) {
+	return f.name("", ""), f.name("_file", "File"), f.name("_env", "Env")
+}
+
+func (f credentialField) name(yamlSuffix, jsonSuffix string) string {
+	yamlName, jsonName := f.yaml+yamlSuffix, f.json+jsonSuffix
+	if yamlName == jsonName {
+		return yamlName
+	}
+	return yamlName + " (" + jsonName + ")"
+}
+
 // resolveSecret accepts at most one of an inline value, a file path, or an
 // environment variable name. A referenced file or variable must exist and be
 // nonempty. File contents lose one trailing newline (\n or \r\n), as mounted
 // secrets often end with one; environment values are used as-is.
-func resolveSecret(setting string, inline pgconfig.Secret, file, env string) (pgconfig.Secret, error) {
+func resolveSecret(field credentialField, inline pgconfig.Secret, file, env string) (pgconfig.Secret, error) {
+	inlineName, fileName, envName := field.names()
 	sources := 0
 	for _, source := range []string{string(inline), file, env} {
 		if source != "" {
@@ -129,13 +152,13 @@ func resolveSecret(setting string, inline pgconfig.Secret, file, env string) (pg
 		}
 	}
 	if sources > 1 {
-		return "", fmt.Errorf("%[1]s, %[1]s_file, and %[1]s_env are mutually exclusive", setting)
+		return "", fmt.Errorf("%s, %s, and %s are mutually exclusive", inlineName, fileName, envName)
 	}
 	switch {
 	case file != "":
 		data, err := os.ReadFile(file)
 		if err != nil {
-			return "", fmt.Errorf("%s_file: %s", setting, fileErrorReason(err))
+			return "", fmt.Errorf("%s: %s", fileName, fileErrorReason(err))
 		}
 		value := string(data)
 		if trimmed, ok := strings.CutSuffix(value, "\r\n"); ok {
@@ -144,13 +167,13 @@ func resolveSecret(setting string, inline pgconfig.Secret, file, env string) (pg
 			value = strings.TrimSuffix(value, "\n")
 		}
 		if value == "" {
-			return "", fmt.Errorf("%s_file: file is empty", setting)
+			return "", fmt.Errorf("%s: file is empty", fileName)
 		}
 		return pgconfig.Secret(value), nil
 	case env != "":
 		value := os.Getenv(env)
 		if value == "" {
-			return "", fmt.Errorf("%s_env: environment variable is not set or empty", setting)
+			return "", fmt.Errorf("%s: environment variable is not set or empty", envName)
 		}
 		return pgconfig.Secret(value), nil
 	}
