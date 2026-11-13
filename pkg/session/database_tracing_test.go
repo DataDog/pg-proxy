@@ -7,6 +7,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -126,6 +127,7 @@ func TestDatabaseExchangeDatadog(t *testing.T) {
 						root = span
 					} else if span.SpanID() != database.SpanID() {
 						require.Equal(t, "internal", span.Tag("span.kind"))
+						require.EqualValues(t, 1, span.Tag("_dd.measured"))
 					}
 				}
 				require.NotNil(t, root)
@@ -203,6 +205,71 @@ func TestDatabaseExchangeOTel(t *testing.T) {
 			} else {
 				require.NotEqual(t, codes.Error, database.Status().Code)
 			}
+		})
+	}
+}
+
+func TestDatabaseCompletesBeforeThresholdTriggeredFinalClientWrite(t *testing.T) {
+	for _, writeErr := range []error{nil, errors.New("client write failed")} {
+		name := "success"
+		if writeErr != nil {
+			name = "write_failure"
+		}
+		t.Run(name, func(t *testing.T) {
+			mt := mocktracer.Start()
+			defer mt.Stop()
+			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxydatadog.Tracer{}}))
+			started, release := make(chan struct{}), make(chan struct{})
+			defer func() {
+				select {
+				case <-release:
+				default:
+					close(release)
+				}
+			}()
+			conn := &blockingWriteConn{started: started, release: release, err: writeErr}
+			pending := true
+			backend := &testLink{
+				nextExpectation: func() query.ReplyExpectation {
+					if pending {
+						return query.SyncReply
+					}
+					return query.NoReply
+				},
+				receive:                func() (pgproto3.BackendMessage, error) { return &pgproto3.ReadyForQuery{TxStatus: 'T'}, nil },
+				resolveNextExpectation: func() { pending = false },
+			}
+			session := New(Config{Client: &testClient{}, ClientConn: conn, InitialLink: backend, PostgresMsgBufferSize: 6})
+			session.TraceState().StartRootTrace(&pgproto3.Sync{})
+			done := make(chan error, 1)
+			go func() { _, err := session.flushPostgres(); done <- err }()
+			select {
+			case <-started:
+			case <-time.After(time.Second):
+				t.Fatal("final client write did not start")
+			}
+			var database *mocktracer.Span
+			for _, span := range mt.FinishedSpans() {
+				if span.OperationName() == query.DatabaseRequestOpName {
+					database = span
+				}
+			}
+			require.NotNil(t, database, "backend exchange must finish before the final response blocks on the client")
+			require.Nil(t, database.Tag("error.message"))
+			close(release)
+			select {
+			case err := <-done:
+				if writeErr == nil {
+					require.NoError(t, err)
+				} else {
+					require.ErrorIs(t, err, writeErr)
+				}
+				session.TraceState().FinishRootTrace(err)
+			case <-time.After(time.Second):
+				t.Fatal("flush did not finish")
+			}
+			require.Nil(t, database.Tag("error.message"), "a failed final client write must not fail the completed database exchange")
+			require.Empty(t, mt.OpenSpans())
 		})
 	}
 }

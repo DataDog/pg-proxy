@@ -13,6 +13,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -686,6 +687,8 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	}
 	backend, err := pgx.ParseConfig(backendURL)
 	require.NoError(t, err)
+	backendAddresses, err := net.DefaultResolver.LookupHost(t.Context(), backend.Host)
+	require.NoError(t, err)
 	seen := map[string]bool{}
 	for _, span := range databaseSpans {
 		id := hex.EncodeToString(span.TraceId)
@@ -693,7 +696,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 		require.Equal(t, rootIDs[id], hex.EncodeToString(span.ParentSpanId))
 		require.Equal(t, "postgresql", stringAttribute(span.Attributes, "db.system"))
 		require.Equal(t, backend.Database, stringAttribute(span.Attributes, "db.namespace"))
-		require.Equal(t, backend.Host, stringAttribute(span.Attributes, "server.address"))
+		require.Contains(t, backendAddresses, stringAttribute(span.Attributes, "server.address"))
 		switch id {
 		case traceID:
 			require.Equal(t, query, stringAttribute(span.Attributes, "db.statement"))

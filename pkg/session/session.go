@@ -1338,6 +1338,22 @@ func (s *Session) flushPostgres() (discarded bool, retErr error) {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
 		}
 
+		if action.ResolveReplyExpectation {
+			s.link.ResolveNextExpectation()
+		}
+		if action.DiscardUntilSync {
+			s.link.DiscardUntilSync()
+			// there can only have up to one sync message buffered at once, so no additional messages can be processed.
+			// this means there is no possible state where discardedUntilSync becomes false before this loop exits.
+			discardedUntilSync = true
+			s.pStmtState.InvalidatePendingStmts(true)
+		}
+		if (action.ResolveReplyExpectation || action.DiscardUntilSync) && s.link.NextExpectation() == query.NoReply {
+			// Completion belongs to receipt of the final backend message,
+			// before even a threshold-triggered client write can block or fail.
+			s.obsVals.traceState.FinishDatabaseTrace(nil)
+		}
+
 		if action.AddNewPreparedStatement {
 			confirmedPreparedStmt := s.pStmtState.ConfirmPendingStmt()
 			if confirmedPreparedStmt != nil && confirmedPreparedStmt.IsExistingPreparedStmt() {
@@ -1366,16 +1382,6 @@ func (s *Session) flushPostgres() (discarded bool, retErr error) {
 					return discardedUntilSync, err
 				}
 			}
-		}
-		if action.ResolveReplyExpectation {
-			s.link.ResolveNextExpectation()
-		}
-		if action.DiscardUntilSync {
-			s.link.DiscardUntilSync()
-			// there can only have up to one sync message buffered at once, so no additional messages can be processed.
-			// this means there is no possible state where discardedUntilSync becomes false before this loop exits.
-			discardedUntilSync = true
-			s.pStmtState.InvalidatePendingStmts(true)
 		}
 		if action.SetTxStatus != query.NoTxStatus {
 			s.link.HandleReadyForQuery(action.SetTxStatus)

@@ -25,12 +25,13 @@ import (
 )
 
 type exportedSpan struct {
-	Name     string            `msgpack:"name"`
-	Service  string            `msgpack:"service"`
-	TraceID  uint64            `msgpack:"trace_id"`
-	SpanID   uint64            `msgpack:"span_id"`
-	ParentID uint64            `msgpack:"parent_id"`
-	Meta     map[string]string `msgpack:"meta"`
+	Name     string             `msgpack:"name"`
+	Service  string             `msgpack:"service"`
+	TraceID  uint64             `msgpack:"trace_id"`
+	SpanID   uint64             `msgpack:"span_id"`
+	ParentID uint64             `msgpack:"parent_id"`
+	Meta     map[string]string  `msgpack:"meta"`
+	Metrics  map[string]float64 `msgpack:"metrics"`
 }
 
 func TestDatadogPresetExportAndShutdown(t *testing.T) {
@@ -109,6 +110,7 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 			require.Equal(t, "server", span.Meta["span.kind"])
 		} else {
 			require.Equal(t, "internal", span.Meta["span.kind"])
+			require.Equal(t, float64(1), span.Metrics["_dd.measured"])
 		}
 		require.Equal(t, "proxy-test", span.Service)
 		require.Equal(t, "test", span.Meta["env"])

@@ -17,7 +17,7 @@ PG Proxy records query and protocol spans with either Datadog or OpenTelemetry. 
 | `Batch execution and proxying` | Grouped batch execution. |
 | `Returning rows to client` | Returning results. |
 
-Both adapters mark incoming root spans as `server`, processing stage spans as `internal`, and `postgres.request` spans as `client`. Native Datadog database spans use type `sql` and `db.system:postgres`; OpenTelemetry database spans use `db.system:postgresql`. The exact query `-- ping` does not start a root trace.
+Both adapters mark incoming root spans as `server`, processing stage spans as `internal`, and `postgres.request` spans as `client`. Native Datadog processing spans remain explicitly measured to preserve their existing trace metrics. Native Datadog database spans use type `sql` and `db.system:postgres`; OpenTelemetry database spans use `db.system:postgresql`. The exact query `-- ping` does not start a root trace.
 
 ## Propagation
 
@@ -70,7 +70,7 @@ The session code warns when named prepared statements contain per-query trace co
 
 PostgreSQL `ErrorResponse` messages mark both the database span and the root request as errors, including errors followed by a successful `ReadyForQuery`. Transport failures also finish the database span with an error. A client write failure after backend completion does not change the completed database span.
 
-The acquired connection supplies the actual database name, host, and port. Native Datadog spans use `db.instance`, `out.host`, and `out.port`; OpenTelemetry spans use `db.namespace` (also `db.name` for compatibility), `server.address`, and `server.port`. These fields do not contain credentials or connection strings. If a custom link does not supply destination metadata, these tags are omitted.
+The acquired connection supplies the database name; its live remote address supplies the actual host and port, including after multi-host fallback. Native Datadog spans use `db.instance`, `out.host`, and `out.port`; OpenTelemetry spans use `db.namespace` (also `db.name` for compatibility), `server.address`, and `server.port`. These fields do not contain credentials or connection strings. If a custom link does not supply destination metadata, these tags are omitted.
 
 Custom tracers keep the existing `Tracer` and `Span` interfaces. To emit database spans, their root spans must also implement `pgproxy.DatabaseSpanStarter`. The built-in adapters implement it. Embedders that decorate links should capture destination metadata through the library backend's checkout path; that path saves it before applying the decorator.
 

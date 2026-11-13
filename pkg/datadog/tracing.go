@@ -51,7 +51,7 @@ func (Tracer) WarnNamedPreparedStatement(name, sql, service string) {
 type span struct{ span *tracer.Span }
 
 func (s span) StartChild(operation string) pgproxy.Span {
-	return span{s.span.StartChild(operation, tracer.Tag(ext.SpanKind, ext.SpanKindInternal))}
+	return span{s.span.StartChild(operation, tracer.Tag(ext.SpanKind, ext.SpanKindInternal), tracer.Measured())}
 }
 
 func (s span) StartDatabaseChild(operation, statement string, database pgproxy.DatabaseInfo) pgproxy.Span {
