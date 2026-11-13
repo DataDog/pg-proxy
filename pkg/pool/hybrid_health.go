@@ -34,6 +34,7 @@ const (
 	SQLHealthFallbackIndeterminate     = "indeterminate_error"
 	SQLHealthFallbackMultiplePrimaries = "multiple_primaries"
 	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
+	SQLHealthFallbackStaleEvidence     = "stale_sql_evidence"
 )
 
 // LeaderDetectionComparison pairs independent SQL and Patroni observations of a new leader.
@@ -87,6 +88,10 @@ type hybridHealthPolicy struct {
 
 	patroniHealth    map[string]bool
 	patroniUpdatedAt time.Time
+	// Keep the last unique leader across empty/ambiguous snapshots. Only a change
+	// to a different unique leader advances the SQL evidence freshness boundary.
+	lastPatroniLeader      string
+	patroniLeaderChangedAt time.Time
 
 	// A conclusive SQL snapshot with no primary allows Patroni to restore routing
 	// immediately. Once restored, follow Patroni until a fresh SQL snapshot arrives.
@@ -146,6 +151,8 @@ func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
 		p.sqlNoPrimaryAt = time.Time{}
 		p.patroniRecoveryActive = false
 		p.patroniRecoveryAt = time.Time{}
+		p.lastPatroniLeader, _ = singleHealthyIP(p.patroniHealth)
+		p.patroniLeaderChangedAt = time.Time{}
 	}
 	p.routingEnabled = enabled
 }
@@ -161,6 +168,12 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 		return hybridRoutingDecision{routingResult: SQLRoutingResultShadow}
 	}
 	previousLeader, previousUnique := singleHealthyIP(p.patroniHealth)
+	if leader, unique := singleHealthyIP(health); unique {
+		if p.lastPatroniLeader != "" && leader != p.lastPatroniLeader {
+			p.patroniLeaderChangedAt = observedAt
+		}
+		p.lastPatroniLeader = leader
+	}
 	p.patroniHealth = maps.Clone(health)
 	p.patroniUpdatedAt = observedAt
 	decision := hybridRoutingDecision{
@@ -260,6 +273,11 @@ func (p *hybridHealthPolicy) observeSQL(
 		decision.routingResult = SQLRoutingResultPatroniRecovery
 		return decision
 	}
+	if fallbackReason == "" && p.sqlPredatesPatroniLeaderLocked(outcome) {
+		// An old cached success must not establish new SQL retention or mark the
+		// newer Patroni leader superseded. Publish eligible Patroni fallback instead.
+		fallbackReason, timeoutType = SQLHealthFallbackStaleEvidence, SQLHealthTimeoutNone
+	}
 	p.patroniRecoveryActive = false
 	for ip := range p.supersededSQLLeaders {
 		if !slices.Contains(candidateIPs, ip) {
@@ -330,6 +348,19 @@ func (p *hybridHealthPolicy) observeSQL(
 	return decision
 }
 
+// sqlPredatesPatroniLeaderLocked checks evidence that would contradict an eligible
+// Patroni leader. An excluded Patroni observation cannot displace retained SQL,
+// and agreement does not establish a new exclusion. The caller holds p.mu.
+func (p *hybridHealthPolicy) sqlPredatesPatroniLeaderLocked(outcome SQLHealthCheckOutcome) bool {
+	if p.patroniLeaderChangedAt.IsZero() || outcome.StartedAt.After(p.patroniLeaderChangedAt) {
+		return false
+	}
+	leader, unique := singleHealthyIP(p.patroniHealth)
+	_, superseded := p.supersededSQLLeaders[leader]
+	return unique && leader != p.supersededPatroniLeader && !superseded &&
+		(len(outcome.PrimaryIPs) != 1 || outcome.PrimaryIPs[0] != leader)
+}
+
 // updateSQLLeaderHistoryLocked reconciles a conclusive SQL selection with prior leaders.
 // The caller must hold p.mu and accept the snapshot's freshness before calling.
 func (p *hybridHealthPolicy) updateSQLLeaderHistoryLocked(
@@ -375,7 +406,8 @@ func (p *hybridHealthPolicy) updateSQLLeaderHistoryLocked(
 func (p *hybridHealthPolicy) canRetainSQLLeaderLocked(candidateIPs []string, outcome SQLHealthCheckOutcome, fallbackReason string) bool {
 	leader := p.awaitingPatroniLeader
 	if leader == "" || !slices.Contains(candidateIPs, leader) ||
-		fallbackReason == SQLHealthFallbackConflictingRoles || fallbackReason == SQLHealthFallbackMultiplePrimaries {
+		fallbackReason == SQLHealthFallbackConflictingRoles || fallbackReason == SQLHealthFallbackMultiplePrimaries ||
+		fallbackReason == SQLHealthFallbackStaleEvidence {
 		return false
 	}
 	primary, unroutable := false, false

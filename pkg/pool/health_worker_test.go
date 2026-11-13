@@ -2617,6 +2617,64 @@ func TestHybridEvaluationPreservesCredentialStartTimesAfterPatroniRecovery(t *te
 	}
 }
 
+func TestHybridEvaluationRejectsCachedSQLBeforePatroniLeaderChange(t *testing.T) {
+	for _, unknownStart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unknown_start_%t", unknownStart), func(t *testing.T) {
+			const a, b = "10.0.0.1", "10.0.0.2"
+			state := NewHealthState()
+			state.Track([]string{a, b})
+			policy := newHybridHealthPolicy(true)
+			health := &PoolHealth{
+				sqlHealthState: state, hybridPolicy: policy,
+				routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+			}
+			var iterations []SQLIteration
+			var selections []LeaderRoutingComparison
+			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
+				Iteration:             func(i SQLIteration, _ []string) { iterations = append(iterations, i) },
+				LeaderRoutingCompared: func(c LeaderRoutingComparison, _ []string) { selections = append(selections, c) },
+			}}
+			first, second := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
+			complete := func(target *sqlHealthTarget, started time.Time, results []SQLHealthCheckResult) {
+				w.completeSQLHealthCheck(target, 0, time.Now(), []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
+					StartedAt: started, Results: results,
+				})
+			}
+			before := time.Now().Add(-time.Second)
+			policy.observePatroni(map[string]bool{a: true, b: false}, before)
+			oldStart := before
+			if unknownStart {
+				oldStart = time.Time{}
+			}
+			oldResults := []SQLHealthCheckResult{{IP: a}, {IP: b, InRecovery: true}}
+			complete(first, oldStart, oldResults)
+			complete(second, oldStart, oldResults)
+			require.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
+
+			// Patroni advances without a preceding SQL no-primary/recovery decision.
+			policy.observePatroni(map[string]bool{a: false, b: true}, time.Now())
+			require.True(t, policy.patroniRecoveryAt.IsZero())
+			freshStart := time.Now()
+			timeouts := []SQLHealthCheckResult{{IP: a, Err: context.DeadlineExceeded}, {IP: b, Err: context.DeadlineExceeded}}
+			complete(first, freshStart, timeouts) // The second target still contributes its old A success.
+			require.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
+			require.NotEmpty(t, selections)
+			assert.Equal(t, b, selections[len(selections)-1].NewLeaderIP)
+			assert.Equal(t, SQLRoutingResultCachedFallback, selections[len(selections)-1].HybridSource)
+			assert.Empty(t, policy.awaitingPatroniLeader)
+			assert.Empty(t, policy.supersededPatroniLeader)
+
+			complete(second, freshStart, timeouts)
+			assert.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
+			assert.Empty(t, policy.awaitingPatroniLeader, "subsequent timeouts must not retain old A")
+			// Fresh SQL confirmation of B can resume conclusive routing.
+			complete(first, time.Now(), []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b}})
+			assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
+			assert.Empty(t, policy.supersededPatroniLeader)
+		})
+	}
+}
+
 func TestSQLPatroniMismatchReason(t *testing.T) {
 	cases := []struct {
 		name      string
