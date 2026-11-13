@@ -11,6 +11,8 @@ on:
   push:
     branches:
       - main
+      # TEMP: deploy from the PR branch to check the site. Remove before merge.
+      - docs/pages-deploy
     paths:
       - docs/site/**
       - .github/workflows/docs-pages.yml
