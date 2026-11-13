@@ -109,7 +109,7 @@ The client-session cap is currently fixed at 100. There are no separate backend 
 
 ### Backend connection settings
 
-Use direct database settings and inline backend credentials in the file. `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. The OSS binary rejects replicas, read clusters, credential references, discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
+Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. The OSS binary rejects replicas, read clusters, discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
 
 ### Client authentication
 
