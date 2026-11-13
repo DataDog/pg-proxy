@@ -10,59 +10,26 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
-	"strconv"
-	"strings"
 	"syscall"
 	"time"
+
+	"github.com/DataDog/pg-proxy/internal/itest"
 )
 
-// backendInfo is the PostgreSQL server behind the proxy.
-type backendInfo struct {
-	Host     string `json:"host"`
-	Port     int    `json:"port"`
-	DBName   string `json:"dbname"`
-	User     string `json:"user"`
-	Password string `json:"-"`
-	Source   string `json:"source"`
-	Version  string `json:"version,omitempty"`
-}
-
-func parseBackendURL(raw string) (*backendInfo, error) {
-	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "postgres" && u.Scheme != "postgresql" {
-		return nil, fmt.Errorf("-postgres must be a postgres:// URL")
-	}
-	port := 5432
-	if p := u.Port(); p != "" {
-		if port, err = strconv.Atoi(p); err != nil {
-			return nil, fmt.Errorf("-postgres port: %w", err)
-		}
-	}
-	password, _ := u.User.Password()
-	b := &backendInfo{Host: u.Hostname(), Port: port, DBName: strings.TrimPrefix(u.Path, "/"), User: u.User.Username(), Password: password, Source: "external"}
-	if b.DBName == "" {
-		b.DBName = "postgres"
-	}
-	return b, nil
-}
-
-// proxyConfig is a minimal configuration that every recent ref accepts.
-func proxyConfig(b *backendInfo, listen string, poolSize int) string {
+// proxyConfig is a minimal configuration that older refs also accept, so it is
+// written by hand rather than encoded from the current pkg/config types.
+func proxyConfig(pg *itest.Postgres, listen string, poolSize int) string {
 	return fmt.Sprintf(`databases:
   - name: primary
     host: %q
     port: %d
-    dbname: %q
+    dbname: postgres
     sslmode: disable
     max_conns: %d
     username: %q
@@ -75,7 +42,7 @@ logical_databases:
     cluster: bench
 proxy:
   listener_address: %q
-`, b.Host, b.Port, b.DBName, poolSize, b.User, b.Password, listen)
+`, pg.Host, pg.Port, poolSize, itest.PostgresUser, itest.PostgresPassword, listen)
 }
 
 type proxyProcess struct {
@@ -86,7 +53,7 @@ type proxyProcess struct {
 	log         *os.File
 }
 
-func startProxy(ctx context.Context, opts options, v *variant, b *backendInfo, dir string) (*proxyProcess, error) {
+func startProxy(ctx context.Context, opts options, v *variant, pg *itest.Postgres, dir string) (*proxyProcess, error) {
 	listen, err := freeAddr()
 	if err != nil {
 		return nil, err
@@ -96,20 +63,22 @@ func startProxy(ctx context.Context, opts options, v *variant, b *backendInfo, d
 		return nil, err
 	}
 	configPath := filepath.Join(dir, "proxy.yaml")
-	if err := os.WriteFile(configPath, []byte(proxyConfig(b, listen, opts.PoolSize)), 0o600); err != nil {
+	if err := os.WriteFile(configPath, []byte(proxyConfig(pg, listen, opts.PoolSize)), 0o600); err != nil {
 		return nil, err
 	}
 	log, err := os.Create(filepath.Join(dir, "proxy.log"))
 	if err != nil {
 		return nil, err
 	}
-	argv := append([]string{v.Binary, "-config", configPath}, opts.ProxyArgs...)
+	argv := []string{v.Binary, "-config", configPath}
 	if opts.ProxyCPUs != "" {
-		// taskset execs the proxy, so the PID still identifies the proxy.
 		argv = append([]string{"taskset", "-c", opts.ProxyCPUs}, argv...)
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
-	cmd.Env = proxyEnv(opts.GOMAXPROCS, metricsAddr)
+	cmd.Env = append(baseEnv(), "PG_PROXY_BENCH_ADDR="+metricsAddr)
+	if opts.GOMAXPROCS != "" {
+		cmd.Env = append(cmd.Env, "GOMAXPROCS="+opts.GOMAXPROCS)
+	}
 	cmd.Stdout, cmd.Stderr = log, log
 	if err := cmd.Start(); err != nil {
 		_ = log.Close()
@@ -139,23 +108,17 @@ func startProxy(ctx context.Context, opts options, v *variant, b *backendInfo, d
 	}
 }
 
-// proxyEnv drops settings that change proxy cost between hosts or shells:
-// telemetry exporters, Go runtime tuning, and libpq defaults.
-func proxyEnv(gomaxprocs, metricsAddr string) []string {
+// baseEnv passes only variables that do not change proxy or pgbench cost, so
+// telemetry exporters, Go runtime tuning, and libpq defaults in the caller's
+// shell cannot skew results.
+func baseEnv() []string {
 	var env []string
-	for _, kv := range os.Environ() {
-		key, _, _ := strings.Cut(kv, "=")
-		switch {
-		case strings.HasPrefix(key, "OTEL_"), strings.HasPrefix(key, "DD_"), strings.HasPrefix(key, "PG"),
-			key == "GOMAXPROCS", key == "GOGC", key == "GOMEMLIMIT", key == "GODEBUG":
-			continue
+	for _, key := range []string{"PATH", "HOME", "TMPDIR", "USER", "LANG", "TZ"} {
+		if value, ok := os.LookupEnv(key); ok {
+			env = append(env, key+"="+value)
 		}
-		env = append(env, kv)
 	}
-	if gomaxprocs != "" {
-		env = append(env, "GOMAXPROCS="+gomaxprocs)
-	}
-	return append(env, "PG_PROXY_BENCH_ADDR="+metricsAddr)
+	return env
 }
 
 func (p *proxyProcess) stop() {
@@ -173,113 +136,24 @@ func (p *proxyProcess) stop() {
 	_ = p.log.Close()
 }
 
-// snapshot holds cumulative proxy counters at one instant.
-type snapshot struct {
-	UserNS    uint64            `json:"user_ns"`
-	SysNS     uint64            `json:"sys_ns"`
-	CPUSource string            `json:"cpu_source"`
-	RSSBytes  uint64            `json:"rss_bytes"`
-	Runtime   map[string]uint64 `json:"runtime,omitempty"`
-}
-
-func (p *proxyProcess) snapshot(ctx context.Context) (snapshot, error) {
-	var s snapshot
-	runtimeMetrics, err := p.runtimeMetrics(ctx)
-	if err == nil {
-		s.Runtime = runtimeMetrics
-		s.UserNS, s.SysNS, s.CPUSource = runtimeMetrics["user_ns"], runtimeMetrics["sys_ns"], "getrusage"
-	} else if s.UserNS, s.SysNS, err = processCPU(p.cmd.Process.Pid); err == nil {
-		s.CPUSource = "os"
-	} else {
-		return s, fmt.Errorf("read proxy CPU: %w", err)
-	}
-	s.RSSBytes, err = processRSS(p.cmd.Process.Pid)
-	return s, err
-}
-
-func (p *proxyProcess) runtimeMetrics(ctx context.Context) (map[string]uint64, error) {
-	var out map[string]uint64
-	body, err := p.get(ctx, "/bench/metrics", 2*time.Second)
-	if err != nil {
-		return nil, err
-	}
-	return out, json.Unmarshal(body, &out)
-}
-
-// get fetches path from the overlay's HTTP server.
-func (p *proxyProcess) get(ctx context.Context, path string, timeout time.Duration) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+// snapshot returns the overlay's counters; see overlay/benchmetrics.go.
+func (p *proxyProcess) snapshot(ctx context.Context) (map[string]uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+p.metricsAddr+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "http://"+p.metricsAddr+"/bench/metrics", nil)
 	if err != nil {
 		return nil, err
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read proxy metrics: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GET %s: %s", path, resp.Status)
+		return nil, fmt.Errorf("read proxy metrics: %s", resp.Status)
 	}
-	return io.ReadAll(resp.Body)
-}
-
-// processCPU reads user and system CPU time without the overlay.
-func processCPU(pid int) (user, sys uint64, err error) {
-	switch runtime.GOOS {
-	case "linux":
-		data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-		if err != nil {
-			return 0, 0, err
-		}
-		// Fields after the parenthesised command: state is index 0, utime 11, stime 12.
-		_, rest, ok := strings.Cut(string(data), ") ")
-		fields := strings.Fields(rest)
-		if !ok || len(fields) < 13 {
-			return 0, 0, errors.New("unexpected /proc stat format")
-		}
-		// Linux reports clock ticks; USER_HZ is 100 on every supported architecture.
-		u, err1 := strconv.ParseUint(fields[11], 10, 64)
-		s, err2 := strconv.ParseUint(fields[12], 10, 64)
-		return u * 10_000_000, s * 10_000_000, errors.Join(err1, err2)
-	case "darwin":
-		out, err := exec.Command("ps", "-o", "utime=,stime=", "-p", strconv.Itoa(pid)).Output()
-		if err != nil {
-			return 0, 0, err
-		}
-		fields := strings.Fields(string(out))
-		if len(fields) != 2 {
-			return 0, 0, fmt.Errorf("unexpected ps output %q", out)
-		}
-		u, err1 := parsePSTime(fields[0])
-		s, err2 := parsePSTime(fields[1])
-		return u, s, errors.Join(err1, err2)
-	}
-	return 0, 0, fmt.Errorf("process CPU is unsupported on %s", runtime.GOOS)
-}
-
-// parsePSTime parses BSD ps times such as "1:02.35" or "1:02:03.45" to nanoseconds.
-func parsePSTime(s string) (uint64, error) {
-	parts := strings.Split(s, ":")
-	var seconds float64
-	for _, part := range parts {
-		v, err := strconv.ParseFloat(part, 64)
-		if err != nil {
-			return 0, fmt.Errorf("ps time %q: %w", s, err)
-		}
-		seconds = seconds*60 + v
-	}
-	return uint64(seconds * 1e9), nil
-}
-
-func processRSS(pid int) (uint64, error) {
-	out, err := exec.Command("ps", "-o", "rss=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return 0, fmt.Errorf("read proxy RSS: %w", err)
-	}
-	kb, err := strconv.ParseUint(strings.TrimSpace(string(out)), 10, 64)
-	return kb * 1024, err
+	var out map[string]uint64
+	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
 
 func freeAddr() (string, error) {
