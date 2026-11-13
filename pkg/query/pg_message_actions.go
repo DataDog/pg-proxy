@@ -33,6 +33,62 @@ func IsSwitchoverSignature(code, message string) bool {
 	return false
 }
 
+// BackendError is a PostgreSQL ErrorResponse that pg-proxy attributes to the
+// database or its infrastructure rather than to the client's query. Only these
+// errors mark pg-proxy spans as failed; see IsBackendError.
+type BackendError struct {
+	Code       string
+	Message    string
+	Switchover bool
+}
+
+func (e *BackendError) Error() string {
+	return fmt.Sprintf("code %s: %s", e.Code, e.Message)
+}
+
+// IsBackendError reports whether an ErrorResponse reflects a failure of the
+// database or its infrastructure (leader switchover, connection or resource
+// exhaustion, operator intervention, system or internal errors) rather than a
+// problem with the client's query.
+//
+// Client query errors (constraint violations, deadlocks, syntax errors, missing
+// relations, statement timeouts, ...) are proxied faithfully: pg-proxy did its
+// job, and the client's own database span already reports the error to the
+// owning service. Marking pg-proxy spans as failed for them would attribute
+// client bugs to pg-proxy.
+func IsBackendError(code, message string) bool {
+	if IsSwitchoverSignature(code, message) {
+		return true
+	}
+	if code == pgerrcode.QueryCanceled {
+		// Class 57 includes 57014, raised by client-set statement_timeout and
+		// client cancel requests.
+		return false
+	}
+	return pgerrcode.IsConnectionException(code) ||
+		pgerrcode.IsInsufficientResources(code) ||
+		pgerrcode.IsOperatorIntervention(code) ||
+		pgerrcode.IsSystemError(code) ||
+		pgerrcode.IsInternalError(code)
+}
+
+// finishTraceForErrorResponse tags the current span with the SQLSTATE and
+// finishes it, marking it as failed only for non-FATAL backend errors. FATAL
+// errors are returned to the session, which records them on the root span, so
+// they are not recorded on the child span as well.
+func finishTraceForErrorResponse(traceState *TraceState, m *pgproto3.ErrorResponse) {
+	traceState.SetTag("pg.sqlstate", m.Code)
+	if m.Severity == "FATAL" || !IsBackendError(m.Code, m.Message) {
+		traceState.FinishTrace()
+		return
+	}
+	traceState.FinishTrace(&BackendError{
+		Code:       m.Code,
+		Message:    m.Message,
+		Switchover: IsSwitchoverSignature(m.Code, m.Message),
+	})
+}
+
 // annotateIfSwitchoverError appends the hint to a non-FATAL ErrorResponse in place.
 func annotateIfSwitchoverError(m *pgproto3.ErrorResponse) {
 	if IsSwitchoverSignature(m.Code, m.Message) {
@@ -193,7 +249,7 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		action.ProxyMsgSize = getParameterStatusByteSize(m)
 
 	case *pgproto3.ErrorResponse:
-		traceState.FinishTrace(fmt.Errorf("code %s: %s", m.Code, m.Message))
+		finishTraceForErrorResponse(traceState, m)
 		if m.Severity == "FATAL" {
 			// FATAL always closes the session; annotation happens in closeErrorResponse()
 			// to avoid double-appending the hint when the error is forwarded to the client.
