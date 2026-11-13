@@ -172,45 +172,56 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 	decision.leaderDetection = p.observeLeaderLocked("patroni", healthyIPs(health), observedAt, sqlDowntimeWindow{})
 	if p.routingEnabled {
 		decision.routingComparison = p.recordRoutingLeaderLocked("patroni", health, observedAt, "")
-		leader, unique := singleHealthyIP(health)
-		if unique && leader == p.awaitingPatroniLeader && observedAt.After(p.sqlLeaderSelectedAt) {
-			p.awaitingPatroniLeader = ""
-			p.supersededPatroniLeader = ""
-			p.supersededSQLLeaders = nil
-		}
-		// A -> B -> C may happen without this proxy observing Patroni confirm B.
-		// Protecting B from stale A must not block a newer unique Patroni leader C.
-		_, supersededSQLLeader := p.supersededSQLLeaders[leader]
-		patroniAdvancedPastSQLLeader := p.awaitingPatroniLeader != "" && unique && !supersededSQLLeader &&
-			leader != p.awaitingPatroniLeader && leader != p.supersededPatroniLeader &&
-			observedAt.After(p.sqlLeaderSelectedAt)
-		p.excludeSupersededLeadersLocked(decision.health)
-		// Excluding a superseded leader must not make an ambiguous snapshot
-		// eligible to recover routing and clear that exclusion.
-		eligibleLeader := unique && decision.health[leader]
-		if (!p.sqlNoPrimaryAt.IsZero() && observedAt.After(p.sqlNoPrimaryAt) && eligibleLeader) ||
-			patroniAdvancedPastSQLLeader || p.patroniRecoveryActive {
-			// Do not wait for another SQL completion to publish a recovered Patroni
-			// leader. Continue following Patroni, including loss of that leader,
-			// until SQL supplies evidence collected after this routing transition.
-			if !p.patroniRecoveryActive || unique != previousUnique || leader != previousLeader {
-				p.patroniRecoveryAt = observedAt
-			}
-			p.patroniRecoveryActive = true
-			if eligibleLeader {
-				// Recovery establishes a new route, not agreement on old SQL leaders.
-				// Keep their exclusions until SQL establishes the topology again.
-				p.rememberSupersededSQLLeaderLocked(p.awaitingPatroniLeader)
-				p.awaitingPatroniLeader = ""
-			}
-			decision.publish = true
-			decision.routingResult = SQLRoutingResultPatroniRecovery
-			if comparison := p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult); comparison != nil {
-				decision.routingComparison = comparison
-			}
-		}
+		p.reconcilePatroniRoutingLocked(&decision, previousLeader, previousUnique, observedAt)
 	}
 	return decision
+}
+
+// reconcilePatroniRoutingLocked updates the routing decision and recovery state.
+// The caller must hold p.mu and supply a decision with the unfiltered Patroni health.
+func (p *hybridHealthPolicy) reconcilePatroniRoutingLocked(
+	decision *hybridRoutingDecision,
+	previousLeader string,
+	previousUnique bool,
+	observedAt time.Time,
+) {
+	leader, unique := singleHealthyIP(decision.health)
+	if unique && leader == p.awaitingPatroniLeader && observedAt.After(p.sqlLeaderSelectedAt) {
+		p.awaitingPatroniLeader = ""
+		p.supersededPatroniLeader = ""
+		p.supersededSQLLeaders = nil
+	}
+	// A -> B -> C may happen without this proxy observing Patroni confirm B.
+	// Protecting B from stale A must not block a newer unique Patroni leader C.
+	_, supersededSQLLeader := p.supersededSQLLeaders[leader]
+	patroniAdvancedPastSQLLeader := p.awaitingPatroniLeader != "" && unique && !supersededSQLLeader &&
+		leader != p.awaitingPatroniLeader && leader != p.supersededPatroniLeader &&
+		observedAt.After(p.sqlLeaderSelectedAt)
+	p.excludeSupersededLeadersLocked(decision.health)
+	// Excluding a superseded leader must not make an ambiguous snapshot
+	// eligible to recover routing and clear that exclusion.
+	eligibleLeader := unique && decision.health[leader]
+	if (!p.sqlNoPrimaryAt.IsZero() && observedAt.After(p.sqlNoPrimaryAt) && eligibleLeader) ||
+		patroniAdvancedPastSQLLeader || p.patroniRecoveryActive {
+		// Do not wait for another SQL completion to publish a recovered Patroni
+		// leader. Continue following Patroni, including loss of that leader,
+		// until SQL supplies evidence collected after this routing transition.
+		if !p.patroniRecoveryActive || unique != previousUnique || leader != previousLeader {
+			p.patroniRecoveryAt = observedAt
+		}
+		p.patroniRecoveryActive = true
+		if eligibleLeader {
+			// Recovery establishes a new route, not agreement on old SQL leaders.
+			// Keep their exclusions until SQL establishes the topology again.
+			p.rememberSupersededSQLLeaderLocked(p.awaitingPatroniLeader)
+			p.awaitingPatroniLeader = ""
+		}
+		decision.publish = true
+		decision.routingResult = SQLRoutingResultPatroniRecovery
+		if comparison := p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult); comparison != nil {
+			decision.routingComparison = comparison
+		}
+	}
 }
 
 // observeSQL evaluates one complete SQL snapshot. SQL routing is conclusive only when every IP has
@@ -301,10 +312,35 @@ func (p *hybridHealthPolicy) observeSQL(
 		return decision
 	}
 
+	p.updateSQLLeaderHistoryLocked(candidateIPs, outcome.PrimaryIPs, observedAt)
+	decision.routingResult = SQLRoutingResultConclusive
+	decision.health = make(map[string]bool, len(candidateIPs))
+	for _, ip := range candidateIPs {
+		decision.health[ip] = false
+	}
+	if len(outcome.PrimaryIPs) == 1 {
+		decision.health[outcome.PrimaryIPs[0]] = true
+	}
+	decision.routingComparison = p.recordRoutingLeaderLocked(
+		"hybrid",
+		decision.health,
+		observedAt,
+		SQLRoutingResultConclusive,
+	)
+	return decision
+}
+
+// updateSQLLeaderHistoryLocked reconciles a conclusive SQL selection with prior leaders.
+// The caller must hold p.mu and accept the snapshot's freshness before calling.
+func (p *hybridHealthPolicy) updateSQLLeaderHistoryLocked(
+	candidateIPs []string,
+	primaryIPs []string,
+	observedAt time.Time,
+) {
 	previousSQLLeader := p.awaitingPatroniLeader
 	p.awaitingPatroniLeader = ""
-	if len(outcome.PrimaryIPs) == 1 {
-		leader := outcome.PrimaryIPs[0]
+	if len(primaryIPs) == 1 {
+		leader := primaryIPs[0]
 		patroniLeader, unique := singleHealthyIP(p.patroniHealth)
 		if unique && patroniLeader == leader {
 			p.supersededPatroniLeader = ""
@@ -330,21 +366,6 @@ func (p *hybridHealthPolicy) observeSQL(
 		// B -> no primary -> C must remember B just like B -> C does.
 		p.rememberSupersededSQLLeaderLocked(previousSQLLeader)
 	}
-	decision.routingResult = SQLRoutingResultConclusive
-	decision.health = make(map[string]bool, len(candidateIPs))
-	for _, ip := range candidateIPs {
-		decision.health[ip] = false
-	}
-	if len(outcome.PrimaryIPs) == 1 {
-		decision.health[outcome.PrimaryIPs[0]] = true
-	}
-	decision.routingComparison = p.recordRoutingLeaderLocked(
-		"hybrid",
-		decision.health,
-		observedAt,
-		SQLRoutingResultConclusive,
-	)
-	return decision
 }
 
 // Retain a previously conclusive SQL leader only through uncertainty. Explicit
