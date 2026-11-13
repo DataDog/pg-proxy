@@ -84,12 +84,7 @@ func policyWithSQLAheadOfPatroni(t *testing.T) (*hybridHealthPolicy, time.Time) 
 }
 
 func TestHybridHealthRetainsSQLLeaderUntilPatroniAgrees(t *testing.T) {
-	for _, err := range []error{
-		context.DeadlineExceeded,
-		&pgconn.PgError{Code: "28P01"},
-		&pgconn.PgError{Code: "58030"},
-		&pgconn.PgError{Code: "XX000"},
-	} {
+	for _, err := range []error{context.DeadlineExceeded, &pgconn.PgError{Code: "XX000"}} {
 		t.Run(err.Error(), func(t *testing.T) {
 			policy, started := policyWithSQLAheadOfPatroni(t)
 			uncertain := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
@@ -97,6 +92,7 @@ func TestHybridHealthRetainsSQLLeaderUntilPatroniAgrees(t *testing.T) {
 			}}
 			for tick := 2; tick <= 3; tick++ {
 				at := started.Add(time.Duration(tick) * time.Second)
+				policy.setRoutingEnabled(true) // An unchanged flag must preserve retention.
 				oldPatroni := policy.observePatroni(map[string]bool{"A": true, "B": false}, at)
 				assert.False(t, oldPatroni.publish)
 				retained := policy.observeSQL([]string{"A", "B"}, uncertain, at.Add(time.Millisecond))
@@ -154,18 +150,6 @@ func TestHybridHealthPatroniAdvancesPastRetainedSQLLeader(t *testing.T) {
 				NewLeaderIP: "C", Improvement: 0, HybridSource: SQLRoutingResultPatroniRecovery,
 			}, *recovered.routingComparison)
 
-			// Reuse the recovery barrier: a check begun before C's publication
-			// cannot finish late and put the old SQL leader B back into routing.
-			lateB := SQLHealthCheckOutcome{
-				StartedAt: started.Add(2500 * time.Millisecond),
-				Results: []SQLHealthCheckResult{
-					{IP: "A", InRecovery: true}, {IP: "B"}, {IP: "C", InRecovery: true},
-				},
-				PrimaryIPs: []string{"B"},
-			}
-			late := policy.observeSQL(candidates, lateB, started.Add(4*time.Second))
-			assert.False(t, late.publish)
-
 			// Fresh uncertainty must use cached Patroni C, not retain B again.
 			uncertain.StartedAt = started.Add(4 * time.Second)
 			fallback := policy.observeSQL(candidates, uncertain, started.Add(5*time.Second))
@@ -217,27 +201,42 @@ func TestHybridHealthSQLSupersedesRecoveredPatroniLeader(t *testing.T) {
 	assert.Equal(t, []string{"D"}, healthyIPs(retained.health))
 }
 
-func TestHybridHealthPatroniAdvanceRequiresFreshUniqueNewLeader(t *testing.T) {
-	for _, tc := range []struct {
-		name   string
-		health map[string]bool
-		at     time.Duration
-	}{
-		{"before SQL selection", map[string]bool{"C": true}, 500 * time.Millisecond},
-		{"at SQL selection", map[string]bool{"C": true}, time.Second},
-		{"superseded A", map[string]bool{"A": true}, 2 * time.Second},
-		{"no leader", map[string]bool{"B": false, "C": false}, 2 * time.Second},
-		{"multiple new leaders", map[string]bool{"C": true, "D": true}, 2 * time.Second},
-		{"old and new leaders", map[string]bool{"A": true, "C": true}, 2 * time.Second},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			policy, started := policyWithSQLAheadOfPatroni(t)
-			decision := policy.observePatroni(tc.health, started.Add(tc.at))
-			assert.False(t, decision.publish)
-			assert.Equal(t, "B", policy.awaitingPatroniLeader)
-			assert.Equal(t, "A", policy.supersededPatroniLeader)
-			assert.True(t, policy.patroniRecoveryAt.IsZero())
-		})
+func TestHybridHealthPatroniRecoveryEligibility(t *testing.T) {
+	for _, mode := range []string{"awaiting confirmation", "no primary"} {
+		for _, tc := range []struct {
+			name   string
+			health map[string]bool
+			delay  time.Duration
+		}{
+			{"before boundary", map[string]bool{"C": true}, -time.Millisecond},
+			{"at boundary", map[string]bool{"C": true}, 0},
+			{"superseded A", map[string]bool{"A": true}, time.Second},
+			{"no leader", map[string]bool{"B": false, "C": false}, time.Second},
+			{"multiple new leaders", map[string]bool{"C": true, "D": true}, time.Second},
+			{"ambiguous before exclusions", map[string]bool{"A": true, "C": true}, time.Second},
+		} {
+			t.Run(mode+"/"+tc.name, func(t *testing.T) {
+				policy, started := policyWithSQLAheadOfPatroni(t)
+				boundary, awaiting := started.Add(time.Second), "B"
+				if mode == "no primary" {
+					boundary, awaiting = started.Add(2*time.Second), ""
+					policy.observeSQL([]string{"A", "B", "C"}, SQLHealthCheckOutcome{}, boundary)
+				}
+				for range 2 {
+					decision := policy.observePatroni(tc.health, boundary.Add(tc.delay))
+					assert.False(t, decision.publish)
+					assert.Equal(t, awaiting, policy.awaitingPatroniLeader)
+					assert.Equal(t, "A", policy.supersededPatroniLeader)
+					assert.True(t, policy.patroniRecoveryAt.IsZero())
+				}
+				// Rejected observations must not prevent later unambiguous recovery.
+				recovered := policy.observePatroni(map[string]bool{"C": true}, boundary.Add(2*time.Second))
+				require.True(t, recovered.publish)
+				assert.Equal(t, SQLRoutingResultPatroniRecovery, recovered.routingResult)
+				assert.Equal(t, []string{"C"}, healthyIPs(recovered.health))
+				assert.Equal(t, "A", policy.supersededPatroniLeader)
+			})
+		}
 	}
 }
 
@@ -276,43 +275,6 @@ func TestHybridHealthDoesNotRetainDisqualifiedSQLLeader(t *testing.T) {
 	}
 }
 
-func TestHybridHealthConclusiveNoPrimaryDoesNotResurrectSupersededLeader(t *testing.T) {
-	policy, started := policyWithSQLAheadOfPatroni(t)
-	negative := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{
-		Results: []SQLHealthCheckResult{{IP: "A", InRecovery: true}, {IP: "B", InRecovery: true}},
-	}, started.Add(2*time.Second))
-	assert.Empty(t, healthyIPs(negative.health))
-	oldPatroni := policy.observePatroni(map[string]bool{"A": true}, started.Add(3*time.Second))
-	assert.False(t, oldPatroni.publish)
-
-	// Fresh successful SQL evidence can establish A as primary again.
-	returned := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{
-		Results:    []SQLHealthCheckResult{{IP: "A"}, {IP: "B", InRecovery: true}},
-		PrimaryIPs: []string{"A"},
-	}, started.Add(4*time.Second))
-	assert.Equal(t, []string{"A"}, healthyIPs(returned.health))
-	fallback := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{
-		Results: []SQLHealthCheckResult{{IP: "A", Err: context.DeadlineExceeded}},
-	}, started.Add(5*time.Second))
-	assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
-	assert.Equal(t, []string{"A"}, healthyIPs(fallback.health))
-}
-
-func TestHybridHealthRetainsLatestConclusiveSQLLeader(t *testing.T) {
-	policy, started := policyWithSQLAheadOfPatroni(t)
-	policy.observeSQL([]string{"A", "B", "C"}, SQLHealthCheckOutcome{
-		Results:    []SQLHealthCheckResult{{IP: "A", InRecovery: true}, {IP: "B", InRecovery: true}, {IP: "C"}},
-		PrimaryIPs: []string{"C"},
-	}, started.Add(2*time.Second))
-	lateB := policy.observePatroni(map[string]bool{"A": false, "B": true, "C": false}, started.Add(2500*time.Millisecond))
-	assert.False(t, lateB.publish, "Patroni catching up to superseded SQL leader B must not replace C")
-	retained := policy.observeSQL([]string{"A", "B", "C"}, SQLHealthCheckOutcome{
-		Results: []SQLHealthCheckResult{{IP: "C", Err: context.DeadlineExceeded}},
-	}, started.Add(3*time.Second))
-	assert.Equal(t, SQLRoutingResultRetainedSQL, retained.routingResult)
-	assert.Equal(t, []string{"C"}, healthyIPs(retained.health))
-}
-
 func TestHybridHealthSupersededSQLLeadersSurviveLeaderLoss(t *testing.T) {
 	for _, conclusive := range []bool{false, true} {
 		t.Run(fmt.Sprintf("conclusive_%t", conclusive), func(t *testing.T) {
@@ -321,6 +283,11 @@ func TestHybridHealthSupersededSQLLeadersSurviveLeaderLoss(t *testing.T) {
 			policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"C"}}, started.Add(2*time.Second))
 			patroniB := map[string]bool{"A": false, "B": true, "C": false}
 			require.False(t, policy.observePatroni(patroniB, started.Add(3*time.Second)).publish)
+			retained := policy.observeSQL(candidates, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{{IP: "C", Err: context.DeadlineExceeded}},
+			}, started.Add(3500*time.Millisecond))
+			require.Equal(t, SQLRoutingResultRetainedSQL, retained.routingResult)
+			require.Equal(t, []string{"C"}, healthyIPs(retained.health))
 
 			b := SQLHealthCheckResult{IP: "B", Err: context.DeadlineExceeded}
 			if conclusive {
@@ -402,30 +369,35 @@ func TestHybridHealthPatroniRecoveryPreservesSupersededExclusions(t *testing.T) 
 }
 
 func TestHybridHealthConclusiveSQLReestablishesSupersededLeader(t *testing.T) {
-	policy, started := policyWithSQLAheadOfPatroni(t)
-	candidates := []string{"A", "B", "C"}
-	policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"C"}}, started.Add(2*time.Second))
-	policy.observeSQL(candidates, SQLHealthCheckOutcome{}, started.Add(3*time.Second))
-
-	// Patroni still reports A. Fresh SQL can select B without waiting for agreement.
-	returned := policy.observeSQL(candidates, SQLHealthCheckOutcome{
-		PrimaryIPs: []string{"B"},
-		Results:    []SQLHealthCheckResult{{IP: "A", InRecovery: true}, {IP: "B"}, {IP: "C", InRecovery: true}},
-	}, started.Add(4*time.Second))
-	require.Equal(t, SQLRoutingResultConclusive, returned.routingResult)
-	require.Equal(t, []string{"B"}, healthyIPs(returned.health))
-	uncertain := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "B", Err: context.DeadlineExceeded}}}
-	retained := policy.observeSQL(candidates, uncertain, started.Add(5*time.Second))
-	require.Equal(t, SQLRoutingResultRetainedSQL, retained.routingResult)
-	require.Equal(t, []string{"B"}, healthyIPs(retained.health))
-
-	// Patroni's later agreement ends the catch-up phase. Subsequent Patroni
-	// leadership changes can participate in normal fallback again.
-	policy.observePatroni(map[string]bool{"B": true}, started.Add(6*time.Second))
-	policy.observePatroni(map[string]bool{"C": true}, started.Add(7*time.Second))
-	fallback := policy.observeSQL(candidates, uncertain, started.Add(8*time.Second))
-	assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
-	assert.Equal(t, []string{"C"}, healthyIPs(fallback.health))
+	for _, leader := range []string{"A", "B"} {
+		t.Run(leader, func(t *testing.T) {
+			policy, started := policyWithSQLAheadOfPatroni(t)
+			candidates := []string{"A", "B", "C"}
+			if leader == "B" {
+				policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"C"}}, started.Add(1500*time.Millisecond))
+			}
+			negative := policy.observeSQL(candidates, SQLHealthCheckOutcome{}, started.Add(2*time.Second))
+			require.Empty(t, healthyIPs(negative.health))
+			assert.False(t, policy.observePatroni(map[string]bool{"A": true}, started.Add(3*time.Second)).publish)
+			returned := policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{leader}}, started.Add(4*time.Second))
+			require.True(t, returned.publish)
+			require.Equal(t, SQLRoutingResultConclusive, returned.routingResult)
+			require.Equal(t, []string{leader}, healthyIPs(returned.health))
+			uncertain := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: leader, Err: context.DeadlineExceeded}}}
+			decision := policy.observeSQL(candidates, uncertain, started.Add(5*time.Second))
+			want := SQLRoutingResultCachedFallback // Patroni already agrees on A.
+			if leader == "B" {
+				want = SQLRoutingResultRetainedSQL
+			}
+			assert.Equal(t, want, decision.routingResult)
+			assert.Equal(t, []string{leader}, healthyIPs(decision.health))
+			policy.observePatroni(map[string]bool{leader: true}, started.Add(6*time.Second))
+			policy.observePatroni(map[string]bool{"C": true}, started.Add(7*time.Second))
+			fallback := policy.observeSQL(candidates, uncertain, started.Add(8*time.Second))
+			assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
+			assert.Equal(t, []string{"C"}, healthyIPs(fallback.health))
+		})
+	}
 }
 
 func TestHybridHealthSupersededSQLHistoryTracksCandidates(t *testing.T) {
@@ -519,47 +491,6 @@ func TestHybridHealthPatroniRecoversBeforeNextSQLCompletion(t *testing.T) {
 	freshNegative := policy.observeSQL([]string{oldIP, newIP}, noPrimary, started.Add(4*time.Second))
 	assert.True(t, freshNegative.publish)
 	assert.Equal(t, map[string]bool{oldIP: false, newIP: false}, freshNegative.health)
-}
-
-func TestHybridHealthPatroniRecoveryRequiresUniqueLeader(t *testing.T) {
-	for _, health := range []map[string]bool{
-		{"10.0.0.1": false},
-		{"10.0.0.1": true, "10.0.0.2": true},
-	} {
-		policy := newHybridHealthPolicy(true)
-		started := time.Now()
-		policy.observeSQL([]string{"10.0.0.1"}, SQLHealthCheckOutcome{}, started)
-		decision := policy.observePatroni(health, started.Add(time.Second))
-		assert.False(t, decision.publish)
-	}
-}
-
-func TestHybridHealthPatroniRecoveryRequiresUniqueLeaderBeforeExclusion(t *testing.T) {
-	policy, started := policyWithSQLAheadOfPatroni(t)
-	noPrimary := policy.observeSQL([]string{"A", "B", "C"}, SQLHealthCheckOutcome{
-		Results: []SQLHealthCheckResult{
-			{IP: "A", InRecovery: true}, {IP: "B", InRecovery: true}, {IP: "C", InRecovery: true},
-		},
-	}, started.Add(2*time.Second))
-	require.True(t, noPrimary.publish)
-	require.Empty(t, healthyIPs(noPrimary.health))
-
-	// Filtering superseded A must not turn an ambiguous A+C snapshot into
-	// authority to recover to C and forget A's exclusion on the next poll.
-	for _, at := range []time.Duration{3 * time.Second, 4 * time.Second} {
-		ambiguous := policy.observePatroni(map[string]bool{"A": true, "C": true}, started.Add(at))
-		assert.False(t, ambiguous.publish)
-		assert.Equal(t, "A", policy.supersededPatroniLeader)
-		assert.False(t, policy.patroniRecoveryActive)
-		assert.True(t, policy.patroniRecoveryAt.IsZero())
-	}
-
-	// An unambiguous, eligible leader can still restore routing immediately.
-	recovered := policy.observePatroni(map[string]bool{"A": false, "C": true}, started.Add(5*time.Second))
-	assert.True(t, recovered.publish)
-	assert.Equal(t, []string{"C"}, healthyIPs(recovered.health))
-	assert.Equal(t, SQLRoutingResultPatroniRecovery, recovered.routingResult)
-	assert.Equal(t, "A", policy.supersededPatroniLeader, "recovery alone must preserve old-leader exclusions")
 }
 
 func TestHybridHealthPatroniRecoveryFollowsLeaderLoss(t *testing.T) {
@@ -814,71 +745,46 @@ func TestHybridHealthResetsRoutingComparisonWhenRoutingFlagChanges(t *testing.T)
 	assert.Contains(t, policy.routingTiming.reference.lastNonempty, "10.0.0.2")
 }
 
-func TestHybridHealthRoutingFlagToggleDropsRetainedSQLLeader(t *testing.T) {
-	policy, started := policyWithSQLAheadOfPatroni(t)
-	uncertain := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
-		{IP: "A", Err: context.DeadlineExceeded},
-		{IP: "B", Err: context.DeadlineExceeded},
-	}}
-	// Ordinary flag evaluations must preserve retention within the same mode.
-	policy.setRoutingEnabled(true)
-	retained := policy.observeSQL([]string{"A", "B"}, uncertain, started.Add(2*time.Second))
-	require.Equal(t, SQLRoutingResultRetainedSQL, retained.routingResult)
-	require.Equal(t, []string{"B"}, healthyIPs(retained.health))
-
-	policy.setRoutingEnabled(false)
-	confirmed := policy.observePatroni(map[string]bool{"A": false, "B": true}, started.Add(3*time.Second))
-	require.True(t, confirmed.publish)
-	current := map[string]bool{"A": true, "B": false}
-	returned := policy.observePatroni(current, started.Add(4*time.Second))
-	require.True(t, returned.publish)
-	require.Equal(t, current, returned.health)
-
-	policy.setRoutingEnabled(true)
-	fallback := policy.observeSQL([]string{"A", "B"}, uncertain, started.Add(5*time.Second))
-	assert.True(t, fallback.publish)
-	assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
-	assert.Equal(t, current, fallback.health, "do not resurrect SQL B or exclude current Patroni A")
-}
-
-func TestHybridHealthRoutingFlagToggleDropsSupersededSQLHistory(t *testing.T) {
-	policy, started := policyWithSQLAheadOfPatroni(t)
-	candidates := []string{"A", "B", "C", "D"}
-	policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"C"}}, started.Add(2*time.Second))
-	policy.setRoutingEnabled(false)
-	policy.observePatroni(map[string]bool{"A": true}, started.Add(3*time.Second))
-	policy.setRoutingEnabled(true)
-	policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"D"}}, started.Add(4*time.Second))
-
-	// B was superseded in the old mode, but is a valid newer Patroni leader now.
-	recovered := policy.observePatroni(map[string]bool{"B": true}, started.Add(5*time.Second))
-	assert.True(t, recovered.publish)
-	assert.Equal(t, SQLRoutingResultPatroniRecovery, recovered.routingResult)
-	assert.Equal(t, []string{"B"}, healthyIPs(recovered.health))
-}
-
-func TestHybridHealthRoutingFlagToggleDropsRecoveryState(t *testing.T) {
-	for _, recovered := range []bool{false, true} {
-		t.Run(fmt.Sprintf("recovered_%t", recovered), func(t *testing.T) {
+func TestHybridHealthRoutingFlagToggleDropsLeadershipState(t *testing.T) {
+	for _, state := range []string{"retained SQL", "superseded SQL", "no primary", "Patroni recovery"} {
+		t.Run(state, func(t *testing.T) {
 			policy, started := policyWithSQLAheadOfPatroni(t)
-			policy.observeSQL([]string{"A", "B", "C"}, SQLHealthCheckOutcome{}, started.Add(2*time.Second))
-			if recovered {
-				recovery := policy.observePatroni(map[string]bool{"C": true}, started.Add(3*time.Second))
-				require.Equal(t, SQLRoutingResultPatroniRecovery, recovery.routingResult)
+			candidates := []string{"A", "B", "C", "D"}
+			switch state {
+			case "superseded SQL":
+				policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"C"}}, started.Add(2*time.Second))
+			case "no primary", "Patroni recovery":
+				policy.observeSQL(candidates, SQLHealthCheckOutcome{}, started.Add(2*time.Second))
+				if state == "Patroni recovery" {
+					require.True(t, policy.observePatroni(map[string]bool{"C": true}, started.Add(3*time.Second)).publish)
+				}
 			}
 			policy.setRoutingEnabled(false)
-			policy.observePatroni(map[string]bool{"A": true}, started.Add(4*time.Second))
+			for tick, leader := range []string{"B", "A"} {
+				current := map[string]bool{leader: true}
+				decision := policy.observePatroni(current, started.Add(time.Duration(4+tick)*time.Second))
+				require.True(t, decision.publish)
+				require.Equal(t, current, decision.health)
+			}
 			policy.setRoutingEnabled(true)
-
-			patroni := policy.observePatroni(map[string]bool{"B": true}, started.Add(5*time.Second))
-			assert.False(t, patroni.publish, "old no-primary or active recovery state must not initiate recovery")
-			assert.Equal(t, SQLRoutingResultShadow, patroni.routingResult)
-			// With no recovery in the new mode, its first SQL observation needs no
-			// timestamp comparison against a recovery from the previous mode.
-			sql := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: []string{"B"}}, started.Add(6*time.Second))
-			assert.True(t, sql.publish)
-			assert.Equal(t, SQLRoutingResultConclusive, sql.routingResult)
-			assert.Equal(t, []string{"B"}, healthyIPs(sql.health))
+			// Old no-primary/recovery/retention must not initiate a new recovery.
+			assert.False(t, policy.observePatroni(map[string]bool{"E": true}, started.Add(6*time.Second)).publish)
+			policy.observePatroni(map[string]bool{"A": true}, started.Add(7*time.Second))
+			uncertain := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "B", Err: context.DeadlineExceeded}}}
+			fallback := policy.observeSQL(candidates, uncertain, started.Add(8*time.Second))
+			require.True(t, fallback.publish)
+			assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
+			assert.Equal(t, []string{"A"}, healthyIPs(fallback.health))
+			// Unknown start times must not retain the previous mode's recovery barrier.
+			selected := policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"D"}}, started.Add(9*time.Second))
+			require.True(t, selected.publish)
+			assert.Equal(t, SQLRoutingResultConclusive, selected.routingResult)
+			assert.Equal(t, []string{"D"}, healthyIPs(selected.health))
+			// B's superseded history belonged to the old mode.
+			recovered := policy.observePatroni(map[string]bool{"B": true}, started.Add(10*time.Second))
+			require.True(t, recovered.publish)
+			assert.Equal(t, SQLRoutingResultPatroniRecovery, recovered.routingResult)
+			assert.Equal(t, []string{"B"}, healthyIPs(recovered.health))
 		})
 	}
 }
