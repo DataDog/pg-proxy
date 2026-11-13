@@ -8,128 +8,45 @@ package main
 import (
 	"context"
 	"errors"
-	"maps"
 	"net"
 	"net/http"
 	"net/netip"
-	"slices"
-	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
-
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/health"
 )
 
 const (
-	backendProbeInterval = 10 * time.Second
-	backendProbeTimeout  = 3 * time.Second
+	backendCheckInterval = 10 * time.Second
+	backendCheckTimeout  = 3 * time.Second
 )
 
-// healthState holds the signals that /livez and /readyz report.
-// A nil *healthState ignores updates, so callers without an admin listener
-// do not need checks.
-type healthState struct {
-	accepting atomic.Bool
-	draining  atomic.Bool
-	reachable atomic.Bool
-}
-
-func newHealthState() *healthState {
-	h := &healthState{}
-	// newProxy connects to every backend before the proxy starts.
-	h.reachable.Store(true)
-	return h
-}
-
-func (h *healthState) setAccepting(v bool) {
-	if h != nil {
-		h.accepting.Store(v)
-	}
-}
-
-func (h *healthState) startDrain() {
-	if h != nil {
-		h.draining.Store(true)
-	}
-}
-
-// Responses contain only a fixed status word. They never include backend
-// names, addresses, users, or driver errors.
-func (h *healthState) handler() http.Handler {
+// adminHandler serves /livez and /readyz from the shared health state.
+// The listener has no authentication, so responses carry only the status
+// word. Per-cluster detail stays for authenticated surfaces.
+func adminHandler(state *health.State) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /livez", func(w http.ResponseWriter, _ *http.Request) {
-		if !h.accepting.Load() {
-			writeStatus(w, http.StatusServiceUnavailable, "not accepting")
-			return
-		}
-		writeStatus(w, http.StatusOK, "ok")
+		ok, status := state.Snapshot().Live()
+		writeStatus(w, ok, status)
 	})
 	mux.HandleFunc("GET /readyz", func(w http.ResponseWriter, _ *http.Request) {
-		switch {
-		case h.draining.Load():
-			writeStatus(w, http.StatusServiceUnavailable, "draining")
-		case !h.accepting.Load():
-			writeStatus(w, http.StatusServiceUnavailable, "not accepting")
-		case !h.reachable.Load():
-			writeStatus(w, http.StatusServiceUnavailable, "backend unreachable")
-		default:
-			writeStatus(w, http.StatusOK, "ok")
-		}
+		ok, status := state.Snapshot().Ready()
+		writeStatus(w, ok, status)
 	})
 	return mux
 }
 
-func writeStatus(w http.ResponseWriter, code int, body string) {
+func writeStatus(w http.ResponseWriter, ok bool, status string) {
+	code := http.StatusOK
+	if !ok {
+		code = http.StatusServiceUnavailable
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
-	_, _ = w.Write([]byte(body + "\n"))
-}
-
-// probeBackends checks each cluster primary on an interval until ctx ends.
-// Each check opens its own short-lived connection, so it never borrows from or
-// changes the serving pools.
-func (h *healthState) probeBackends(ctx context.Context, targets map[string]*pgx.ConnConfig, interval time.Duration) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-	failing := map[string]bool{}
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-		healthy := true
-		for _, name := range slices.Sorted(maps.Keys(targets)) {
-			ok := pingBackend(ctx, targets[name])
-			if ctx.Err() != nil {
-				return
-			}
-			if ok == failing[name] {
-				// Log only state changes, with the cluster name and no driver error.
-				if ok {
-					pgproxy.Logger().Info("backend health check recovered", "cluster", name)
-				} else {
-					pgproxy.Logger().Warn("backend health check failed", "cluster", name)
-				}
-				failing[name] = !ok
-			}
-			healthy = healthy && ok
-		}
-		h.reachable.Store(healthy)
-	}
-}
-
-func pingBackend(ctx context.Context, settings *pgx.ConnConfig) bool {
-	ctx, cancel := context.WithTimeout(ctx, backendProbeTimeout)
-	defer cancel()
-	conn, err := pgx.ConnectConfig(ctx, settings.Copy())
-	if err != nil {
-		return false
-	}
-	defer conn.Close(context.Background())
-	return conn.Ping(ctx) == nil
+	_, _ = w.Write([]byte(status + "\n"))
 }
 
 func validateAdminAddress(address string) error {
@@ -150,14 +67,14 @@ type adminServer struct {
 
 // startAdmin binds the admin listener before the proxy starts, so a bad
 // address fails startup instead of leaving the proxy without health checks.
-func startAdmin(address string, health *healthState) (*adminServer, error) {
+func startAdmin(address string, state *health.State) (*adminServer, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, errors.New("could not listen on proxy.admin_address")
 	}
 	admin := &adminServer{
 		server: &http.Server{
-			Handler:           health.handler(),
+			Handler:           adminHandler(state),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       5 * time.Second,
 			WriteTimeout:      5 * time.Second,

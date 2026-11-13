@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/health"
 )
 
 func TestProxyAgainstPostgres(t *testing.T) {
@@ -34,6 +35,13 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	t.Run("client TLS", func(t *testing.T) { verifyProxyTLS(t, adminURL, admin) })
 	t.Run("client authentication", func(t *testing.T) { verifyProxyAuthentication(t, adminURL, admin) })
 	t.Run("pool statistics", func(t *testing.T) { verifyProxyPoolStats(t, adminURL) })
+	t.Run("backend health check", func(t *testing.T) {
+		settings, err := pgx.ParseConfig(adminURL)
+		require.NoError(t, err)
+		status := health.Check(ctx, settings, 5*time.Second)
+		require.True(t, status.OK, "stage %q", status.Stage)
+		require.Empty(t, status.Stage)
+	})
 
 	// Minimum connections must open during startup, before the periodic health check.
 	for _, minimum := range []string{"pool_min_conns=3", "pool_min_idle_conns=3"} {

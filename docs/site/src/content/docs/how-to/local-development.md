@@ -117,7 +117,7 @@ Set `proxy.admin_address` (for example `0.0.0.0:8080`) to start a plain HTTP lis
 | `GET /livez` | The client listener is accepting connections. | `not accepting` |
 | `GET /readyz` | The client listener is accepting, shutdown has not started, and the last backend check passed for every cluster. | `draining`, `not accepting`, or `backend unreachable` |
 
-Every 10 seconds the proxy opens one new connection to each cluster primary and sends a ping. These checks do not use the serving pools. `/readyz` returns `draining` as soon as SIGINT or SIGTERM arrives, before the client listener closes. Responses never contain backend names, addresses, users, or errors; the proxy logs the cluster name when a check fails or recovers.
+Every 10 seconds the proxy opens one new connection to each cluster primary, with `application_name` set to `pg-proxy-health`, and runs `select pg_is_in_recovery()`. A check fails if the server cannot be reached or is not a writable primary. These checks do not use the serving pools. `/readyz` returns `draining` as soon as SIGINT or SIGTERM arrives, before the client listener closes. Responses never contain backend names, addresses, users, or errors; the proxy logs the cluster name and failed stage (`connect`, `query`, or `not_primary`) when a check fails or recovers.
 
 The admin listener has no authentication or TLS. It accepts any IP address, because load balancers and orchestrators usually check from another host. Do not expose it outside your network.
 

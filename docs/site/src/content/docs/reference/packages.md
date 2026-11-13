@@ -22,6 +22,7 @@ The public API lives under `pkg/` (short for packages); the reference executable
 | `pkg/prepared` | Prepared-statement name mapping for txn pooling |
 | `pkg/pool` | Direct, discovered, static cloud, and replica pool runtimes; instance health, selection, and pgx adapters |
 | `pkg/link` | Session↔Postgres link: expectations, prepared-on-conn, release |
+| `pkg/health` | Shared liveness, readiness, and per-cluster backend check state for health surfaces |
 | `pkg/limiter` | Portable global and per-service session caps |
 | `pkg/listener` | TCP/TLS negotiation, startup, admission, and session lifecycle |
 | `pkg/mirror` | Bounded asynchronous traffic-mirroring queue and worker |
