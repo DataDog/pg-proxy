@@ -1628,7 +1628,7 @@ func closeErrorResponse(err error) *pgproto3.ErrorResponse {
 		return &pgproto3.ErrorResponse{
 			Severity: "FATAL",
 			Code:     pgErr.Code,
-			Message:  pgErr.Message,
+			Message:  pgErr.Message + query.LeaderSwitchoverHint,
 		}
 	}
 	return &pgproto3.ErrorResponse{
