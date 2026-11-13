@@ -210,7 +210,9 @@ func verifyProxyTLS(t *testing.T, backendURL string, observer *pgx.Conn) {
 			proxy, err := newProxy(ctx, cfg)
 			require.NoError(t, err)
 			done := make(chan error, 1)
-			go func() { done <- serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second) }()
+			go func() {
+				done <- serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second, nil)
+			}()
 			t.Cleanup(func() {
 				stop()
 				select {

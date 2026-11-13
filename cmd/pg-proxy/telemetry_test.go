@@ -593,7 +593,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	done := make(chan struct{})
 	var serveErr error
 	go func() {
-		serveErr = serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
+		serveErr = serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second, nil)
 		close(done)
 	}()
 	defer func() {

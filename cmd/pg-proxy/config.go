@@ -287,6 +287,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if cfg.listenAddress == "" {
 		cfg.listenAddress = "127.0.0.1:15432"
 	}
+	cfg.adminAddress = shared.Proxy.AdminAddress
 	cfg.messageBufferSize = int(shared.Proxy.PostgresMsgBufferSize)
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize

@@ -22,6 +22,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	pgproxy "github.com/DataDog/pg-proxy"
@@ -40,6 +41,7 @@ type config struct {
 	telemetry         telemetryConfig
 	telemetryWarnings []string
 	listenAddress     string
+	adminAddress      string
 	messageBufferSize int
 	tlsConfig         *tls.Config
 	requireTLS        bool
@@ -67,6 +69,9 @@ func main() {
 
 func (c config) validate() error {
 	if err := c.validateListener(c.authenticate != nil); err != nil {
+		return err
+	}
+	if err := validateAdminAddress(c.adminAddress); err != nil {
 		return err
 	}
 	if c.messageBufferSize < 0 {
@@ -98,12 +103,32 @@ func (c config) validate() error {
 func run(ctx context.Context, cfg config) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	var health *healthState
+	if cfg.adminAddress != "" {
+		if err := cfg.validate(); err != nil {
+			return err
+		}
+		health = newHealthState()
+		admin, err := startAdmin(cfg.adminAddress, health)
+		if err != nil {
+			return err
+		}
+		// Close after serve returns, so /readyz reports draining for the whole shutdown.
+		defer admin.Close()
+	}
 	proxy, err := newProxy(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	if health != nil {
+		targets := make(map[string]*pgx.ConnConfig, len(cfg.clusters))
+		for name, primary := range cfg.clusters {
+			targets[name] = cfg.databases[primary].ConnConfig
+		}
+		go health.probeBackends(ctx, targets, backendProbeInterval)
+	}
 	pgproxy.Logger().Info("proxy ready", "address", proxy.server.Addr(), "clusters", len(cfg.clusters), "client_authentication", cfg.authenticate != nil)
-	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
+	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second, health)
 }
 
 type localProxy struct {
@@ -190,8 +215,11 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 
 // Explicitly close the socket to wake Accept, then drain sessions before pools.
 // Bound the wait so a client with an unfinished transaction cannot prevent exit.
-func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, sessions *sessionRegistry, closeBackend func(), timeout time.Duration) error {
+// health may be nil. When set, /readyz turns not-ready before the client
+// listener closes, so load balancers can stop sending new connections.
+func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, sessions *sessionRegistry, closeBackend func(), timeout time.Duration, health *healthState) error {
 	runDone := make(chan error, 1)
+	health.setAccepting(true)
 	go func() { runDone <- proxy.Run() }()
 	var runErr error
 	finished := false
@@ -200,8 +228,10 @@ func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, s
 	case runErr = <-runDone:
 		finished = true
 	}
+	health.startDrain()
 	stop()
 	_ = proxy.Close()
+	health.setAccepting(false)
 	closed := make(chan struct{})
 	go func() {
 		if !finished {

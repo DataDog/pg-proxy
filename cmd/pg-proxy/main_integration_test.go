@@ -113,7 +113,7 @@ proxy:
 	done := make(chan struct{})
 	var serveErr error
 	go func() {
-		serveErr = serve(proxyCtx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
+		serveErr = serve(proxyCtx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second, nil)
 		close(done)
 	}()
 	t.Cleanup(func() {

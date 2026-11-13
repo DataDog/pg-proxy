@@ -205,6 +205,11 @@ values and minimum connections above the maximum are rejected. Backend connectio
 parsing retains pgx environment defaults. `application_name` in connection options
 is overridden by a nonempty `application_name` database field.
 
+Set `proxy.admin_address` (for example `0.0.0.0:8080`) to serve HTTP health checks:
+`/livez` returns 200 while the client listener accepts connections, and `/readyz`
+returns 200 only when the proxy is not shutting down and every cluster primary
+answered the last ping. The listener is off by default and has no authentication.
+
 Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS. Set
 `proxy.tls_required: true` to reject plaintext startup. See the
 [client TLS guide](docs/client-connections.md#standalone-tls) for examples.

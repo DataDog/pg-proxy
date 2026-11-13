@@ -60,6 +60,7 @@ Set `password_auth_enabled: true` (JSON: `passwordAuthEnabled`) with required TL
 to enable static users and non-loopback listeners. Each user needs an explicit
 logical-database list. Proxy usernames are independent of backend accounts.
 See [client authentication](../../docs/client-authentication.md).
+Set `admin_address` (JSON: `adminAddress`) to serve HTTP `/livez` and `/readyz`.
 It rejects JWT, mirroring, and other unsupported options with explicit startup errors.
 The library schema remains broader than this command.
 
