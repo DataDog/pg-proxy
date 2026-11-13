@@ -20,12 +20,13 @@ loopback. JWT authentication remains a separate, unsupported mode.
 
 Each `users` entry requires a unique `static_credentials.username`, exactly one
 `password` or `scram_sha_256`, and an explicit list of logical `databases`.
-JSON uses `staticCredentials` and `scramSHA256`. Each credential can also come
-from a file or an environment variable; see
-[credential references](#credential-references). Names match exactly, including
-case. Unknown users and databases outside the user's list are denied. Wildcards
-have no special meaning. Static mode rejects `email`, `group`, `pg_roles`, and
-nonzero `max_sessions` rather than ignoring them.
+JSON uses `staticCredentials` and `scramSHA256`. Usernames and database names
+match exactly, including case. Unknown users and databases outside the user's
+list are denied. Wildcards have no special meaning. Static mode rejects `email`,
+`group`, `pg_roles`, and nonzero `max_sessions` rather than ignoring them.
+
+Each credential can be inline, or come from a file or an environment variable;
+see [credential references](#credential-references).
 
 Proxy users are independent of backend accounts. Alice and Bob may both connect
 to `orders`, sharing its configured pool and backend account. Their sessions and
@@ -61,21 +62,27 @@ import (
     "fmt"
     "io"
     "os"
+    "strings"
 
     "github.com/DataDog/pg-proxy/pkg/scram"
 )
 
 func main() {
-    password, err := io.ReadAll(os.Stdin)
+    data, err := io.ReadAll(os.Stdin)
     if err != nil { panic("could not read password") }
-    verifier, err := scram.NewVerifier(string(password))
+    // Remove one trailing newline, the same rule as password_file.
+    password, ok := strings.CutSuffix(string(data), "\r\n")
+    if !ok { password = strings.TrimSuffix(password, "\n") }
+    if password == "" { panic("password is empty") }
+    verifier, err := scram.NewVerifier(password)
     if err != nil { panic("could not derive verifier") }
     fmt.Println(verifier.Encode())
 }
 ```
 
-Supply a protected password file containing the exact password bytes, without
-an added newline:
+Supply a protected password file. The helper removes one trailing newline
+(`\n` or `\r\n`), like `password_file` does, so the same file gives the same
+password to both:
 
 ```sh
 go run scram-verifier.go < /path/to/password-file
@@ -122,7 +129,8 @@ Rules:
 - The command removes one trailing newline (`\n` or `\r\n`) from file contents,
   because mounted secrets often end with one. It keeps all other bytes. A
   password that ends with a newline must therefore have one more newline in the
-  file. Environment values are used as-is.
+  file. The verifier helper above uses the same rule. Environment values are
+  used as-is.
 - Errors name the setting, not the path, the variable, or the value. Resolved
   values are redacted like inline ones.
 

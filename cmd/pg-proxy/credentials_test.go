@@ -224,7 +224,7 @@ func TestCredentialReferenceErrors(t *testing.T) {
 				if tc.err != "" {
 					require.EqualError(t, err, tc.err, format)
 				}
-				for _, sentinel := range []string{"secret-sentinel", "missing-path-sentinel", "UNSET_SENTINEL", "verifier-sentinel", present} {
+				for _, sentinel := range []string{"secret-sentinel", "missing-path-sentinel", "UNSET_SENTINEL", "verifier-sentinel", present, missing, empty, invalidVerifier, "PG_PROXY_TEST"} {
 					require.NotContains(t, err.Error(), sentinel, format)
 				}
 			}
