@@ -177,6 +177,11 @@ type Session struct {
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
 	backendDestroyedOnClientDisconnect atomic.Bool     // true after recording that this session destroyed its backend because the client disconnected
 	releasingIdleLink                  atomic.Bool     // true while flushPostgres replies to the client and then releases an idle link
+	// idleReleaseTimer starts Release beside a final client write that has not
+	// finished after idleReleaseGrace, and idleReleaseDone carries the result of
+	// that Release. Both are created by the session's first idle release.
+	idleReleaseTimer *time.Timer
+	idleReleaseDone  chan releaseResult
 
 	mirroring Mirroring
 
@@ -1315,6 +1320,54 @@ func (s *Session) invalidatePendingStmts(fromError bool) {
 	s.unnamedPendingGens = nil
 }
 
+// idleReleaseGrace is how long the final client write of a reply may run before
+// Release starts beside it. A write that takes this long is waiting for the
+// client to read, so the backend should not wait with it.
+const idleReleaseGrace = time.Millisecond
+
+// releaseResult carries the outcome of releasing the idle link.
+type releaseResult struct {
+	err     error
+	elapsed time.Duration
+}
+
+func releaseLink(backendLink link.Link) releaseResult {
+	start := time.Now()
+	err := backendLink.Release()
+	return releaseResult{err: err, elapsed: time.Since(start)}
+}
+
+// armIdleRelease starts the timer that releases the idle link if the final
+// client write has not finished within idleReleaseGrace.
+func (s *Session) armIdleRelease() {
+	if s.idleReleaseTimer == nil {
+		s.idleReleaseDone = make(chan releaseResult, 1)
+		s.idleReleaseTimer = time.AfterFunc(idleReleaseGrace, s.releaseIdleLinkBesideWrite)
+		return
+	}
+	s.idleReleaseTimer.Reset(idleReleaseGrace)
+}
+
+// disarmIdleRelease stops the timer once the final client write returns. If the
+// timer already fired, it waits for that Release and returns its result with
+// started set.
+func (s *Session) disarmIdleRelease() (result releaseResult, started bool) {
+	if s.idleReleaseTimer.Stop() {
+		return releaseResult{}, false
+	}
+	return <-s.idleReleaseDone, true
+}
+
+// releaseIdleLinkBesideWrite runs on the timer's goroutine while the session is
+// still blocked writing the reply. The session does not change its link until
+// disarmIdleRelease returns.
+func (s *Session) releaseIdleLinkBesideWrite() {
+	s.linkMu.Lock()
+	backendLink := s.link
+	s.linkMu.Unlock()
+	s.idleReleaseDone <- releaseLink(backendLink)
+}
+
 func (s *Session) handleDeallocatePreparedStmt(action ClientMessageAction) error {
 	preparedStmt := action.DeallocatePreparedStmt
 	if preparedStmt == nil {
@@ -1478,29 +1531,40 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
 			// Reply before Release runs its RESET ALL round trip, so the client
-			// gets its result one round trip sooner. The session keeps the link
-			// until Release returns and reads the client's next message only after
-			// that, so no message reaches a backend that has not been reset. If the
-			// write fails, close releases the link the session still holds.
-			// releasingIdleLink stops the client monitor from force-closing this
-			// healthy backend while the write or the reset runs.
+			// gets its result one round trip sooner. If the write has not finished
+			// after idleReleaseGrace, as when the client stops reading, Release
+			// starts beside it so the client cannot keep the backend out of the
+			// pool. Either way the session keeps the link until Release returns and
+			// reads the client's next message only after that, so no message
+			// reaches a backend that has not been reset. releasingIdleLink stops
+			// the client monitor from force-closing this healthy backend while the
+			// write or the reset runs.
 			s.releasingIdleLink.Store(true)
-			if err := finishClientFlush(); err != nil {
-				// Leave releasingIdleLink set: the session closes on this error,
-				// and close resets the idle link after the monitor stops.
-				return discardedUntilSync, err
-			}
 			s.invalidatePendingStmts(false)
-			releaseStart := time.Now()
-			err := s.link.Release()
-			s.recordIdleLinkReleaseFinished(time.Since(releaseStart))
-			if err != nil {
-				pgproxy.Logger().Warn("error releasing session link", "err", err)
+			s.armIdleRelease()
+			writeErr := finishClientFlush()
+			release, releasedBesideWrite := s.disarmIdleRelease()
+			if !releasedBesideWrite {
+				if writeErr != nil {
+					// Leave releasingIdleLink set: the session closes on this error,
+					// and close resets the idle link after the monitor stops.
+					return discardedUntilSync, writeErr
+				}
+				release = releaseLink(s.link)
+			}
+			s.recordIdleLinkReleaseFinished(release.elapsed)
+			if release.err != nil {
+				pgproxy.Logger().Warn("error releasing session link", "err", release.err)
 			}
 			s.linkMu.Lock()
 			s.setLink(nil)
 			s.linkMu.Unlock()
 			s.releasingIdleLink.Store(false)
+			if writeErr != nil {
+				// Release already returned the link to the pool, so close has
+				// nothing left to reset.
+				return discardedUntilSync, writeErr
+			}
 			break
 		}
 	}

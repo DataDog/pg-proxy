@@ -810,6 +810,118 @@ func TestFlushPostgresClientWriteFailureBeforeReleaseLeavesLinkForClose(t *testi
 	})
 }
 
+// TestFlushPostgresStuckClientDoesNotHoldIdleLink checks that a client that stops
+// reading does not keep the backend out of the pool: Release starts while the
+// write is still blocked, and the session waits for both before it returns.
+func TestFlushPostgresStuckClientDoesNotHoldIdleLink(t *testing.T) {
+	unblockWrite := make(chan struct{})
+	clientConn := &blockingWriteConn{started: make(chan struct{}), release: unblockWrite}
+	releaseStarted := make(chan struct{})
+	finishRelease := make(chan struct{})
+	backendLink := &testLink{
+		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
+		receive: func() (pgproto3.BackendMessage, error) {
+			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
+		},
+		release: func() error {
+			close(releaseStarted)
+			<-finishRelease
+			return nil
+		},
+	}
+	s := New(Config{
+		Context:               context.Background(),
+		Client:                &testClient{},
+		ClientConn:            clientConn,
+		InitialLink:           backendLink,
+		PostgresMsgBufferSize: 1 << 20,
+	})
+
+	flushed := make(chan error, 1)
+	go func() {
+		_, err := s.FlushPostgres()
+		flushed <- err
+	}()
+
+	<-clientConn.started
+	select {
+	case <-releaseStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Release waited for the blocked client write")
+	}
+	// A client disconnect seen now must not force-close the backend being reset
+	// for the pool.
+	s.ForceCloseBackendOnClientDisconnect(backendLink)
+	close(unblockWrite)
+	// The write has finished, but the session must not read the client's next
+	// message before the backend is reset.
+	select {
+	case err := <-flushed:
+		t.Fatalf("FlushPostgres returned before Release finished: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(finishRelease)
+	require.NoError(t, <-flushed)
+
+	require.Nil(t, s.CurrentLink())
+	assert.Equal(t, 1, backendLink.calls.release)
+	assert.Zero(t, backendLink.calls.forceClose)
+	assert.False(t, s.releasingIdleLink.Load())
+}
+
+// TestFlushPostgresStuckClientWriteFailureAfterRelease checks that when a blocked
+// write fails after Release has already returned the link to the pool, the
+// session drops the link, so close does not release it a second time.
+func TestFlushPostgresStuckClientWriteFailureAfterRelease(t *testing.T) {
+	writeErr := errors.New("client write failed")
+	unblockWrite := make(chan struct{})
+	clientConn := &blockingWriteConn{started: make(chan struct{}), release: unblockWrite, err: writeErr}
+	released := make(chan struct{})
+	backendLink := &testLink{
+		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
+		receive: func() (pgproto3.BackendMessage, error) {
+			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
+		},
+		release: func() error {
+			close(released)
+			return nil
+		},
+	}
+	flushSucceeded := 0
+	s := New(Config{
+		Context:               context.Background(),
+		Client:                &testClient{},
+		ClientConn:            clientConn,
+		InitialLink:           backendLink,
+		PostgresMsgBufferSize: 1 << 20,
+		Hooks:                 Hooks{ClientFlushSucceeded: func() { flushSucceeded++ }},
+	})
+
+	flushed := make(chan error, 1)
+	go func() {
+		_, err := s.FlushPostgres()
+		flushed <- err
+	}()
+
+	<-clientConn.started
+	select {
+	case <-released:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Release waited for the blocked client write")
+	}
+	close(unblockWrite)
+	err := <-flushed
+	require.ErrorIs(t, err, writeErr)
+	require.True(t, s.ClientDisconnected())
+	require.Zero(t, flushSucceeded)
+	require.Nil(t, s.CurrentLink())
+	assert.False(t, s.releasingIdleLink.Load())
+
+	s.Close(err)
+
+	assert.Equal(t, 1, backendLink.calls.release)
+}
+
 // linkReleased reports whether the session has released its link. The client
 // receives a reply before the session finishes releasing the link, so tests
 // wait for the release instead of asserting it as soon as the reply arrives.
