@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
 
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
@@ -44,7 +45,7 @@ func backendConfig(t *testing.T, url string) config {
 	return config{
 		listenAddress:    "127.0.0.1:0",
 		databases:        map[string]*pgxpool.Config{"primary": settings},
-		clusters:         map[string]string{"local": "primary"},
+		clusters:         map[string]pgconfig.Cluster{"local": {Primary: "primary"}},
 		logicalDatabases: map[string]topology.LogicalDatabase{"local_db": {Cluster: "local"}},
 	}
 }

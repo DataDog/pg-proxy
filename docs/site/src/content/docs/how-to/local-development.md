@@ -99,7 +99,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
-| `clusters[].replicas` | None | Database names used as replica pools for the cluster. Each must be a configured database other than the cluster primary. See [Read routing](../../explanation/read-routing/). |
+| `clusters[].replicas` | None | Database names used as replica pools for the cluster. Each must be a configured database other than the cluster primary. Replica databases default to `max_conn_lifetime: 15m` and `max_conn_lifetime_jitter: 5m`. See [Read routing](../../explanation/read-routing/). |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
 | `logical_databases[].read_clusters` | None | Maps configured cluster names to a `weight` from 0 to 255 (default `1`). Any entry, including weight `0`, enables read routing for the logical database. |
 | `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
