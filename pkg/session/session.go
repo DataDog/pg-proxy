@@ -177,11 +177,10 @@ type Session struct {
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
 	backendDestroyedOnClientDisconnect atomic.Bool     // true after recording that this session destroyed its backend because the client disconnected
 	releasingIdleLink                  atomic.Bool     // true while flushPostgres replies to the client and then releases an idle link
-	// idleReleaseTimer starts Release beside a final client write that has not
-	// finished after idleReleaseGrace, and idleReleaseDone carries the result of
-	// that Release. Both are created by the session's first idle release.
+	// idleReleaseTimer releases the idle link beside a stalled client write (see
+	// flushPostgres), and idleReleaseDone signals that this Release returned.
 	idleReleaseTimer *time.Timer
-	idleReleaseDone  chan releaseResult
+	idleReleaseDone  chan struct{}
 
 	mirroring Mirroring
 
@@ -1325,23 +1324,20 @@ func (s *Session) invalidatePendingStmts(fromError bool) {
 // client to read, so the backend should not wait with it.
 const idleReleaseGrace = time.Millisecond
 
-// releaseResult carries the outcome of releasing the idle link.
-type releaseResult struct {
-	err     error
-	elapsed time.Duration
-}
-
-func releaseLink(backendLink link.Link) releaseResult {
+// releaseIdleLink resets backendLink for the pool and records how long it took.
+func (s *Session) releaseIdleLink(backendLink link.Link) {
 	start := time.Now()
 	err := backendLink.Release()
-	return releaseResult{err: err, elapsed: time.Since(start)}
+	s.recordIdleLinkReleaseFinished(time.Since(start))
+	if err != nil {
+		pgproxy.Logger().Warn("error releasing session link", "err", err)
+	}
 }
 
-// armIdleRelease starts the timer that releases the idle link if the final
-// client write has not finished within idleReleaseGrace.
+// armIdleRelease starts the grace timer for the final client write of a reply.
 func (s *Session) armIdleRelease() {
 	if s.idleReleaseTimer == nil {
-		s.idleReleaseDone = make(chan releaseResult, 1)
+		s.idleReleaseDone = make(chan struct{}, 1)
 		s.idleReleaseTimer = time.AfterFunc(idleReleaseGrace, s.releaseIdleLinkBesideWrite)
 		return
 	}
@@ -1349,23 +1345,20 @@ func (s *Session) armIdleRelease() {
 }
 
 // disarmIdleRelease stops the timer once the final client write returns. If the
-// timer already fired, it waits for that Release and returns its result with
-// started set.
-func (s *Session) disarmIdleRelease() (result releaseResult, started bool) {
+// timer already fired, it waits for that Release and reports true.
+func (s *Session) disarmIdleRelease() (releasedBesideWrite bool) {
 	if s.idleReleaseTimer.Stop() {
-		return releaseResult{}, false
+		return false
 	}
-	return <-s.idleReleaseDone, true
+	<-s.idleReleaseDone
+	return true
 }
 
 // releaseIdleLinkBesideWrite runs on the timer's goroutine while the session is
-// still blocked writing the reply. The session does not change its link until
-// disarmIdleRelease returns.
+// blocked writing the reply, so the session's link does not change under it.
 func (s *Session) releaseIdleLinkBesideWrite() {
-	s.linkMu.Lock()
-	backendLink := s.link
-	s.linkMu.Unlock()
-	s.idleReleaseDone <- releaseLink(backendLink)
+	s.releaseIdleLink(s.CurrentLink())
+	s.idleReleaseDone <- struct{}{}
 }
 
 func (s *Session) handleDeallocatePreparedStmt(action ClientMessageAction) error {
@@ -1543,18 +1536,14 @@ func (s *Session) flushPostgres() (bool, error) {
 			s.invalidatePendingStmts(false)
 			s.armIdleRelease()
 			writeErr := finishClientFlush()
-			release, releasedBesideWrite := s.disarmIdleRelease()
-			if !releasedBesideWrite {
+			if !s.disarmIdleRelease() {
 				if writeErr != nil {
 					// Leave releasingIdleLink set: the session closes on this error,
-					// and close resets the idle link after the monitor stops.
+					// and close resets the idle link. The client monitor runs until
+					// after that, and the flag keeps it from force-closing the link.
 					return discardedUntilSync, writeErr
 				}
-				release = releaseLink(s.link)
-			}
-			s.recordIdleLinkReleaseFinished(release.elapsed)
-			if release.err != nil {
-				pgproxy.Logger().Warn("error releasing session link", "err", release.err)
+				s.releaseIdleLink(s.link)
 			}
 			s.linkMu.Lock()
 			s.setLink(nil)

@@ -41,19 +41,12 @@ func TestStuckClientDoesNotHoldPooledBackend(t *testing.T) {
 	// Postgres has finished and the backend is idle. With the default buffer, a
 	// reply this large is written while Postgres is still sending it, and a client
 	// that stops reading then holds the backend whatever the proxy does.
-	cfg := proxyConfig()
-	cfg.Proxy.PostgresMsgBufferSize = 2 * rows * rowBytes
-	proxy := itest.MustStartProxy(t, cfg)
+	proxy := startProxyWithBuffer(t, 2*rows*rowBytes)
 	connStr := proxy.URL(dbPooled, itest.PostgresUser)
 	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
 	defer cancel()
 
-	clientB, err := pgx.Connect(ctx, connStr)
-	require.NoError(t, err, "client B connect")
-	defer clientB.Close(context.Background())
-	var backendPID uint32
-	require.NoError(t, clientB.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPID))
-
+	clientB, backendPID := connectClientB(t, ctx, connStr)
 	direct, err := backend.Connect(ctx, "postgres")
 	require.NoError(t, err, "connect to Postgres directly")
 	defer direct.Close(context.Background())
@@ -101,12 +94,7 @@ func TestStuckClientDoesNotHoldPooledBackend(t *testing.T) {
 		}
 	}
 	require.Equal(t, rows, gotRows)
-
-	// A's session is still usable.
-	require.NoError(t, pgConnA.Conn().SetReadDeadline(time.Time{}))
-	var one int
-	require.NoError(t, clientA.QueryRow(ctx, "SELECT 1").Scan(&one))
-	require.Equal(t, 1, one)
+	requireSessionUsable(t, ctx, clientA)
 }
 
 // TestStuckPipelinedClientDoesNotHoldPooledBackend checks the same with the
@@ -129,12 +117,7 @@ func TestStuckPipelinedClientDoesNotHoldPooledBackend(t *testing.T) {
 	defer cancel()
 	require.NoError(t, backend.Exec(ctx, "DROP SEQUENCE IF EXISTS "+sequence, "CREATE SEQUENCE "+sequence))
 
-	clientB, err := pgx.Connect(ctx, connStr)
-	require.NoError(t, err, "client B connect")
-	defer clientB.Close(context.Background())
-	var backendPID uint32
-	require.NoError(t, clientB.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPID))
-
+	clientB, backendPID := connectClientB(t, ctx, connStr)
 	direct, err := backend.Connect(ctx, "postgres")
 	require.NoError(t, err, "connect to Postgres directly")
 	defer direct.Close(context.Background())
@@ -201,9 +184,26 @@ func TestStuckPipelinedClientDoesNotHoldPooledBackend(t *testing.T) {
 	}
 	require.Equal(t, queries, gotRows)
 	require.NoError(t, <-written, "client A write")
+	requireSessionUsable(t, ctx, clientA)
+}
 
-	// A's session is still usable.
-	require.NoError(t, pgConnA.Conn().SetReadDeadline(time.Time{}))
+// connectClientB connects the client that competes with A for the only pooled
+// backend, and returns that backend's PID.
+func connectClientB(t *testing.T, ctx context.Context, connStr string) (*pgx.Conn, uint32) {
+	t.Helper()
+	clientB, err := pgx.Connect(ctx, connStr)
+	require.NoError(t, err, "client B connect")
+	t.Cleanup(func() { clientB.Close(context.Background()) })
+	var backendPID uint32
+	require.NoError(t, clientB.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPID))
+	return clientB, backendPID
+}
+
+// requireSessionUsable checks that client A's session still runs queries once
+// it has read everything the proxy sent it.
+func requireSessionUsable(t *testing.T, ctx context.Context, clientA *pgx.Conn) {
+	t.Helper()
+	require.NoError(t, clientA.PgConn().Conn().SetReadDeadline(time.Time{}))
 	var one int
 	require.NoError(t, clientA.QueryRow(ctx, "SELECT 1").Scan(&one))
 	require.Equal(t, 1, one)

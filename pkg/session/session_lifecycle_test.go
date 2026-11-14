@@ -750,12 +750,12 @@ func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
 				ClientConn:            clientConn,
 				InitialLink:           backendLink,
 				PostgresMsgBufferSize: test.bufferSize,
-				Hooks:                 flushRecordingHooks{events: &events}.hooks(),
+				Hooks:                 Hooks{ClientFlushSucceeded: flushRecordingHooks{events: &events}.clientFlushSucceeded},
 			})
 
 			_, err := s.FlushPostgres()
 			require.NoError(t, err)
-			require.Equal(t, test.wantEvents, withoutObserve(events))
+			require.Equal(t, test.wantEvents, events)
 			require.Equal(t, wantWritten, clientConn.written)
 			require.Nil(t, s.link)
 			assert.Equal(t, 1, backendLink.calls.release)
@@ -768,12 +768,7 @@ func TestFlushPostgresClientWriteFailureBeforeReleaseLeavesLinkForClose(t *testi
 	metrics := newLifecycleRecordingMetrics(t)
 	writeErr := errors.New("client write failed")
 	clientConn := &writeRecordingConn{writeErr: writeErr}
-	backendLink := &testLink{
-		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
-		receive: func() (pgproto3.BackendMessage, error) {
-			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
-		},
-	}
+	backendLink := idleReplyLink(nil)
 	flushSucceeded := 0
 	s := New(Config{
 		Context:     context.Background(),
@@ -818,17 +813,11 @@ func TestFlushPostgresStuckClientDoesNotHoldIdleLink(t *testing.T) {
 	clientConn := &blockingWriteConn{started: make(chan struct{}), release: unblockWrite}
 	releaseStarted := make(chan struct{})
 	finishRelease := make(chan struct{})
-	backendLink := &testLink{
-		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
-		receive: func() (pgproto3.BackendMessage, error) {
-			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
-		},
-		release: func() error {
-			close(releaseStarted)
-			<-finishRelease
-			return nil
-		},
-	}
+	backendLink := idleReplyLink(func() error {
+		close(releaseStarted)
+		<-finishRelease
+		return nil
+	})
 	s := New(Config{
 		Context:               context.Background(),
 		Client:                &testClient{},
@@ -837,12 +826,7 @@ func TestFlushPostgresStuckClientDoesNotHoldIdleLink(t *testing.T) {
 		PostgresMsgBufferSize: 1 << 20,
 	})
 
-	flushed := make(chan error, 1)
-	go func() {
-		_, err := s.FlushPostgres()
-		flushed <- err
-	}()
-
+	flushed := flushInBackground(s)
 	<-clientConn.started
 	select {
 	case <-releaseStarted:
@@ -877,16 +861,10 @@ func TestFlushPostgresStuckClientWriteFailureAfterRelease(t *testing.T) {
 	unblockWrite := make(chan struct{})
 	clientConn := &blockingWriteConn{started: make(chan struct{}), release: unblockWrite, err: writeErr}
 	released := make(chan struct{})
-	backendLink := &testLink{
-		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
-		receive: func() (pgproto3.BackendMessage, error) {
-			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
-		},
-		release: func() error {
-			close(released)
-			return nil
-		},
-	}
+	backendLink := idleReplyLink(func() error {
+		close(released)
+		return nil
+	})
 	flushSucceeded := 0
 	s := New(Config{
 		Context:               context.Background(),
@@ -897,12 +875,7 @@ func TestFlushPostgresStuckClientWriteFailureAfterRelease(t *testing.T) {
 		Hooks:                 Hooks{ClientFlushSucceeded: func() { flushSucceeded++ }},
 	})
 
-	flushed := make(chan error, 1)
-	go func() {
-		_, err := s.FlushPostgres()
-		flushed <- err
-	}()
-
+	flushed := flushInBackground(s)
 	<-clientConn.started
 	select {
 	case <-released:
@@ -922,19 +895,33 @@ func TestFlushPostgresStuckClientWriteFailureAfterRelease(t *testing.T) {
 	assert.Equal(t, 1, backendLink.calls.release)
 }
 
-// linkReleased reports whether the session has released its link. The client
-// receives a reply before the session finishes releasing the link, so tests
-// wait for the release instead of asserting it as soon as the reply arrives.
-func linkReleased(s *Session) func() bool {
-	return func() bool { return s.CurrentLink() == nil }
+// idleReplyLink is a link whose reply is a single idle ReadyForQuery, so the
+// session releases it once the reply is written. release may be nil.
+func idleReplyLink(release func() error) *testLink {
+	return &testLink{
+		nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
+		receive: func() (pgproto3.BackendMessage, error) {
+			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
+		},
+		release: release,
+	}
 }
 
-func withoutObserve(events []string) []string {
-	filtered := []string{}
-	for _, event := range events {
-		if event != "observe" {
-			filtered = append(filtered, event)
-		}
-	}
-	return filtered
+// flushInBackground runs s.FlushPostgres on its own goroutine and delivers its
+// error.
+func flushInBackground(s *Session) <-chan error {
+	flushed := make(chan error, 1)
+	go func() {
+		_, err := s.FlushPostgres()
+		flushed <- err
+	}()
+	return flushed
+}
+
+// assertLinkReleased waits for the session to release its link. The client
+// receives a reply before the session finishes releasing the link, so tests
+// wait for the release instead of asserting it as soon as the reply arrives.
+func assertLinkReleased(t *testing.T, s *Session) bool {
+	t.Helper()
+	return assert.Eventually(t, func() bool { return s.CurrentLink() == nil }, 5*time.Second, time.Millisecond)
 }

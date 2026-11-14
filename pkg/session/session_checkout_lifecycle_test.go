@@ -216,7 +216,7 @@ func TestDrainDoesNotStartNewTransactionAfterCurrentOneEnds(t *testing.T) {
 	// The pipelined BEGIN was never serviced: no second link was acquired, so no new
 	// transaction was started, and the session is left unlinked.
 	assert.Equal(int32(1), backend.acquisitions.Load(), "a second transaction was started during draining")
-	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
+	assertLinkReleased(t, session)
 }
 
 func TestDrainWaitsForAutocommitQuery(t *testing.T) {
@@ -399,7 +399,7 @@ func TestDrainReadTimeoutDoesNotAbortInFlightTransaction(t *testing.T) {
 		t.Fatal("session did not drain and exit")
 	}
 	assert.Equal(int32(1), backend.acquisitions.Load(), "no second transaction should have been started")
-	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
+	assertLinkReleased(t, session)
 }
 
 // This file verifies that a FLASh "requests-in-flight" (RIF) load-shedder slot
@@ -442,7 +442,7 @@ func TestRIFSlotHeldExactlyForCheckoutDuration_NormalRelease(t *testing.T) {
 	assert.NoError(err)
 	_, err = fakeClient.Receive()
 	assert.NoError(err)
-	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
+	assertLinkReleased(t, session)
 
 	// Force the session to fully exit. closer() blocks on the session's `done`
 	// channel (session.Run() having returned), which is the only race-free way
@@ -601,7 +601,7 @@ func TestRIFSlotHeldExactlyForCheckoutDuration_StateRemapMidCheckout(t *testing.
 	assert.NoError(err)
 	assert.Equal(buildReadyForQueryIdleMessage(), rfq)
 	assert.Equal(newBackend, session.Backend())
-	assert.Eventually(linkReleased(session), 5*time.Second, time.Millisecond)
+	assertLinkReleased(t, session)
 
 	// Force full shutdown to synchronize on the session goroutine having
 	// returned from handleTransaction before reading activeCount.
