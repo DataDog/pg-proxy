@@ -11,6 +11,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -77,17 +78,8 @@ func TestStuckClientDoesNotHoldPooledBackend(t *testing.T) {
 		return err == nil && queryStart.After(before) && state == "idle"
 	}, 20*time.Second, 5*time.Millisecond, "Postgres did not finish client A's query")
 
-	// A has read nothing, and B must still get the only backend. A proxy that
-	// keeps the backend until the write finishes makes B wait for A indefinitely;
-	// the bound leaves room for a slow machine and the race detector.
-	bctx, bcancel := context.WithTimeout(ctx, 2*time.Second)
-	defer bcancel()
-	start := time.Now()
-	var pid uint32
-	require.NoError(t, clientB.QueryRow(bctx, "SELECT pg_backend_pid()").Scan(&pid),
-		"client B did not get the backend while client A was not reading its reply")
-	t.Logf("client B got the backend %v after Postgres finished client A's query", time.Since(start))
-	require.Equal(t, backendPID, pid, "client B should reuse the only pooled backend")
+	// A has read nothing, and B must still get the only backend.
+	requireBackendFree(t, ctx, clientB, backendPID)
 
 	// A reads again and gets the whole reply.
 	require.NoError(t, pgConnA.Conn().SetReadDeadline(time.Now().Add(30*time.Second)))
@@ -115,6 +107,122 @@ func TestStuckClientDoesNotHoldPooledBackend(t *testing.T) {
 	var one int
 	require.NoError(t, clientA.QueryRow(ctx, "SELECT 1").Scan(&one))
 	require.Equal(t, 1, one)
+}
+
+// TestStuckPipelinedClientDoesNotHoldPooledBackend checks the same with the
+// default message buffer. Each reply fits in the buffer, so the proxy writes it
+// in one piece once Postgres has finished and the backend is idle. Client A
+// pipelines many such queries and reads none of the replies, so one of those
+// writes blocks once the socket buffers are full.
+func TestStuckPipelinedClientDoesNotHoldPooledBackend(t *testing.T) {
+	const (
+		queries = 2000
+		// With the rest of its reply, a row stays under the default 10 KiB buffer.
+		rowBytes      = 8 << 10
+		receiveBuffer = 64 << 10
+		// Counts the queries Postgres has run for A.
+		sequence = "stuck_pipelined_client"
+	)
+	proxy := startProxy(t)
+	connStr := proxy.URL(dbPooled, itest.PostgresUser)
+	ctx, cancel := context.WithTimeout(t.Context(), 60*time.Second)
+	defer cancel()
+	require.NoError(t, backend.Exec(ctx, "DROP SEQUENCE IF EXISTS "+sequence, "CREATE SEQUENCE "+sequence))
+
+	clientB, err := pgx.Connect(ctx, connStr)
+	require.NoError(t, err, "client B connect")
+	defer clientB.Close(context.Background())
+	var backendPID uint32
+	require.NoError(t, clientB.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&backendPID))
+
+	direct, err := backend.Connect(ctx, "postgres")
+	require.NoError(t, err, "connect to Postgres directly")
+	defer direct.Close(context.Background())
+	queriesRun := func() (n int64, err error) {
+		err = direct.QueryRow(ctx, "SELECT CASE WHEN is_called THEN last_value ELSE 0 END FROM "+sequence).Scan(&n)
+		return n, err
+	}
+
+	clientA := connectWithReceiveBuffer(t, ctx, connStr, receiveBuffer)
+	defer clientA.Close(context.Background())
+	pgConnA := clientA.PgConn()
+	var pipeline []byte
+	for range queries {
+		pipeline, err = (&pgproto3.Query{String: fmt.Sprintf("SELECT nextval('%s'), repeat('x', %d)", sequence, rowBytes)}).Encode(pipeline)
+		require.NoError(t, err)
+	}
+	// Once the proxy stops reading A's queries, this write waits for A to read
+	// replies, so it runs beside the reads below.
+	written := make(chan error, 1)
+	go func() {
+		_, err := pgConnA.Conn().Write(pipeline)
+		written <- err
+	}()
+
+	// The proxy has stopped running A's queries when the count stops moving.
+	var stalledAt int64
+	lastChange := time.Now()
+	require.Eventually(t, func() bool {
+		n, err := queriesRun()
+		if err != nil {
+			return false
+		}
+		if n != stalledAt {
+			stalledAt, lastChange = n, time.Now()
+			return false
+		}
+		return n > 0 && time.Since(lastChange) >= 250*time.Millisecond
+	}, 20*time.Second, 5*time.Millisecond, "the proxy did not stop running client A's queries")
+	require.Less(t, stalledAt, int64(queries), "the socket buffers held every reply, so no write blocked")
+	t.Logf("the proxy stopped after %d of client A's %d queries", stalledAt, queries)
+
+	// A has read nothing, and B must still get the only backend.
+	requireBackendFree(t, ctx, clientB, backendPID)
+
+	// A reads again and gets every reply, in order.
+	require.NoError(t, pgConnA.Conn().SetReadDeadline(time.Now().Add(30*time.Second)))
+	frontendA := pgConnA.Frontend()
+	gotRows := 0
+	for replies := 0; replies < queries; {
+		msg, err := frontendA.Receive()
+		require.NoError(t, err, "client A read")
+		switch msg := msg.(type) {
+		case *pgproto3.DataRow:
+			gotRows++
+			require.Len(t, msg.Values, 2)
+			require.Equal(t, strconv.Itoa(gotRows), string(msg.Values[0]), "client A's replies are out of order")
+			require.Len(t, msg.Values[1], rowBytes)
+		case *pgproto3.ErrorResponse:
+			t.Fatalf("client A got an error instead of its reply: %s", msg.Message)
+		case *pgproto3.ReadyForQuery:
+			require.Equal(t, byte('I'), msg.TxStatus)
+			replies++
+		}
+	}
+	require.Equal(t, queries, gotRows)
+	require.NoError(t, <-written, "client A write")
+
+	// A's session is still usable.
+	require.NoError(t, pgConnA.Conn().SetReadDeadline(time.Time{}))
+	var one int
+	require.NoError(t, clientA.QueryRow(ctx, "SELECT 1").Scan(&one))
+	require.Equal(t, 1, one)
+}
+
+// requireBackendFree checks that clientB gets the only pooled backend while
+// client A is not reading. A proxy that keeps the backend until its write to A
+// finishes makes B wait for A indefinitely; the bound leaves room for a slow
+// machine and the race detector.
+func requireBackendFree(t *testing.T, ctx context.Context, clientB *pgx.Conn, backendPID uint32) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	start := time.Now()
+	var pid uint32
+	require.NoError(t, clientB.QueryRow(ctx, "SELECT pg_backend_pid()").Scan(&pid),
+		"client B did not get the backend while client A was not reading its replies")
+	t.Logf("client B got the backend after %v", time.Since(start))
+	require.Equal(t, backendPID, pid, "client B should reuse the only pooled backend")
 }
 
 // connectWithReceiveBuffer connects through the proxy with SO_RCVBUF pinned to
