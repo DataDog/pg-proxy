@@ -32,6 +32,7 @@ export default defineConfig({
       ] },
       { label: 'How-to guides', items: [
         { slug: 'how-to/local-development' },
+        { slug: 'how-to/run-in-production' },
         { slug: 'how-to/otel-metrics-to-datadog' },
         { slug: 'how-to/contributing' },
         { slug: 'how-to/documentation-contributing' },
