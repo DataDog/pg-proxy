@@ -81,7 +81,7 @@ func parseConfig(args []string) (config, error) {
 	flags := flag.NewFlagSet("pg-proxy", flag.ContinueOnError)
 	flags.StringVar(&telemetry, "telemetry", "", "all-signal preset: datadog, otel, or none (default: OTEL_*_EXPORTER selection)")
 	flags.StringVar(&tracing, "tracing", "none", "query tracing backend: none or otel (overrides OTEL_TRACES_EXPORTER)")
-	flags.BoolVar(&traceParameters, "trace-parameters", false, "include raw bind parameter values in query traces (default: disabled; SQL text is always recorded)")
+	flags.BoolVar(&traceParameters, "trace-parameters", false, "include raw bind parameter values in sampled query traces (default: disabled; SQL text is always recorded)")
 	flags.TextVar(&logLevel, "log-level", slog.LevelInfo, "minimum proxy log level for stderr and OTLP: DEBUG, INFO, WARN, or ERROR")
 	flags.StringVar(&path, "config", "", "JSON or YAML configuration file")
 	if err := flags.Parse(args); err != nil {
@@ -101,9 +101,9 @@ func parseConfig(args []string) (config, error) {
 	var shared pgconfig.Config
 	switch filepath.Ext(path) {
 	case ".json":
-		shared, err = pgconfig.ReadJSON(file)
+		shared, err = readConfigJSON(file)
 	case ".yaml", ".yml":
-		shared, err = pgconfig.ReadYAML(file)
+		shared, err = readConfigYAML(file)
 	default:
 		return config{}, errors.New("configuration file must use .json, .yaml, or .yml")
 	}
@@ -325,17 +325,10 @@ func clientTLSConfig(proxy pgconfig.Proxy) (*tls.Config, error) {
 
 func readTLSFile(path, setting string) ([]byte, error) {
 	data, err := os.ReadFile(path)
-	if err == nil {
-		return data, nil
+	if err != nil {
+		return nil, fmt.Errorf("%s: %s", setting, fileErrorReason(err))
 	}
-	reason := "could not read file"
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		reason = "file not found"
-	case errors.Is(err, os.ErrPermission):
-		reason = "permission denied"
-	}
-	return nil, fmt.Errorf("%s: %s", setting, reason)
+	return data, nil
 }
 
 // Classify a failed pair without returning parser errors that can contain PEM

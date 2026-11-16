@@ -144,9 +144,11 @@ you just resolved. Convert again when you reload the file or refresh credentials
 changing an environment variable alone does not update an existing pool.
 
 This custom format belongs to your application. The
-[OSS binary](../README.md#oss-binary) accepts the library's
-format and supports direct primary backends. It will not understand
-`password_env` without its own reader and conversion.
+[OSS binary](../README.md#oss-binary) uses the same pattern for its own
+[credential references](client-authentication.md#credential-references):
+it reads `password_env` and similar fields next to `password`, not in a
+`credentials` section, so it will not read the format in this example. See
+`cmd/pg-proxy/credentials.go` for a complete reader.
 
 ## When the library itself should change
 

@@ -235,7 +235,7 @@ func TestSubscribe_RegisterNewPoolNewHost(t *testing.T) {
 
 	poolHealth := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", []string{"tag:value"}, nil))
 
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, poolHealth.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2", "10.0.0.3"}, poolHealth.Snapshot().Resolved)
 	assert.True(t, poolHealth.IsHealthy("10.0.0.1"))
 	assert.False(t, poolHealth.IsHealthy("10.0.0.2"))
 	assert.True(t, poolHealth.IsHealthy("10.0.0.3"))
@@ -274,7 +274,7 @@ func TestSubscribe_BroadcastsUpdatesToEverySubscriber(t *testing.T) {
 
 	assert.Same(t, poolHealth, receivePoolHealth(t, u1))
 	assert.Same(t, poolHealth, receivePoolHealth(t, u2))
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Snapshot().Resolved)
 }
 
 func TestSubscribe_DifferentHosts_SeparatePoolHealths(t *testing.T) {
@@ -290,8 +290,8 @@ func TestSubscribe_DifferentHosts_SeparatePoolHealths(t *testing.T) {
 	a := receivePoolHealth(t, w.Subscribe("primary-a.local", false, "db_a", nil, nil))
 	b := receivePoolHealth(t, w.Subscribe("primary-b.local", false, "db_b", nil, nil))
 
-	assert.ElementsMatch(t, []string{"10.0.0.1"}, a.Resolved())
-	assert.ElementsMatch(t, []string{"10.0.0.2"}, b.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, a.Snapshot().Resolved)
+	assert.ElementsMatch(t, []string{"10.0.0.2"}, b.Snapshot().Resolved)
 }
 
 func TestSubscribe_SQLConnectionStringsShareHostStateWhenSQLDisabled(t *testing.T) {
@@ -758,12 +758,12 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	assert.NoError(t, health.sqlComparisonLatest[b].Results[0].Err)
 	assert.Empty(t, conclusiveErrors, "a timeout resolved by another credential is still an indeterminate error")
 
-	// Once all latest credential results are unknown, comparison and hybrid evaluation must
-	// both stop relying on the previous successful observations.
+	// Once all latest credential results are unknown, the raw comparison becomes unknown
+	// while the hybrid policy retains its last SQL leader.
 	complete(a, t0.Add(2*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	complete(b, t0.Add(2*time.Second), context.DeadlineExceeded)
-	assert.Equal(t, SQLRoutingResultCachedFallback, iterations[len(iterations)-1].RoutingResult)
+	assert.Equal(t, SQLRoutingResultRetainedSQL, iterations[len(iterations)-1].RoutingResult)
 	assert.Equal(t, SQLHealthFallbackTimeout, iterations[len(iterations)-1].FallbackReason)
 	snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{ip: {}}, health.sqlComparisonLatest)
 	assert.Empty(t, snapshot.health, "comparison must derive roles from the latest credential results")
@@ -829,9 +829,9 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			t.Cleanup(func() { w.Unsubscribe(updates) })
 			policy, _ := health.routingPolicy()
 			scheduledAt := time.Now()
-			policy.observePatroni(map[string]bool{oldIP: true}, scheduledAt.Add(-2*time.Second))
-			policy.observeSQL([]string{oldIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, scheduledAt.Add(-2*time.Second))
-			policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(-time.Second))
+			policy.observePatroni(map[string]bool{oldIP: true}, scheduledAt)
+			policy.observeSQL([]string{oldIP}, SQLHealthCheckOutcome{PrimaryIPs: []string{oldIP}}, scheduledAt)
+			policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(time.Nanosecond))
 			var iterations, comparisons int
 			w.sqlHooks.Iteration = func(SQLIteration, []string) { iterations++ }
 			w.sqlHooks.LeaderDetectionCompared = func(LeaderDetectionComparison, []string) { comparisons++ }
@@ -960,7 +960,7 @@ func TestCentralizedSQLHealthCheckDiscoversNewIPBeforePatroniRefresh(t *testing.
 	assert.True(t, observation.Writable)
 	assert.NoError(t, observation.Err)
 	assert.Equal(t, 1, sqlProber.callCount(newSQLIP))
-	assert.Equal(t, []string{patroniIP}, health.Resolved(), "SQL discovery must not mutate Patroni routing state")
+	assert.Equal(t, []string{patroniIP}, health.Snapshot().Resolved, "SQL discovery must not mutate Patroni routing state")
 }
 
 func TestRefreshSQLPublishesWritableBeforeReportingMultiplePrimaries(t *testing.T) {
@@ -1677,7 +1677,7 @@ func TestTickOne_EmptyDNS_LeavesResolvedEmpty(t *testing.T) {
 
 	poolHealth := receivePoolHealth(t, w.Subscribe("nowhere.local", false, "mydb", nil, nil))
 
-	assert.Empty(t, poolHealth.Resolved())
+	assert.Empty(t, poolHealth.Snapshot().Resolved)
 	assert.False(t, poolHealth.IsHealthy("anything"))
 }
 
@@ -1692,7 +1692,7 @@ func TestTickOne_AllUnhealthy(t *testing.T) {
 
 	poolHealth := receivePoolHealth(t, w.Subscribe("primary.local", false, "mydb", nil, nil))
 
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Snapshot().Resolved)
 	assert.False(t, poolHealth.IsHealthy("10.0.0.1"))
 	assert.False(t, poolHealth.IsHealthy("10.0.0.2"))
 }
@@ -1764,7 +1764,7 @@ func TestRoutingSnapshotPreservesIndependentPatroniDiscoveryAndComparisons(t *te
 	health.routingMu.Lock()
 	health.publishRoutingSnapshot(map[string]bool{standby: true}, []string{standby})
 	health.routingMu.Unlock()
-	assert.ElementsMatch(t, []string{primary, standby}, health.patroniHealthState.Resolved())
+	assert.ElementsMatch(t, []string{primary, standby}, health.patroniHealthState.Snapshot().Resolved)
 	assert.True(t, health.patroniHealthState.IsHealthy(primary))
 	w.RefreshSQL()
 	assert.Equal(t, map[string]bool{primary: true, standby: false}, comparedPatroniHealth)
@@ -1777,7 +1777,7 @@ func TestRoutingSnapshotPreservesIndependentPatroniDiscoveryAndComparisons(t *te
 	w.Refresh()
 	assert.True(t, health.IsHealthy(primary))
 	assert.False(t, health.IsHealthy(standby))
-	assert.ElementsMatch(t, []string{primary, standby}, health.Resolved())
+	assert.ElementsMatch(t, []string{primary, standby}, health.Snapshot().Resolved)
 }
 
 func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
@@ -1788,17 +1788,17 @@ func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
 	w.applyPatroniHealth(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1", "10.0.0.2"}, time.Now())
 	assert.True(t, s.IsHealthy("10.0.0.1"))
 	assert.True(t, s.IsHealthy("10.0.0.2"))
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Snapshot().Resolved)
 
 	// 10.0.0.2 leaves DNS but stays healthy — grace window, not evicted
 	for i := 0; i < maxFailedHostLookups-1; i++ {
 		w.applyPatroniHealth(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"}, time.Now())
 	}
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Resolved(), "still in grace window")
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s.Snapshot().Resolved, "still in grace window")
 
 	// 10.0.0.2 now unhealthy and absent from DNS — eligible for eviction
 	w.applyPatroniHealth(s, map[string]bool{"10.0.0.1": true, "10.0.0.2": false}, nil, []string{"10.0.0.1"}, time.Now())
-	assert.ElementsMatch(t, []string{"10.0.0.1"}, s.Resolved(), "evicted after grace window and unhealthy")
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, s.Snapshot().Resolved, "evicted after grace window and unhealthy")
 	assert.False(t, s.IsHealthy("10.0.0.2"), "evicted IP must not stay healthy")
 
 	// verify lastKnownPgHealth protects an IP that is still healthy
@@ -1807,7 +1807,7 @@ func TestUpdateHealthAndCleanup_PublishesHealthAndEvictsExpired(t *testing.T) {
 	for i := 0; i < maxFailedHostLookups+1; i++ {
 		w.applyPatroniHealth(s2, map[string]bool{"10.0.0.1": true, "10.0.0.2": true}, nil, []string{"10.0.0.1"}, time.Now())
 	}
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s2.Resolved(), "last known healthy IP never evicted")
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, s2.Snapshot().Resolved, "last known healthy IP never evicted")
 }
 
 func TestPatroniRefreshDoesNotWaitForBlockedSQLCheckToCleanUpEvictedPool(t *testing.T) {
@@ -1867,7 +1867,7 @@ func TestPatroniRefreshDoesNotWaitForBlockedSQLCheckToCleanUpEvictedPool(t *test
 		t.Fatal("Patroni refresh waited for the blocked SQL health check")
 	}
 	assert.Same(t, health, receivePoolHealth(t, healthUpdates))
-	assert.Equal(t, []string{replacementIP}, health.Resolved())
+	assert.Equal(t, []string{replacementIP}, health.Snapshot().Resolved)
 	assert.Equal(t, 1, pools.Len(), "the pool must remain open while its SQL probe is using it")
 
 	releaseSQL()
@@ -1939,8 +1939,8 @@ func TestRefreshSQLRetainsIndependentlyDiscoveredPrimaryWhenDNSReturnsNoAddresse
 		assert.NoError(t, observation.Err)
 		assert.Equal(t, 1, pools.Len())
 	}
-	assert.Equal(t, []string{sqlIP}, health.sqlHealthState.Resolved())
-	assert.Equal(t, []string{patroniIP}, health.Resolved())
+	assert.Equal(t, []string{sqlIP}, health.sqlHealthState.Snapshot().Resolved)
+	assert.Equal(t, []string{patroniIP}, health.Snapshot().Resolved)
 	pools.mu.Lock()
 	_, retainedSQLIP := pools.pools[sqlIP]
 	pools.mu.Unlock()
@@ -1953,14 +1953,14 @@ func TestTick_IpRotation(t *testing.T) {
 
 	updates := w.Subscribe("primary.local", false, "mydb", nil, nil)
 	poolHealth := receivePoolHealth(t, updates)
-	assert.ElementsMatch(t, []string{"10.0.0.1"}, poolHealth.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, poolHealth.Snapshot().Resolved)
 
 	p.mu.Lock()
 	p.ipsByHost["primary.local"] = []string{"10.0.0.1", "10.0.0.2"}
 	p.mu.Unlock()
 	w.Refresh()
 	assert.Same(t, poolHealth, receivePoolHealth(t, updates))
-	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved())
+	assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Snapshot().Resolved)
 
 	// Both IPs leave DNS. 10.0.0.1 remains healthy so lastKnownPgHealth
 	// protects it from eviction. 10.0.0.2 is unhealthy and gets evicted.
@@ -1970,10 +1970,10 @@ func TestTick_IpRotation(t *testing.T) {
 
 	for i := 0; i < maxFailedHostLookups-1; i++ {
 		w.Refresh()
-		assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Resolved(), "tick %d: IPs should still be tracked", i+1)
+		assert.ElementsMatch(t, []string{"10.0.0.1", "10.0.0.2"}, poolHealth.Snapshot().Resolved, "tick %d: IPs should still be tracked", i+1)
 	}
 	w.Refresh()
-	assert.ElementsMatch(t, []string{"10.0.0.1"}, poolHealth.Resolved(), "10.0.0.2 evicted; 10.0.0.1 protected by lastKnownPgHealth")
+	assert.ElementsMatch(t, []string{"10.0.0.1"}, poolHealth.Snapshot().Resolved, "10.0.0.2 evicted; 10.0.0.1 protected by lastKnownPgHealth")
 }
 
 func TestHealthWorkerPreservesSubscriptionMetadataAndHooks(t *testing.T) {
@@ -2026,7 +2026,7 @@ func TestHealthWorkerPreservesSubscriptionMetadataAndHooks(t *testing.T) {
 	events = nil
 	w.Refresh()
 	assert.Equal(t, []string{"start", "finish", "evict"}, events, "timing is reported before cleanup")
-	assert.Empty(t, first.Resolved())
+	assert.Empty(t, first.Snapshot().Resolved)
 
 	w.Unsubscribe(firstUpdates)
 	w.Unsubscribe(secondUpdates)
@@ -2379,7 +2379,7 @@ func TestHybridEvaluationIncludesPrimaryRestoredByLateSuccess(t *testing.T) {
 	state.RecordHealthAt(now.Add(-time.Second), map[string]bool{oldIP: true})
 	// The new IP disappears from DNS before its first successful probe finishes.
 	state.RefreshResolved(nil, 1, nil)
-	require.ElementsMatch(t, []string{oldIP}, state.Resolved())
+	require.ElementsMatch(t, []string{oldIP}, state.Snapshot().Resolved)
 	health := &PoolHealth{
 		state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: state,
 		hybridPolicy:     newHybridHealthPolicy(true),
@@ -2447,7 +2447,7 @@ func TestSQLDiscoverySerializesRetentionWithEvaluation(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("SQL refresh did not finish")
 	}
-	assert.ElementsMatch(t, []string{ip}, state.Resolved())
+	assert.ElementsMatch(t, []string{ip}, state.Snapshot().Resolved)
 }
 
 func TestHybridTelemetryUsesDecisionRoutingMode(t *testing.T) {
@@ -2583,7 +2583,7 @@ func TestHybridRoutingPreservesPatroniWhenSQLDiscoveryHasNoCandidates(t *testing
 	w.RefreshSQL()
 
 	assert.True(t, health.IsHealthy(ip), "empty SQL discovery must preserve the Patroni route")
-	assert.ElementsMatch(t, []string{ip}, health.Resolved())
+	assert.ElementsMatch(t, []string{ip}, health.Snapshot().Resolved)
 }
 
 func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T) {
@@ -2622,11 +2622,13 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 		}
 		comparisons = append(comparisons, c)
 	}
-	// Patroni learns a new leader while SQL still owns the all-standby route.
+	// A newer Patroni leader recovers the all-standby route immediately.
 	patroniObservedAt := time.Now()
 	w.applyPatroniHealth(health, map[string]bool{primary: false, standby: true}, nil, []string{primary, standby}, patroniObservedAt)
-	require.False(t, health.IsHealthy(standby))
-	require.Empty(t, comparisons)
+	require.True(t, health.IsHealthy(standby))
+	require.Len(t, comparisons, 1)
+	assert.Equal(t, SQLRoutingResultPatroniRecovery, comparisons[0].HybridSource)
+	assert.Zero(t, comparisons[0].Improvement)
 
 	patroniProber.mu.Lock()
 	patroniProber.ipsByHost["primary.local"] = nil
@@ -2636,19 +2638,14 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 		require.True(t, health.sqlRoutingActive, "empty DNS must not restore Patroni while SQL candidates are retained")
 		require.False(t, health.IsHealthy(primary))
 	}
-	beforeFallback := time.Now()
 	w.RefreshSQL()
-	afterFallback := time.Now()
-	require.Empty(t, health.sqlHealthState.Resolved())
+	require.Empty(t, health.sqlHealthState.Snapshot().Resolved)
 	require.False(t, health.sqlRoutingActive, "evicting every SQL candidate must restore Patroni ownership")
 	require.True(t, health.IsHealthy(standby))
-	assert.ElementsMatch(t, []string{primary, standby}, health.Resolved())
+	assert.ElementsMatch(t, []string{primary, standby}, health.Snapshot().Resolved)
 	assert.False(t, health.sqlRoutingDisabled, "empty discovery must not latch the routing kill switch")
-	require.Len(t, comparisons, 1, "record fallback publication without waiting for another Patroni refresh")
+	require.Len(t, comparisons, 1, "restoring the same leader must not repeat its recovery comparison")
 	assert.Equal(t, standby, comparisons[0].NewLeaderIP)
-	assert.Equal(t, SQLRoutingResultCachedFallback, comparisons[0].HybridSource)
-	assert.GreaterOrEqual(t, comparisons[0].Improvement, patroniObservedAt.Sub(afterFallback))
-	assert.LessOrEqual(t, comparisons[0].Improvement, patroniObservedAt.Sub(beforeFallback))
 
 	// Empty SQL rounds and a later Patroni refresh must not repeat the comparison.
 	w.RefreshSQL()
@@ -2704,9 +2701,9 @@ func TestSQLRoutingDoesNotReplacePatroniDiscoveryState(t *testing.T) {
 	patroniProber.ipsByHost["primary.local"] = []string{standby}
 	patroniProber.mu.Unlock()
 	w.RefreshSQL()
-	require.ElementsMatch(t, []string{standby}, health.Resolved())
+	require.ElementsMatch(t, []string{standby}, health.Snapshot().Resolved)
 	require.False(t, health.IsHealthy(patroniPrimary))
-	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.patroniHealthState.Resolved())
+	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.patroniHealthState.Snapshot().Resolved)
 
 	// Patroni must continue probing its independently retained primary even though SQL removed it
 	// from the client-visible routing snapshot.
@@ -2725,7 +2722,7 @@ func TestSQLRoutingDoesNotReplacePatroniDiscoveryState(t *testing.T) {
 	sqlProber.mu.Unlock()
 	w.RefreshSQL()
 	assert.True(t, health.IsHealthy(patroniPrimary))
-	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.Resolved())
+	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.Snapshot().Resolved)
 }
 
 func TestSQLChecksDisableRoutingUntilHostStateIsRecreated(t *testing.T) {
@@ -3140,9 +3137,55 @@ func TestAggregatedSQLDecisionsControlPublishedRouting(t *testing.T) {
 			assert.Equal(t, tc.wantSQL, health.sqlRoutingActive)
 			assert.Equal(t, tc.wantPrimary == a, health.IsHealthy(a))
 			assert.Equal(t, tc.wantPrimary == b, health.IsHealthy(b))
-			assert.ElementsMatch(t, []string{a, b}, health.Resolved())
+			assert.ElementsMatch(t, []string{a, b}, health.Snapshot().Resolved)
 		})
 	}
+}
+
+func TestPublishedRoutingPreservesRetentionExclusionsAndPatroniRecovery(t *testing.T) {
+	const a, b, c = "10.0.0.1", "10.0.0.2", "10.0.0.3"
+	candidates := []string{a, b, c}
+	health := newTestPoolHealth(candidates...)
+	health.sqlHealthState = NewHealthState()
+	health.sqlHealthState.Track(candidates)
+	health.hybridPolicy = newHybridHealthPolicy(true)
+	health.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) }
+	w := newTestWorker(nil)
+	patroni := func(leader string) {
+		w.applyPatroniHealth(health, map[string]bool{a: leader == a, b: leader == b, c: leader == c}, nil, candidates, time.Now())
+	}
+	target := &sqlHealthTarget{poolHealth: health}
+	sql := func(results ...SQLHealthCheckResult) {
+		now := time.Now()
+		w.completeSQLHealthCheck(target, 0, now, candidates, map[string]struct{}{a: {}, b: {}, c: {}}, SQLHealthCheckOutcome{
+			StartedAt: now, Results: results,
+		})
+	}
+
+	patroni(a)
+	sql(SQLHealthCheckResult{IP: a, InRecovery: true}, SQLHealthCheckResult{IP: b}, SQLHealthCheckResult{IP: c, InRecovery: true})
+	require.True(t, health.IsHealthy(b))
+
+	// Uncertainty retains SQL B and must keep stale Patroni A from taking ownership.
+	sql(SQLHealthCheckResult{IP: a, InRecovery: true}, SQLHealthCheckResult{IP: b, Err: context.DeadlineExceeded}, SQLHealthCheckResult{IP: c, InRecovery: true})
+	require.True(t, health.sqlRoutingActive)
+	patroni(a)
+	require.True(t, health.IsHealthy(b))
+	require.False(t, health.IsHealthy(a))
+
+	// Losing B falls back with A excluded, including on subsequent Patroni polls.
+	sql(SQLHealthCheckResult{IP: a, InRecovery: true}, SQLHealthCheckResult{IP: b, InRecovery: true}, SQLHealthCheckResult{IP: c, Err: context.DeadlineExceeded})
+	require.False(t, health.sqlRoutingActive)
+	patroni(a)
+	require.Empty(t, healthyIPs(health.Snapshot().Health))
+
+	// A newer eligible Patroni C publishes immediately without another SQL completion.
+	patroni(c)
+	require.True(t, health.IsHealthy(c))
+	require.False(t, health.IsHealthy(a))
+	require.False(t, health.IsHealthy(b))
+	patroni("")
+	assert.Empty(t, healthyIPs(health.Snapshot().Health), "Patroni recovery must also publish loss of its leader")
 }
 
 func TestSQLComparisonPrunesEvictedResultsAndRejectsLateCompletion(t *testing.T) {
@@ -3277,6 +3320,52 @@ func TestSQLRefreshRejectsFlagEvaluationFromBeforeDisable(t *testing.T) {
 	w.RefreshSQL()
 	assert.Equal(t, 1, prober.callCount("conn"), "a fresh enabled tick must still run")
 	assert.Equal(t, int32(1), comparisons.Load())
+}
+
+// Per-credential caching must preserve the oldest probe start time, including unknown
+// timestamps, so a fresh credential cannot admit SQL evidence from before recovery.
+func TestHybridEvaluationPreservesCredentialStartTimesAfterPatroniRecovery(t *testing.T) {
+	for _, unknown := range []bool{false, true} {
+		t.Run(fmt.Sprintf("unknown_start_%t", unknown), func(t *testing.T) {
+			const a, b = "10.0.0.1", "10.0.0.2"
+			state := NewHealthState()
+			state.Track([]string{a, b})
+			health := &PoolHealth{
+				state:              NewHealthState(),
+				patroniHealthState: NewHealthState(),
+				sqlHealthState:     state,
+				hybridPolicy:       newHybridHealthPolicy(true),
+				routingEnabledFn:   func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+			}
+			policy := health.hybridPolicy
+			before := time.Now().Add(-time.Second)
+			policy.observePatroni(map[string]bool{a: true}, before)
+			policy.observeSQL([]string{a, b}, SQLHealthCheckOutcome{}, before.Add(time.Millisecond))
+			policy.observePatroni(map[string]bool{b: true}, before.Add(2*time.Millisecond))
+			var iterations []SQLIteration
+			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{Iteration: func(i SQLIteration, _ []string) { iterations = append(iterations, i) }}}
+			first, second := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
+			complete := func(target *sqlHealthTarget, started time.Time) {
+				w.completeSQLHealthCheck(target, 0, time.Now(), []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
+					StartedAt: started,
+					Results:   []SQLHealthCheckResult{{IP: a, InRecovery: true}, {IP: b}},
+				})
+			}
+			oldStart := before
+			if unknown {
+				oldStart = time.Time{}
+			}
+			complete(first, oldStart)
+			assert.Equal(t, oldStart, health.sqlComparisonLatest[first].StartedAt)
+			complete(second, time.Now())
+			require.Len(t, iterations, 2)
+			assert.Equal(t, SQLRoutingResultPatroniRecovery, iterations[0].RoutingResult)
+			assert.Equal(t, SQLRoutingResultPatroniRecovery, iterations[1].RoutingResult)
+			complete(first, time.Now())
+			require.Len(t, iterations, 3)
+			assert.Equal(t, SQLRoutingResultConclusive, iterations[2].RoutingResult)
+		})
+	}
 }
 
 func TestSQLPatroniMismatchReason(t *testing.T) {
