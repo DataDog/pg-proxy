@@ -291,7 +291,7 @@ func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T)
 	// evict the old address, even after both credentials confirm the replacement.
 	w.RefreshSQL()
 	w.RefreshSQL()
-	assert.ElementsMatch(t, []string{oldIP, replacementIP}, health.sqlHealthState.Resolved())
+	assert.ElementsMatch(t, []string{oldIP, replacementIP}, health.sqlHealthState.Snapshot().Resolved)
 	assert.Equal(t, 2, slowPools.Len())
 	assert.Equal(t, 2, fastPools.Len())
 
@@ -302,7 +302,7 @@ func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T)
 	fastProber.demote(oldIP)
 	w.RefreshSQL()
 	w.RefreshSQL()
-	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Resolved())
+	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Snapshot().Resolved)
 	assert.Equal(t, 1, slowPools.Len())
 	assert.Equal(t, 1, fastPools.Len())
 	for _, oldPool := range []*pgxpool.Pool{slowOldPool, fastOldPool} {
