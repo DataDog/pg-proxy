@@ -375,7 +375,7 @@ func TestSQLPotentialPatroniTimestampPrecedesCallbacks(t *testing.T) {
 func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 	const oldIP, newIP = "10.0.0.1", "10.0.0.2"
 	s := &PoolHealth{
-		patroniHealthState: NewHealthState(), sqlHealthState: NewHealthState(),
+		state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: NewHealthState(),
 		hybridPolicy: newHybridHealthPolicy(true),
 	}
 	s.refreshSQLResolved(true, []string{oldIP, newIP}, 1)
