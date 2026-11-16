@@ -49,6 +49,7 @@ package.
 | `pkg/prepared` | Prepared-statement name mapping for txn pooling |
 | `pkg/pool` | Direct, discovered, static cloud, and replica pool runtimes; instance health, selection, and pgx adapters |
 | `pkg/link` | Session↔Postgres link: expectations, prepared-on-conn, release |
+| `pkg/health` | Shared liveness, readiness, and per-cluster backend check state for health surfaces |
 | `pkg/limiter` | Portable global and per-service session caps |
 | `pkg/listener` | TCP/TLS negotiation, startup, admission, and session lifecycle |
 | `pkg/mirror` | Bounded asynchronous traffic-mirroring queue and worker |
@@ -207,6 +208,11 @@ use `127.0.0.1:15432` and 10240 bytes. Zero pool settings use pgx defaults; nega
 values and minimum connections above the maximum are rejected. Backend connection
 parsing retains pgx environment defaults. `application_name` in connection options
 is overridden by a nonempty `application_name` database field.
+
+Set `proxy.admin_address` (for example `0.0.0.0:8080`) to serve HTTP health checks:
+`/livez` returns 200 while the client listener accepts connections, and `/readyz`
+returns 200 only when the proxy is not shutting down and every cluster primary
+passed the last check (reachable and not in recovery). The listener is off by default and has no authentication.
 
 Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS. Set
 `proxy.tls_required: true` to reject plaintext startup. See the

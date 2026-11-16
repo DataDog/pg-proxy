@@ -104,6 +104,8 @@ type Proxy struct {
 	PasswordAuthEnabled bool   `json:"passwordAuthEnabled,omitempty" yaml:"password_auth_enabled,omitempty"`
 	TLSCertFile         string `json:"tlsCertFile,omitempty" yaml:"tls_cert_file,omitempty"`
 	TLSKeyFile          string `json:"tlsKeyFile,omitempty" yaml:"tls_key_file,omitempty"`
+	// AdminAddress enables the HTTP health listener (/livez, /readyz) when set.
+	AdminAddress string `json:"adminAddress,omitempty" yaml:"admin_address,omitempty"`
 }
 
 // UserSettings retains access and session-limit settings. Authentication is caller-owned.

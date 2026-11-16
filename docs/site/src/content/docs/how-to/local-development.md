@@ -97,6 +97,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
+| `proxy.admin_address` | Off | IP address and port for the HTTP health listener (`/livez`, `/readyz`). See [Health checks](#health-checks). |
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
@@ -106,6 +107,19 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `-log-level` | `INFO` | Minimum severity for proxy logs on stderr and through OTLP. Use `DEBUG` for local diagnostics. |
 
 The client-session cap is currently fixed at 100. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
+
+### Health checks
+
+Set `proxy.admin_address` (for example `0.0.0.0:8080`) to start a plain HTTP listener, separate from the client port. It is off by default.
+
+| Path | 200 when | 503 body |
+| --- | --- | --- |
+| `GET /livez` | The client listener is accepting connections. | `not accepting` |
+| `GET /readyz` | The client listener is accepting, shutdown has not started, and the last backend check passed for every cluster. | `draining`, `not accepting`, or `backend unreachable` |
+
+Every 10 seconds the proxy opens one new connection to each cluster primary, with `application_name` set to `pg-proxy-health`, and runs `select pg_is_in_recovery()`. A check fails if the server cannot be reached or is not a writable primary. These checks do not use the serving pools. `/readyz` returns `draining` as soon as SIGINT or SIGTERM arrives, before the client listener closes. Responses never contain backend names, addresses, users, or errors; the proxy logs the cluster name and failed stage (`connect`, `query`, or `not_primary`) when a check fails or recovers.
+
+The admin listener has no authentication or TLS. It accepts any IP address, because load balancers and orchestrators usually check from another host. Do not expose it outside your network.
 
 ### Backend connection settings
 

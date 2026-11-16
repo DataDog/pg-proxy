@@ -22,10 +22,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/backend"
+	"github.com/DataDog/pg-proxy/pkg/health"
 	"github.com/DataDog/pg-proxy/pkg/limiter"
 	"github.com/DataDog/pg-proxy/pkg/listener"
 	"github.com/DataDog/pg-proxy/pkg/pool"
@@ -40,6 +42,7 @@ type config struct {
 	telemetry         telemetryConfig
 	telemetryWarnings []string
 	listenAddress     string
+	adminAddress      string
 	messageBufferSize int
 	tlsConfig         *tls.Config
 	requireTLS        bool
@@ -67,6 +70,9 @@ func main() {
 
 func (c config) validate() error {
 	if err := c.validateListener(c.authenticate != nil); err != nil {
+		return err
+	}
+	if err := validateAdminAddress(c.adminAddress); err != nil {
 		return err
 	}
 	if c.messageBufferSize < 0 {
@@ -98,12 +104,32 @@ func (c config) validate() error {
 func run(ctx context.Context, cfg config) error {
 	ctx, stop := context.WithCancel(ctx)
 	defer stop()
+	var state *health.State
+	if cfg.adminAddress != "" {
+		if err := cfg.validate(); err != nil {
+			return err
+		}
+		state = health.NewState(slices.Collect(maps.Keys(cfg.clusters)))
+		admin, err := startAdmin(cfg.adminAddress, state)
+		if err != nil {
+			return err
+		}
+		// Close after serve returns, so /readyz reports draining for the whole shutdown.
+		defer admin.Close()
+	}
 	proxy, err := newProxy(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	if state != nil {
+		targets := make(map[string]*pgx.ConnConfig, len(cfg.clusters))
+		for name, primary := range cfg.clusters {
+			targets[name] = cfg.databases[primary].ConnConfig
+		}
+		go health.Checker{State: state, Targets: targets, Interval: backendCheckInterval, Timeout: backendCheckTimeout}.Run(ctx)
+	}
 	pgproxy.Logger().Info("proxy ready", "address", proxy.server.Addr(), "clusters", len(cfg.clusters), "client_authentication", cfg.authenticate != nil)
-	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
+	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second, state)
 }
 
 type localProxy struct {
@@ -190,8 +216,11 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 
 // Explicitly close the socket to wake Accept, then drain sessions before pools.
 // Bound the wait so a client with an unfinished transaction cannot prevent exit.
-func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, sessions *sessionRegistry, closeBackend func(), timeout time.Duration) error {
+// state may be nil. When set, readiness turns off before the client listener
+// closes, so load balancers can stop sending new connections.
+func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, sessions *sessionRegistry, closeBackend func(), timeout time.Duration, state *health.State) error {
 	runDone := make(chan error, 1)
+	state.SetAccepting(true)
 	go func() { runDone <- proxy.Run() }()
 	var runErr error
 	finished := false
@@ -200,8 +229,10 @@ func serve(ctx context.Context, stop context.CancelFunc, proxy *server.Server, s
 	case runErr = <-runDone:
 		finished = true
 	}
+	state.StartDrain()
 	stop()
 	_ = proxy.Close()
+	state.SetAccepting(false)
 	closed := make(chan struct{})
 	go func() {
 		if !finished {
