@@ -8,6 +8,7 @@ package pool
 import (
 	"context"
 	"errors"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -310,5 +311,109 @@ func TestAggregateSQLHealthCheckOutcomesLeavesIndeterminateIPUnknown(t *testing.
 			assert.NotContains(t, aggregation.Health, "10.0.0.1")
 			assert.Len(t, aggregation.Outcome.Results, 1, "raw evidence remains available to routing policy")
 		})
+	}
+}
+
+// Different credentials can complete on opposite sides of a role change. Only
+// non-overlapping successful probes establish which observation is newer.
+func TestAggregateSQLHealthRolesUsesProbeOrder(t *testing.T) {
+	const ip = "10.0.0.1"
+	base := time.Now()
+	role := func(standby bool, start, end time.Duration) SQLHealthCheckResult {
+		return SQLHealthCheckResult{IP: ip, InRecovery: standby, StartedAt: base.Add(start), CompletedAt: base.Add(end)}
+	}
+	oldStandby, oldPrimary := role(true, 0, time.Millisecond), role(false, 0, time.Millisecond)
+	newStandby, newPrimary := role(true, 2*time.Millisecond, 3*time.Millisecond), role(false, 2*time.Millisecond, 3*time.Millisecond)
+	timeout := newPrimary
+	timeout.Err = context.DeadlineExceeded
+	shutdown := newPrimary
+	shutdown.Err = &pgconn.PgError{Code: "57P02"}
+	otherIP := newPrimary
+	otherIP.IP = "10.0.0.2"
+	for _, tc := range []struct {
+		name    string
+		results []SQLHealthCheckResult
+		reason  string
+		primary bool
+		kept    int
+	}{
+		{"promotion", []SQLHealthCheckResult{oldStandby, newPrimary}, "", true, 1},
+		{"demotion", []SQLHealthCheckResult{oldPrimary, newStandby}, "", false, 1},
+		{"overlapping", []SQLHealthCheckResult{role(true, 0, 3*time.Millisecond), newPrimary}, SQLHealthFallbackConflictingRoles, false, 2},
+		{"touching", []SQLHealthCheckResult{role(true, 0, 2*time.Millisecond), newPrimary}, SQLHealthFallbackConflictingRoles, false, 2},
+		{"new observation resolves overlapping conflict", []SQLHealthCheckResult{role(true, 0, 3*time.Millisecond), newPrimary, role(false, 4*time.Millisecond, 5*time.Millisecond)}, "", true, 1},
+		{"missing timing", []SQLHealthCheckResult{{IP: ip, InRecovery: true}, newPrimary}, SQLHealthFallbackConflictingRoles, false, 2},
+		{"invalid timing", []SQLHealthCheckResult{oldStandby, role(false, 3*time.Millisecond, 2*time.Millisecond)}, SQLHealthFallbackConflictingRoles, false, 2},
+		{"new timeout preserves successful role", []SQLHealthCheckResult{oldPrimary, timeout}, "", true, 2},
+		{"new shutdown preserves successful role and error", []SQLHealthCheckResult{oldPrimary, shutdown}, "", true, 2},
+		{"new result cannot replace another IP", []SQLHealthCheckResult{oldPrimary, otherIP}, SQLHealthFallbackMultiplePrimaries, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, reverse := range []bool{false, true} {
+				results := slices.Clone(tc.results)
+				if reverse {
+					slices.Reverse(results)
+				}
+				original := slices.Clone(results)
+				var outcomes []SQLHealthCheckOutcome
+				for _, result := range results {
+					outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: result.StartedAt, Results: []SQLHealthCheckResult{result}})
+				}
+				aggregation := aggregateSQLHealthCheckOutcomes(outcomes)
+				reason, _ := sqlHealthFallback(aggregation.Outcome)
+				assert.Equal(t, tc.reason, reason)
+				assert.Len(t, aggregation.Outcome.Results, tc.kept)
+				roles, conflicting := aggregateSQLComparisonRoles(results)
+				if tc.reason == SQLHealthFallbackConflictingRoles {
+					assert.Equal(t, []string{ip}, conflicting)
+					assert.NotContains(t, roles, ip)
+				} else {
+					assert.Empty(t, conflicting)
+					assert.Equal(t, tc.primary, roles[ip])
+					assert.Equal(t, tc.primary, aggregation.Health[ip])
+				}
+				assert.Equal(t, original, results, "cached diagnostic evidence must not be changed")
+			}
+		})
+	}
+}
+
+func TestSQLHealthCheckerRecordsEachIPBeforeTheRoundCompletes(t *testing.T) {
+	prober := &partiallyBlockingSQLHealthProber{blockingIP: "slow", blockingRecovery: true, blocked: make(chan struct{}), release: make(chan struct{})}
+	var once sync.Once
+	release := func() { once.Do(func() { close(prober.release) }) }
+	defer release()
+	checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{})
+	quick := make(chan SQLHealthCheckResult, 1)
+	done := make(chan SQLHealthCheckOutcome, 1)
+	go func() {
+		done <- checker.Check(context.Background(), []string{"quick", "slow"}, func(ip string) string { return ip }, nil, nil, func(result SQLHealthCheckResult) {
+			if result.IP == "quick" {
+				quick <- result
+			}
+		})
+	}()
+	select {
+	case <-prober.blocked:
+	case <-time.After(time.Second):
+		t.Fatal("slow probe did not start")
+	}
+	var result SQLHealthCheckResult
+	select {
+	case result = <-quick:
+	case <-time.After(time.Second):
+		t.Fatal("quick probe did not finish independently")
+	}
+	require.False(t, result.StartedAt.IsZero())
+	assert.False(t, result.CompletedAt.Before(result.StartedAt))
+	unblockedAt := time.Now()
+	release()
+	select {
+	case outcome := <-done:
+		assert.False(t, result.StartedAt.Before(outcome.StartedAt))
+		assert.False(t, result.CompletedAt.After(unblockedAt), "per-IP completion must not wait for the slow sibling")
+		assert.False(t, outcome.Results[1].CompletedAt.Before(unblockedAt))
+	case <-time.After(time.Second):
+		t.Fatal("round did not complete")
 	}
 }

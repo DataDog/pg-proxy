@@ -1451,11 +1451,13 @@ func TestHybridHealthRoutingBanRequiresFreshUnambiguousRecovery(t *testing.T) {
 		fresh            SQLHealthCheckResult
 		startedBeforeBan bool
 		conflicting      bool
+		ordered          bool
 		wantRecovered    bool
 	}{
 		{name: "cached success does not clear ban", fresh: SQLHealthCheckResult{IP: ip, Err: context.DeadlineExceeded}},
 		{name: "in-flight success does not clear ban", fresh: SQLHealthCheckResult{IP: ip}, startedBeforeBan: true},
 		{name: "conflicting roles do not clear ban", fresh: SQLHealthCheckResult{IP: ip}, conflicting: true},
+		{name: "newer primary supersedes cached standby and clears ban", fresh: SQLHealthCheckResult{IP: ip}, conflicting: true, ordered: true, wantRecovered: true},
 		{name: "fresh primary clears ban", fresh: SQLHealthCheckResult{IP: ip}, wantRecovered: true},
 		{name: "fresh standby clears ban", fresh: SQLHealthCheckResult{IP: ip, InRecovery: true}, wantRecovered: true},
 	} {
@@ -1472,6 +1474,10 @@ func TestHybridHealthRoutingBanRequiresFreshUnambiguousRecovery(t *testing.T) {
 			cachedSuccess := SQLHealthCheckResult{IP: ip, InRecovery: tc.fresh.InRecovery}
 			if tc.conflicting {
 				cachedSuccess.InRecovery = !tc.fresh.InRecovery
+			}
+			if tc.ordered {
+				cachedSuccess.StartedAt, cachedSuccess.CompletedAt = at, at.Add(time.Millisecond)
+				tc.fresh.StartedAt, tc.fresh.CompletedAt = startedAt, startedAt.Add(time.Millisecond)
 			}
 			outcome := aggregateSQLHealthCheckResults([]SQLHealthCheckResult{cachedSuccess, tc.fresh}).Outcome
 			decision := policy.observeSQLRound([]string{ip}, outcome, SQLHealthResultsSnapshot{

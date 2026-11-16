@@ -515,7 +515,7 @@ func buildSQLHealthComparisonSnapshot(
 func aggregateSQLComparisonRoles(results []SQLHealthCheckResult) (map[string]bool, []string) {
 	health := make(map[string]bool)
 	conflicts := make(map[string]struct{})
-	for _, result := range results {
+	for _, result := range filterSupersededSQLRoles(results) {
 		if result.Err != nil {
 			continue
 		}
