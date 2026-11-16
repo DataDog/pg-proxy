@@ -294,8 +294,9 @@ type PoolHealth struct {
 	subscribers map[HealthUpdates]chan *PoolHealth
 	// ready closes after the first inline health check finishes. Concurrent
 	// subscribers wait for it instead of observing an empty snapshot.
-	ready chan struct{}
-	state *HealthState
+	ready              chan struct{}
+	state              *HealthState // Client-visible routing, independent of both discovery states.
+	patroniHealthState *HealthState
 
 	sqlMu          sync.RWMutex
 	sqlHealthState *HealthState
@@ -432,7 +433,7 @@ func (s *PoolHealth) recordSQLComparisonPollLocked(
 	}
 
 	retainedIPs := make(map[string]struct{})
-	for _, ip := range s.sqlHealthState.Resolved() {
+	for _, ip := range s.sqlHealthState.Snapshot().Resolved {
 		retainedIPs[ip] = struct{}{}
 	}
 
@@ -652,6 +653,7 @@ func (w *HealthWorker) Subscribe(host string, isReadReplica bool, dbName string,
 			tags:                healthTags,
 			patroniTags:         patroniHealthTags(host, isReadReplica),
 			state:               NewHealthState(),
+			patroniHealthState:  NewHealthState(),
 			sqlHealthState:      NewHealthState(),
 			subscribers:         make(map[HealthUpdates]chan *PoolHealth),
 			ready:               make(chan struct{}),
@@ -666,7 +668,7 @@ func (w *HealthWorker) Subscribe(host string, isReadReplica bool, dbName string,
 		if poolHealth.hybridPolicy == nil {
 			poolHealth.hybridPolicy = newHybridHealthPolicy(routingEnabled)
 			poolHealth.routingEnabledFn = sql.RoutingEnabled
-			poolHealth.hybridPolicy.observePatroni(poolHealth.state.Snapshot(), time.Now())
+			poolHealth.hybridPolicy.observePatroni(poolHealth.patroniHealthState.Snapshot().Health, time.Now())
 		}
 		for _, existing := range poolHealth.subscriptionTargets {
 			if existing.connectionStringHash == connectionStringHash {
@@ -789,16 +791,23 @@ func (w *HealthWorker) runCentralizedSQLChecks() {
 }
 
 func (s *PoolHealth) trackNewIPs(ips []string) []string {
-	return s.state.Track(ips)
+	return s.patroniHealthState.Track(ips)
+}
+
+// publishRoutingSnapshot updates client routing without changing either source's discovery state.
+func (s *PoolHealth) publishRoutingSnapshot(health map[string]bool, resolved []string) {
+	s.state.ReplaceRoutingSnapshot(health, resolved)
+	s.notifySubscribers()
 }
 
 func (w *HealthWorker) updateHealthAndCleanup(s *PoolHealth, pghealth map[string]bool, systemIDs map[string]string, ips []string) {
-	s.state.Update(pghealth, systemIDs, ips, w.absenceThreshold, func(ip string) {
+	s.patroniHealthState.Update(pghealth, systemIDs, ips, w.absenceThreshold, func(ip string) {
 		if w.hooks.Evicted != nil {
 			w.hooks.Evicted(ip, s.tags)
 		}
 	})
-	s.notifySubscribers()
+	snapshot := s.patroniHealthState.Snapshot()
+	s.publishRoutingSnapshot(snapshot.Health, snapshot.Resolved)
 }
 
 func (s *PoolHealth) routingPolicy() (*hybridHealthPolicy, func(context.Context) SQLHealthFeatureFlagEvaluation) {
@@ -861,7 +870,7 @@ func (w *HealthWorker) checkPoolHealth(poolHealth *PoolHealth) {
 			routingEnabled = routingEnabledFn(context.Background()).Enabled
 		}
 		policy.setRoutingEnabled(routingEnabled)
-		decision := policy.observePatroni(poolHealth.state.Snapshot(), observedAt)
+		decision := policy.observePatroni(poolHealth.patroniHealthState.Snapshot().Health, observedAt)
 		w.reportHybridDecision(poolHealth, decision, false)
 	}
 }
@@ -1131,7 +1140,7 @@ func (w *HealthWorker) reportSQLPatroniComparison(
 		SQLConflictingIPs: slices.Clone(snapshot.conflictingIPs),
 		SQLRetainedIPs:    slices.Clone(snapshot.retainedIPs),
 		SQLResults:        slices.Clone(snapshot.results),
-		PatroniHealth:     poolHealth.state.Snapshot(),
+		PatroniHealth:     poolHealth.patroniHealthState.Snapshot().Health,
 	}
 	w.hooks.SQLPatroniCompared(comparison, poolHealth.patroniTags)
 }
@@ -1239,10 +1248,7 @@ func (w *HealthWorker) checkSQLHealth(
 			}, true
 		}
 
-		patroniHealth := make(map[string]bool, len(toProbe))
-		for _, ip := range toProbe {
-			patroniHealth[ip] = poolHealth.IsHealthy(ip)
-		}
+		patroniHealth := poolHealth.patroniHealthState.Snapshot().Health
 		outcome = target.checker.Check(
 			ctx,
 			toProbe,
@@ -1454,9 +1460,9 @@ func (s *PoolHealth) publishSQLHealth(observation SQLHealthObservation) {
 	}
 }
 
-// Resolved returns a copy of the currently tracked IPs for the host.
-func (s *PoolHealth) Resolved() []string {
-	return s.state.Resolved()
+// Snapshot returns copies of the current routing health and retained IPs for the host.
+func (s *PoolHealth) Snapshot() HealthStateSnapshot {
+	return s.state.Snapshot()
 }
 
 // IsHealthy returns whether ip passed its most recent probe. Unknown
