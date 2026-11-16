@@ -102,7 +102,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
 | `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
 | `-tracing` | `OTEL_TRACES_EXPORTER` selection | `otel` or `none`; overrides the trace exporter selector and cannot be combined with `-telemetry`. |
-| `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in traces. SQL text is recorded regardless. |
+| `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in sampled traces. SQL text is recorded regardless. |
 | `-log-level` | `INFO` | Minimum severity for proxy logs on stderr and through OTLP. Use `DEBUG` for local diagnostics. |
 
 The client-session cap is currently fixed at 100. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.

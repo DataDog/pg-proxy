@@ -87,6 +87,12 @@ func (s otelSpan) SetTag(key string, value any) {
 	s.span.SetAttributes(attr)
 }
 
+// Sampled reports whether exporters will receive the span. Non-recording spans
+// can still carry a sampled parent context, so both checks are needed.
+func (s otelSpan) Sampled() bool {
+	return s.span.IsRecording() && s.span.SpanContext().IsSampled()
+}
+
 // PostgreSQL text and binary Bind parameters may contain invalid UTF-8. Escape
 // only telemetry copies so protobuf encoding cannot drop the entire export batch.
 func escapeInvalidUTF8(value string) string {

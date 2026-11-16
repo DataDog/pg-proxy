@@ -13,7 +13,7 @@ PG Proxy also has specific boundaries around prepared statements and connection 
 
 ## Traces can contain sensitive data
 
-When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The OSS binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters`. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.
+When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The OSS binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters` on sampled traces. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.
 
 ## Client messages have no configured size limit
 

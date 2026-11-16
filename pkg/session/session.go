@@ -298,7 +298,7 @@ type Config struct {
 	MirrorBudget                 *mirror.Budget
 	PreparedStatements           prepared.PreparedStatementState
 	TraceState                   *query.TraceState
-	// EnableTraceParameters includes raw Bind values in query traces for every backend.
+	// EnableTraceParameters includes raw Bind values in sampled query traces for every backend.
 	// The zero value disables parameter capture. SQL text is unaffected.
 	EnableTraceParameters bool
 	MetricTags            []string
