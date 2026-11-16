@@ -8,7 +8,6 @@ package link
 import (
 	"context"
 	"net"
-	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -271,10 +270,9 @@ func TestReleaseResetSQL(t *testing.T) {
 					return
 				}
 				received <- msg
-				if q, ok := msg.(*pgproto3.Query); ok {
-					for range strings.Split(q.String, ";") {
-						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-					}
+				if _, ok := msg.(*pgproto3.Query); ok {
+					// pgx reads results until ReadyForQuery, so one CommandComplete suffices.
+					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
 					backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 					_ = backend.Flush()
 				}
@@ -286,11 +284,12 @@ func TestReleaseResetSQL(t *testing.T) {
 
 			require.NoError(t, link.Release())
 
-			// One simple query: the whole reset costs a single round trip.
+			// One simple query: the whole reset costs a single round trip. The backend
+			// buffers the query before replying, so a successful reset has already sent it.
 			select {
 			case msg := <-received:
 				require.Equal(t, &pgproto3.Query{String: test.want}, msg)
-			case <-time.After(5 * time.Second):
+			default:
 				t.Fatal("Release sent no reset query")
 			}
 		})

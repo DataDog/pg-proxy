@@ -226,10 +226,17 @@ func (link *SessionLink) Release() error {
 	// because RESET ALL resets to pg_settings.reset_val, which captures startup values.
 	// postgres docs on reset all: https://www.postgresql.org/docs/current/sql-reset.html
 	// pgx docs on client config startup packets: https://pkg.go.dev/github.com/jackc/pgx#ConnConfig
-	// RESET ALL does not cover role or session_authorization; resetSQL adds them when no
-	// RoleSession manages the role.
+	//
+	// RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). A RoleSession
+	// has already reset the role above. Without one, the same simple query (pgx sends a
+	// zero-argument Exec as one) resets identity first: any user may run RESET SESSION
+	// AUTHORIZATION, and RESET ROLE restores a connection-time role (ALTER ROLE ... SET
+	// role, or a startup option), which Postgres releases before the CVE-2024-10978 fix drop.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
-		resetSQL := link.resetSQL()
+		resetSQL := "RESET ALL"
+		if link.role == nil {
+			resetSQL = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+		}
 		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		_, err := link.conn.Exec(resetCtx, resetSQL)
 		cancel()
@@ -252,27 +259,6 @@ func (link *SessionLink) Release() error {
 	}
 
 	return nil
-}
-
-const (
-	// resetAllSQL leaves role and session_authorization alone: Postgres marks both
-	// GUC_NO_RESET_ALL.
-	resetAllSQL = "RESET ALL"
-	// resetIdentityAndAllSQL also undoes a client's SET ROLE or SET SESSION AUTHORIZATION,
-	// in the same round trip: pgx sends a zero-argument Exec as one simple query. Any user
-	// may run RESET SESSION AUTHORIZATION. RESET ROLE then restores a connection-time role
-	// (ALTER ROLE ... SET role, or a startup option), which RESET SESSION AUTHORIZATION
-	// alone drops on Postgres releases older than the CVE-2024-10978 fix.
-	resetIdentityAndAllSQL = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
-)
-
-// resetSQL returns the statement Release runs to clear session state. A configured
-// RoleSession owns the role, and has already reset it, so only GUCs are reset then.
-func (link *SessionLink) resetSQL() string {
-	if link.role != nil {
-		return resetAllSQL
-	}
-	return resetIdentityAndAllSQL
 }
 
 // logNonIdleRelease reports a backend destroyed because its link was not at a

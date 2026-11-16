@@ -172,7 +172,7 @@ func TestSessionIdentityIsolation(t *testing.T) {
 	appLogin := func(options map[string]string) pgconfig.Config {
 		cfg := proxyConfig()
 		for i := range cfg.Databases {
-			if cfg.Databases[i].Name == "pooled-primary" {
+			if cfg.Databases[i].Name == pooledPrimary {
 				cfg.Databases[i].Username = appUser
 				cfg.Databases[i].Password = pgconfig.Secret(appPassword)
 				cfg.Databases[i].ConnectionOptions = options
@@ -184,11 +184,12 @@ func TestSessionIdentityIsolation(t *testing.T) {
 	tests := []struct {
 		name   string
 		config pgconfig.Config
-		// user is the client user; without client authentication it must match the backend login.
+		// user is the client user and the backend login; without client authentication
+		// they must match. It is session_user before client A and after the reset.
 		user      string
 		statement string
-		// wantCurrent and wantSession are the identity before client A and after the reset.
-		wantCurrent, wantSession string
+		// wantCurrent is current_user before client A and after the reset.
+		wantCurrent string
 	}{
 		{
 			name:        "superuser SET ROLE",
@@ -196,7 +197,6 @@ func TestSessionIdentityIsolation(t *testing.T) {
 			user:        itest.PostgresUser,
 			statement:   "SET ROLE " + leakRole,
 			wantCurrent: itest.PostgresUser,
-			wantSession: itest.PostgresUser,
 		},
 		{
 			name:        "superuser SET SESSION AUTHORIZATION",
@@ -204,7 +204,6 @@ func TestSessionIdentityIsolation(t *testing.T) {
 			user:        itest.PostgresUser,
 			statement:   "SET SESSION AUTHORIZATION " + leakRole,
 			wantCurrent: itest.PostgresUser,
-			wantSession: itest.PostgresUser,
 		},
 		{
 			name:        "non-superuser with ALTER ROLE role SET ROLE",
@@ -212,7 +211,6 @@ func TestSessionIdentityIsolation(t *testing.T) {
 			user:        appUser,
 			statement:   "SET ROLE " + leakRole,
 			wantCurrent: alterRole,
-			wantSession: appUser,
 		},
 		{
 			name:        "non-superuser with startup role SET ROLE",
@@ -220,31 +218,30 @@ func TestSessionIdentityIsolation(t *testing.T) {
 			user:        appUser,
 			statement:   "SET ROLE " + leakRole,
 			wantCurrent: startupRole,
-			wantSession: appUser,
 		},
 	}
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			connStr := itest.MustStartProxy(t, test.config).URL(dbPooled, test.user)
+			proxy := itest.MustStartProxy(t, test.config)
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 
 			const identity = "SELECT current_user, session_user, pg_backend_pid()"
 
 			// Record the login identity (what a reset restores) and the backend PID.
-			baseConn, err := pgx.Connect(ctx, connStr)
+			baseConn, err := proxy.Connect(ctx, dbPooled, test.user)
 			require.NoError(t, err, "baseline connect")
 			var baseCurrent, baseSession string
 			var basePID uint32
 			require.NoError(t, baseConn.QueryRow(ctx, identity).Scan(&baseCurrent, &baseSession, &basePID))
 			require.Equal(t, test.wantCurrent, baseCurrent, "baseline current_user")
-			require.Equal(t, test.wantSession, baseSession, "baseline session_user")
+			require.Equal(t, test.user, baseSession, "baseline session_user")
 			require.NoError(t, baseConn.Close(ctx))
 
 			// Client A changes its identity in autocommit; the connection is released
 			// right after. One simple query keeps the check on the same backend link.
-			clientA, err := pgx.Connect(ctx, connStr)
+			clientA, err := proxy.Connect(ctx, dbPooled, test.user)
 			require.NoError(t, err, "client A connect")
 			results, err := clientA.PgConn().Exec(ctx, test.statement+"; SELECT current_user").ReadAll()
 			require.NoError(t, err, "client A "+test.statement)
@@ -252,7 +249,7 @@ func TestSessionIdentityIsolation(t *testing.T) {
 			require.Equal(t, leakRole, scalarResult(t, results[1]), "client A should run as the role it set")
 			require.NoError(t, clientA.Close(ctx))
 
-			clientB, err := pgx.Connect(ctx, connStr)
+			clientB, err := proxy.Connect(ctx, dbPooled, test.user)
 			require.NoError(t, err, "client B connect")
 			defer clientB.Close(context.Background())
 
