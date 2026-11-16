@@ -37,10 +37,14 @@ type SQLHealthCheckStage string
 
 // SQLHealthCheckResult is one instance's SQL health result.
 type SQLHealthCheckResult struct {
-	IP         string
-	InRecovery bool
-	Err        error
-	Stage      SQLHealthCheckStage
+	// The interval covers this IP's probe, including retries. It is not the
+	// credential round's completion time, which may wait for other IPs.
+	StartedAt   time.Time
+	CompletedAt time.Time
+	IP          string
+	InRecovery  bool
+	Err         error
+	Stage       SQLHealthCheckStage
 }
 
 // HealthyPrimary reports whether the probe conclusively observed a writable primary.
@@ -58,10 +62,11 @@ type SQLHealthCheckOutcome struct {
 	PrimaryIPs []string
 }
 
-// sqlHealthCheckAggregation summarizes completed SQL evidence across credential targets. Health
-// is optimistic per address: one conclusive primary result wins over another credential's standby
-// or error result. Outcome retains every raw result so a later routing policy can still treat
-// indeterminate errors, conflicting roles, or multiple primary addresses conservatively.
+// sqlHealthCheckAggregation summarizes completed SQL evidence across credential targets.
+// Proven older successful roles are removed first. Health is then optimistic per
+// address; Outcome keeps errors and overlapping/unknown-time roles so routing can
+// reject unresolved conflicts. Each credential's SQLHealthResultsSnapshot retains
+// all raw results for diagnosis.
 type sqlHealthCheckAggregation struct {
 	Outcome SQLHealthCheckOutcome
 	Health  map[string]bool
@@ -84,6 +89,7 @@ func aggregateSQLHealthCheckOutcomes(outcomes []SQLHealthCheckOutcome) sqlHealth
 }
 
 func aggregateSQLHealthCheckResults(results []SQLHealthCheckResult) sqlHealthCheckAggregation {
+	results = filterSupersededSQLRoles(results)
 	aggregation := sqlHealthCheckAggregation{
 		Outcome: SQLHealthCheckOutcome{Results: slices.Clone(results)},
 		Health:  make(map[string]bool),
@@ -106,6 +112,41 @@ func aggregateSQLHealthCheckResults(results []SQLHealthCheckResult) sqlHealthChe
 	aggregation.Outcome.PrimaryIPs = slices.Collect(maps.Keys(primaryIPs))
 	slices.Sort(aggregation.Outcome.PrimaryIPs)
 	return aggregation
+}
+
+// filterSupersededSQLRoles drops a successful role only when another successful
+// probe of the same IP started strictly after it finished. Arrival order and
+// whole-credential timestamps cannot establish that ordering. Keep all errors,
+// and keep observations with missing or invalid timing conservatively.
+// The input is never modified; raw credential snapshots remain unchanged.
+func filterSupersededSQLRoles(results []SQLHealthCheckResult) []SQLHealthCheckResult {
+	latestStarts := make(map[string]time.Time)
+	for _, result := range results {
+		if result.Err == nil && result.hasProbeInterval() && result.StartedAt.After(latestStarts[result.IP]) {
+			latestStarts[result.IP] = result.StartedAt
+		}
+	}
+	var filtered []SQLHealthCheckResult
+	for i, result := range results {
+		if result.Err == nil && result.hasProbeInterval() && latestStarts[result.IP].After(result.CompletedAt) {
+			if filtered == nil {
+				filtered = make([]SQLHealthCheckResult, 0, len(results)-1)
+				filtered = append(filtered, results[:i]...)
+			}
+			continue
+		}
+		if filtered != nil {
+			filtered = append(filtered, result)
+		}
+	}
+	if filtered == nil {
+		return results
+	}
+	return filtered
+}
+
+func (r SQLHealthCheckResult) hasProbeInterval() bool {
+	return !r.StartedAt.IsZero() && !r.CompletedAt.IsZero() && !r.CompletedAt.Before(r.StartedAt)
 }
 
 // SQLHealthCheckRunner applies embedding-application retry policy around one instance probe.
@@ -277,10 +318,12 @@ func (c *SQLHealthChecker) checkIP(
 		err = c.runWithRetry(ctx, metricTags, attempt)
 	}
 	result := SQLHealthCheckResult{
-		IP:         ip,
-		InRecovery: inRecovery,
-		Err:        err,
-		Stage:      sqlHealthCheckResultStage(err),
+		StartedAt:   start,
+		CompletedAt: time.Now(),
+		IP:          ip,
+		InRecovery:  inRecovery,
+		Err:         err,
+		Stage:       sqlHealthCheckResultStage(err),
 	}
 	if c.hooks.ProbeFinished != nil {
 		c.hooks.ProbeFinished(result, patroniHealthy, time.Since(start), metricTags)

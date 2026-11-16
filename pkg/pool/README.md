@@ -33,10 +33,23 @@ subscription, probing, and cleanup tests live in `health_worker_test.go`.
 Credential results are reconciled per IP. A successful role query takes
 precedence over an allowlisted error from another credential on the same IP.
 For example, `primary + 57P01` remains primary, and `standby + 57P01` remains
-standby, in either credential-result order. This rule expresses evidence
-precedence, not which observation is newer. Unresolved evidence on another IP,
-conflicting successful roles, or multiple primaries still requires Patroni
-fallback.
+standby, in either credential-result order. Errors do not erase successful role
+results, regardless of their arrival order.
+
+Each credential keeps its latest completed poll, so an aggregate can contain
+results from different rounds. A promotion can therefore leave one credential
+reporting standby and another reporting primary for the same IP. We use the
+newer successful role only when its per-IP probe **started after the older probe
+finished**, including retries. For example, a standby probe at 12:00:00.000–.010
+is replaced by a primary probe at 12:00:01.000–.010. The reverse applies to demotion.
+We do not use the whole credential round's completion time: another slow IP can
+delay that round even when this IP's probe has already finished.
+
+Overlapping probes, missing timestamps, and invalid intervals cannot establish
+that order; conflicting roles still require Patroni fallback. A result for one
+IP cannot replace evidence for another IP. Multiple primaries or an unresolved
+error on another IP also keep the existing fallback behavior. Raw per-credential
+results remain available in comparison snapshots and mismatch logs.
 
 `TestHybridHealthPrimaryTakesPrecedenceOverAdminShutdownOnSameIP` covers both
 orders with Patroni selecting a different IP, ensuring the policy actually uses

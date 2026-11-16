@@ -3505,3 +3505,47 @@ func TestSQLPatroniMismatchReason(t *testing.T) {
 		})
 	}
 }
+
+// Mirror a promotion between two credentials' scheduled polls. The old role
+// stays in raw diagnostics, but cannot force fallback after a later role query.
+func TestHybridEvaluationReconcilesOrderedCredentialRoles(t *testing.T) {
+	const ip = "10.0.0.1"
+	sqlState := NewHealthState()
+	sqlState.Track([]string{ip})
+	health := &PoolHealth{
+		state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: sqlState,
+		hybridPolicy:     newHybridHealthPolicy(true),
+		routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	}
+	var comparisons []SQLPatroniHealthSnapshot
+	var iterations []SQLIteration
+	w := &HealthWorker{
+		hooks:    HealthWorkerHooks{SQLPatroniCompared: func(snapshot SQLPatroniHealthSnapshot, _ []string) { comparisons = append(comparisons, snapshot) }},
+		sqlHooks: SQLHealthWorkerHooks{Iteration: func(i SQLIteration, _ []string) { iterations = append(iterations, i) }},
+	}
+	before := time.Now().Add(-time.Second)
+	first, second := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
+	complete := func(target *sqlHealthTarget, standby bool, start time.Time) {
+		w.completeSQLHealthCheck(target, 0, start, []string{ip}, map[string]struct{}{ip: {}}, SQLHealthCheckOutcome{
+			StartedAt: start,
+			Results:   []SQLHealthCheckResult{{IP: ip, InRecovery: standby, StartedAt: start, CompletedAt: start.Add(time.Millisecond)}},
+		})
+	}
+	complete(first, true, before)
+	complete(second, false, before.Add(2*time.Millisecond))
+	require.Len(t, iterations, 2)
+	assert.Equal(t, SQLRoutingResultConclusive, iterations[1].RoutingResult)
+	assert.Empty(t, iterations[1].FallbackReason)
+	assert.True(t, health.IsHealthy(ip))
+	require.Len(t, comparisons, 2)
+	assert.Equal(t, map[string]bool{ip: true}, comparisons[1].SQLHealth)
+	assert.Empty(t, comparisons[1].SQLConflictingIPs)
+	require.Len(t, comparisons[1].SQLResults, 2)
+	assert.True(t, comparisons[1].SQLResults[0].Results[0].InRecovery, "keep raw old standby result for diagnosis")
+	// A later demotion must also replace the cached primary, without inventing
+	// a conflict or retaining a leader that SQL has explicitly disqualified.
+	complete(first, true, before.Add(4*time.Millisecond))
+	assert.False(t, health.IsHealthy(ip))
+	assert.Equal(t, SQLRoutingResultConclusive, iterations[2].RoutingResult)
+	assert.Empty(t, iterations[2].FallbackReason)
+}
