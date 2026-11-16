@@ -61,7 +61,7 @@ type RuntimeConfig struct {
 	RandomInt         func(int) int
 	Mirroring         session.Mirroring
 	Metrics           session.Metrics
-	// EnableTraceParameters includes raw Bind values in all sessions' query traces.
+	// EnableTraceParameters includes raw Bind values in all sessions' sampled query traces.
 	// The zero value disables parameter capture. SQL text is unaffected.
 	EnableTraceParameters bool
 }
@@ -91,14 +91,14 @@ func NewRuntime(cfg RuntimeConfig) *Runtime {
 func (r *Runtime) ResolveStartup(ctx context.Context, request listener.StartupRequest) (listener.StartupResult[ResolvedStartup], error) {
 	logicalDB, ok := r.cfg.Inventory.GetLogicalDatabase(request.Database)
 	if !ok {
-		return listener.StartupResult[ResolvedStartup]{}, fmt.Errorf("no configuration found for logical database %s", request.Database)
+		return listener.StartupResult[ResolvedStartup]{}, fmt.Errorf("%w: %s", listener.ErrLogicalDatabaseNotConfigured, request.Database)
 	}
 	backend, ok := r.cfg.Inventory.GetBackend(logicalDB.Cluster)
 	if !ok {
 		pgproxy.LoggerFromContext(ctx).Info("startup backend unavailable", "backend_cluster", fmt.Sprintf("%.256s", logicalDB.Cluster))
 		return listener.StartupResult[ResolvedStartup]{}, fmt.Errorf(
-			"the specified logical database %q is mapped to cluster %q but could not find an entry for it in the states map",
-			request.Database, logicalDB.Cluster,
+			"%w: logical database %q is mapped to cluster %q, which has no entry in the states map",
+			listener.ErrBackendNotReady, request.Database, logicalDB.Cluster,
 		)
 	}
 	parameters := make(map[string]string)

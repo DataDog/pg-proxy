@@ -100,6 +100,15 @@ The prefix is part of the generated URLs, so rebuild when changing it. Upload th
 contents of `dist-static/` with `index.html` at the site root. The ordinary
 `dist/` output assumes hosting at `/` with directory-index routing.
 
+## Deployment
+
+[`.github/workflows/docs-pages.yml`](../../.github/workflows/docs-pages.yml)
+runs `npm run build:static` and deploys `dist-static/` to GitHub Pages on each
+push to `main` that changes `docs/site/`. It reads the path prefix from the
+Pages settings, so the same workflow works for a private site, a public
+project site (`/pg-proxy/`), or a custom domain. Run it by hand from the
+Actions tab with **Run workflow**.
+
 ## Astro guides
 
 Consult the relevant [Astro documentation](https://docs.astro.build) before working on these tasks:

@@ -74,11 +74,13 @@ func TestRuntimeResolveStartup(t *testing.T) {
 	assert.Equal(t, "16", inventory.backends["primary"].ParameterStatuses()["server_version"])
 
 	_, err = runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "missing"})
-	assert.EqualError(t, err, "no configuration found for logical database missing")
+	assert.ErrorIs(t, err, listener.ErrLogicalDatabaseNotConfigured)
+	assert.EqualError(t, err, "logical database is not configured in this pg-proxy: missing")
 	assert.Equal(t, "primary", resolved.Data.BackendCluster())
 	delete(inventory.backends, "primary")
 	_, err = runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})
-	assert.EqualError(t, err, `the specified logical database "testdb" is mapped to cluster "primary" but could not find an entry for it in the states map`)
+	assert.ErrorIs(t, err, listener.ErrBackendNotReady)
+	assert.EqualError(t, err, `backend cluster for this logical database has no ready connection pool: logical database "testdb" is mapped to cluster "primary", which has no entry in the states map`)
 }
 
 func TestRuntimeReadStatesPreserveAvailableWeights(t *testing.T) {

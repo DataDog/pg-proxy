@@ -32,10 +32,9 @@ type ClientMessageAction struct {
 	// will be added to the SessionLink. Once `FlushPostgres` is triggered, the
 	// Session will block until *all* reply expectations are resolved.
 	AddReplyExpectation query.ReplyExpectation
-	// If ReplyMsgToClient is non-nil, the contained message will be immediately
-	// flushed back to the client as a reply. (This action allows the proxy to intercept
-	// a message and create its own reply instead of proxying to the Postgres server).
-	ReplyMsgToClient pgproto3.BackendMessage
+	// ReplyMsgsToClient is sent in order and flushed back to the client as one reply.
+	// This allows the proxy to answer locally instead of proxying to Postgres.
+	ReplyMsgsToClient []pgproto3.BackendMessage
 	// If FlushPostgres is true, any buffered proxied messages are flushed on the
 	// SessionLink connection to Postgres, and then the Session enters a blocking loop
 	// to receive messages from the PostgresServer until *all* reply expectations are resolved.
@@ -44,7 +43,7 @@ type ClientMessageAction struct {
 	// with which read traffic is distributed or a replica pool of a state's cluster
 	HandleReadQuery bool
 	// If AfterFlushAction is not nil and FlushPostgres is true, it will first flush all buffered messages to PG and then execute this action.
-	// This is useful for cases such as sending a ReplyMsgToClient after processing all previously received messages.
+	// This is useful for sending ReplyMsgsToClient after processing all previously received messages.
 	AfterFlushAction *ClientMessageAction
 	// If DiscardUntilSync is true, the Session should proceed to discard all incoming messages from the client until a Sync is received.
 	DiscardUntilSync bool
@@ -54,6 +53,13 @@ type ClientMessageAction struct {
 	// If CheckExistingPreparedStmt is not nil, check that the SessionLink's connection has this prepared statement
 	// created, otherwise create it.
 	CheckExistingPreparedStmt prepared.PreparedStatement
+	// If EnsureUnnamedPreparedStmt is true, the client's unnamed prepared statement is re-created on the
+	// SessionLink's connection before the message is proxied, if that connection does not have it.
+	EnsureUnnamedPreparedStmt bool
+	// If InvalidateUnnamedPreparedStmt is true, the message destroys the client's unnamed prepared
+	// statement in PostgreSQL: a simple Query, including one the proxy answers locally, or a Close
+	// of the unnamed statement. The Session must forget it before replying or proxying the message.
+	InvalidateUnnamedPreparedStmt bool
 	// If DeallocatePreparedStmt is not nil, deallocate the prepared statement with the given client name.
 	DeallocatePreparedStmt prepared.PreparedStatement
 	// If UpdateAutoCachedUnnamedPreparedStmt is not nil, update the prepared statement in the Session's state.
@@ -106,8 +112,8 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		// There is nothing to flush to Postgres (no session link). Send
 		// ReadyForQuery directly to the client and clear the discard flag.
 		return ClientMessageAction{
-			ReplyMsgToClient: &pgproto3.ReadyForQuery{TxStatus: 'I'},
-			DiscardUntilSync: false,
+			ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.ReadyForQuery{TxStatus: 'I'}},
+			DiscardUntilSync:  false,
 		}, nil
 	}
 
@@ -122,7 +128,9 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			AddReplyExpectation: query.QueryReply,
 			FlushPostgres:       true,
 		}
-		return handleClientQuery(m.String, SimpleQueryProtocol, action, state, hooks)
+		action, err := handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
+		action.InvalidateUnnamedPreparedStmt = true
+		return action, err
 
 	case *pgproto3.Parse:
 		clientName := m.Name
@@ -138,7 +146,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		if !prepared.IsNamedPreparedStmt(m.Name) && !state.AutoPreparedStmtsEnabled {
 			// TODO: track unnamed prepared statements across backend releases
 			// instead of treating them as one-off queries.
-			return handleClientQuery(m.Query, ExtendedQueryProtocol, action, state, hooks)
+			return handleClientQuery(m, m.Query, ExtendedQueryProtocol, action, state, hooks)
 		}
 		if hooks.NamedPreparedStmtObserved != nil {
 			hooks.NamedPreparedStmtObserved(m.Name, m.Query)
@@ -161,7 +169,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 				ProxyMsgToPg:  &pgproto3.Flush{},
 				FlushPostgres: true,
 				AfterFlushAction: &ClientMessageAction{
-					ReplyMsgToClient: &pgproto3.ParseComplete{},
+					ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.ParseComplete{}},
 				},
 			}
 			// if it's an auto-cached unnamed prepared statement, it's valid to reuse its name
@@ -181,7 +189,11 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		// if attempting to describe an unnamed statement or a named portal, no action needed
 		// portals only exist for the duration of the transaction, so there is no risk of conflict
 		clientName := m.Name
-		if m.ObjectType == 'P' || (!prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled) {
+		if m.ObjectType == 'P' {
+			return action, nil
+		}
+		if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
 		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
@@ -201,12 +213,16 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 				ProxyMsgToPg:  &pgproto3.Flush{},
 				FlushPostgres: true,
 				AfterFlushAction: &ClientMessageAction{
-					ReplyMsgToClient:       &pgproto3.CloseComplete{},
+					ReplyMsgsToClient:      []pgproto3.BackendMessage{&pgproto3.CloseComplete{}},
 					DeallocatePreparedStmt: state.PreparedStatements.FindKnownNamedStmtFromClientName(clientName),
 				},
 			}, nil
 		}
-		return ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.CloseReply}, nil
+		return ClientMessageAction{
+			ProxyMsgToPg:                  m,
+			AddReplyExpectation:           query.CloseReply,
+			InvalidateUnnamedPreparedStmt: m.ObjectType == 'S' && clientName == "",
+		}, nil
 
 	case *pgproto3.Bind:
 		// TODO handle tracing named prepared statements
@@ -219,6 +235,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		// handle unnamed prepared statements with no auto-caching
 		clientName := m.PreparedStatement
 		if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
 		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
@@ -263,18 +280,15 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 
 // handleClientQuery processes a sql string received as either a Query or Parse FrontendMessage.
 // Classification failures still return the original action so the query is forwarded.
-func handleClientQuery(sql string, protocol PGQueryProtocolType, action ClientMessageAction, state State, hooks Hooks) (ClientMessageAction, error) {
+func handleClientQuery(msg pgproto3.FrontendMessage, sql string, protocol PGQueryProtocolType, action ClientMessageAction, state State, hooks Hooks) (ClientMessageAction, error) {
 	if hooks.QueryObserved != nil {
 		hooks.QueryObserved(sql, protocol)
 	}
-	if IsPGXPing(sql) {
-		// don't propagate pings from pgx clients to postgres since pgx also sends pings from the proxy itself
-		// i.e. for each query sent from a pgx client, postgres would receive three pings
-		// by intercepting this pgx client ping, postgres should receive one ping per query
-		// the pgx client only sends pings using the simple protocol with a Query message
-		// there is an assumption here that the proxy has no buffered messages that it needs to send to the Proxy at this time
-		// otherwise, we would need to flush them first and then determine if we should send this back
-		return ClientMessageAction{ReplyMsgToClient: &pgproto3.ReadyForQuery{TxStatus: 'I'}}, nil
+	if IsIdlePGXPing(msg, state) {
+		return ClientMessageAction{ReplyMsgsToClient: []pgproto3.BackendMessage{
+			&pgproto3.EmptyQueryResponse{},
+			&pgproto3.ReadyForQuery{TxStatus: 'I'},
+		}}, nil
 	}
 	// Only parse the query if dynamic routing is enabled, as we only use the parsing result
 	// to determine if it's a read query for routing purposes
@@ -362,8 +376,8 @@ func NewFlushErrorAction(response *pgproto3.ErrorResponse) ClientMessageAction {
 		ProxyMsgToPg:  &pgproto3.Flush{},
 		FlushPostgres: true,
 		AfterFlushAction: &ClientMessageAction{
-			ReplyMsgToClient: response,
-			DiscardUntilSync: true,
+			ReplyMsgsToClient: []pgproto3.BackendMessage{response},
+			DiscardUntilSync:  true,
 		},
 	}
 }
@@ -379,10 +393,10 @@ func newObservedFlushErrorAction(response *pgproto3.ErrorResponse, err error, ho
 }
 
 func observeErrorAction(action *ClientMessageAction, hooks Hooks) {
-	if action == nil || action.AfterFlushAction == nil {
+	if action == nil || action.AfterFlushAction == nil || len(action.AfterFlushAction.ReplyMsgsToClient) == 0 {
 		return
 	}
-	response, _ := action.AfterFlushAction.ReplyMsgToClient.(*pgproto3.ErrorResponse)
+	response, _ := action.AfterFlushAction.ReplyMsgsToClient[0].(*pgproto3.ErrorResponse)
 	if response != nil {
 		if hooks.ErrorActionCreated != nil {
 			hooks.ErrorActionCreated(response, nil)
@@ -416,3 +430,16 @@ func BuildPreparedStatementDoesNotExistErrorResponse(name string) *pgproto3.Erro
 
 // IsPGXPing reports whether sql is pgx's health-check query.
 func IsPGXPing(sql string) bool { return sql == "-- ping" }
+
+// IsIdlePGXPing reports whether msg is a pgx health-check ping that the proxy
+// answers locally. Only pings at an idle boundary qualify: a held link may have
+// an active/failed transaction or buffered extended-protocol work, so those
+// pings go to Postgres in order and report its transaction state; during error
+// recovery pings are discarded until Sync.
+//
+// Session uses this to bypass the load shedder, and DecideClientMessageAction
+// uses it to reply locally, so the two decisions cannot drift apart.
+func IsIdlePGXPing(msg pgproto3.FrontendMessage, state State) bool {
+	q, ok := msg.(*pgproto3.Query)
+	return ok && !state.HasLink && !state.DiscardUntilSync && IsPGXPing(q.String)
+}

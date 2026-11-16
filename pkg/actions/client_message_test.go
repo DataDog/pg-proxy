@@ -28,10 +28,11 @@ func TestDecideClientMessageAction(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := ClientMessageAction{
-		ProxyMsgToPg:        queryMessage,
-		AddReplyExpectation: query.QueryReply,
-		FlushPostgres:       true,
-		HandleReadQuery:     true,
+		ProxyMsgToPg:                  queryMessage,
+		AddReplyExpectation:           query.QueryReply,
+		FlushPostgres:                 true,
+		HandleReadQuery:               true,
+		InvalidateUnnamedPreparedStmt: true,
 	}
 	if !reflect.DeepEqual(action, want) {
 		t.Fatalf("action mismatch:\n got: %#v\nwant: %#v", action, want)
@@ -47,8 +48,8 @@ func TestDecideClientMessageActionDiscardSyncWithoutLink(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := ClientMessageAction{
-		ReplyMsgToClient: &pgproto3.ReadyForQuery{TxStatus: 'I'},
-		DiscardUntilSync: false,
+		ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.ReadyForQuery{TxStatus: 'I'}},
+		DiscardUntilSync:  false,
 	}
 	if !reflect.DeepEqual(action, want) {
 		t.Fatalf("action mismatch:\n got: %#v\nwant: %#v", action, want)
@@ -102,7 +103,7 @@ func TestDecideClientMessageActionReportsPortableHooks(t *testing.T) {
 type ClientMessageActionTest struct {
 	name                          string
 	msg                           pgproto3.FrontendMessage
-	replyMsg                      pgproto3.BackendMessage
+	replyMsgs                     []pgproto3.BackendMessage
 	proxyMsgToPg                  pgproto3.FrontendMessage
 	wantExp                       query.ReplyExpectation
 	wantFlush                     bool
@@ -117,6 +118,8 @@ type ClientMessageActionTest struct {
 	enableNamedPreparedStatements bool
 	passthroughUser               bool
 	wantDeallocate                bool
+	wantEnsureUnnamed             bool
+	wantInvalidateUnnamed         bool
 	deallocatePreparedStmt        prepared.PreparedStatement
 	dynamicRoutingEnabled         bool
 	autoCachedEnabled             bool
@@ -135,6 +138,7 @@ func TestClientMessageActions(t *testing.T) {
 			wantFlush:             true,
 			wantTraceStarted:      true,
 			wantHandleReadQuery:   true,
+			wantInvalidateUnnamed: true,
 		},
 		{
 			name:                  "simple query update",
@@ -145,6 +149,7 @@ func TestClientMessageActions(t *testing.T) {
 			wantFlush:             true,
 			wantTraceStarted:      true,
 			wantHandleReadQuery:   false, // Should be false since INSERT is a write query
+			wantInvalidateUnnamed: true,
 		},
 		{
 			name:                  "simple parse",
@@ -166,12 +171,15 @@ func TestClientMessageActions(t *testing.T) {
 			wantFlush:             true,
 			wantTraceStarted:      true,
 			wantHandleReadQuery:   false, // Should be false even though it's a read-only query since no parsing occurred
+			wantInvalidateUnnamed: true,
 		},
 		{
-			name:      "pgx ping",
-			msg:       &pgproto3.Query{String: "-- ping"},
-			wantReply: true,
-			replyMsg:  &pgproto3.ReadyForQuery{TxStatus: 'I'},
+			// Answered locally, but still a simple Query, which destroys the unnamed statement.
+			name:                  "pgx ping",
+			msg:                   &pgproto3.Query{String: "-- ping"},
+			wantReply:             true,
+			replyMsgs:             []pgproto3.BackendMessage{&pgproto3.EmptyQueryResponse{}, &pgproto3.ReadyForQuery{TxStatus: 'I'}},
+			wantInvalidateUnnamed: true,
 		},
 		{
 			name:                          "parse named statement",
@@ -184,17 +192,26 @@ func TestClientMessageActions(t *testing.T) {
 			enableNamedPreparedStatements: true,
 		},
 		{
-			name:         "simple describe",
-			msg:          &pgproto3.Describe{ObjectType: 'S'},
-			proxyMsgToPg: &pgproto3.Describe{ObjectType: 'S'},
-			wantExp:      query.DescribeReply,
+			name:              "simple describe",
+			msg:               &pgproto3.Describe{ObjectType: 'S'},
+			proxyMsgToPg:      &pgproto3.Describe{ObjectType: 'S'},
+			wantExp:           query.DescribeReply,
+			wantEnsureUnnamed: true,
 		},
 		{
-			name:           "simple close",
-			msg:            &pgproto3.Close{ObjectType: 'S', Name: ""},
-			proxyMsgToPg:   &pgproto3.Close{ObjectType: 'S', Name: ""},
-			wantExp:        query.CloseReply,
-			wantDeallocate: true,
+			name:                  "simple close",
+			msg:                   &pgproto3.Close{ObjectType: 'S', Name: ""},
+			proxyMsgToPg:          &pgproto3.Close{ObjectType: 'S', Name: ""},
+			wantExp:               query.CloseReply,
+			wantDeallocate:        true,
+			wantInvalidateUnnamed: true,
+		},
+		{
+			// Closing the unnamed portal leaves the unnamed statement in place.
+			name:         "close unnamed portal",
+			msg:          &pgproto3.Close{ObjectType: 'P', Name: ""},
+			proxyMsgToPg: &pgproto3.Close{ObjectType: 'P', Name: ""},
+			wantExp:      query.CloseReply,
 		},
 		{
 			name:         "close named prepared statement",
@@ -202,15 +219,16 @@ func TestClientMessageActions(t *testing.T) {
 			proxyMsgToPg: &pgproto3.Flush{},
 			wantFlush:    true,
 			afterFlushAction: &ClientMessageAction{
-				ReplyMsgToClient:       &pgproto3.CloseComplete{},
+				ReplyMsgsToClient:      []pgproto3.BackendMessage{&pgproto3.CloseComplete{}},
 				DeallocatePreparedStmt: nil, // nil because test case contains non-existent prepared stmt
 			},
 		},
 		{
-			name:         "simple bind",
-			msg:          &pgproto3.Bind{},
-			proxyMsgToPg: &pgproto3.Bind{},
-			wantExp:      query.BindReply,
+			name:              "simple bind",
+			msg:               &pgproto3.Bind{},
+			proxyMsgToPg:      &pgproto3.Bind{},
+			wantExp:           query.BindReply,
+			wantEnsureUnnamed: true,
 		},
 		{
 			name:         "simple execute",
@@ -277,7 +295,7 @@ func TestClientMessageActions(t *testing.T) {
 			proxyMsgToPg:      &pgproto3.Flush{},
 			wantFlush:         true,
 			afterFlushAction: &ClientMessageAction{
-				ReplyMsgToClient:       &pgproto3.CloseComplete{},
+				ReplyMsgsToClient:      []pgproto3.BackendMessage{&pgproto3.CloseComplete{}},
 				DeallocatePreparedStmt: nil, // nil because test case contains non-existent prepared stmt
 			},
 		},
@@ -315,7 +333,7 @@ func TestClientMessageActions(t *testing.T) {
 				wantAction.AfterFlushAction = test.afterFlushAction
 			}
 			if test.wantReply {
-				wantAction.ReplyMsgToClient = test.replyMsg
+				wantAction.ReplyMsgsToClient = test.replyMsgs
 			}
 			if test.wantNewPreparedStmt {
 				wantAction.RecordNewPreparedStmt = test.newPreparedStmt
@@ -323,6 +341,8 @@ func TestClientMessageActions(t *testing.T) {
 			if test.wantDeallocate {
 				wantAction.DeallocatePreparedStmt = test.deallocatePreparedStmt
 			}
+			wantAction.EnsureUnnamedPreparedStmt = test.wantEnsureUnnamed
+			wantAction.InvalidateUnnamedPreparedStmt = test.wantInvalidateUnnamed
 			wantAction.HandleReadQuery = test.wantHandleReadQuery
 			assert.EqualValues(wantAction, action, "for test %s", test.name)
 		}
@@ -345,8 +365,8 @@ func TestSyncAfterLoadSheddingDiscard(t *testing.T) {
 	})
 	assert.NoError(err)
 	assert.Equal(ClientMessageAction{
-		ReplyMsgToClient: &pgproto3.ReadyForQuery{TxStatus: 'I'},
-		DiscardUntilSync: false,
+		ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.ReadyForQuery{TxStatus: 'I'}},
+		DiscardUntilSync:  false,
 	}, action)
 	assert.False(messageObserved, "no observation hook should run for the Sync fast-path")
 }
@@ -528,5 +548,52 @@ func TestGetParameterString(t *testing.T) {
 
 		result := GetParameterString(bindMsg)
 		assert.Equal(t, test.expected, result)
+	}
+}
+
+// A held link covers both buffered protocol work and active/failed transactions.
+func TestPingShortcutBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		name                        string
+		msg                         pgproto3.FrontendMessage
+		hasLink, discard, autoCache bool
+		wantExpectation             query.ReplyExpectation
+	}{
+		{name: "idle", msg: &pgproto3.Query{String: "-- ping"}},
+		{name: "held_link", msg: &pgproto3.Query{String: "-- ping"}, hasLink: true, wantExpectation: query.QueryReply},
+		{name: "unnamed_parse", msg: &pgproto3.Parse{Query: "-- ping"}, wantExpectation: query.ParseReply},
+		{name: "named_parse", msg: &pgproto3.Parse{Name: "ping", Query: "-- ping"}, wantExpectation: query.ParseReply},
+		{name: "auto_cached_parse", msg: &pgproto3.Parse{Query: "-- ping"}, autoCache: true, wantExpectation: query.ParseReply},
+		{name: "recovery_without_link", msg: &pgproto3.Query{String: "-- ping"}, discard: true},
+		{name: "recovery_with_link", msg: &pgproto3.Query{String: "-- ping"}, hasLink: true, discard: true},
+		{name: "parse_during_recovery", msg: &pgproto3.Parse{Query: "-- ping"}, hasLink: true, discard: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			action, err := DecideClientMessageAction(tc.msg, State{
+				HasLink: tc.hasLink, DiscardUntilSync: tc.discard,
+				AutoPreparedStmtsEnabled: tc.autoCache,
+				PreparedStatements:       prepared.CreateProxyPreparedStmtsState(nil),
+			}, Hooks{})
+			assert.NoError(t, err)
+			// The session's shedder bypass must agree with the local-reply decision.
+			repliedLocally := !tc.discard && tc.wantExpectation == query.NoReply
+			assert.Equal(t, repliedLocally, IsIdlePGXPing(tc.msg, State{HasLink: tc.hasLink, DiscardUntilSync: tc.discard}))
+			if tc.discard {
+				// Discarded messages do not reach Postgres, so they keep the unnamed statement.
+				assert.Equal(t, ClientMessageAction{DiscardUntilSync: true}, action)
+			} else if tc.wantExpectation != query.NoReply {
+				assert.Equal(t, tc.msg, action.ProxyMsgToPg)
+				assert.Equal(t, tc.wantExpectation, action.AddReplyExpectation)
+				assert.Empty(t, action.ReplyMsgsToClient)
+				assert.Equal(t, tc.wantExpectation == query.QueryReply, action.FlushPostgres)
+				_, simpleQuery := tc.msg.(*pgproto3.Query)
+				assert.Equal(t, simpleQuery, action.InvalidateUnnamedPreparedStmt)
+			} else {
+				// Answered locally, but a simple Query still destroys the unnamed statement.
+				assert.Equal(t, ClientMessageAction{ReplyMsgsToClient: []pgproto3.BackendMessage{
+					&pgproto3.EmptyQueryResponse{}, &pgproto3.ReadyForQuery{TxStatus: 'I'},
+				}, InvalidateUnnamedPreparedStmt: true}, action)
+			}
+		})
 	}
 }

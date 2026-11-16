@@ -31,18 +31,13 @@ const (
 // from a client to their Session. (See ClientMessageAction docs for the set of actions.)
 func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (ClientMessageAction, error) {
 	var observeParameters func(string)
-	if s.enableTraceParameters {
+	// A nil hook skips joining the parameters, which is most of the cost.
+	if s.enableTraceParameters && s.obsVals.traceState.Sampled() {
 		observeParameters = func(params string) {
 			s.obsVals.traceState.SetTag("db.parameters", params)
 		}
 	}
-	return actions.DecideClientMessageAction(msg, actions.State{
-		DiscardUntilSync:         s.discardUntilSync,
-		HasLink:                  s.link != nil,
-		DynamicRoutingEnabled:    s.dynamicRoutingEnabled,
-		AutoPreparedStmtsEnabled: s.autoPreparedStatementsEnabled(),
-		PreparedStatements:       s.pStmtState,
-	}, actions.Hooks{
+	return actions.DecideClientMessageAction(msg, s.actionState(), actions.Hooks{
 		MessageObserved: func(msg pgproto3.FrontendMessage) {
 			s.obsVals.traceState.AddMessage(msg)
 			if s.hooks.FrontendMessage != nil {
@@ -69,8 +64,15 @@ func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (Clien
 	})
 }
 
-func isPgxPing(sql string) bool {
-	return actions.IsPGXPing(sql)
+// actionState snapshots the session state the actions layer decides on.
+func (s *Session) actionState() actions.State {
+	return actions.State{
+		DiscardUntilSync:         s.discardUntilSync,
+		HasLink:                  s.link != nil,
+		DynamicRoutingEnabled:    s.dynamicRoutingEnabled,
+		AutoPreparedStmtsEnabled: s.autoPreparedStatementsEnabled(),
+		PreparedStatements:       s.pStmtState,
+	}
 }
 
 // NewFlushErrorAction returns a ClientMessageAction that ensures PostgreSQL flushes pending messages

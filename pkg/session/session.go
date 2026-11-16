@@ -147,6 +147,20 @@ type Session struct {
 	AutoPreparedStmtsEnabled     bool
 	autoPreparedStmtsEnabledFunc func() bool
 
+	// The client's unnamed prepared statement, which Postgres keeps until the next
+	// unnamed Parse, Close of it, or simple Query, and whether the current link's
+	// connection has it. Releasing a link discards it, so it is re-created on the
+	// next link that a Bind or Describe uses.
+	unnamedStmt       prepared.PreparedStatement
+	unnamedStmtOnLink bool
+	// unnamedGen counts the client messages that replace or destroy the unnamed
+	// statement. Replies arrive after later messages are sent, so each unnamed
+	// Parse sent to Postgres records the generation it belongs to, in send order;
+	// a ParseComplete from an older generation must not restore a statement that a
+	// later message replaced or destroyed.
+	unnamedGen         uint64
+	unnamedPendingGens []uint64
+
 	// Non-nil when the session has been remapped to a different state.
 	// Think of it as a peek-able channel.
 	remappedBackend Backend
@@ -284,7 +298,7 @@ type Config struct {
 	MirrorBudget                 *mirror.Budget
 	PreparedStatements           prepared.PreparedStatementState
 	TraceState                   *query.TraceState
-	// EnableTraceParameters includes raw Bind values in query traces for every backend.
+	// EnableTraceParameters includes raw Bind values in sampled query traces for every backend.
 	// The zero value disables parameter capture. SQL text is unaffected.
 	EnableTraceParameters bool
 	MetricTags            []string
@@ -540,6 +554,7 @@ func (s *Session) ForceCloseBackendOnClientDisconnect(backendLink link.Link) {
 
 func (s *Session) setLink(backendLink link.Link) {
 	s.link = backendLink
+	s.unnamedStmtOnLink = false
 	if backendLink == nil && s.hooks.RoutedLinkChanged != nil {
 		s.hooks.RoutedLinkChanged(nil)
 	}
@@ -617,7 +632,7 @@ func (s *Session) handleOneMessage(msg pgproto3.FrontendMessage) error {
 // interceptBypassingMessage handles messages that must not go through the standard
 // per-message dispatcher, returning (intercepted, err):
 //   - Terminate: closes the session and returns (true, wrapped io.EOF) — terminal.
-//   - pgx ping health check: handled directly via handleOneMessage; returns
+//   - pgx ping health check at an idle boundary: handled via handleOneMessage; returns
 //     (true, err) where err is nil on success.
 //   - any other message: returns (false, nil).
 //
@@ -626,9 +641,8 @@ func (s *Session) handleOneMessage(msg pgproto3.FrontendMessage) error {
 // caller must stop (return err). When intercepted && err == nil the message was
 // handled and processing may continue — the top-level loop returns nil to fetch the
 // next message, and the inner loops (handleTransaction, drainUntilSync) `continue`.
-// During a discard-until-sync drain, the ping's handleOneMessage call is turned into
-// a no-op discard by DecideClientMessageAction, so this same path correctly ignores
-// pings (and everything else) until Sync.
+// Pings with a held link follow the normal dispatcher, preserving pending work
+// and transaction state. During error recovery they are discarded until Sync.
 func (s *Session) interceptBypassingMessage(msg pgproto3.FrontendMessage) (bool, error) {
 	if _, ok := msg.(*pgproto3.Terminate); ok {
 		err := fmt.Errorf("client requested terminate: %w", io.EOF)
@@ -639,7 +653,7 @@ func (s *Session) interceptBypassingMessage(msg pgproto3.FrontendMessage) (bool,
 		s.close(err)
 		return true, err
 	}
-	if q, ok := msg.(*pgproto3.Query); ok && isPgxPing(q.String) {
+	if actions.IsIdlePGXPing(msg, s.actionState()) {
 		return true, s.handleOneMessage(msg)
 	}
 	return false, nil
@@ -666,9 +680,7 @@ func (s *Session) handleTransaction(initialMsg pgproto3.FrontendMessage) error {
 		if s.handleStateRemapping() {
 			return nil
 		}
-		// A handled ping (intercepted, no error) must NOT end the checkout: continue the
-		// loop so the RIF stays held until the link is actually released. Only a terminal
-		// interception (Terminate) returns.
+		// Terminate must close the session even while the checkout is held.
 		if intercepted, err := s.interceptBypassingMessage(msg); intercepted {
 			if err != nil {
 				return err
@@ -760,10 +772,11 @@ func (s *Session) receiveAndHandleMessage() error {
 		return nil
 	}
 
-	// Bypass the load shedder for Terminate and pgx health-check pings.
+	// Bypass the load shedder for Terminate and idle pgx health-check pings.
 	// Terminate must not reach the shedder — it would reply with an ErrorResponse
-	// instead of cleanly closing the connection. pgx pings are bypassed so they
-	// don't count against load; empty queries and ";" are NOT bypassed.
+	// instead of cleanly closing the connection. Idle pgx pings (no held link, not
+	// discarding until Sync) are answered locally so they don't count against load;
+	// pings on a held link, empty queries and ";" are NOT bypassed.
 	if intercepted, err := s.interceptBypassingMessage(msg); intercepted {
 		return err
 	}
@@ -972,11 +985,17 @@ func (s *Session) flushClientConn() error {
 func (s *Session) handleAction(action ClientMessageAction) error {
 	s.setDiscardUntilSync(action.DiscardUntilSync)
 
-	if action.ReplyMsgToClient != nil {
-		if s.hooks.BackendMessage != nil {
-			s.hooks.BackendMessage(action.ReplyMsgToClient)
+	if action.InvalidateUnnamedPreparedStmt {
+		s.invalidateUnnamedStmt()
+	}
+
+	if len(action.ReplyMsgsToClient) > 0 {
+		for _, msg := range action.ReplyMsgsToClient {
+			if s.hooks.BackendMessage != nil {
+				s.hooks.BackendMessage(msg)
+			}
+			s.clientConn.Send(msg)
 		}
-		s.clientConn.Send(action.ReplyMsgToClient)
 		err := s.flushClientConn()
 		if err != nil {
 			return fmt.Errorf("error flushing proxied msg(s) to client: %w", err)
@@ -1146,6 +1165,7 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	if err := s.handleCheckExistingPreparedStmt(action); err != nil {
 		return err
 	}
+	s.handleEnsureUnnamedPreparedStmt(action)
 
 	s.link.Send(action.ProxyMsgToPg, action.AddReplyExpectation)
 
@@ -1159,6 +1179,11 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 	preparedStatement := action.RecordNewPreparedStmt
 	if preparedStatement == nil {
 		return true, nil
+	}
+	if !preparedStatement.IsProxyNamedPreparedStmt() {
+		// Postgres drops the previous unnamed statement before parsing a new one,
+		// so a failed Parse leaves none; ParseComplete records the new one.
+		s.invalidateUnnamedStmt()
 	}
 	// if the connection already has this pending named statement, can just send back ParseComplete
 	if preparedStatement.IsProxyNamedPreparedStmt() && s.link.HasExistingNamedPreparedStmt(preparedStatement) {
@@ -1198,6 +1223,9 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 		}
 	}
 	s.pStmtState.EnqueuePendingStmt(preparedStatement, false)
+	if !preparedStatement.IsProxyNamedPreparedStmt() {
+		s.unnamedPendingGens = append(s.unnamedPendingGens, s.unnamedGen)
+	}
 	return true, nil
 }
 
@@ -1232,6 +1260,54 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 	s.link.Send(&pgproto3.Parse{Name: preparedStatement.GetProxyName(), Query: preparedStatement.GetSQLQuery(), ParameterOIDs: preparedStatement.GetParamOIDs()}, query.ParseReply)
 	s.pStmtState.EnqueuePendingStmt(preparedStatement, true)
 	return nil
+}
+
+// handleEnsureUnnamedPreparedStmt re-creates the client's unnamed prepared statement
+// on the link's connection before a Bind or Describe that refers to it. The client
+// may have parsed it on a link that has since been released (for example psql's
+// \gdesc sends Parse+Sync, then Describe+Sync). Releasing a link runs RESET ALL as a
+// simple Query, and any simple Query discards the unnamed statement. The
+// ParseComplete is not forwarded to the client.
+func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
+	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
+		return
+	}
+	s.link.Send(&pgproto3.Parse{Query: s.unnamedStmt.GetSQLQuery(), ParameterOIDs: s.unnamedStmt.GetParamOIDs()}, query.ParseReply)
+	s.pStmtState.EnqueuePendingStmt(s.unnamedStmt, true)
+	s.unnamedPendingGens = append(s.unnamedPendingGens, s.unnamedGen)
+	s.unnamedStmtOnLink = true
+}
+
+// invalidateUnnamedStmt forgets the client's unnamed prepared statement and
+// starts a new generation, so ParseComplete replies for unnamed Parses sent
+// before this point cannot restore it.
+func (s *Session) invalidateUnnamedStmt() {
+	s.unnamedStmt = nil
+	s.unnamedGen++
+}
+
+// confirmUnnamedStmt records the unnamed statement a ParseComplete confirms, if
+// no later message replaced or destroyed it. It stores a plain copy: the
+// confirmed value wraps the statement for the pending queue, and re-creating it
+// would otherwise nest another wrapper on each reuse.
+func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
+	if len(s.unnamedPendingGens) == 0 {
+		return
+	}
+	generation := s.unnamedPendingGens[0]
+	s.unnamedPendingGens = s.unnamedPendingGens[1:]
+	if generation != s.unnamedGen {
+		return
+	}
+	s.unnamedStmt = prepared.CreatePreparedStatement("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs())
+	s.unnamedStmtOnLink = true
+}
+
+// invalidatePendingStmts drops the pending statement queue and the unnamed
+// generations recorded alongside it.
+func (s *Session) invalidatePendingStmts(fromError bool) {
+	s.pStmtState.InvalidatePendingStmts(fromError)
+	s.unnamedPendingGens = nil
 }
 
 func (s *Session) handleDeallocatePreparedStmt(action ClientMessageAction) error {
@@ -1269,6 +1345,9 @@ func (s *Session) flushPostgres() (bool, error) {
 	timesFlushed := 0
 	clientWriteSucceeded := false
 	discardedUntilSync := false
+	// pgSkippingUntilSync is whether Postgres reported an error that no ReadyForQuery
+	// has followed, so Postgres is skipping messages until the client's Sync.
+	pgSkippingUntilSync := false
 
 	// replyBuf accumulates encoded messages destined for the client. It is seeded from the
 	// connection's retained buffer (so small replies don't re-allocate) and reused across the
@@ -1335,6 +1414,9 @@ func (s *Session) flushPostgres() (bool, error) {
 			if confirmedPreparedStmt != nil && confirmedPreparedStmt.IsExistingPreparedStmt() {
 				action.ProxyMsgToClient = nil
 			}
+			if confirmedPreparedStmt != nil && !confirmedPreparedStmt.IsProxyNamedPreparedStmt() {
+				s.confirmUnnamedStmt(confirmedPreparedStmt)
+			}
 			err := s.link.RecordNewNamedPreparedStmt(confirmedPreparedStmt)
 			if err != nil {
 				return discardedUntilSync, fmt.Errorf("error recording new prepared statement: %w", err)
@@ -1367,13 +1449,15 @@ func (s *Session) flushPostgres() (bool, error) {
 			// there can only have up to one sync message buffered at once, so no additional messages can be processed.
 			// this means there is no possible state where discardedUntilSync becomes false before this loop exits.
 			discardedUntilSync = true
-			s.pStmtState.InvalidatePendingStmts(true)
+			pgSkippingUntilSync = true
+			s.invalidatePendingStmts(true)
 		}
 		if action.SetTxStatus != query.NoTxStatus {
 			s.link.HandleReadyForQuery(action.SetTxStatus)
+			pgSkippingUntilSync = false
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
-			s.pStmtState.InvalidatePendingStmts(false)
+			s.invalidatePendingStmts(false)
 			err := s.link.Release()
 			if err != nil {
 				pgproxy.Logger().Warn("error releasing session link", "err", err)
@@ -1397,6 +1481,12 @@ func (s *Session) flushPostgres() (bool, error) {
 	s.obsVals.traceState.FinishRootTrace()
 	if clientWriteSucceeded && s.hooks.ClientFlushSucceeded != nil {
 		s.hooks.ClientFlushSucceeded()
+	}
+	if pgSkippingUntilSync {
+		// The error came before the client's Sync, as in a pipeline flushed with
+		// Flush. Postgres ignores the client's messages until that Sync, so the
+		// session must too: it must not reply to them or record their effects.
+		s.setDiscardUntilSync(true)
 	}
 
 	return discardedUntilSync, nil

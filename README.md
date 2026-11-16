@@ -89,7 +89,10 @@ caller's context. Identity and resource fields are structured and capped at
 The listener records the startup stage without formatting arbitrary hook errors.
 Known listener failures and `listener.AuthenticationError` constants retain
 specific server-side diagnostics while client responses remain generic except
-for the fixed JWT-expiry response. Hooks
+for the fixed JWT-expiry response. Resolver hooks should wrap
+`listener.ErrLogicalDatabaseNotConfigured` or `listener.ErrBackendNotReady` so
+these failures log `reason=logical_database_not_configured` or
+`reason=backend_not_ready` instead of a generic diagnostic. Hooks
 log safe resource and verified identity details where they are available.
 Unknown failures retain `08006` and a generic diagnostic.
 Cancellation failures retain the previous missing-session and incorrect-secret
@@ -195,7 +198,10 @@ Add entries to `databases`, `clusters`, and `logical_databases` for more backend
 Each cluster selects one primary database. Each logical database selects a cluster.
 Multiple logical databases can select the same cluster.
 
-The OSS binary accepts direct connection settings, inline backend credentials, pool sizing/lifetimes, a configured
+The OSS binary accepts direct connection settings, backend credentials (inline, or
+from a file or environment variable with `password_file`/`password_env`; see
+[credential references](docs/client-authentication.md#credential-references)),
+pool sizing/lifetimes, a configured
 listener address, and the message buffer size. Omitted listener and buffer settings
 use `127.0.0.1:15432` and 10240 bytes. Zero pool settings use pgx defaults; negative
 values and minimum connections above the maximum are rejected. Backend connection
@@ -236,6 +242,32 @@ The standalone-command suite also accepts an explicit disposable PostgreSQL URL
 through `PG_PROXY_TEST_DATABASE_URL`. CI uses the shared container fixture instead.
 See the [client integration test instructions](docs/client-authentication.md#integration-tests).
 
+#### Ping protocol behavior
+
+`TestProxyAgainstPostgres/ping_protocol` sends identical raw protocol messages
+to PostgreSQL and to the proxy, and requires the same replies from both:
+
+- `ping_idle`: `EmptyQueryResponse`, then `ReadyForQuery(I)`.
+- `ping_in_transaction`: the same empty response, then `ReadyForQuery(T)`.
+- `ping_in_failed_transaction`: the same empty response, then `ReadyForQuery(E)`;
+  a rollback restores `I`.
+- `extended_ping` and `named_extended_ping`: Parse/Flush returns `ParseComplete`;
+  Bind/Execute/Sync returns `BindComplete`, `EmptyQueryResponse`, `ReadyForQuery(I)`.
+- Pending Parse messages and error recovery: replies stay in order, and pings
+  discarded before Sync produce no reply of their own.
+
+Every scenario ends with another query to detect stray replies. The test uses a
+raw protocol client because a comment passed to `psql`, or driver statement
+caching, can hide the exchange being checked. Run just these scenarios with:
+
+```sh
+go test -race -tags=integration -count=1 -v ./cmd/pg-proxy \
+  -run 'TestProxyAgainstPostgres/ping_protocol'
+```
+
+The idle ping's load-shedding bypass is covered by unit tests in `pkg/actions`
+and `pkg/session`, which need no Docker.
+
 #### Black-box integration tests
 
 `test/integration` runs the `cmd/pg-proxy` binary as a black box. Each test starts
@@ -266,6 +298,18 @@ path. A prebuilt binary is used as is, so build it with `-race` yourself if need
 
 Readiness uses a timed TCP port probe, not startup log parsing. Captured output
 is printed only for failure diagnostics.
+
+Custom tests cover transaction pooling, backend reuse, session-state isolation,
+transaction status, client disconnects, and process startup/shutdown. Assertions
+use query results, wire responses, connection state, and process exit status.
+
+Detecting a client that disconnects while waiting for a backend connection relies
+on Linux `POLLRDHUP`, so that test is skipped on other platforms. To run the
+full suite from macOS, run it in a Linux container that uses the host's Docker:
+
+```sh
+docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
+```
 
 GitHub Actions runs unit tests on minimum and stable Go and Docker-backed
 integration tests with race detection.
@@ -335,8 +379,9 @@ rates. Local validation confirms that 100 events over 10 seconds exports as
 
 Traces contain SQL text, including literal values, and error messages. Bind
 parameter capture is off by default. Add `-trace-parameters=true` to a command
-that enables tracing to include raw values as `db.parameters`. This changes only
-trace data; PostgreSQL receives the same parameter values.
+that enables tracing to include raw values as `db.parameters`. Values are added
+only to traces the tracer has already decided to keep when the root span starts.
+This changes only trace data; PostgreSQL receives the same parameter values.
 
 For application trace propagation, send W3C context (`traceparent`) in SQL
 comments. Span fields are recorded in
@@ -404,6 +449,12 @@ go test -race -count=1 ./...
 Docker-backed tests require the `integration` build tag. Run the Docker checks
 above when needed. Format changed Go files with `gofmt -w`;
 no Bazel setup or generated BUILD files are needed in this repository.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[Contribute to PG Proxy](docs/site/src/content/docs/how-to/contributing.md).
+<!-- TODO: once the documentation site is published, link to the contributing page's site URL instead of its source file. -->
 
 ## License
 

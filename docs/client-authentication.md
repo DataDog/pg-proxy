@@ -9,7 +9,7 @@ Copyright 2026-Present Datadog, Inc.
 
 The standalone command supports opt-in password/SCRAM authentication. Start with
 the complete [YAML](../examples/password-auth.yaml) or
-[JSON](../examples/password-auth.json) example. Replace the hosts, credentials,
+[JSON](../examples/password-auth.json) example. Replace the hosts, credential sources,
 certificate paths, and every `<...>` placeholder before starting.
 
 Set `proxy.password_auth_enabled: true` and `proxy.tls_required: true`, with a
@@ -20,10 +20,13 @@ loopback. JWT authentication remains a separate, unsupported mode.
 
 Each `users` entry requires a unique `static_credentials.username`, exactly one
 `password` or `scram_sha_256`, and an explicit list of logical `databases`.
-JSON uses `staticCredentials` and `scramSHA256`. Names match exactly, including
-case. Unknown users and databases outside the user's list are denied. Wildcards
-have no special meaning. Static mode rejects `email`, `group`, `pg_roles`, and
-nonzero `max_sessions` rather than ignoring them.
+JSON uses `staticCredentials` and `scramSHA256`. Usernames and database names
+match exactly, including case. Unknown users and databases outside the user's
+list are denied. Wildcards have no special meaning. Static mode rejects `email`,
+`group`, `pg_roles`, and nonzero `max_sessions` rather than ignoring them.
+
+Each credential can be inline, or come from a file or an environment variable;
+see [credential references](#credential-references).
 
 Proxy users are independent of backend accounts. Alice and Bob may both connect
 to `orders`, sharing its configured pool and backend account. Their sessions and
@@ -37,7 +40,7 @@ PostgreSQL roles or run `SET ROLE`; role passthrough remains rejected.
 Both credential forms use the PostgreSQL SCRAM-SHA-256 exchange. A client supplies
 its ordinary password. A stored verifier is a server credential, never a client
 password. Plaintext configuration is converted to a random-salt verifier once
-at startup. Protect the configuration file because it contains credentials.
+at startup. Protect the configuration file if it contains inline credentials.
 
 Stored verifiers use:
 
@@ -59,29 +62,87 @@ import (
     "fmt"
     "io"
     "os"
+    "strings"
 
     "github.com/DataDog/pg-proxy/pkg/scram"
 )
 
 func main() {
-    password, err := io.ReadAll(os.Stdin)
+    data, err := io.ReadAll(os.Stdin)
     if err != nil { panic("could not read password") }
-    verifier, err := scram.NewVerifier(string(password))
+    // Remove one trailing newline, the same rule as password_file.
+    password, ok := strings.CutSuffix(string(data), "\r\n")
+    if !ok { password = strings.TrimSuffix(password, "\n") }
+    if password == "" { panic("password is empty") }
+    verifier, err := scram.NewVerifier(password)
     if err != nil { panic("could not derive verifier") }
     fmt.Println(verifier.Encode())
 }
 ```
 
-Supply a protected password file containing the exact password bytes, without
-an added newline:
+Supply a protected password file. The helper removes one trailing newline
+(`\n` or `\r\n`), like `password_file` does, so the same file gives the same
+password to both:
 
 ```sh
 go run scram-verifier.go < /path/to/password-file
 ```
 
-Copy its output into `scram_sha_256` in a protected configuration file. The helper
-prints sensitive verifier material. Normal `Secret` and `Verifier` formatting
+Copy its output into `scram_sha_256` in a protected configuration file, or
+write it to a protected file and point `scram_sha_256_file` at that file. The
+helper prints sensitive verifier material. Normal `Secret` and `Verifier` formatting
 redacts credentials; `Verifier.Encode` explicitly returns the stored value.
+
+### Credential references
+
+The standalone command can read a credential from a file or an environment
+variable instead of the configuration file. This lets you keep the
+configuration file free of secrets, for example in version control, and supply
+the values from Kubernetes Secrets, systemd credentials, or similar.
+
+| Inline | File | Environment variable |
+|--------|------|----------------------|
+| `databases[].password` | `password_file` | `password_env` |
+| `static_credentials.password` | `password_file` | `password_env` |
+| `static_credentials.scram_sha_256` | `scram_sha_256_file` | `scram_sha_256_env` |
+
+JSON uses `passwordFile`, `passwordEnv`, `scramSHA256File`, and `scramSHA256Env`.
+
+```yaml
+databases:
+  - name: orders-primary
+    username: orders_backend
+    password_file: /run/secrets/orders_backend_password
+users:
+  - static_credentials:
+      username: bob
+      scram_sha_256_env: BOB_SCRAM_VERIFIER
+    databases: [orders]
+```
+
+Rules:
+
+- Set at most one of the inline, file, and environment forms for a credential.
+- The command reads each reference once, at startup. If a file is missing,
+  unreadable, or empty, or a variable is unset or empty, startup fails. Change
+  the file or variable and restart the proxy to rotate a credential.
+- The command removes one trailing newline (`\n` or `\r\n`) from file contents,
+  because mounted secrets often end with one. It keeps all other bytes. A
+  password that ends with a newline must therefore have one more newline in the
+  file. The verifier helper above uses the same rule. Environment values are
+  used as-is.
+- Relative `*_file` paths are resolved from the proxy's working directory, not
+  from the directory of the configuration file. Use absolute paths.
+- Errors name the setting, not the path, the variable, or the value. Resolved
+  values are redacted like inline ones.
+
+The verifier helper above prints a trailing newline, so you can redirect its
+output directly to a `scram_sha_256_file`.
+
+This is a feature of the standalone command only. `pkg/config` and its
+`ReadJSON`/`ReadYAML` readers accept inline credentials only; embedding
+applications resolve their own references. See
+[adapting configuration](extending-configuration.md).
 
 ## Connecting
 

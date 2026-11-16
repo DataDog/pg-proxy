@@ -67,10 +67,12 @@ func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, erro
 	image := options.image
 	customizers := append([]testcontainers.ContainerCustomizer{
 		postgres.WithDatabase("postgres"), postgres.WithUsername(PostgresUser), postgres.WithPassword(PostgresPassword),
-		// The official entrypoint initializes with a server that does not listen on
-		// TCP and then restarts, so wait for a ready server listening on TCP.
+		// The official entrypoint initializes with a temporary server that does not
+		// listen on TCP and then restarts. Both servers log "ready", so wait for the
+		// second line: matching the first lets the port check pass while the real
+		// server is still starting up (SQLSTATE 57P03).
 		testcontainers.WithWaitStrategy(wait.ForAll(
-			wait.ForLog("database system is ready to accept connections"),
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
 			wait.ForListeningPort("5432/tcp"),
 		).WithDeadline(2 * time.Minute)),
 	}, options.customizers...)
