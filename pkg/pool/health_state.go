@@ -188,13 +188,6 @@ func foreignAddresses(systemIDs map[string]string, resolved map[string]struct{})
 	return foreign
 }
 
-// Resolved returns all retained addresses.
-func (s *HealthState) Resolved() []string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return slices.Collect(maps.Keys(s.resolved))
-}
-
 // IsHealthy returns the latest health for an address.
 func (s *HealthState) IsHealthy(ip string) bool {
 	s.mu.RLock()
@@ -202,11 +195,21 @@ func (s *HealthState) IsHealthy(ip string) bool {
 	return s.health[ip]
 }
 
-// Snapshot returns a stable copy of the latest health map.
-func (s *HealthState) Snapshot() map[string]bool {
+// HealthStateSnapshot contains health and retained addresses from the same state.
+// Both fields are independent copies that callers may modify.
+type HealthStateSnapshot struct {
+	Health   map[string]bool
+	Resolved []string
+}
+
+// Snapshot copies health and retained addresses under one lock.
+func (s *HealthState) Snapshot() HealthStateSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return maps.Clone(s.health)
+	return HealthStateSnapshot{
+		Health:   maps.Clone(s.health),
+		Resolved: slices.Collect(maps.Keys(s.resolved)),
+	}
 }
 
 // SetHealth replaces the health snapshot without changing DNS tracking.
@@ -214,4 +217,23 @@ func (s *HealthState) SetHealth(health map[string]bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.health = maps.Clone(health)
+}
+
+// ReplaceRoutingSnapshot replaces the client-visible address and health snapshots with one
+// complete routing decision. The caller supplies addresses retained by the active discovery
+// policy, so no additional DNS absence policy is applied here.
+func (s *HealthState) ReplaceRoutingSnapshot(
+	health map[string]bool,
+	resolved []string,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	nextResolved := make(map[string]struct{}, len(resolved))
+	for _, ip := range resolved {
+		nextResolved[ip] = struct{}{}
+	}
+	s.resolved = nextResolved
+	s.lookupAbsences = make(map[string]int, len(nextResolved))
+	s.recordHealthLocked(health)
 }

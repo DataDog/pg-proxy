@@ -41,7 +41,7 @@ databases:
     port: 5432
     dbname: orders
     username: orders_backend
-    password: "<orders backend password>"
+    password_file: /etc/pg-proxy/orders-backend-password
     sslmode: verify-full
     max_conns: 20
     connection_options:
@@ -71,7 +71,7 @@ users:
 
 **Client users.** Each user lists the logical databases it can reach. Unknown users and unlisted databases are denied. Prefer `scram_sha_256` verifiers over plaintext `password` values, so the file never holds a client's actual password. The [client authentication guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credentials) shows how to generate a verifier.
 
-**Protect the file.** It holds backend passwords and client credentials. Make it readable only by the user that runs the proxy, for example `chmod 600`, and keep it out of version control.
+**Keep secrets out of the file.** The example reads the backend password from `password_file`. Credentials can also come from environment variables; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). Make secret files readable only by the user that runs the proxy, for example `chmod 600`. If you keep any credentials inline, protect the configuration file the same way and keep it out of version control.
 
 Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../local-development/#settings) lists the other options.
 
