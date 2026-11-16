@@ -838,12 +838,13 @@ func (w *HealthWorker) syncSQLRoutingKillSwitch(s *PoolHealth) {
 
 // disableSQLRoutingLocked requires routingMu; it must not wait for an in-flight SQL probe.
 func (s *PoolHealth) disableSQLRoutingLocked() {
+	routingWasEnabled := s.hybridPolicy != nil && s.hybridPolicy.isRoutingEnabled()
 	s.sqlRoutingDisabled = true
-	if s.hybridPolicy != nil && s.hybridPolicy.isRoutingEnabled() {
+	if routingWasEnabled {
 		s.hybridPolicy.setRoutingEnabled(false)
 		s.routingChangedAt = time.Now()
 	}
-	if s.sqlRoutingActive {
+	if s.sqlRoutingActive || routingWasEnabled {
 		s.sqlRoutingActive = false
 		snapshot := s.patroniHealthState.Snapshot()
 		s.publishRoutingSnapshot(snapshot.Health, snapshot.Resolved)
@@ -866,7 +867,8 @@ func (w *HealthWorker) applyPatroniHealth(s *PoolHealth, health map[string]bool,
 		decision = policy.observePatroni(patroniHealth.Health, observedAt)
 		routingHealth = decision.health
 	}
-	if !s.sqlRoutingActive || decision.publish {
+	// A rejected stale observation has nil health and must not clear the published route.
+	if (policy == nil || decision.health != nil) && (!s.sqlRoutingActive || decision.publish) {
 		s.publishRoutingSnapshot(routingHealth, patroniHealth.Resolved)
 		if policy != nil && decision.routingResult != SQLRoutingResultPatroniRecovery {
 			if comparison := policy.observePublishedPatroniRouting(routingHealth, observedAt); comparison != nil {
