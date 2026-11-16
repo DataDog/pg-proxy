@@ -198,7 +198,10 @@ Add entries to `databases`, `clusters`, and `logical_databases` for more backend
 Each cluster selects one primary database. Each logical database selects a cluster.
 Multiple logical databases can select the same cluster.
 
-The OSS binary accepts direct connection settings, inline backend credentials, pool sizing/lifetimes, a configured
+The OSS binary accepts direct connection settings, backend credentials (inline, or
+from a file or environment variable with `password_file`/`password_env`; see
+[credential references](docs/client-authentication.md#credential-references)),
+pool sizing/lifetimes, a configured
 listener address, and the message buffer size. Omitted listener and buffer settings
 use `127.0.0.1:15432` and 10240 bytes. Zero pool settings use pgx defaults; negative
 values and minimum connections above the maximum are rejected. Backend connection
@@ -376,8 +379,9 @@ rates. Local validation confirms that 100 events over 10 seconds exports as
 
 Traces contain SQL text, including literal values, and error messages. Bind
 parameter capture is off by default. Add `-trace-parameters=true` to a command
-that enables tracing to include raw values as `db.parameters`. This changes only
-trace data; PostgreSQL receives the same parameter values.
+that enables tracing to include raw values as `db.parameters`. Values are added
+only to traces the tracer has already decided to keep when the root span starts.
+This changes only trace data; PostgreSQL receives the same parameter values.
 
 For application trace propagation, send W3C context (`traceparent`) in SQL
 comments. Span fields are recorded in

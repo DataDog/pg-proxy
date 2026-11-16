@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 type fakePool struct {
 	acquire func(context.Context) (*pgxpool.Conn, error)
 	closed  bool
+	exports atomic.Int32
 }
 
 func (p *fakePool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
@@ -35,9 +37,9 @@ func (p *fakePool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	}
 	return nil, nil
 }
-func (*fakePool) ExportStats([]string) {}
-func (p *fakePool) Close()             { p.closed = true }
-func (*fakePool) Reset()               {}
+func (p *fakePool) ExportStats([]string) { p.exports.Add(1) }
+func (p *fakePool) Close()               { p.closed = true }
+func (*fakePool) Reset()                 {}
 
 func newTestRuntime(primary *fakePool, replicas ...*fakePool) *Runtime {
 	replicaPools := make([]interfacePool, 0, len(replicas))
@@ -219,6 +221,7 @@ type recordingMetrics struct {
 	pgproxy.NoopMetrics
 	mu     sync.Mutex
 	counts []metricCall
+	gauges []metricCall
 }
 
 type metricCall struct {
@@ -231,6 +234,42 @@ func (m *recordingMetrics) Count(name string, _ int64, tags []string, _ float64)
 	defer m.mu.Unlock()
 	m.counts = append(m.counts, metricCall{name: name, tags: append([]string(nil), tags...)})
 	return nil
+}
+
+func (m *recordingMetrics) Gauge(name string, _ float64, tags []string, _ float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.gauges = append(m.gauges, metricCall{name: name, tags: append([]string(nil), tags...)})
+	return nil
+}
+
+func (m *recordingMetrics) gaugeCalls() []metricCall {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return append([]metricCall(nil), m.gauges...)
+}
+
+func TestStartStatsExportsOneLoopUntilClose(t *testing.T) {
+	metrics := &recordingMetrics{}
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+	primary := &fakePool{}
+	runtime := newTestRuntime(primary)
+	runtime.StartStats()
+	runtime.StartStats()
+
+	// Ticks fire at two and four seconds; check between them, then close before the second.
+	time.Sleep(3 * time.Second)
+	want := []metricCall{{
+		name: pgproxy.MetricName("pg_proxy.sessions.waiting"),
+		tags: []string{"database:primary", "database_cluster:test-cluster"},
+	}}
+	assert.Equal(t, want, metrics.gaugeCalls())
+	assert.EqualValues(t, 1, primary.exports.Load())
+
+	runtime.Close()
+	time.Sleep(2 * time.Second)
+	assert.Equal(t, want, metrics.gaugeCalls())
+	assert.EqualValues(t, 1, primary.exports.Load())
 }
 
 type fakeRole struct{}

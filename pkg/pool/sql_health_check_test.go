@@ -94,6 +94,7 @@ func TestSQLHealthCheckerReportsSnapshotAndComparison(t *testing.T) {
 	var mu sync.Mutex
 	var observations []observation
 	var completed []string
+	var firstCompletionAt time.Time
 	checker := newTestSQLHealthChecker(t, prober, 1, SQLHealthCheckHooks{
 		ProbeFinished: func(result SQLHealthCheckResult, patroniHealthy bool, _ time.Duration, tags []string) {
 			mu.Lock()
@@ -102,6 +103,7 @@ func TestSQLHealthCheckerReportsSnapshotAndComparison(t *testing.T) {
 		},
 	})
 
+	beforeCheck := time.Now()
 	outcome := checker.Check(
 		context.Background(),
 		[]string{"10.0.0.1", "10.0.0.2"},
@@ -111,10 +113,15 @@ func TestSQLHealthCheckerReportsSnapshotAndComparison(t *testing.T) {
 		func(result SQLHealthCheckResult) {
 			mu.Lock()
 			defer mu.Unlock()
+			if firstCompletionAt.IsZero() {
+				firstCompletionAt = time.Now()
+			}
 			completed = append(completed, result.IP)
 		},
 	)
 
+	assert.False(t, outcome.StartedAt.Before(beforeCheck))
+	assert.False(t, outcome.StartedAt.After(firstCompletionAt), "start time must precede probe completion")
 	require.Len(t, outcome.Results, 2)
 	assert.True(t, outcome.Results[0].HealthyPrimary())
 	assert.False(t, outcome.Results[1].HealthyPrimary())
@@ -268,6 +275,30 @@ func TestAggregateSQLHealthCheckOutcomesOptimisticallyAcrossCredentials(t *testi
 	}, aggregation.Health)
 	assert.Equal(t, []string{"10.0.0.1", "10.0.0.3"}, aggregation.Outcome.PrimaryIPs)
 	assert.Len(t, aggregation.Outcome.Results, 6, "raw results remain available to conservative routing policies")
+}
+
+func TestAggregateSQLHealthCheckOutcomesPreservesEarliestStart(t *testing.T) {
+	first := time.Now()
+	later := first.Add(time.Second)
+	for _, tc := range []struct {
+		name   string
+		starts []time.Time
+		want   time.Time
+	}{
+		{"oldest first", []time.Time{first, later}, first},
+		{"oldest last", []time.Time{later, first}, first},
+		{"unknown first", []time.Time{{}, later}, time.Time{}},
+		{"unknown last", []time.Time{later, {}}, time.Time{}},
+		{"empty", nil, time.Time{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var outcomes []SQLHealthCheckOutcome
+			for _, startedAt := range tc.starts {
+				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: startedAt})
+			}
+			assert.Equal(t, tc.want, aggregateSQLHealthCheckOutcomes(outcomes).Outcome.StartedAt)
+		})
+	}
 }
 
 func TestAggregateSQLHealthCheckOutcomesLeavesIndeterminateIPUnknown(t *testing.T) {
