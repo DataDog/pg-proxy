@@ -1,0 +1,18 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed by Datadog (https://www.datadoghq.com/).
+# Copyright 2026-Present Datadog, Inc.
+
+# Read-only access for the dd-source scheduled pg-proxy dependency reconciler.
+# Campaigner's existing identity owns the subsequent dependency PR writes.
+issuer: https://gitlab.ddbuild.io
+subject_pattern: "project_path:ddoghq/dd-source:ref_type:branch:ref:main"
+claim_pattern:
+  project_path: "ddoghq/dd-source"
+  ref: "main"
+  ref_type: "branch"
+  ref_path: "refs/heads/main"
+  pipeline_source: "schedule"
+permissions:
+  contents: read
+  actions: read
