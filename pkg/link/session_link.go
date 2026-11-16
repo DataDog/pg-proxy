@@ -229,13 +229,14 @@ func (link *SessionLink) Release() error {
 	// RESET ALL does not cover role or session_authorization; resetSQL adds them when no
 	// RoleSession manages the role.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
+		resetSQL := link.resetSQL()
 		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := link.conn.Exec(resetCtx, link.resetSQL())
+		_, err := link.conn.Exec(resetCtx, resetSQL)
 		cancel()
 		if err != nil {
 			_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
 			link.conn.Conn().Close(context.Background())
-			pgproxy.Logger().Warn("Closing connection due to RESET ALL failure", "error", err)
+			pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetSQL, "error", err)
 			return err
 		}
 	}

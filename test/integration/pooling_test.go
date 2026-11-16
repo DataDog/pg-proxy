@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/DataDog/pg-proxy/internal/itest"
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
 
 // TestTransactionPooling verifies the transaction-pooling contract: client
@@ -138,18 +139,94 @@ func TestSessionStateIsolation(t *testing.T) {
 // TestSessionIdentityIsolation verifies that a role or session user set by one
 // client does not leak to the next client on the same backend connection.
 // RESET ALL does not reset role or session_authorization, so the proxy must
-// reset them separately when it releases a connection.
+// reset them separately when it releases a connection. The reset must succeed
+// for a non-superuser backend login and keep a role assigned at connection time.
 func TestSessionIdentityIsolation(t *testing.T) {
-	const role = "itest_identity_leak"
-	require.NoError(t, backend.Exec(t.Context(), "CREATE ROLE "+role+" NOLOGIN"))
-	t.Cleanup(func() { _ = backend.Exec(context.Background(), "DROP ROLE IF EXISTS "+role) })
+	const (
+		leakRole = "itest_identity_leak"
+		// appUser is a non-superuser backend login and a member of the roles here.
+		appUser     = "itest_identity_app"
+		appPassword = "itest_identity_app"
+		// alterRole is assigned to appUser by ALTER ROLE ... SET role.
+		alterRole = "itest_identity_alter"
+		// startupRole is assigned by a -c role= startup option, which overrides alterRole.
+		startupRole = "itest_identity_startup"
+	)
+	require.NoError(t, backend.Exec(t.Context(),
+		"CREATE ROLE "+leakRole+" NOLOGIN",
+		"CREATE ROLE "+alterRole+" NOLOGIN",
+		"CREATE ROLE "+startupRole+" NOLOGIN",
+		"CREATE ROLE "+appUser+" LOGIN NOSUPERUSER PASSWORD '"+appPassword+"' IN ROLE "+leakRole+", "+alterRole+", "+startupRole,
+		"ALTER ROLE "+appUser+" SET role = "+alterRole,
+	))
+	t.Cleanup(func() {
+		_ = backend.Exec(context.Background(),
+			"DROP ROLE IF EXISTS "+appUser,
+			"DROP ROLE IF EXISTS "+leakRole,
+			"DROP ROLE IF EXISTS "+alterRole,
+			"DROP ROLE IF EXISTS "+startupRole,
+		)
+	})
 
-	for _, statement := range []string{
-		"SET ROLE " + role,
-		"SET SESSION AUTHORIZATION " + role,
-	} {
-		t.Run(statement, func(t *testing.T) {
-			connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
+	// appLogin returns startProxy's configuration with dbPooled logging in as appUser.
+	appLogin := func(options map[string]string) pgconfig.Config {
+		cfg := proxyConfig()
+		for i := range cfg.Databases {
+			if cfg.Databases[i].Name == "pooled-primary" {
+				cfg.Databases[i].Username = appUser
+				cfg.Databases[i].Password = pgconfig.Secret(appPassword)
+				cfg.Databases[i].ConnectionOptions = options
+			}
+		}
+		return cfg
+	}
+
+	tests := []struct {
+		name   string
+		config pgconfig.Config
+		// user is the client user; without client authentication it must match the backend login.
+		user      string
+		statement string
+		// wantCurrent and wantSession are the identity before client A and after the reset.
+		wantCurrent, wantSession string
+	}{
+		{
+			name:        "superuser SET ROLE",
+			config:      proxyConfig(),
+			user:        itest.PostgresUser,
+			statement:   "SET ROLE " + leakRole,
+			wantCurrent: itest.PostgresUser,
+			wantSession: itest.PostgresUser,
+		},
+		{
+			name:        "superuser SET SESSION AUTHORIZATION",
+			config:      proxyConfig(),
+			user:        itest.PostgresUser,
+			statement:   "SET SESSION AUTHORIZATION " + leakRole,
+			wantCurrent: itest.PostgresUser,
+			wantSession: itest.PostgresUser,
+		},
+		{
+			name:        "non-superuser with ALTER ROLE role SET ROLE",
+			config:      appLogin(nil),
+			user:        appUser,
+			statement:   "SET ROLE " + leakRole,
+			wantCurrent: alterRole,
+			wantSession: appUser,
+		},
+		{
+			name:        "non-superuser with startup role SET ROLE",
+			config:      appLogin(map[string]string{"role": startupRole}),
+			user:        appUser,
+			statement:   "SET ROLE " + leakRole,
+			wantCurrent: startupRole,
+			wantSession: appUser,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			connStr := itest.MustStartProxy(t, test.config).URL(dbPooled, test.user)
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 			defer cancel()
 
@@ -161,23 +238,25 @@ func TestSessionIdentityIsolation(t *testing.T) {
 			var baseCurrent, baseSession string
 			var basePID uint32
 			require.NoError(t, baseConn.QueryRow(ctx, identity).Scan(&baseCurrent, &baseSession, &basePID))
-			require.NotEqual(t, role, baseCurrent, "baseline current_user must differ from the leaked role for a meaningful assertion")
+			require.Equal(t, test.wantCurrent, baseCurrent, "baseline current_user")
+			require.Equal(t, test.wantSession, baseSession, "baseline session_user")
 			require.NoError(t, baseConn.Close(ctx))
 
 			// Client A changes its identity in autocommit; the connection is released
 			// right after. One simple query keeps the check on the same backend link.
 			clientA, err := pgx.Connect(ctx, connStr)
 			require.NoError(t, err, "client A connect")
-			results, err := clientA.PgConn().Exec(ctx, statement+"; SELECT current_user").ReadAll()
-			require.NoError(t, err, "client A "+statement)
+			results, err := clientA.PgConn().Exec(ctx, test.statement+"; SELECT current_user").ReadAll()
+			require.NoError(t, err, "client A "+test.statement)
 			require.Len(t, results, 2)
-			require.Equal(t, role, scalarResult(t, results[1]), "client A should run as the role it set")
+			require.Equal(t, leakRole, scalarResult(t, results[1]), "client A should run as the role it set")
 			require.NoError(t, clientA.Close(ctx))
 
 			clientB, err := pgx.Connect(ctx, connStr)
 			require.NoError(t, err, "client B connect")
 			defer clientB.Close(context.Background())
 
+			// The same PID also shows the reset succeeded: a failed reset closes the connection.
 			var bCurrent, bSession string
 			var bPID uint32
 			require.NoError(t, clientB.QueryRow(ctx, identity).Scan(&bCurrent, &bSession, &bPID))

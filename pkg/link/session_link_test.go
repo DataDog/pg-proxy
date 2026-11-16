@@ -287,7 +287,12 @@ func TestReleaseResetSQL(t *testing.T) {
 			require.NoError(t, link.Release())
 
 			// One simple query: the whole reset costs a single round trip.
-			require.Equal(t, &pgproto3.Query{String: test.want}, <-received)
+			select {
+			case msg := <-received:
+				require.Equal(t, &pgproto3.Query{String: test.want}, msg)
+			case <-time.After(5 * time.Second):
+				t.Fatal("Release sent no reset query")
+			}
 		})
 	}
 }

@@ -33,11 +33,11 @@ Long or idle transactions keep their backend connection, leaving fewer connectio
 
 The link is reusable only after PostgreSQL reports an idle `ReadyForQuery` state and expected replies have been consumed. An open or failed transaction is not an idle connection ready for another client.
 
-On release, the current link implementation resets the connection's role and configuration, then removes excess cached prepared statements. An unsafe connection or a failed reset causes the connection to be closed.
+On release, the current link implementation resets the connection's configuration and identity as described below, then removes excess cached prepared statements. An unsafe connection or a failed reset causes the connection to be closed.
 
 [`RESET ALL`](https://www.postgresql.org/docs/current/sql-reset.html) resets configuration parameters to their baseline values. It does not reset `role` or `session_authorization`, so the proxy resets them separately:
 
-- With application-supplied role management, the role implementation resets the role, and then the proxy runs `RESET ALL`.
+- With application-supplied role management, the role implementation resets the role, and then the proxy runs `RESET ALL`. The proxy does not reset `role` or `session_authorization` itself. The role implementation must undo any `SET ROLE` or `SET SESSION AUTHORIZATION` a client issues.
 - Otherwise, the proxy runs `RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL` as one simple query. A client's `SET ROLE` or `SET SESSION AUTHORIZATION` does not carry to the next client. A role assigned at connection time, through `ALTER ROLE ... SET role` or a startup option, is restored.
 
 This is not a complete reset of PostgreSQL session state: it does not clear temporary objects or session-level advisory locks. The proxy retains prepared statements for reuse rather than running `DISCARD ALL` on every release.
