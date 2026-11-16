@@ -1357,6 +1357,7 @@ func (s *Session) disarmIdleRelease() (releasedBesideWrite bool) {
 // releaseIdleLinkBesideWrite runs on the timer's goroutine while the session is
 // blocked writing the reply, so the session's link does not change under it.
 func (s *Session) releaseIdleLinkBesideWrite() {
+	s.recordIdleLinkReleasedBesideWrite()
 	s.releaseIdleLink(s.CurrentLink())
 	s.idleReleaseDone <- struct{}{}
 }

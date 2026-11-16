@@ -713,6 +713,7 @@ func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			metrics := newLifecycleRecordingMetrics(t)
 			var wantWritten []byte
 			for _, msg := range test.reply {
 				var err error
@@ -749,6 +750,7 @@ func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
 				Client:                &testClient{},
 				ClientConn:            clientConn,
 				InitialLink:           backendLink,
+				MetricTags:            []string{"user:testuser"},
 				PostgresMsgBufferSize: test.bufferSize,
 				Hooks:                 Hooks{ClientFlushSucceeded: flushRecordingHooks{events: &events}.clientFlushSucceeded},
 			})
@@ -760,6 +762,8 @@ func TestFlushPostgresRepliesBeforeReleasingIdleLink(t *testing.T) {
 			require.Nil(t, s.link)
 			assert.Equal(t, 1, backendLink.calls.release)
 			assert.False(t, s.releasingIdleLink.Load())
+			// The write finished within idleReleaseGrace, so Release ran after it.
+			assert.Empty(t, metrics.countValues("datadog."+MetricIdleLinkReleaseBesideWrite, s.MetricTags()))
 		})
 	}
 }
@@ -809,6 +813,7 @@ func TestFlushPostgresClientWriteFailureBeforeReleaseLeavesLinkForClose(t *testi
 // reading does not keep the backend out of the pool: Release starts while the
 // write is still blocked, and the session waits for both before it returns.
 func TestFlushPostgresStuckClientDoesNotHoldIdleLink(t *testing.T) {
+	metrics := newLifecycleRecordingMetrics(t)
 	unblockWrite := make(chan struct{})
 	clientConn := &blockingWriteConn{started: make(chan struct{}), release: unblockWrite}
 	releaseStarted := make(chan struct{})
@@ -823,6 +828,7 @@ func TestFlushPostgresStuckClientDoesNotHoldIdleLink(t *testing.T) {
 		Client:                &testClient{},
 		ClientConn:            clientConn,
 		InitialLink:           backendLink,
+		MetricTags:            []string{"user:testuser"},
 		PostgresMsgBufferSize: 1 << 20,
 	})
 
@@ -851,6 +857,7 @@ func TestFlushPostgresStuckClientDoesNotHoldIdleLink(t *testing.T) {
 	assert.Equal(t, 1, backendLink.calls.release)
 	assert.Zero(t, backendLink.calls.forceClose)
 	assert.False(t, s.releasingIdleLink.Load())
+	assert.Equal(t, []int64{1}, metrics.countValues("datadog."+MetricIdleLinkReleaseBesideWrite, s.MetricTags()))
 }
 
 // TestFlushPostgresStuckClientWriteFailureAfterRelease checks that when a blocked

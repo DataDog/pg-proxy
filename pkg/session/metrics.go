@@ -19,15 +19,16 @@ import (
 const (
 	pgSeverityFatal = "FATAL"
 
-	MetricBufferFlushCount        = "pg_proxy.sessions.buffer_flush.count"
-	MetricFlushPostgresLatency    = pgproxy.MetricFlushPostgresLatency
-	MetricIdleLinkReleaseLatency  = pgproxy.MetricIdleLinkReleaseLatency
-	MetricClientMessageBodyLength = "pg_proxy.client_messages.body_length_bytes"
-	MetricMessages                = "pg_proxy.messages"
-	MetricMessageLatency          = pgproxy.MetricMessageLatency
-	MetricQueries                 = "pg_proxy.messages.queries"
-	MetricQueryParseLatency       = pgproxy.MetricQueryParseLatency
-	MetricLoadSheddingRejected    = "pg_proxy.messages.load_shedding_rejected"
+	MetricBufferFlushCount           = "pg_proxy.sessions.buffer_flush.count"
+	MetricFlushPostgresLatency       = pgproxy.MetricFlushPostgresLatency
+	MetricIdleLinkReleaseLatency     = pgproxy.MetricIdleLinkReleaseLatency
+	MetricIdleLinkReleaseBesideWrite = "pg_proxy.sessions.idle_link_release.beside_write"
+	MetricClientMessageBodyLength    = "pg_proxy.client_messages.body_length_bytes"
+	MetricMessages                   = "pg_proxy.messages"
+	MetricMessageLatency             = pgproxy.MetricMessageLatency
+	MetricQueries                    = "pg_proxy.messages.queries"
+	MetricQueryParseLatency          = pgproxy.MetricQueryParseLatency
+	MetricLoadSheddingRejected       = "pg_proxy.messages.load_shedding_rejected"
 )
 
 // MetricTags carries both the tags sent to DogStatsD and a stable lookup key.
@@ -182,6 +183,16 @@ func (s *Session) recordIdleLinkReleaseFinished(elapsed time.Duration) {
 	s.metrics.Distribution(
 		MetricIdleLinkReleaseLatency,
 		float64(elapsed.Microseconds()),
+		s.obsVals.baseMetricTags(),
+	)
+}
+
+// recordIdleLinkReleasedBesideWrite counts releases that started because the
+// final client write of a reply ran past idleReleaseGrace.
+func (s *Session) recordIdleLinkReleasedBesideWrite() {
+	s.metrics.Count(
+		MetricIdleLinkReleaseBesideWrite,
+		1,
 		s.obsVals.baseMetricTags(),
 	)
 }
