@@ -97,6 +97,9 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
+| `proxy.max_sessions` | `100000` | Maximum established client sessions across all users in this proxy process. |
+| `proxy.default_max_user_sessions` | `10000` | Default established-session cap for each client user. |
+| `users[].max_sessions` | Inherit the per-user default | Override for one authenticated user across logical databases. |
 | `proxy.shutdown_grace_period` | `30s` | Maximum session and pool cleanup time after SIGINT or SIGTERM; a positive duration such as `30s` or `2m`. |
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
@@ -106,7 +109,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in sampled traces. SQL text is recorded regardless. |
 | `-log-level` | `INFO` | Minimum severity for proxy logs on stderr and through OTLP. Use `DEBUG` for local diagnostics. |
 
-The client-session cap is currently fixed at 100. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
+Omitted or zero session limits use the defaults above; negative limits are rejected. Session limits do not change backend pool sizes. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
 
 ### Backend connection settings
 

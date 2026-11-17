@@ -99,3 +99,17 @@ duration string, such as `30s` or `2m`, to bound session and pool cleanup after
 and overflowing durations fail at startup. Give the service manager a longer
 stop timeout to allow cleanup and telemetry flushing. This setting belongs to
 `Proxy`; applications embedding `ProxySettings` keep their own shutdown policy.
+
+## Standalone session admission
+
+The binary defaults to 100,000 sessions per process and 10,000 per client user.
+Set `proxy.max_sessions` and `proxy.default_max_user_sessions` to change these
+caps. Set `users[].max_sessions` to override one authenticated user's cap across
+logical databases. JSON uses `maxSessions` and `defaultMaxUserSessions` under
+`proxy`, and `maxSessions` under each user. Omitted or zero values use defaults;
+negative values fail at startup. In loopback trust mode, the backend username
+is the per-user key. These limits do not change `databases[].max_conns`.
+
+This raises the old fixed limit of 100. To keep it, set both proxy limits to
+`100`. Older binaries reject the new proxy fields and nonzero per-user limits;
+remove them before rolling back to an older binary.

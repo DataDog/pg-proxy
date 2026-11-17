@@ -104,6 +104,10 @@ type Proxy struct {
 	PasswordAuthEnabled bool   `json:"passwordAuthEnabled,omitempty" yaml:"password_auth_enabled,omitempty"`
 	TLSCertFile         string `json:"tlsCertFile,omitempty" yaml:"tls_cert_file,omitempty"`
 	TLSKeyFile          string `json:"tlsKeyFile,omitempty" yaml:"tls_key_file,omitempty"`
+	// MaxSessions and DefaultMaxUserSessions control standalone admission.
+	// Zero selects command defaults; negative limits are rejected.
+	MaxSessions            int32 `json:"maxSessions,omitempty" yaml:"max_sessions,omitempty"`
+	DefaultMaxUserSessions int32 `json:"defaultMaxUserSessions,omitempty" yaml:"default_max_user_sessions,omitempty"`
 	// ShutdownGracePeriod bounds standalone session and pool cleanup after a stop.
 	// Empty uses the command default; nonempty values are positive Go durations.
 	ShutdownGracePeriod string `json:"shutdownGracePeriod,omitempty" yaml:"shutdown_grace_period,omitempty"`
