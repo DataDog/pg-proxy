@@ -25,6 +25,14 @@ type Span interface {
 	Finish(err error)
 }
 
+// SamplingReporter is optionally implemented by spans that know whether their
+// trace will be kept. The proxy skips building costly tag values, such as Bind
+// parameters, for traces that report false. Spans that do not implement it are
+// treated as kept.
+type SamplingReporter interface {
+	Sampled() bool
+}
+
 // NoopTracer preserves protocol trace lifecycles without recording or exporting.
 type NoopTracer struct{}
 
@@ -37,3 +45,4 @@ type noopSpan struct{}
 func (noopSpan) StartChild(string) Span { return noopSpan{} }
 func (noopSpan) SetTag(string, any)     {}
 func (noopSpan) Finish(error)           {}
+func (noopSpan) Sampled() bool          { return false }

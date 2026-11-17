@@ -61,7 +61,7 @@ type RuntimeConfig struct {
 	RandomInt         func(int) int
 	Mirroring         session.Mirroring
 	Metrics           session.Metrics
-	// EnableTraceParameters includes raw Bind values in all sessions' query traces.
+	// EnableTraceParameters includes raw Bind values in all sessions' sampled query traces.
 	// The zero value disables parameter capture. SQL text is unaffected.
 	EnableTraceParameters bool
 }

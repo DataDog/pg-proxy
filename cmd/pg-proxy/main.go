@@ -35,20 +35,23 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
+const defaultShutdownGracePeriod = 30 * time.Second
+
 // config holds validated startup settings for the OSS binary.
 type config struct {
-	telemetry         telemetryConfig
-	telemetryWarnings []string
-	routingWarnings   []string
-	listenAddress     string
-	messageBufferSize int
-	tlsConfig         *tls.Config
-	requireTLS        bool
-	authenticate      authenticationHook
-	databases         map[string]*pgxpool.Config
-	clusters          map[string]string   // Cluster name to primary database name.
-	replicas          map[string][]string // Cluster name to replica database names.
-	logicalDatabases  map[string]topology.LogicalDatabase
+	telemetry           telemetryConfig
+	telemetryWarnings   []string
+	routingWarnings     []string
+	listenAddress       string
+	messageBufferSize   int
+	shutdownGracePeriod time.Duration
+	tlsConfig           *tls.Config
+	requireTLS          bool
+	authenticate        authenticationHook
+	databases           map[string]*pgxpool.Config
+	clusters            map[string]string   // Cluster name to primary database name.
+	replicas            map[string][]string // Cluster name to replica database names.
+	logicalDatabases    map[string]topology.LogicalDatabase
 }
 
 func main() {
@@ -70,6 +73,9 @@ func main() {
 func (c config) validate() error {
 	if err := c.validateListener(c.authenticate != nil); err != nil {
 		return err
+	}
+	if c.shutdownGracePeriod < 0 {
+		return errors.New("proxy.shutdown_grace_period must be positive")
 	}
 	if c.messageBufferSize < 0 {
 		return errors.New("postgres_msg_buffer_size must not be negative")
@@ -164,7 +170,11 @@ func run(ctx context.Context, cfg config) error {
 		return err
 	}
 	pgproxy.Logger().Info("proxy ready", "address", proxy.server.Addr(), "clusters", len(cfg.clusters), "client_authentication", cfg.authenticate != nil)
-	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, 5*time.Second)
+	grace := cfg.shutdownGracePeriod
+	if grace == 0 {
+		grace = defaultShutdownGracePeriod
+	}
+	return serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, grace)
 }
 
 type localProxy struct {

@@ -83,6 +83,12 @@ without obfuscation. The library also defaults to capture disabled; embedders ca
 set `server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTraceParameters`
 when constructing sessions directly) to `true` to enable it.
 
+Values are recorded only when the root span's head sampling decision keeps the
+trace: a Datadog sampling priority above zero, or an OTel span that is recording
+and sampled. Traces kept later, for example because they contain errors, omit
+`db.parameters`. Tracers that do not implement `pgproxy.SamplingReporter` are
+treated as keeping every trace.
+
 Disabling capture skips parameter formatting and trace tagging; it does not change
 the values forwarded to PostgreSQL. SQL text in `db.statement`, including literal
 values, and error messages are unaffected. This option is not SQL obfuscation or
