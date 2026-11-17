@@ -13,7 +13,8 @@ The six sections are `databases`, `clusters`, `logical_databases`, `proxy`,
 the struct tags. Serialization includes empty sections, except that nil mirroring
 is omitted. Readers still accept documents with missing sections. This package defines the model. The
 [OSS binary](../../README.md#oss-binary) reads a limited subset
-for direct primary backends; embedding applications can support other sections.
+for direct backends, including replicas and read clusters; embedding
+applications can support other sections.
 
 ## Credentials
 
@@ -55,7 +56,8 @@ two 32-byte keys. JSON calls the field `scramSHA256`.
 A user may supply either a password or a verifier, never both.
 
 The OSS binary uses `-config` for direct backend credentials, connection
-and pool settings, primary/logical routes, and loopback listener settings,
+and pool settings, primary, replica, and logical routes, read clusters, and
+loopback listener settings,
 including optional or required client TLS through `tls_cert_file`, `tls_key_file`,
 and `tls_required`. See [client TLS](../../docs/client-connections.md#standalone-tls).
 Set `password_auth_enabled: true` (JSON: `passwordAuthEnabled`) with required TLS

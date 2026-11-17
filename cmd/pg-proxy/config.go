@@ -292,20 +292,31 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		}
 	}
 	cfg.clusters = make(map[string]string, len(shared.Clusters))
+	cfg.replicas = make(map[string][]string)
 	for _, name := range slices.Sorted(maps.Keys(shared.Clusters)) {
 		cluster := shared.Clusters[name]
-		if len(cluster.Replicas) > 0 {
-			issues = append(issues, fmt.Errorf("clusters[%q].replicas: replica routing is not implemented by the OSS binary", name))
-		}
 		cfg.clusters[name] = cluster.Primary
+		if len(cluster.Replicas) > 0 {
+			cfg.replicas[name] = slices.Clone(cluster.Replicas)
+		}
 	}
 	cfg.logicalDatabases = make(map[string]topology.LogicalDatabase, len(shared.LogicalDatabases))
 	for _, name := range slices.Sorted(maps.Keys(shared.LogicalDatabases)) {
 		logical := shared.LogicalDatabases[name]
+		database := topology.LogicalDatabase{Cluster: logical.Cluster}
 		if len(logical.ReadClusters) > 0 {
-			issues = append(issues, fmt.Errorf("logical_databases[%q].read_clusters: read-cluster routing is not implemented by the OSS binary", name))
+			database.ReadClusters = make(topology.ReadClusters, len(logical.ReadClusters))
+			for cluster, read := range logical.ReadClusters {
+				// An empty entry (`reports: {}` or `reports: null`) uses the default weight.
+				var weight *uint8
+				if read != nil {
+					weight = read.Weight
+				}
+				database.ReadClusters[cluster] = &topology.ReadCluster{Weight: topology.NormalizedWeight(weight)}
+			}
+
 		}
-		cfg.logicalDatabases[name] = topology.LogicalDatabase{Cluster: logical.Cluster}
+		cfg.logicalDatabases[name] = database
 	}
 	cfg.listenAddress = shared.Proxy.ListenerAddress
 	if cfg.listenAddress == "" {
@@ -326,6 +337,8 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if err := errors.Join(issues...); err != nil {
 		return config{}, err
 	}
+	cfg.routingWarnings = routingWarningsFor(cfg)
+
 	return cfg, nil
 }
 

@@ -45,6 +45,7 @@ type config struct {
 	validateOnly        bool
 	telemetry           telemetryConfig
 	telemetryWarnings   []string
+	routingWarnings     []string
 	listenAddress       string
 	messageBufferSize   int
 	shutdownGracePeriod time.Duration
@@ -53,7 +54,8 @@ type config struct {
 	requireTLS          bool
 	authenticate        authenticationHook
 	databases           map[string]*pgxpool.Config
-	clusters            map[string]string
+	clusters            map[string]string   // Cluster name to primary database name.
+	replicas            map[string][]string // Cluster name to replica database names.
 	logicalDatabases    map[string]topology.LogicalDatabase
 }
 
@@ -67,6 +69,9 @@ func main() {
 		os.Exit(1)
 	}
 	if cfg.validateOnly {
+		for _, warning := range append(cfg.telemetryWarnings, cfg.routingWarnings...) {
+			fmt.Fprintln(os.Stderr, "warning:", warning)
+		}
 		fmt.Fprintln(os.Stdout, "configuration valid (database connectivity and listener availability were not checked)")
 		return
 	}
@@ -123,10 +128,32 @@ func (c config) validateSettings() error {
 		}
 		usedDatabases[primary] = true
 	}
+	for _, name := range slices.Sorted(maps.Keys(c.replicas)) {
+		seen := make(map[string]bool)
+		for i, replica := range c.replicas[name] {
+			if _, exists := c.databases[replica]; !exists {
+				issues = append(issues, fmt.Errorf("clusters[%q].replicas[%d]: each cluster replica must refer to a configured database", name, i))
+			}
+			if replica == c.clusters[name] || seen[replica] {
+				issues = append(issues, fmt.Errorf("clusters[%q].replicas[%d]: cluster replicas must be unique and differ from the cluster primary", name, i))
+			}
+			seen[replica] = true
+			usedDatabases[replica] = true
+		}
+	}
 	for _, name := range slices.Sorted(maps.Keys(c.logicalDatabases)) {
 		logical := c.logicalDatabases[name]
 		if _, exists := c.clusters[logical.Cluster]; name == "" || !exists {
 			issues = append(issues, fmt.Errorf("logical_databases[%q].cluster: each logical database must have a name and refer to a configured cluster", name))
+		}
+		for _, cluster := range slices.Sorted(maps.Keys(logical.ReadClusters)) {
+			read := logical.ReadClusters[cluster]
+			if _, exists := c.clusters[cluster]; !exists {
+				issues = append(issues, fmt.Errorf("logical_databases[%q].read_clusters[%q]: each read cluster must refer to a configured cluster", name, cluster))
+			}
+			if read == nil {
+				issues = append(issues, fmt.Errorf("logical_databases[%q].read_clusters[%q]: each read cluster must have routing settings", name, cluster))
+			}
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.databases)) {
@@ -135,6 +162,44 @@ func (c config) validateSettings() error {
 		}
 	}
 	return errors.Join(issues...)
+}
+
+// routingWarningsFor reports valid but likely wrong routing settings. Replicas
+// and read clusters can intentionally use other databases or roles, so these
+// are warnings, not errors. Messages contain only names from the file.
+func routingWarningsFor(c config) []string {
+	var warnings []string
+	// mismatch compares database with reference. subject describes database.
+	mismatch := func(subject, database, reference string) {
+		got, want := c.databases[database].ConnConfig, c.databases[reference].ConnConfig
+		if got.Database != want.Database {
+			warnings = append(warnings, fmt.Sprintf("%s uses dbname %q, but database %q uses %q", subject, got.Database, reference, want.Database))
+		}
+		if got.User != want.User {
+			warnings = append(warnings, fmt.Sprintf("%s uses a different username than database %q", subject, reference))
+		}
+	}
+	for _, cluster := range slices.Sorted(maps.Keys(c.replicas)) {
+		for _, replica := range c.replicas[cluster] {
+			mismatch(fmt.Sprintf("replica %q of cluster %q", replica, cluster), replica, c.clusters[cluster])
+		}
+	}
+	for _, name := range slices.Sorted(maps.Keys(c.logicalDatabases)) {
+		logical := c.logicalDatabases[name]
+		if len(logical.ReadClusters) == 0 {
+			continue
+		}
+		for _, cluster := range slices.Sorted(maps.Keys(logical.ReadClusters)) {
+			if cluster != logical.Cluster {
+				primary := c.clusters[cluster]
+				mismatch(fmt.Sprintf("database %q, the primary of read cluster %q for logical database %q,", primary, cluster, name), primary, c.clusters[logical.Cluster])
+			}
+		}
+		if topology.TotalWeight(logical.ReadClusters) == 0 {
+			warnings = append(warnings, fmt.Sprintf("logical database %q: all read_clusters weights are 0, so reads use cluster %q, including its replicas", name, logical.Cluster))
+		}
+	}
+	return warnings
 }
 
 func run(ctx context.Context, cfg config) error {
@@ -179,19 +244,18 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	}()
 	for _, name := range slices.Sorted(maps.Keys(cfg.clusters)) {
 		settings := cfg.databases[cfg.clusters[name]]
-		pgxPool, err := pgxpool.NewWithConfig(ctx, settings)
+		primary, parameters, err := openPool(ctx, settings, fmt.Sprintf("backend %q", name))
 		if err != nil {
-			return nil, errors.New("could not create backend pool")
+			return nil, err
 		}
-		primary := pool.NewPGXPool(pgxPool, pool.PGXHooks{})
-		parameters, err := backend.RetrieveParameterStatuses(primary, name)
+		replicas, err := newReplicaPools(ctx, cfg, name)
 		if err != nil {
 			primary.Close()
-			return nil, fmt.Errorf("connect to backend %q: %w", name, err)
+			return nil, err
 		}
 		inventory.backends[name] = &clusterBackend{backend.New(backend.Config{
 			ClusterName: name, PrimaryDatabaseName: settings.ConnConfig.Database,
-			Primary: primary, ParameterStatuses: parameters,
+			Primary: primary, Replicas: replicas, ParameterStatuses: parameters,
 		})}
 	}
 	users := make(map[string]string, len(cfg.logicalDatabases))
@@ -229,6 +293,44 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 	}
 	ready = true
 	return &localProxy{server: proxy, sessions: sessions, inventory: inventory}, nil
+}
+
+// openPool creates a pgx pool and checks that it accepts a connection. It
+// returns the backend parameter statuses from that check. The label names the
+// pool in errors. Errors omit the pgx cause of a failed pool creation because
+// it can contain connection settings.
+func openPool(ctx context.Context, settings *pgxpool.Config, label string) (*pool.PGXPool, map[string]string, error) {
+	pgxPool, err := pgxpool.NewWithConfig(ctx, settings)
+	if err != nil {
+		return nil, nil, fmt.Errorf("could not create pool for %s", label)
+	}
+	opened := pool.NewPGXPool(pgxPool, pool.PGXHooks{})
+	parameters, err := backend.RetrieveParameterStatuses(opened, label)
+	if err != nil {
+		opened.Close()
+		return nil, nil, fmt.Errorf("connect to %s: %w", label, err)
+	}
+	return opened, parameters, nil
+}
+
+// newReplicaPools opens one pgx pool per replica database of cluster. Replicas
+// are static: there is no health worker. A failed replica checkout falls back to
+// the cluster primary at runtime, but each replica must accept a connection at
+// startup so that a configuration error stops the proxy. Clients receive the
+// primary's parameter statuses, so the replica's statuses are not kept.
+func newReplicaPools(ctx context.Context, cfg config, cluster string) ([]pool.Pool, error) {
+	var replicas []pool.Pool
+	for _, name := range cfg.replicas[cluster] {
+		replica, _, err := openPool(ctx, cfg.databases[name], fmt.Sprintf("replica %q of backend %q", name, cluster))
+		if err != nil {
+			for _, opened := range replicas {
+				opened.Close()
+			}
+			return nil, err
+		}
+		replicas = append(replicas, replica)
+	}
+	return replicas, nil
 }
 
 // sessionLimitParams also applies defaults for callers constructing config in Go.
@@ -302,6 +404,8 @@ type staticInventory struct {
 	backends         map[string]*clusterBackend
 }
 
+// GetLogicalDatabase returns the static routing view. Read clusters were
+// validated against the configured clusters at startup.
 func (i *staticInventory) GetLogicalDatabase(name string) (topology.LogicalDatabase, bool) {
 	database, exists := i.logicalDatabases[name]
 	return database, exists

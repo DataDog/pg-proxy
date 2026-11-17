@@ -114,11 +114,17 @@ func TestValidateConfigReportsAllLocalIssues(t *testing.T) {
 clusters:
   orders:
     primary: primary
+    replicas:
+      - missing-replica
+      - primary
   broken:
     primary: missing
 logical_databases:
   app:
     cluster: absent
+    read_clusters:
+      missing-read:
+        weight: 1
 proxy:
   listener_address: invalid-address
   max_sessions: -1
@@ -140,6 +146,8 @@ proxy:
 		"databases[0]: database min_conns must not be negative",
 		"databases[1]: database host is required",
 		`clusters["broken"].primary`, `logical_databases["app"].cluster`,
+		`clusters["orders"].replicas[0]`, `clusters["orders"].replicas[1]`,
+		`logical_databases["app"].read_clusters["missing-read"]`,
 		"proxy.listener_address", "proxy.max_sessions", "proxy.default_max_user_sessions",
 		"proxy.shutdown_grace_period", "postgres_msg_buffer_size", "proxy.tls_cert_file", "proxy.tls_key_file",
 	}
