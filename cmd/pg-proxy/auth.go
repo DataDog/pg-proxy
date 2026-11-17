@@ -24,8 +24,8 @@ type authenticationHook = func(context.Context, listener.StartupRequest, listene
 func passwordAuthentication(shared pgconfig.Config) (authenticationHook, error) {
 	users := make([]auth.StaticUser, 0, len(shared.Users))
 	for _, user := range shared.Users {
-		if user.Email != "" || user.Group != "" || len(user.PGRoles) != 0 || user.MaxSessions != 0 {
-			return nil, errors.New("password authentication supports only static_credentials and databases in each user")
+		if user.Email != "" || user.Group != "" || len(user.PGRoles) != 0 {
+			return nil, errors.New("password authentication supports only static_credentials, databases, and max_sessions in each user")
 		}
 		credentials := user.StaticCredentials
 		if credentials.Username == "" || len(credentials.Username) > 256 || strings.ContainsRune(credentials.Username, 0) || (credentials.Password == "") == (credentials.SCRAMSHA256 == "") {

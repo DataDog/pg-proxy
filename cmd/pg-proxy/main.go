@@ -35,7 +35,11 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
-const defaultShutdownGracePeriod = 30 * time.Second
+const (
+	defaultShutdownGracePeriod       = 30 * time.Second
+	defaultMaxSessions         int32 = 100_000
+	defaultMaxUserSessions     int32 = 10_000
+)
 
 // config holds validated startup settings for the OSS binary.
 type config struct {
@@ -45,6 +49,7 @@ type config struct {
 	listenAddress       string
 	messageBufferSize   int
 	shutdownGracePeriod time.Duration
+	sessionLimits       limiter.Params
 	tlsConfig           *tls.Config
 	requireTLS          bool
 	authenticate        authenticationHook
@@ -73,6 +78,17 @@ func main() {
 func (c config) validate() error {
 	if err := c.validateListener(c.authenticate != nil); err != nil {
 		return err
+	}
+	if c.sessionLimits.GlobalLimit < 0 {
+		return errors.New("proxy.max_sessions must not be negative")
+	}
+	if c.sessionLimits.DefaultServiceMax < 0 {
+		return errors.New("proxy.default_max_user_sessions must not be negative")
+	}
+	for _, quota := range c.sessionLimits.Quotas {
+		if quota.Max < 0 {
+			return errors.New("users[].max_sessions must not be negative")
+		}
 	}
 	if c.shutdownGracePeriod < 0 {
 		return errors.New("proxy.shutdown_grace_period must be positive")
@@ -234,12 +250,9 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 		AuthenticationMessageLimit: 16 << 10,
 		StartupTimeout:             10 * time.Second,
 		MaxPendingConnections:      100,
-		// TODO: configure session admission limits independently of backend pool sizes.
-		Admission: limiter.New(limiter.Params{
-			GlobalLimit: 100, DefaultServiceMax: 100,
-		}),
-		Authenticate: authenticate,
-		Sessions:     sessions,
+		Admission:                  limiter.New(cfg.sessionLimitParams()),
+		Authenticate:               authenticate,
+		Sessions:                   sessions,
 		Runtime: server.RuntimeConfig{
 			Inventory:             inventory,
 			EnableTraceParameters: cfg.telemetry.CaptureBindParameters,
@@ -294,6 +307,18 @@ func newReplicaPools(ctx context.Context, cfg config, cluster string) ([]pool.Po
 		replicas = append(replicas, replica)
 	}
 	return replicas, nil
+}
+
+// sessionLimitParams also applies defaults for callers constructing config in Go.
+func (c config) sessionLimitParams() limiter.Params {
+	params := c.sessionLimits
+	if params.GlobalLimit == 0 {
+		params.GlobalLimit = defaultMaxSessions
+	}
+	if params.DefaultServiceMax == 0 {
+		params.DefaultServiceMax = defaultMaxUserSessions
+	}
+	return params
 }
 
 // Explicitly close the socket to wake Accept, then drain sessions before pools.

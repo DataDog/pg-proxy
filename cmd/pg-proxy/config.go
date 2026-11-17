@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
+	"github.com/DataDog/pg-proxy/pkg/limiter"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
@@ -232,6 +233,19 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if err := shared.ValidateCredentials(); err != nil {
 		return config{}, err
 	}
+	cfg.sessionLimits = limiter.Params{
+		GlobalLimit:       shared.Proxy.MaxSessions,
+		DefaultServiceMax: shared.Proxy.DefaultMaxUserSessions,
+	}
+	for _, user := range shared.Users {
+		if user.MaxSessions < 0 {
+			return config{}, errors.New("users[].max_sessions must not be negative")
+		}
+		if user.MaxSessions > 0 {
+			cfg.sessionLimits.Quotas = append(cfg.sessionLimits.Quotas, limiter.ServiceQuota{Name: user.StaticCredentials.Username, Max: user.MaxSessions})
+		}
+	}
+	cfg.sessionLimits = cfg.sessionLimitParams()
 	cfg.shutdownGracePeriod = defaultShutdownGracePeriod
 	if shared.Proxy.ShutdownGracePeriod != "" {
 		grace, err := time.ParseDuration(shared.Proxy.ShutdownGracePeriod)
