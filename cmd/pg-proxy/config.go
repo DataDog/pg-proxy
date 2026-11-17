@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -229,6 +230,14 @@ func exporterFromEnv(key string) (string, error) {
 func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if err := shared.ValidateCredentials(); err != nil {
 		return config{}, err
+	}
+	cfg.shutdownGracePeriod = defaultShutdownGracePeriod
+	if shared.Proxy.ShutdownGracePeriod != "" {
+		grace, err := time.ParseDuration(shared.Proxy.ShutdownGracePeriod)
+		if err != nil || grace <= 0 {
+			return config{}, errors.New("proxy.shutdown_grace_period must be a positive duration such as 30s or 2m")
+		}
+		cfg.shutdownGracePeriod = grace
 	}
 	var err error
 	cfg.tlsConfig, err = clientTLSConfig(shared.Proxy)

@@ -54,6 +54,7 @@ proxy:
   listener_address: "0.0.0.0:15432"
   password_auth_enabled: true
   tls_required: true
+  shutdown_grace_period: 30s
   tls_cert_file: /etc/pg-proxy/server.crt
   tls_key_file: /etc/pg-proxy/server.key
 users:
@@ -131,7 +132,9 @@ PGPASSFILE=/path/to/monitor.pgpass \
 
 ## 7. Restart and roll out changes
 
-All configuration, credential, and certificate changes need a restart. On `SIGTERM` or `SIGINT`, the proxy stops accepting connections, drains sessions at transaction boundaries, and waits up to five seconds before exiting. A transaction still open after five seconds is cut off.
+All configuration, credential, and certificate changes need a restart. On `SIGTERM` or `SIGINT`, the proxy stops accepting connections, drains sessions at transaction boundaries, and waits for sessions and pools to close for up to `proxy.shutdown_grace_period` (30 seconds in the example above). If cleanup exceeds that deadline, the process exits with an error and unfinished work is cut off. Omitted or empty values keep the 30-second default.
+
+Set the grace period to cover normal transaction durations. Give your service manager or container a longer stop timeout to allow cleanup and telemetry flushing; for Kubernetes, set `terminationGracePeriodSeconds` above the proxy grace period and allow time for any pre-stop hooks.
 
 To restart without downtime, run at least two instances behind a TCP load balancer and restart them one at a time:
 

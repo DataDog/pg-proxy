@@ -84,7 +84,7 @@ go test -race -tags=integration -count=1 ./...
 
 ## 5. Stop the local proxy
 
-Close test clients and press `Ctrl+C` in the proxy terminal. SIGINT and SIGTERM stop acceptance and allow up to five seconds for sessions and pools to close. An unfinished transaction can exhaust that deadline and cause a nonzero exit. Startup or runtime errors also cause a nonzero exit. Query cancellation is supported.
+Close test clients and press `Ctrl+C` in the proxy terminal. SIGINT and SIGTERM stop acceptance and allow up to `proxy.shutdown_grace_period` for sessions and pools to close (30 seconds by default). An unfinished transaction can exhaust that deadline and cause a nonzero exit. Startup or runtime errors also cause a nonzero exit. Query cancellation is supported.
 
 For Datadog and OTel configuration, see [Telemetry configuration](../../reference/observability/).
 
@@ -97,6 +97,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
+| `proxy.shutdown_grace_period` | `30s` | Maximum session and pool cleanup time after SIGINT or SIGTERM; a positive duration such as `30s` or `2m`. |
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |

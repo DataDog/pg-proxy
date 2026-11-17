@@ -90,3 +90,12 @@ Follow the [configuration extension guide](../../docs/extending-configuration.md
 to change a nested field for your application, add settings, or contribute a
 shared library field. The guide follows an application that supplies database
 passwords through environment variables and converts them for the library.
+
+## Standalone shutdown
+
+Set `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) to a positive Go
+duration string, such as `30s` or `2m`, to bound session and pool cleanup after
+`SIGINT` or `SIGTERM`. Omitted or empty values use `30s`; zero, negative, invalid,
+and overflowing durations fail at startup. Give the service manager a longer
+stop timeout to allow cleanup and telemetry flushing. This setting belongs to
+`Proxy`; applications embedding `ProxySettings` keep their own shutdown policy.

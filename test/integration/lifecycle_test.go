@@ -79,7 +79,7 @@ func TestShutdownWithIdleClients(t *testing.T) {
 }
 
 // TestShutdownWithOpenTransaction verifies an unfinished transaction holds
-// shutdown until the five-second deadline, after which the process exits
+// shutdown until the configured one-second deadline, after which the process exits
 // with an error.
 func TestShutdownWithOpenTransaction(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -89,6 +89,7 @@ func TestShutdownWithOpenTransaction(t *testing.T) {
 		Databases:        []pgconfig.Database{backend.Database("primary", "postgres")},
 		Clusters:         map[string]pgconfig.Cluster{"local": {Primary: "primary"}},
 		LogicalDatabases: map[string]pgconfig.LogicalDatabase{dbDefault: {Cluster: "local"}},
+		Proxy:            pgconfig.Proxy{ShutdownGracePeriod: "1s"},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() {
@@ -111,5 +112,5 @@ func TestShutdownWithOpenTransaction(t *testing.T) {
 	// Stop kills the process after 15 seconds, which also yields an ExitError
 	// (exit code -1). Exit code 1 shows the proxy exited on its own deadline.
 	require.Equal(t, 1, exitErr.ExitCode(), "shutdown should exit on its own deadline, not be killed by the harness")
-	require.GreaterOrEqual(t, time.Since(start), 4*time.Second, "shutdown should wait for the session")
+	require.GreaterOrEqual(t, time.Since(start), time.Second, "shutdown should wait for the session")
 }

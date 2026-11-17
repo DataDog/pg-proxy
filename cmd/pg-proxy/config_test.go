@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
@@ -348,5 +350,46 @@ func TestLogLevelSelection(t *testing.T) {
 	for _, value := range []string{"", "verbose", "42"} {
 		_, err := parseConfig([]string{"-config", path, "-log-level", value})
 		require.ErrorContains(t, err, "log-level")
+	}
+}
+
+func TestShutdownGracePeriodConfig(t *testing.T) {
+	for _, tc := range []struct {
+		value   string
+		want    time.Duration
+		invalid bool
+	}{
+		{value: "", want: 30 * time.Second},
+		{value: "30s", want: 30 * time.Second},
+		{value: "2m", want: 2 * time.Minute},
+		{value: "250ms", want: 250 * time.Millisecond},
+		{value: "0s", invalid: true},
+		{value: "-1s", invalid: true},
+		{value: "30", invalid: true},
+		{value: "invalid-secret-value", invalid: true},
+		{value: "999999999999999999h", invalid: true},
+	} {
+		for _, format := range []string{"json", "yaml"} {
+			t.Run(format+"/"+tc.value, func(t *testing.T) {
+				shared := ossConfig()
+				shared.Proxy.ShutdownGracePeriod = tc.value
+				var data []byte
+				var err error
+				if format == "json" {
+					data, err = json.Marshal(shared)
+				} else {
+					data, err = yaml.Marshal(shared)
+				}
+				require.NoError(t, err)
+				cfg, err := parseConfig([]string{"-config", writeConfig(t, format, string(data)), "-telemetry", "none"})
+				if tc.invalid {
+					require.ErrorContains(t, err, "proxy.shutdown_grace_period must be a positive duration")
+					require.NotContains(t, err.Error(), "invalid-secret-value")
+					return
+				}
+				require.NoError(t, err)
+				require.Equal(t, tc.want, cfg.shutdownGracePeriod)
+			})
+		}
 	}
 }
