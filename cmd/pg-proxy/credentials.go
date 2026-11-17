@@ -60,9 +60,14 @@ func readConfigYAML(r io.Reader) (pgconfig.Config, error) {
 	return cfg.resolve()
 }
 
+// credentialResolutionError marks a decoded document whose local credentials
+// could not all be resolved. Other independent settings can still be checked.
+type credentialResolutionError struct{ error }
+
 // resolve reads every credential reference once, at startup. Errors name the
 // setting but never the referenced path, variable, or value.
 func (c fileConfig) resolve() (pgconfig.Config, error) {
+	var issues []error
 	result := pgconfig.Config{
 		Clusters:         c.Clusters,
 		LogicalDatabases: c.LogicalDatabases,
@@ -75,7 +80,7 @@ func (c fileConfig) resolve() (pgconfig.Config, error) {
 	for i, database := range c.Databases {
 		password, err := resolveSecret("password", database.Password, database.PasswordFile, database.PasswordEnv)
 		if err != nil {
-			return pgconfig.Config{}, fmt.Errorf("database %d: %w", i, err)
+			issues = append(issues, fmt.Errorf("database %d: %w", i, err))
 		}
 		result.Databases[i] = database.Database
 		result.Databases[i].Password = password
@@ -87,18 +92,19 @@ func (c fileConfig) resolve() (pgconfig.Config, error) {
 		credentials := user.StaticCredentials
 		password, err := resolveSecret("password", credentials.Password, credentials.PasswordFile, credentials.PasswordEnv)
 		if err != nil {
-			return pgconfig.Config{}, fmt.Errorf("user %d: %w", i, err)
+			issues = append(issues, fmt.Errorf("user %d: %w", i, err))
 		}
 		verifier, err := resolveSecret("scram_sha_256", credentials.SCRAMSHA256, credentials.SCRAMSHA256File, credentials.SCRAMSHA256Env)
 		if err != nil {
-			return pgconfig.Config{}, fmt.Errorf("user %d: %w", i, err)
+			issues = append(issues, fmt.Errorf("user %d: %w", i, err))
 		}
 		result.Users[i] = pgconfig.User{UserSettings: user.UserSettings, StaticCredentials: credentials.StaticCredentials}
 		result.Users[i].StaticCredentials.Password = password
 		result.Users[i].StaticCredentials.SCRAMSHA256 = verifier
 	}
-	if err := result.ValidateCredentials(); err != nil {
-		return pgconfig.Config{}, err
+	issues = append(issues, result.ValidateCredentials())
+	if err := errors.Join(issues...); err != nil {
+		return result, credentialResolutionError{err}
 	}
 	return result, nil
 }

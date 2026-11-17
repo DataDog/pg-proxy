@@ -69,11 +69,26 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 		}
 		return fmt.Errorf("configuration %s at line %d, column %d (%s): %s", strings.ToUpper(format), node.Line, node.Column, path, message)
 	}
+	var issues []error
 	switch typ.Kind() {
 	case reflect.Struct:
 		// Custom scalar types such as time.Time own their decoding.
 		if node.Kind != yaml.MappingNode {
-			if format == "yaml" && node.Decode(reflect.New(typ).Interface()) != nil {
+			target := reflect.New(typ).Interface()
+			var err error
+			if format == "yaml" {
+				err = node.Decode(target)
+			} else {
+				if node.Kind != yaml.ScalarNode {
+					return location("expected a mapping or valid scalar for this field")
+				}
+				data := []byte(node.Value)
+				if node.Tag == "!!str" {
+					data, _ = json.Marshal(node.Value)
+				}
+				err = json.Unmarshal(data, target)
+			}
+			if err != nil {
 				return location("expected a mapping or valid scalar for this field")
 			}
 			return nil
@@ -83,7 +98,8 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 		for i := 0; i < len(node.Content); i += 2 {
 			key, value := node.Content[i], node.Content[i+1]
 			if format == "yaml" && seen[key.Value] {
-				return fmt.Errorf("configuration %s at line %d, column %d (%s): duplicate field %q", strings.ToUpper(format), key.Line, key.Column, path, key.Value)
+				issues = append(issues, fmt.Errorf("configuration %s at line %d, column %d (%s): duplicate field %q", strings.ToUpper(format), key.Line, key.Column, path, key.Value))
+				continue
 			}
 			seen[key.Value] = true
 			if key.Tag == "!!merge" {
@@ -109,10 +125,11 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 					names = append(names, name)
 				}
 				slices.Sort(names)
-				return fmt.Errorf("configuration %s at line %d, column %d (%s): unknown field; allowed fields: %s", strings.ToUpper(format), key.Line, key.Column, childPath, strings.Join(names, ", "))
+				issues = append(issues, fmt.Errorf("configuration %s at line %d, column %d (%s): unknown field; allowed fields: %s", strings.ToUpper(format), key.Line, key.Column, childPath, strings.Join(names, ", ")))
+				continue
 			}
 			if err := diagnoseNode(value, fieldType, format, childPath, depth+1, remaining); err != nil {
-				return err
+				issues = append(issues, err)
 			}
 		}
 	case reflect.Slice:
@@ -121,7 +138,7 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 		}
 		for i, value := range node.Content {
 			if err := diagnoseNode(value, typ.Elem(), format, fmt.Sprintf("%s[%d]", path, i), depth+1, remaining); err != nil {
-				return err
+				issues = append(issues, err)
 			}
 		}
 	case reflect.Map:
@@ -133,7 +150,7 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 				continue
 			}
 			if err := diagnoseNode(node.Content[i+1], typ.Elem(), format, fmt.Sprintf("%s[%q]", path, node.Content[i].Value), depth+1, remaining); err != nil {
-				return err
+				issues = append(issues, err)
 			}
 		}
 	default:
@@ -155,7 +172,7 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 			return location("expected " + typ.String() + " (check the value's type and range)")
 		}
 	}
-	return nil
+	return errors.Join(issues...)
 }
 
 // Use the schema tags, including embedded YAML inline fields and embedded JSON

@@ -59,3 +59,42 @@ func TestDiagnosticWalkPreservesYAMLAliasesAndMerges(t *testing.T) {
 	require.ErrorContains(t, err, "databases[0].port")
 	require.NotContains(t, err.Error(), "private-value")
 }
+
+func TestConfigurationReportsAllSchemaIssues(t *testing.T) {
+	for _, tc := range []struct{ format, input string }{
+		{"yaml", "proxy:\n  tls_requred: private-value\n  postgres_msg_buffer_size: private-value\ndatabases:\n- port: private-value\n- max_conns: private-value\n"},
+		{"json", `{"proxy":{"tls_requred":"private-value","postgresMsgBufferSize":"private-value"},"databases":[{"port":"private-value"},{"maxConns":"private-value"}]}`},
+	} {
+		t.Run(tc.format, func(t *testing.T) {
+			read := ReadYAML
+			bufferField, maxField := "postgres_msg_buffer_size", "max_conns"
+			if tc.format == "json" {
+				read = ReadJSON
+				bufferField, maxField = "postgresMsgBufferSize", "maxConns"
+			}
+			_, err := read(strings.NewReader(tc.input))
+			require.Error(t, err)
+			for _, field := range []string{"proxy.tls_requred", "proxy." + bufferField, "databases[0].port", "databases[1]." + maxField} {
+				require.Contains(t, err.Error(), field)
+			}
+			require.Len(t, strings.Split(err.Error(), "\n"), 4)
+			require.NotContains(t, err.Error(), "private-value")
+			_, again := read(strings.NewReader(tc.input))
+			require.EqualError(t, again, err.Error())
+		})
+	}
+}
+
+func TestConfigurationReportsAllInvalidSections(t *testing.T) {
+	for _, document := range []string{`{"proxy":false,"databases":[false,false]}`, "proxy: false\ndatabases:\n- false\n- false\n"} {
+		read := ReadYAML
+		if strings.HasPrefix(document, "{") {
+			read = ReadJSON
+		}
+		_, err := read(strings.NewReader(document))
+		for _, path := range []string{"(proxy)", "(databases[0])", "(databases[1])"} {
+			require.ErrorContains(t, err, path)
+		}
+		require.Len(t, strings.Split(err.Error(), "\n"), 3)
+	}
+}

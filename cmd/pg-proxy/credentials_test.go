@@ -272,3 +272,45 @@ func TestCredentialReferenceDiagnostics(t *testing.T) {
 		})
 	}
 }
+
+func TestCredentialResolutionReportsAllIssues(t *testing.T) {
+	t.Setenv("PG_PROXY_MULTIPLE_EMPTY", "")
+	document := `databases:
+  - username: first
+    password_file: /missing-secret-sentinel/backend
+  - username: second
+    password_env: PG_PROXY_MULTIPLE_EMPTY
+users:
+  - static_credentials:
+      username: alice
+      password_file: /missing-secret-sentinel/client
+  - static_credentials:
+      username: bob
+      scram_sha_256_file: /missing-secret-sentinel/verifier
+`
+	_, err := readConfigYAML(strings.NewReader(document))
+	for _, message := range []string{"database 0: password_file", "database 1: password_env", "user 0: password_file", "user 1: scram_sha_256_file"} {
+		require.ErrorContains(t, err, message)
+	}
+	require.Len(t, strings.Split(err.Error(), "\n"), 4)
+	require.NotContains(t, err.Error(), "missing-secret-sentinel")
+	require.NotContains(t, err.Error(), "PG_PROXY_MULTIPLE_EMPTY")
+}
+
+func TestAuthenticationReportsAllUserIssues(t *testing.T) {
+	shared := ossConfig()
+	shared.Users = []pgconfig.User{
+		{StaticCredentials: pgconfig.StaticCredentials{Username: "alice"}},
+		{StaticCredentials: pgconfig.StaticCredentials{Username: "alice", Password: "private-value"}, UserSettings: pgconfig.UserSettings{Databases: []string{"missing"}}},
+	}
+	_, err := passwordAuthentication(shared)
+	for _, message := range []string{
+		"users[0]: each proxy user requires a username and exactly one password or SCRAM verifier",
+		"users[0]: each proxy user requires allowed databases",
+		"users[1]: proxy usernames must be unique",
+		"users[1]: databases[0]: allowed databases must refer to configured logical databases",
+	} {
+		require.ErrorContains(t, err, message)
+	}
+	require.NotContains(t, err.Error(), "private-value")
+}

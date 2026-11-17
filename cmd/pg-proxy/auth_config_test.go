@@ -153,7 +153,7 @@ func TestUserSessionLimits(t *testing.T) {
 	shared := passwordConfig(t)
 	shared.Users[0].MaxSessions = -1
 	_, err := (config{}).withSharedConfig(shared)
-	require.ErrorContains(t, err, "users[].max_sessions")
+	require.ErrorContains(t, err, "users[0].max_sessions")
 	shared.Users[0].MaxSessions = 0
 	cfg, err := (config{}).withSharedConfig(shared)
 	require.NoError(t, err)

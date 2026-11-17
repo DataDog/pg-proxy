@@ -113,3 +113,16 @@ func TestPGXConfigFieldDiagnostics(t *testing.T) {
 		})
 	}
 }
+
+func TestPGXConfigReportsAllSettingsIssues(t *testing.T) {
+	database := directDatabase()
+	database.Host, database.DBName = "", ""
+	database.Port, database.MaxConns, database.MinConns = 70000, 1, 4
+	database.MinIdleConns = 5
+	database.SSLMode = "test-password"
+	_, err := PGXConfig(database)
+	for _, message := range []string{"host is required", "dbname is required", "port is out of range", "sslmode must be", "min_conns:", "min_idle_conns:"} {
+		require.ErrorContains(t, err, message)
+	}
+	require.NotContains(t, err.Error(), "test-password")
+}

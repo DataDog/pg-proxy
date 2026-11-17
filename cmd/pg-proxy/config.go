@@ -15,8 +15,10 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -110,7 +112,9 @@ func parseConfig(args []string) (config, error) {
 	default:
 		return config{}, errors.New("configuration file must use .json, .yaml, or .yml")
 	}
-	if err != nil {
+	fileErr := err
+	var credentialErr credentialResolutionError
+	if err != nil && !errors.As(err, &credentialErr) {
 		return config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	tracingSet := false
@@ -119,12 +123,13 @@ func parseConfig(args []string) (config, error) {
 			tracingSet = true
 		}
 	})
-	resolved, err := resolveTelemetry(telemetry, tracing, tracingSet, traceParameters)
-	if err != nil {
+	resolved, telemetryErr := resolveTelemetry(telemetry, tracing, tracingSet, traceParameters)
+	resolved.LogLevel = logLevel
+	cfg, settingsErr := (config{validateOnly: validateOnly, telemetry: resolved, telemetryWarnings: telemetryPresetWarnings(telemetry)}).withSharedConfig(shared)
+	if err := errors.Join(fileErr, telemetryErr, settingsErr); err != nil {
 		return config{}, err
 	}
-	resolved.LogLevel = logLevel
-	return (config{validateOnly: validateOnly, telemetry: resolved, telemetryWarnings: telemetryPresetWarnings(telemetry)}).withSharedConfig(shared)
+	return cfg, nil
 }
 
 // Collect diagnostics during configuration, then log them through the selected
@@ -186,34 +191,29 @@ func resolveTelemetry(preset, tracing string, tracingSet, captureBindParameters 
 	default:
 		return cfg, errors.New("-telemetry must be datadog, otel, or none")
 	}
+	var issues []error
 	if tracingSet {
 		if tracing == "otel" {
 			cfg.Traces = traceOTel
 		}
 	} else {
 		exporter, err := exporterFromEnv("OTEL_TRACES_EXPORTER")
-		if err != nil {
-			return cfg, err
-		}
+		issues = append(issues, err)
 		if exporter == "otlp" {
 			cfg.Traces = traceOTel
 		}
 	}
 	metrics, err := exporterFromEnv("OTEL_METRICS_EXPORTER")
-	if err != nil {
-		return cfg, err
-	}
+	issues = append(issues, err)
 	if metrics == "otlp" {
 		cfg.Metrics = metricOTel
 	}
 	logs, err := exporterFromEnv("OTEL_LOGS_EXPORTER")
-	if err != nil {
-		return cfg, err
-	}
+	issues = append(issues, err)
 	if logs == "otlp" {
 		cfg.Logs = logsOTel
 	}
-	return cfg, nil
+	return cfg, errors.Join(issues...)
 }
 
 func exporterFromEnv(key string) (string, error) {
@@ -230,16 +230,11 @@ func exporterFromEnv(key string) (string, error) {
 // withSharedConfig resolves the settings supported by the OSS binary.
 // Reject unsupported features before opening pools or the listener.
 func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
-	if err := shared.ValidateCredentials(); err != nil {
-		return config{}, err
-	}
-	cfg.sessionLimits = limiter.Params{
-		GlobalLimit:       shared.Proxy.MaxSessions,
-		DefaultServiceMax: shared.Proxy.DefaultMaxUserSessions,
-	}
-	for _, user := range shared.Users {
+	var issues []error
+	cfg.sessionLimits = limiter.Params{GlobalLimit: shared.Proxy.MaxSessions, DefaultServiceMax: shared.Proxy.DefaultMaxUserSessions}
+	for i, user := range shared.Users {
 		if user.MaxSessions < 0 {
-			return config{}, errors.New("users[].max_sessions must not be negative")
+			issues = append(issues, fmt.Errorf("users[%d].max_sessions must not be negative", i))
 		}
 		if user.MaxSessions > 0 {
 			cfg.sessionLimits.Quotas = append(cfg.sessionLimits.Quotas, limiter.ServiceQuota{Name: user.StaticCredentials.Username, Max: user.MaxSessions})
@@ -250,60 +245,65 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if shared.Proxy.ShutdownGracePeriod != "" {
 		grace, err := time.ParseDuration(shared.Proxy.ShutdownGracePeriod)
 		if err != nil || grace <= 0 {
-			return config{}, errors.New("proxy.shutdown_grace_period must be a positive duration such as 30s or 2m")
+			issues = append(issues, errors.New("proxy.shutdown_grace_period must be a positive duration such as 30s or 2m"))
+		} else {
+			cfg.shutdownGracePeriod = grace
 		}
-		cfg.shutdownGracePeriod = grace
 	}
-	var err error
-	cfg.tlsConfig, err = clientTLSConfig(shared.Proxy)
-	if err != nil {
-		return config{}, err
-	}
+	var tlsErr error
+	cfg.tlsConfig, tlsErr = clientTLSConfig(shared.Proxy)
+	issues = append(issues, tlsErr)
 	cfg.requireTLS = shared.Proxy.TLSRequired
 	cfg.authenticate = nil
 	if shared.Proxy.JWTAuthEnabled && shared.Proxy.PasswordAuthEnabled {
-		return config{}, errors.New("password_auth_enabled and jwt_auth_enabled are mutually exclusive")
+		issues = append(issues, errors.New("password_auth_enabled and jwt_auth_enabled are mutually exclusive"))
 	}
 	if shared.Proxy.JWTAuthEnabled {
-		return config{}, errors.New("JWT authentication is not implemented by the OSS binary")
+		issues = append(issues, errors.New("JWT authentication is not implemented by the OSS binary"))
 	}
 	if shared.Proxy.PasswordAuthEnabled {
+		var err error
 		cfg.authenticate, err = passwordAuthentication(shared)
-		if err != nil {
-			return config{}, err
-		}
+		issues = append(issues, err)
 	} else if len(shared.Users) > 0 {
-		return config{}, errors.New("configured users require proxy.password_auth_enabled")
+		issues = append(issues, errors.New("configured users require proxy.password_auth_enabled"))
 	}
 	// TODO: wire shared traffic mirroring settings into the OSS binary.
 	if shared.Mirroring != nil {
-		return config{}, errors.New("mirroring configuration is not implemented by the OSS binary")
+		issues = append(issues, errors.New("mirroring configuration is not implemented by the OSS binary"))
 	}
 	cfg.databases = make(map[string]*pgxpool.Config, len(shared.Databases))
 	for i, database := range shared.Databases {
 		if database.Name == "" {
-			return config{}, fmt.Errorf("databases[%d].name: database name is required", i)
+			issues = append(issues, fmt.Errorf("databases[%d].name: database name is required", i))
 		}
-		if _, exists := cfg.databases[database.Name]; exists {
-			return config{}, fmt.Errorf("databases[%d].name: database names must be unique", i)
+		_, duplicate := cfg.databases[database.Name]
+		if duplicate {
+			issues = append(issues, fmt.Errorf("databases[%d].name: database names must be unique", i))
 		}
 		settings, err := pool.PGXConfig(database)
 		if err != nil {
-			return config{}, fmt.Errorf("databases[%d]: %w", i, err)
+			issues = append(issues, configurationContext(fmt.Sprintf("databases[%d]", i), err))
 		}
-		cfg.databases[database.Name] = settings
+		// Keep declared names even when their settings are invalid. Routing checks
+		// must not misreport an invalid pool as an unknown database.
+		if !duplicate {
+			cfg.databases[database.Name] = settings
+		}
 	}
 	cfg.clusters = make(map[string]string, len(shared.Clusters))
-	for name, cluster := range shared.Clusters {
+	for _, name := range slices.Sorted(maps.Keys(shared.Clusters)) {
+		cluster := shared.Clusters[name]
 		if len(cluster.Replicas) > 0 {
-			return config{}, errors.New("replica routing is not implemented by the OSS binary")
+			issues = append(issues, fmt.Errorf("clusters[%q].replicas: replica routing is not implemented by the OSS binary", name))
 		}
 		cfg.clusters[name] = cluster.Primary
 	}
 	cfg.logicalDatabases = make(map[string]topology.LogicalDatabase, len(shared.LogicalDatabases))
-	for name, logical := range shared.LogicalDatabases {
+	for _, name := range slices.Sorted(maps.Keys(shared.LogicalDatabases)) {
+		logical := shared.LogicalDatabases[name]
 		if len(logical.ReadClusters) > 0 {
-			return config{}, errors.New("read-cluster routing is not implemented by the OSS binary")
+			issues = append(issues, fmt.Errorf("logical_databases[%q].read_clusters: read-cluster routing is not implemented by the OSS binary", name))
 		}
 		cfg.logicalDatabases[name] = topology.LogicalDatabase{Cluster: logical.Cluster}
 	}
@@ -315,7 +315,18 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
-	return cfg, cfg.validate()
+	issues = append(issues, cfg.validateSettings())
+	// A TLS load error already explains the missing certificate. Still check the
+	// listener address, using the requested authentication policy to avoid cascades.
+	if tlsErr != nil {
+		issues = append(issues, cfg.validateListenerAddress(shared.Proxy.PasswordAuthEnabled))
+	} else {
+		issues = append(issues, cfg.validateListener(shared.Proxy.PasswordAuthEnabled))
+	}
+	if err := errors.Join(issues...); err != nil {
+		return config{}, err
+	}
+	return cfg, nil
 }
 
 // clientTLSConfig loads the certificate and key used to accept TLS client connections.
@@ -329,12 +340,9 @@ func clientTLSConfig(proxy pgconfig.Proxy) (*tls.Config, error) {
 	if proxy.TLSCertFile == "" || proxy.TLSKeyFile == "" {
 		return nil, errors.New("proxy.tls_cert_file and tls_key_file must be configured together")
 	}
-	certPEM, err := readTLSFile(proxy.TLSCertFile, "proxy.tls_cert_file")
-	if err != nil {
-		return nil, err
-	}
-	keyPEM, err := readTLSFile(proxy.TLSKeyFile, "proxy.tls_key_file")
-	if err != nil {
+	certPEM, certErr := readTLSFile(proxy.TLSCertFile, "proxy.tls_cert_file")
+	keyPEM, keyErr := readTLSFile(proxy.TLSKeyFile, "proxy.tls_key_file")
+	if err := errors.Join(certErr, keyErr); err != nil {
 		return nil, err
 	}
 	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
@@ -395,4 +403,20 @@ func tlsPEMBlock(data []byte, kind string) []byte {
 			return block.Bytes
 		}
 	}
+}
+
+// Label every issue in a joined error, so multiline output retains its field
+// context on each line while preserving the original errors for errors.Is/As.
+func configurationContext(path string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if group, ok := err.(interface{ Unwrap() []error }); ok {
+		var issues []error
+		for _, child := range group.Unwrap() {
+			issues = append(issues, configurationContext(path, child))
+		}
+		return errors.Join(issues...)
+	}
+	return fmt.Errorf("%s: %w", path, err)
 }

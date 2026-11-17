@@ -25,17 +25,18 @@ func (Secret) GoString() string             { return "[REDACTED]" }
 func (Secret) MarshalJSON() ([]byte, error) { return []byte(`"[REDACTED]"`), nil }
 func (Secret) MarshalYAML() (any, error)    { return "[REDACTED]", nil }
 
-func (c StaticCredentials) validate() error {
+func (c StaticCredentials) issues() []error {
+	var issues []error
 	if c.Password != "" && c.SCRAMSHA256 != "" {
-		return errors.New("password and scram_sha_256 are mutually exclusive")
+		issues = append(issues, errors.New("password and scram_sha_256 are mutually exclusive"))
 	}
 	if (c.Password != "" || c.SCRAMSHA256 != "") && c.Username == "" {
-		return errors.New("static credentials require username")
+		issues = append(issues, errors.New("static credentials require username"))
 	}
-	if c.SCRAMSHA256 != "" && !validSCRAMSHA256(string(c.SCRAMSHA256)) {
-		return errors.New("invalid SCRAM-SHA-256 verifier")
+	if c.Password == "" && c.SCRAMSHA256 != "" && !validSCRAMSHA256(string(c.SCRAMSHA256)) {
+		issues = append(issues, errors.New("invalid SCRAM-SHA-256 verifier"))
 	}
-	return nil
+	return issues
 }
 
 // Reuse the exchange's parser so configuration and authentication accept the
@@ -48,15 +49,16 @@ func validSCRAMSHA256(value string) bool {
 // ValidateCredentials checks credential sources only. Runtime defaults, topology
 // validation and backend construction remain the caller's responsibility.
 func (c Config) ValidateCredentials() error {
+	var issues []error
 	for i, db := range c.Databases {
 		if db.Password != "" && db.Username == "" {
-			return fmt.Errorf("database %d: password requires username", i)
+			issues = append(issues, fmt.Errorf("database %d: password requires username", i))
 		}
 	}
 	for i, user := range c.Users {
-		if err := user.StaticCredentials.validate(); err != nil {
-			return fmt.Errorf("user %d: %w", i, err)
+		for _, err := range user.StaticCredentials.issues() {
+			issues = append(issues, fmt.Errorf("user %d: %w", i, err))
 		}
 	}
-	return nil
+	return errors.Join(issues...)
 }

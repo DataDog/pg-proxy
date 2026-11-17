@@ -12,7 +12,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"log/slog"
 	"maps"
 	"net"
 	"os"
@@ -64,7 +63,7 @@ func main() {
 		return
 	}
 	if err != nil {
-		slog.Error("invalid configuration", "error", err)
+		fmt.Fprintf(os.Stderr, "invalid configuration:\n%s\n", err)
 		os.Exit(1)
 	}
 	if cfg.validateOnly {
@@ -79,49 +78,63 @@ func main() {
 }
 
 func (c config) validate() error {
-	if err := c.validateListener(c.authenticate != nil); err != nil {
-		return err
+	var issues []error
+	issues = append(issues, c.validateListener(c.authenticate != nil), c.validateSettings())
+	for _, name := range slices.Sorted(maps.Keys(c.databases)) {
+		if c.databases[name] == nil {
+			issues = append(issues, fmt.Errorf("databases[%q]: database configuration is invalid", name))
+		}
 	}
+	return errors.Join(issues...)
+}
+
+func (c config) validateSettings() error {
+	var issues []error
 	if c.sessionLimits.GlobalLimit < 0 {
-		return errors.New("proxy.max_sessions must not be negative")
+		issues = append(issues, errors.New("proxy.max_sessions must not be negative"))
 	}
 	if c.sessionLimits.DefaultServiceMax < 0 {
-		return errors.New("proxy.default_max_user_sessions must not be negative")
+		issues = append(issues, errors.New("proxy.default_max_user_sessions must not be negative"))
 	}
-	for _, quota := range c.sessionLimits.Quotas {
+	for i, quota := range c.sessionLimits.Quotas {
 		if quota.Max < 0 {
-			return errors.New("users[].max_sessions must not be negative")
+			issues = append(issues, fmt.Errorf("users[%d].max_sessions must not be negative", i))
 		}
 	}
 	if c.shutdownGracePeriod < 0 {
-		return errors.New("proxy.shutdown_grace_period must be positive")
+		issues = append(issues, errors.New("proxy.shutdown_grace_period must be positive"))
 	}
 	if c.messageBufferSize < 0 {
-		return errors.New("postgres_msg_buffer_size must not be negative")
+		issues = append(issues, errors.New("postgres_msg_buffer_size must not be negative"))
 	}
-	if len(c.databases) == 0 || len(c.clusters) == 0 || len(c.logicalDatabases) == 0 {
-		return errors.New("databases, clusters, and logical_databases must not be empty")
+	for _, section := range []struct {
+		name string
+		size int
+	}{{"databases", len(c.databases)}, {"clusters", len(c.clusters)}, {"logical_databases", len(c.logicalDatabases)}} {
+		if section.size == 0 {
+			issues = append(issues, fmt.Errorf("%s must not be empty", section.name))
+		}
 	}
 	usedDatabases := make(map[string]bool, len(c.databases))
 	for _, name := range slices.Sorted(maps.Keys(c.clusters)) {
 		primary := c.clusters[name]
-		if name == "" || c.databases[primary] == nil {
-			return fmt.Errorf("clusters[%q].primary: each cluster must have a name and refer to a configured primary database", name)
+		if _, exists := c.databases[primary]; name == "" || !exists {
+			issues = append(issues, fmt.Errorf("clusters[%q].primary: each cluster must have a name and refer to a configured primary database", name))
 		}
 		usedDatabases[primary] = true
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.logicalDatabases)) {
 		logical := c.logicalDatabases[name]
 		if _, exists := c.clusters[logical.Cluster]; name == "" || !exists {
-			return fmt.Errorf("logical_databases[%q].cluster: each logical database must have a name and refer to a configured cluster", name)
+			issues = append(issues, fmt.Errorf("logical_databases[%q].cluster: each logical database must have a name and refer to a configured cluster", name))
 		}
 	}
 	for _, name := range slices.Sorted(maps.Keys(c.databases)) {
 		if !usedDatabases[name] {
-			return fmt.Errorf("databases[%q]: each database must be used by a cluster", name)
+			issues = append(issues, fmt.Errorf("databases[%q]: each database must be used by a cluster", name))
 		}
 	}
-	return nil
+	return errors.Join(issues...)
 }
 
 func run(ctx context.Context, cfg config) error {

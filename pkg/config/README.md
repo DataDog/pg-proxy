@@ -96,7 +96,8 @@ passwords through environment variables and converts them for the library.
 ## Reading and validating files
 
 Reader errors include field paths and source locations when available. Unknown
-fields list the allowed names for that section. Decoder values are not included
+fields list the allowed names for that section. Readers collect independent
+field errors in one result. Decoder values are not included
 in errors, so a misplaced password does not appear in the message.
 
 Applications with their own `ConfigSections` types can use `ReadJSONAs[T]` or
@@ -105,7 +106,9 @@ credential resolution and semantic checks to the caller.
 
 For the standalone binary, use `pg-proxy -config proxy.yaml -validate-config`
 to run local startup checks and exit before opening listeners or backend pools.
-Successful validation does not prove database connectivity or port availability.
+Validation reports independent local issues together, one per line. Syntax and
+field-type errors must be fixed before semantic checks can run. Successful
+validation does not prove database connectivity or port availability.
 
 ## Standalone shutdown
 

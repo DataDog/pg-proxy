@@ -97,3 +97,73 @@ func TestValidateConfigUsesStartupChecks(t *testing.T) {
 	_, err = (config{}).withSharedConfig(shared)
 	require.ErrorContains(t, err, "proxy.tls_cert_file")
 }
+
+func TestValidateConfigReportsAllLocalIssues(t *testing.T) {
+	document := `databases:
+  - name: primary
+    host: localhost
+    dbname: postgres
+    username: postgres
+    password_file: /missing-secret-sentinel/password
+    port: 70000
+    max_conns: -1
+    min_conns: -1
+  - name: other
+    dbname: postgres
+    username: postgres
+clusters:
+  orders:
+    primary: primary
+  broken:
+    primary: missing
+logical_databases:
+  app:
+    cluster: absent
+proxy:
+  listener_address: invalid-address
+  max_sessions: -1
+  default_max_user_sessions: -1
+  shutdown_grace_period: invalid-duration
+  postgres_msg_buffer_size: -1
+  tls_cert_file: /missing-secret-sentinel/cert
+  tls_key_file: /missing-secret-sentinel/key
+`
+	path := writeConfig(t, "yaml", document)
+	args := []string{"-config", path, "-validate-config", "-telemetry", "none"}
+	cfg, err := parseConfig(args)
+	require.Error(t, err)
+	require.Nil(t, cfg.databases, "invalid configuration must not be usable")
+	expected := []string{
+		"database 0: password_file: file not found",
+		"databases[0]: database port is out of range",
+		"databases[0]: database max_conns must not be negative",
+		"databases[0]: database min_conns must not be negative",
+		"databases[1]: database host is required",
+		`clusters["broken"].primary`, `logical_databases["app"].cluster`,
+		"proxy.listener_address", "proxy.max_sessions", "proxy.default_max_user_sessions",
+		"proxy.shutdown_grace_period", "postgres_msg_buffer_size", "proxy.tls_cert_file", "proxy.tls_key_file",
+	}
+	for _, message := range expected {
+		require.Contains(t, err.Error(), message)
+	}
+	require.NotContains(t, err.Error(), "missing-secret-sentinel")
+	require.NotContains(t, err.Error(), `clusters["orders"].primary`, "invalid pool settings must not look like an unknown database")
+	_, again := parseConfig(args)
+	require.EqualError(t, again, err.Error())
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestValidateConfigProcess$")
+	cmd.Env = append(os.Environ(), "PG_PROXY_VALIDATE_TEST_CONFIG="+path)
+	output, err := cmd.CombinedOutput()
+	var exit *exec.ExitError
+	require.ErrorAs(t, err, &exit)
+	require.Equal(t, 1, exit.ExitCode())
+	require.NoError(t, ctx.Err())
+	require.Contains(t, string(output), "invalid configuration:\n")
+	for _, message := range expected {
+		require.Contains(t, string(output), message)
+	}
+	require.NotContains(t, string(output), `\n`, "issues should be printed on separate lines")
+}
