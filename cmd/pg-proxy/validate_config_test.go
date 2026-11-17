@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
 
 // Execute the real entry point in a subprocess: a valid offline config must
@@ -66,7 +68,7 @@ func TestValidateConfigUsesStartupChecks(t *testing.T) {
 		modify  func(*config)
 		message string
 	}{
-		{"missing primary", func(c *config) { c.clusters["orders"] = "missing" }, `clusters["orders"].primary`},
+		{"missing primary", func(c *config) { c.clusters["orders"] = pgconfig.Cluster{Primary: "missing"} }, `clusters["orders"].primary`},
 		{"missing cluster", func(c *config) { c.logicalDatabases["client-db"] = c.logicalDatabases["missing"] }, `logical_databases["client-db"].cluster`},
 		{"invalid listener", func(c *config) { c.listenAddress = "0.0.0.0:5432" }, "proxy.listener_address"},
 	} {

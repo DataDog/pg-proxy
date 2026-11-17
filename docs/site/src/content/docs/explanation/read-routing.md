@@ -44,7 +44,9 @@ logical_databases:
         weight: 1
 ```
 
-The OSS binary validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica, or the primary of a read cluster, uses a different `dbname` or username than the main primary. That setup can be intentional, but it can also send reads to the wrong database or role.
+The OSS binary validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica, or the primary of a read cluster, uses a different `dbname` or username than the main primary. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
+
+Replica databases default to a `max_conn_lifetime` of 15 minutes with 5 minutes of `max_conn_lifetime_jitter`, matching the library's replica pools. The defaults apply only when `max_conn_lifetime` is unset; an explicit `max_conn_lifetime_jitter` is kept.
 
 Its replicas are static: each replica must accept a connection at startup, and there are no replica health checks. A failed replica checkout falls back to the cluster primary, as described below. File changes require a restart. Embedding applications can supply discovered replicas and health checks instead.
 
@@ -75,7 +77,7 @@ A string containing multiple statements must have every statement classified as 
 
 Routing happens when the session needs a backend connection. Once acquired, that connection stays attached for the transaction; the proxy does not move each statement of an active transaction between backends.
 
-The proxy classifies the SQL text in `Query` and `Parse` messages. A `Bind` for a named prepared statement does not carry SQL, so it uses the main backend. Clients that cache prepared statements, such as pgx in its default mode, therefore send repeated reads to the main backend. Use the simple protocol or unnamed statements for reads that should be routed.
+The proxy classifies the SQL text in `Query` messages and in `Parse` messages for unnamed statements. It does not classify a `Parse` for a named statement, or any `Parse` when the client sets `pg_proxy.auto_cached_prepared_statements=true`, and a `Bind` carries no SQL. Those statements use the main backend. Clients that prepare named statements, such as pgx in its default mode, therefore send their reads to the main backend. For reads that should be routed, use the simple protocol or unnamed statements without automatic statement caching.
 
 ### Known read-only functions
 

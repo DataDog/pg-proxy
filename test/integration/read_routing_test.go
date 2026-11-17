@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	// readRoutingDB is created on the primary and the replica container. Each
-	// copy holds a marker row with the name of its node.
-	readRoutingDB = "read_routing"
+	// readRoutingPrimaryDB and readRoutingReplicaDB stand in for a primary and
+	// its replica. Each holds a marker row with the name of its node.
+	readRoutingPrimaryDB = "read_routing_primary"
+	readRoutingReplicaDB = "read_routing_replica"
 	// dbReplicaRouting uses a cluster with one replica pool.
 	dbReplicaRouting = "rr_replica"
 	// dbReadCluster sends reads to a separate cluster whose primary is the replica.
@@ -32,17 +33,15 @@ const (
 
 // TestReadRouting checks that the binary routes eligible reads to configured
 // replicas and read clusters, and keeps writes and transactions on the primary.
-// The replica is a separate container, not a streaming replica: each node
-// answers with its own marker, so the test can see where a query ran.
+// The replica is a second database on the shared container, not a streaming
+// replica: each node answers with its own marker, so the test can see where a
+// query ran. Routing depends only on the pool, not on the host.
 func TestReadRouting(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	replica, err := itest.StartPostgres(ctx)
-	require.NoError(t, err, "start replica container")
-	t.Cleanup(func() { _ = replica.Terminate(context.Background()) })
-	for node, pg := range map[string]*itest.Postgres{"primary": backend, "replica": replica} {
-		require.NoError(t, pg.Exec(ctx, "DROP DATABASE IF EXISTS "+readRoutingDB, "CREATE DATABASE "+readRoutingDB))
-		conn, err := pg.Connect(ctx, readRoutingDB)
+	for node, dbname := range map[string]string{"primary": readRoutingPrimaryDB, "replica": readRoutingReplicaDB} {
+		require.NoError(t, backend.Exec(ctx, "DROP DATABASE IF EXISTS "+dbname, "CREATE DATABASE "+dbname))
+		conn, err := backend.Connect(ctx, dbname)
 		require.NoError(t, err)
 		_, err = conn.Exec(ctx, fmt.Sprintf(
 			"CREATE TABLE marker (node text); INSERT INTO marker VALUES ('%s'); CREATE TABLE writes (id int)", node))
@@ -52,8 +51,8 @@ func TestReadRouting(t *testing.T) {
 
 	proxy := itest.MustStartProxy(t, pgconfig.Config{
 		Databases: []pgconfig.Database{
-			backend.Database("rr-primary", readRoutingDB),
-			replica.Database("rr-replica", readRoutingDB),
+			backend.Database("rr-primary", readRoutingPrimaryDB),
+			backend.Database("rr-replica", readRoutingReplicaDB),
 		},
 		Clusters: map[string]pgconfig.Cluster{
 			"rr":        {Primary: "rr-primary", Replicas: []string{"rr-replica"}},
@@ -83,9 +82,9 @@ func TestReadRouting(t *testing.T) {
 			require.NoError(t, err)
 			defer conn.Close(context.Background())
 
-			// The proxy classifies SQL text in Query and Parse messages. pgx's
-			// default mode reuses a cached statement with Bind only, which the
-			// proxy sends to the main cluster, so use modes that send the SQL.
+			// The proxy classifies SQL text in Query messages and in Parse
+			// messages for unnamed statements. pgx's default mode prepares named
+			// statements, which go to the main cluster, so use modes that don't.
 			for _, mode := range []pgx.QueryExecMode{pgx.QueryExecModeSimpleProtocol, pgx.QueryExecModeExec} {
 				nodes := map[string]int{}
 				for range queries {
@@ -115,15 +114,15 @@ func TestReadRouting(t *testing.T) {
 				_, err := conn.Exec(ctx, "INSERT INTO writes VALUES ($1)", i)
 				require.NoError(t, err)
 			}
-			require.Equal(t, queries, countWrites(ctx, t, backend), "writes should go to the primary")
-			require.Zero(t, countWrites(ctx, t, replica), "writes should not go to the replica")
+			require.Equal(t, queries, countWrites(ctx, t, readRoutingPrimaryDB), "writes should go to the primary")
+			require.Zero(t, countWrites(ctx, t, readRoutingReplicaDB), "writes should not go to the replica")
 		})
 	}
 }
 
-func countWrites(ctx context.Context, t *testing.T, pg *itest.Postgres) int {
+func countWrites(ctx context.Context, t *testing.T, dbname string) int {
 	t.Helper()
-	conn, err := pg.Connect(ctx, readRoutingDB)
+	conn, err := backend.Connect(ctx, dbname)
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
 	var count int

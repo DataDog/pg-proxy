@@ -18,7 +18,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -272,6 +271,12 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if shared.Mirroring != nil {
 		issues = append(issues, errors.New("mirroring configuration is not implemented by the OSS binary"))
 	}
+	replicas := make(map[string]bool)
+	for _, cluster := range shared.Clusters {
+		for _, replica := range cluster.Replicas {
+			replicas[replica] = true
+		}
+	}
 	cfg.databases = make(map[string]*pgxpool.Config, len(shared.Databases))
 	for i, database := range shared.Databases {
 		if database.Name == "" {
@@ -280,6 +285,14 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		_, duplicate := cfg.databases[database.Name]
 		if duplicate {
 			issues = append(issues, fmt.Errorf("databases[%d].name: database names must be unique", i))
+		}
+		// Replicas default to the library's replica connection lifetime, so
+		// connections spread across replicas after a rolling restart.
+		if replicas[database.Name] && database.MaxConnLifetime == 0 {
+			database.MaxConnLifetime = pool.ReplicaMaxConnLifetime
+			if database.MaxConnLifetimeJitter == 0 {
+				database.MaxConnLifetimeJitter = pool.ReplicaMaxConnLifetimeJitter
+			}
 		}
 		settings, err := pool.PGXConfig(database)
 		if err != nil {
@@ -291,31 +304,10 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 			cfg.databases[database.Name] = settings
 		}
 	}
-	cfg.clusters = make(map[string]string, len(shared.Clusters))
-	cfg.replicas = make(map[string][]string)
-	for _, name := range slices.Sorted(maps.Keys(shared.Clusters)) {
-		cluster := shared.Clusters[name]
-		cfg.clusters[name] = cluster.Primary
-		if len(cluster.Replicas) > 0 {
-			cfg.replicas[name] = slices.Clone(cluster.Replicas)
-		}
-	}
+	cfg.clusters = maps.Clone(shared.Clusters)
 	cfg.logicalDatabases = make(map[string]topology.LogicalDatabase, len(shared.LogicalDatabases))
-	for _, name := range slices.Sorted(maps.Keys(shared.LogicalDatabases)) {
-		logical := shared.LogicalDatabases[name]
-		database := topology.LogicalDatabase{Cluster: logical.Cluster}
-		if len(logical.ReadClusters) > 0 {
-			database.ReadClusters = make(topology.ReadClusters, len(logical.ReadClusters))
-			for cluster, read := range logical.ReadClusters {
-				// An empty entry (`reports: {}` or `reports: null`) uses the default weight.
-				var weight *uint8
-				if read != nil {
-					weight = read.Weight
-				}
-				database.ReadClusters[cluster] = &topology.ReadCluster{Weight: topology.NormalizedWeight(weight)}
-			}
-		}
-		cfg.logicalDatabases[name] = database
+	for name, logical := range shared.LogicalDatabases {
+		cfg.logicalDatabases[name] = topology.LogicalDatabase{Cluster: logical.Cluster, ReadClusters: readClusters(logical.ReadClusters)}
 	}
 	cfg.listenAddress = shared.Proxy.ListenerAddress
 	if cfg.listenAddress == "" {
@@ -336,8 +328,24 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if err := errors.Join(issues...); err != nil {
 		return config{}, err
 	}
-	cfg.routingWarnings = routingWarningsFor(cfg)
 	return cfg, nil
+}
+
+// readClusters converts read-cluster settings to the runtime view. An empty
+// entry (`reports: {}` or `reports: null`) uses the default weight.
+func readClusters(settings map[string]*pgconfig.ReadCluster) topology.ReadClusters {
+	if len(settings) == 0 {
+		return nil
+	}
+	clusters := make(topology.ReadClusters, len(settings))
+	for name, read := range settings {
+		var weight *uint8
+		if read != nil {
+			weight = read.Weight
+		}
+		clusters[name] = &topology.ReadCluster{Weight: topology.NormalizedWeight(weight)}
+	}
+	return clusters
 }
 
 // clientTLSConfig loads the certificate and key used to accept TLS client connections.
