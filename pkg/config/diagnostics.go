@@ -22,11 +22,11 @@ var yamlErrorLine = regexp.MustCompile(`line ([0-9]+)`)
 // Never forward decoder error text: it can quote passwords, PEM data, or other
 // supplied values. Walk the document only after a decode failure to locate the
 // bad field without changing the decoder's accepted configuration format.
-func configurationError(data []byte, format string, decodeErr error) error {
+func configurationError(data []byte, format string, decodeErr error, schema reflect.Type) error {
 	var document yaml.Node
 	if err := yaml.Unmarshal(data, &document); err == nil && len(document.Content) == 1 {
 		remaining := 10000
-		if err := diagnoseNode(document.Content[0], reflect.TypeFor[Config](), format, "", 0, &remaining); err != nil {
+		if err := diagnoseNode(document.Content[0], schema, format, "", 0, &remaining); err != nil {
 			return err
 		}
 	}

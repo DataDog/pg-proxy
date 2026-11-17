@@ -20,19 +20,39 @@ import (
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const privateParameter = "actual private value"
 const parameterQuery = "SELECT $1 /*traceparent='00-0000000000000000000000000000002a-000000000000000b-01'*/"
+const unsampledParameterQuery = "SELECT $1 /*traceparent='00-0000000000000000000000000000002a-000000000000000b-00'*/"
+
+var parameterCaptureCases = []struct {
+	name, sql              string
+	enable, wantParameters bool
+}{
+	{"default", parameterQuery, false, false},
+	{"enabled", parameterQuery, true, true},
+	{"unsampled", unsampledParameterQuery, true, false},
+}
+
+// recordOnly keeps unsampled spans visible to span processors without
+// exporting them, so tests can inspect what an unsampled trace carried.
+type recordOnly struct{}
+
+func (recordOnly) ShouldSample(p sdktrace.SamplingParameters) sdktrace.SamplingResult {
+	return sdktrace.SamplingResult{Decision: sdktrace.RecordOnly, Tracestate: trace.SpanContextFromContext(p.ParentContext).TraceState()}
+}
+func (recordOnly) Description() string { return "RecordOnly" }
 
 // Exercise real protocol forwarding, including preservation of the Bind payload.
-func runParameterQuery(t *testing.T, enable bool) {
+func runParameterQuery(t *testing.T, sql string, enable bool) {
 	t.Helper()
 	_, client, postgres, _, closeSession := newRunningTestSessionWithBackend(t, func(cfg *Config) {
 		cfg.EnableTraceParameters = enable
 	})
 	defer closeSession()
-	client.Send(&pgproto3.Parse{Query: parameterQuery})
+	client.Send(&pgproto3.Parse{Query: sql})
 	client.Send(&pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}})
 	client.Send(&pgproto3.Execute{})
 	client.Send(&pgproto3.Sync{})
@@ -59,19 +79,24 @@ func runParameterQuery(t *testing.T, enable bool) {
 }
 
 func TestExtendedQueryOTelParameterCapture(t *testing.T) {
-	for _, enable := range []bool{false, true} {
-		t.Run(map[bool]string{false: "default", true: "enabled"}[enable], func(t *testing.T) {
+	for _, tc := range parameterCaptureCases {
+		t.Run(tc.name, func(t *testing.T) {
 			recorder := tracetest.NewSpanRecorder()
-			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder))
+			sampler := sdktrace.ParentBased(sdktrace.AlwaysSample(),
+				sdktrace.WithRemoteParentNotSampled(recordOnly{}), sdktrace.WithLocalParentNotSampled(recordOnly{}))
+			provider := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(recorder), sdktrace.WithSampler(sampler))
 			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxyotel.NewTracer(provider.Tracer("test"))}))
-			runParameterQuery(t, enable)
-			foundRoot, foundParameters := false, false
+			runParameterQuery(t, tc.sql, tc.enable)
+			foundRoot, foundHandling, foundParameters := false, false, false
 			for _, span := range recorder.Ended() {
-				if span.Name() == query.TransactionOpName {
+				switch span.Name() {
+				case query.TransactionOpName:
 					foundRoot = true
 					require.Equal(t, "0000000000000000000000000000002a", span.SpanContext().TraceID().String())
 					require.Equal(t, "000000000000000b", span.Parent().SpanID().String())
+				case query.HandlingMessagesOpName:
+					foundHandling = true
 				}
 				for _, attr := range span.Attributes() {
 					if attr.Key == "db.parameters" {
@@ -79,33 +104,37 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 						require.Equal(t, privateParameter, attr.Value.AsString())
 					}
 					if attr.Key == "db.statement" {
-						require.Equal(t, parameterQuery, attr.Value.AsString())
+						require.Equal(t, tc.sql, attr.Value.AsString())
 					}
-					if !enable {
+					if !tc.wantParameters {
 						require.NotContains(t, attr.Value.AsString(), privateParameter)
 					}
 				}
 			}
 			require.True(t, foundRoot)
-			require.Equal(t, enable, foundParameters)
+			require.True(t, foundHandling, "the span that carries db.parameters must be recorded")
+			require.Equal(t, tc.wantParameters, foundParameters)
 		})
 	}
 }
 
 func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
-	for _, enable := range []bool{false, true} {
-		t.Run(map[bool]string{false: "default", true: "enabled"}[enable], func(t *testing.T) {
+	for _, tc := range parameterCaptureCases {
+		t.Run(tc.name, func(t *testing.T) {
 			tracer := mocktracer.Start()
 			t.Cleanup(tracer.Stop)
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxydatadog.Tracer{}}))
-			runParameterQuery(t, enable)
-			foundRoot, foundParameters := false, false
+			runParameterQuery(t, tc.sql, tc.enable)
+			foundRoot, foundHandling, foundParameters := false, false, false
 			for _, span := range tracer.FinishedSpans() {
-				if span.OperationName() == query.TransactionOpName {
+				switch span.OperationName() {
+				case query.TransactionOpName:
 					foundRoot = true
 					require.Equal(t, uint64(42), span.TraceID())
 					require.Equal(t, uint64(11), span.ParentID())
-					require.Equal(t, parameterQuery, span.Tag("db.statement"))
+					require.Equal(t, tc.sql, span.Tag("db.statement"))
+				case query.HandlingMessagesOpName:
+					foundHandling = true
 				}
 				if value := span.Tag("db.parameters"); value != nil {
 					foundParameters = true
@@ -113,21 +142,28 @@ func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
 				}
 			}
 			require.True(t, foundRoot)
-			require.Equal(t, enable, foundParameters)
+			require.True(t, foundHandling, "mocktracer keeps unsampled spans, so the gate is what drops the tag")
+			require.Equal(t, tc.wantParameters, foundParameters)
 		})
 	}
 }
 
 func TestDefaultParametersDoNotReachDebugLogs(t *testing.T) {
-	var logs bytes.Buffer
-	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{
-		LogHandler: slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}),
-	}))
-	s := New(Config{})
-	bind := &pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}}
-	action, err := s.DecideClientMessageAction(bind)
-	require.NoError(t, err)
-	require.Same(t, bind, action.ProxyMsgToPg)
-	require.NotContains(t, logs.String(), privateParameter)
-	require.NotContains(t, logs.String(), "db.parameters")
+	// Enabled capture without a root trace must not fall back to the debug log
+	// that reports tags set outside a trace.
+	for _, enable := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default", true: "enabled without trace"}[enable], func(t *testing.T) {
+			var logs bytes.Buffer
+			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{
+				LogHandler: slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}),
+			}))
+			s := New(Config{EnableTraceParameters: enable})
+			bind := &pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}}
+			action, err := s.DecideClientMessageAction(bind)
+			require.NoError(t, err)
+			require.Same(t, bind, action.ProxyMsgToPg)
+			require.NotContains(t, logs.String(), privateParameter)
+			require.NotContains(t, logs.String(), "db.parameters")
+		})
+	}
 }

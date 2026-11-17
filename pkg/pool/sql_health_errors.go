@@ -49,6 +49,7 @@ func isConclusiveSQLUnroutableError(err error) bool {
 		pgerrcode.OutOfMemory:
 		return true
 	default:
-		return pgerrcode.IsSystemError(postgresErr.Code) || pgerrcode.IsInternalError(postgresErr.Code)
+		// System (58) and internal (XX) classes do not establish instance-wide unavailability.
+		return false
 	}
 }

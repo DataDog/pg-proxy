@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -21,7 +22,9 @@ import (
 	"time"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 )
@@ -247,4 +250,84 @@ func verifyRejectedAuthMessages(t *testing.T, address string, tlsConfig *tls.Con
 	require.Equal(t, &pgproto3.ErrorResponse{Severity: "FATAL", Code: "08006", Message: "could not establish connection"}, message)
 	_, err = frontend.Receive()
 	require.Error(t, err, "failure closes without successful startup messages")
+}
+
+func verifySessionAdmission(t *testing.T, backendURL string) {
+	ctx, stop := context.WithTimeout(t.Context(), 20*time.Second)
+	defer stop()
+	shared := passwordConfig(t)
+	shared.Proxy.ListenerAddress = "127.0.0.1:0"
+	shared.Proxy.MaxSessions = 4
+	shared.Proxy.DefaultMaxUserSessions = 2
+	shared.Users[0].MaxSessions = 1
+	for _, name := range []string{"bob", "carol"} {
+		shared.Users = append(shared.Users, pgconfig.User{
+			UserSettings:      pgconfig.UserSettings{Databases: []string{"client-db"}},
+			StaticCredentials: pgconfig.StaticCredentials{Username: name, Password: "fixture-password"},
+		})
+	}
+	data, err := json.Marshal(shared)
+	require.NoError(t, err)
+	// Diagnostic serialization redacts credentials; restore fixture passwords in
+	// the input document, just as the published-example tests do.
+	document := strings.ReplaceAll(string(data), "[REDACTED]", "fixture-password")
+	cfg, err := parseConfig([]string{"-config", writeConfig(t, "json", document), "-telemetry", "none"})
+	require.NoError(t, err)
+	cfg.databases["primary"] = backendConfig(t, backendURL).databases["primary"]
+	cfg.databases["primary"].MaxConns = 1
+	proxy, err := newProxy(ctx, cfg)
+	require.NoError(t, err)
+	done := make(chan error, 1)
+	go func() { done <- serve(ctx, stop, proxy.server, proxy.sessions, proxy.inventory.Close, time.Second) }()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(5 * time.Second):
+			t.Error("proxy did not stop")
+		}
+	})
+	connect := func(user string) (*pgx.Conn, error) {
+		settings, err := pgx.ParseConfig("postgres://" + user + "@" + proxy.server.Addr().String() + "/client-db?sslmode=verify-full&sslrootcert=" + url.QueryEscape(shared.Proxy.TLSCertFile))
+		require.NoError(t, err)
+		settings.Password = "fixture-password"
+		return pgx.ConnectConfig(ctx, settings)
+	}
+	open := func(user string) *pgx.Conn {
+		conn, err := connect(user)
+		require.NoError(t, err)
+		t.Cleanup(func() { conn.Close(context.Background()) })
+		return conn
+	}
+	reject := func(user string) {
+		conn, err := connect(user)
+		if conn != nil {
+			conn.Close(ctx)
+		}
+		var pgErr *pgconn.PgError
+		require.ErrorAs(t, err, &pgErr)
+		require.Equal(t, "53300", pgErr.Code)
+	}
+	alice := open("alice")
+	reject("alice")
+	bob := open("bob")
+	open("bob")
+	reject("bob")
+	open("carol")
+	reject("carol")
+	// More than one client shares a pool capped at one backend connection.
+	for _, conn := range []*pgx.Conn{alice, bob} {
+		var n int
+		require.NoError(t, conn.QueryRow(ctx, "select 1").Scan(&n))
+		require.Equal(t, 1, n)
+	}
+	require.NoError(t, alice.Close(ctx))
+	require.Eventually(t, func() bool {
+		proxy.sessions.mu.Lock()
+		defer proxy.sessions.mu.Unlock()
+		return len(proxy.sessions.sessions) == 3
+	}, time.Second, 10*time.Millisecond)
+	open("carol")
+	reject("carol")
 }
