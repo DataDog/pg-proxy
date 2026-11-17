@@ -5,7 +5,7 @@ description: "Deploy the PG Proxy binary with TLS, password authentication, sizi
 
 This guide takes the OSS binary from the [local development](../local-development/) setup to a shared or production environment. It covers client TLS and authentication, backend connections, sizing, telemetry, health checks, and restarts.
 
-If you need features the binary does not configure, such as replica routing, traffic mirroring, or your own authentication, embed the library instead. See [Go library configuration](../../reference/configuration/library/).
+If you need features the binary does not configure, such as discovered replicas with health checks, traffic mirroring, or your own authentication, embed the library instead. See [Go library configuration](../../reference/configuration/library/).
 
 ## 1. Build the binary
 
@@ -76,6 +76,8 @@ users:
 
 **Keep secrets out of the file.** The example reads the backend password from `password_file`. Credentials can also come from environment variables; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). Make secret files readable only by the user that runs the proxy, for example `chmod 600`. If you keep any credentials inline, protect the configuration file the same way and keep it out of version control.
 
+**Replicas.** To send eligible reads to replicas, list them under `clusters[].replicas` and add `read_clusters` to the logical database. The binary's replicas are static: each must accept a connection at startup, and there are no replica health checks. If a replica checkout fails, the read falls back to the primary. See [Read routing](../../explanation/read-routing/) for an example and its consistency limits.
+
 Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../local-development/#settings) lists the other options.
 
 ## 4. Size pools and sessions
@@ -89,7 +91,7 @@ Three limits are involved:
 | Per-user client sessions | `proxy.default_max_user_sessions` (default `10000`), overridden by `users[].max_sessions` | Open sessions for one client user across logical databases |
 | `max_connections` | PostgreSQL | Total connections the server accepts |
 
-Keep `max_conns` × the number of proxy instances below PostgreSQL's `max_connections`, and leave headroom for administrative and other connections. Size client-session limits for the proxy's memory budget and expected workload. These caps do not open backend connections or change `max_conns`.
+Keep `max_conns` × the number of proxy instances below PostgreSQL's `max_connections`, for each primary and replica server, and leave headroom for administrative and other connections. Size client-session limits for the proxy's memory budget and expected workload. These caps do not open backend connections or change `max_conns`.
 
 A client that sits idle inside an open transaction keeps its backend connection. Set `idle_in_transaction_session_timeout` on the backend so stuck transactions do not hold the pool. See [Set connection and session limits](../set-pool-limits/) and [Transaction pooling](../../explanation/pooling/).
 

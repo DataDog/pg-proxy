@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -293,18 +294,28 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		cfg.databases[database.Name] = settings
 	}
 	cfg.clusters = make(map[string]string, len(shared.Clusters))
+	cfg.replicas = make(map[string][]string)
 	for name, cluster := range shared.Clusters {
-		if len(cluster.Replicas) > 0 {
-			return config{}, errors.New("replica routing is not implemented by the OSS binary")
-		}
 		cfg.clusters[name] = cluster.Primary
+		if len(cluster.Replicas) > 0 {
+			cfg.replicas[name] = slices.Clone(cluster.Replicas)
+		}
 	}
 	cfg.logicalDatabases = make(map[string]topology.LogicalDatabase, len(shared.LogicalDatabases))
 	for name, logical := range shared.LogicalDatabases {
+		database := topology.LogicalDatabase{Cluster: logical.Cluster}
 		if len(logical.ReadClusters) > 0 {
-			return config{}, errors.New("read-cluster routing is not implemented by the OSS binary")
+			database.ReadClusters = make(topology.ReadClusters, len(logical.ReadClusters))
+			for cluster, read := range logical.ReadClusters {
+				// An empty entry (`reports: {}` or `reports: null`) uses the default weight.
+				var weight *uint8
+				if read != nil {
+					weight = read.Weight
+				}
+				database.ReadClusters[cluster] = &topology.ReadCluster{Weight: topology.NormalizedWeight(weight)}
+			}
 		}
-		cfg.logicalDatabases[name] = topology.LogicalDatabase{Cluster: logical.Cluster}
+		cfg.logicalDatabases[name] = database
 	}
 	cfg.listenAddress = shared.Proxy.ListenerAddress
 	if cfg.listenAddress == "" {
@@ -314,7 +325,11 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
-	return cfg, cfg.validate()
+	if err := cfg.validate(); err != nil {
+		return cfg, err
+	}
+	cfg.routingWarnings = routingWarningsFor(cfg)
+	return cfg, nil
 }
 
 // clientTLSConfig loads the certificate and key used to accept TLS client connections.

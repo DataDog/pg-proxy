@@ -103,7 +103,9 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `proxy.shutdown_grace_period` | `30s` | Maximum session and pool cleanup time after SIGINT or SIGTERM; a positive duration such as `30s` or `2m`. |
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
+| `clusters[].replicas` | None | Database names used as replica pools for the cluster. Each must be a configured database other than the cluster primary. See [Read routing](../../explanation/read-routing/). |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
+| `logical_databases[].read_clusters` | None | Maps configured cluster names to a `weight` from 0 to 255 (default `1`). Any entry, including weight `0`, enables read routing for the logical database. |
 | `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
 | `-tracing` | `OTEL_TRACES_EXPORTER` selection | `otel` or `none`; overrides the trace exporter selector and cannot be combined with `-telemetry`. |
 | `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in sampled traces. SQL text is recorded regardless. |
@@ -113,7 +115,7 @@ Omitted or zero session limits use the defaults above; negative limits are rejec
 
 ### Backend connection settings
 
-Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. The OSS binary rejects replicas, read clusters, discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
+Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. Cluster `replicas` and logical-database `read_clusters` configure [read routing](../../explanation/read-routing/). The OSS binary rejects discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
 
 ### Client authentication
 

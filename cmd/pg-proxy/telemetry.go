@@ -51,6 +51,9 @@ func runWithTelemetry(ctx context.Context, cfg config) (err error) {
 	for _, warning := range cfg.telemetryWarnings {
 		pgproxy.Logger().Warn(warning)
 	}
+	for _, warning := range cfg.routingWarnings {
+		pgproxy.Logger().Warn("check routing configuration", "reason", warning)
+	}
 	return run(ctx, cfg)
 }
 
