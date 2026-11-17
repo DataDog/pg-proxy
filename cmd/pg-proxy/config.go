@@ -314,7 +314,6 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 				}
 				database.ReadClusters[cluster] = &topology.ReadCluster{Weight: topology.NormalizedWeight(weight)}
 			}
-
 		}
 		cfg.logicalDatabases[name] = database
 	}
@@ -338,7 +337,6 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		return config{}, err
 	}
 	cfg.routingWarnings = routingWarningsFor(cfg)
-
 	return cfg, nil
 }
 

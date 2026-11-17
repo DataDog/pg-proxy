@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"regexp"
 	"slices"
@@ -63,32 +64,13 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 	if node.Tag == "!!null" {
 		return nil
 	}
-	location := func(message string) error {
-		if path == "" {
-			path = "<root>"
-		}
-		return fmt.Errorf("configuration %s at line %d, column %d (%s): %s", strings.ToUpper(format), node.Line, node.Column, path, message)
-	}
+	location := func(message string) error { return nodeError(format, node, path, message) }
 	var issues []error
 	switch typ.Kind() {
 	case reflect.Struct:
 		// Custom scalar types such as time.Time own their decoding.
 		if node.Kind != yaml.MappingNode {
-			target := reflect.New(typ).Interface()
-			var err error
-			if format == "yaml" {
-				err = node.Decode(target)
-			} else {
-				if node.Kind != yaml.ScalarNode {
-					return location("expected a mapping or valid scalar for this field")
-				}
-				data := []byte(node.Value)
-				if node.Tag == "!!str" {
-					data, _ = json.Marshal(node.Value)
-				}
-				err = json.Unmarshal(data, target)
-			}
-			if err != nil {
+			if decodeValue(node, typ, format) != nil {
 				return location("expected a mapping or valid scalar for this field")
 			}
 			return nil
@@ -98,7 +80,7 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 		for i := 0; i < len(node.Content); i += 2 {
 			key, value := node.Content[i], node.Content[i+1]
 			if format == "yaml" && seen[key.Value] {
-				issues = append(issues, fmt.Errorf("configuration %s at line %d, column %d (%s): duplicate field %q", strings.ToUpper(format), key.Line, key.Column, path, key.Value))
+				issues = append(issues, nodeError(format, key, path, fmt.Sprintf("duplicate field %q", key.Value)))
 				continue
 			}
 			seen[key.Value] = true
@@ -120,12 +102,8 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 				childPath = path + "." + childPath
 			}
 			if !ok {
-				names := make([]string, 0, len(fields))
-				for name := range fields {
-					names = append(names, name)
-				}
-				slices.Sort(names)
-				issues = append(issues, fmt.Errorf("configuration %s at line %d, column %d (%s): unknown field; allowed fields: %s", strings.ToUpper(format), key.Line, key.Column, childPath, strings.Join(names, ", ")))
+				allowed := strings.Join(slices.Sorted(maps.Keys(fields)), ", ")
+				issues = append(issues, nodeError(format, key, childPath, "unknown field; allowed fields: "+allowed))
 				continue
 			}
 			if err := diagnoseNode(value, fieldType, format, childPath, depth+1, remaining); err != nil {
@@ -154,25 +132,40 @@ func diagnoseNode(node *yaml.Node, typ reflect.Type, format, path string, depth 
 			}
 		}
 	default:
-		var err error
-		target := reflect.New(typ).Interface()
-		if format == "yaml" {
-			err = node.Decode(target)
-		} else {
-			data := []byte(node.Value)
-			if node.Tag == "!!str" {
-				data, _ = json.Marshal(node.Value)
-			}
-			if node.Kind != yaml.ScalarNode {
-				return location("expected " + typ.String())
-			}
-			err = json.Unmarshal(data, target)
-		}
-		if err != nil {
+		if err := decodeValue(node, typ, format); errors.Is(err, errNotScalar) {
+			return location("expected " + typ.String())
+		} else if err != nil {
 			return location("expected " + typ.String() + " (check the value's type and range)")
 		}
 	}
 	return errors.Join(issues...)
+}
+
+var errNotScalar = errors.New("expected a scalar")
+
+// decodeValue decodes one node into typ with the decoder for format, so the
+// diagnostics accept the same values as the configuration reader.
+func decodeValue(node *yaml.Node, typ reflect.Type, format string) error {
+	target := reflect.New(typ).Interface()
+	if format == "yaml" {
+		return node.Decode(target)
+	}
+	if node.Kind != yaml.ScalarNode {
+		return errNotScalar
+	}
+	data := []byte(node.Value)
+	if node.Tag == "!!str" {
+		data, _ = json.Marshal(node.Value)
+	}
+	return json.Unmarshal(data, target)
+}
+
+// nodeError locates a message at node without quoting the node's value.
+func nodeError(format string, node *yaml.Node, path, message string) error {
+	if path == "" {
+		path = "<root>"
+	}
+	return fmt.Errorf("configuration %s at line %d, column %d (%s): %s", strings.ToUpper(format), node.Line, node.Column, path, message)
 }
 
 // Use the schema tags, including embedded YAML inline fields and embedded JSON
