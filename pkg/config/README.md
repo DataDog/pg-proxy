@@ -63,7 +63,11 @@ to enable static users and non-loopback listeners. Each user needs an explicit
 logical-database list. Proxy usernames are independent of backend accounts.
 See [client authentication](../../docs/client-authentication.md).
 It rejects JWT, mirroring, and other unsupported options with explicit startup errors.
-The library schema remains broader than this command.
+The library schema remains broader than this command. The command also reads
+its own `*_file` and `*_env` credential references and resolves them into these
+types before validation; see
+[credential references](../../docs/client-authentication.md#credential-references).
+`ReadJSON` and `ReadYAML` do not accept those fields.
 
 [`pool.PGXConfig`](../pool/config.go) consumes a `Database` and returns a pgx pool
 configuration without opening connections. It supports direct backends and takes
@@ -88,3 +92,26 @@ Follow the [configuration extension guide](../../docs/extending-configuration.md
 to change a nested field for your application, add settings, or contribute a
 shared library field. The guide follows an application that supplies database
 passwords through environment variables and converts them for the library.
+
+## Standalone shutdown
+
+Set `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) to a positive Go
+duration string, such as `30s` or `2m`, to bound session and pool cleanup after
+`SIGINT` or `SIGTERM`. Omitted or empty values use `30s`; zero, negative, invalid,
+and overflowing durations fail at startup. Give the service manager a longer
+stop timeout to allow cleanup and telemetry flushing. This setting belongs to
+`Proxy`; applications embedding `ProxySettings` keep their own shutdown policy.
+
+## Standalone session admission
+
+The binary defaults to 100,000 sessions per process and 10,000 per client user.
+Set `proxy.max_sessions` and `proxy.default_max_user_sessions` to change these
+caps. Set `users[].max_sessions` to override one authenticated user's cap across
+logical databases. JSON uses `maxSessions` and `defaultMaxUserSessions` under
+`proxy`, and `maxSessions` under each user. Omitted or zero values use defaults;
+negative values fail at startup. In loopback trust mode, the backend username
+is the per-user key. These limits do not change `databases[].max_conns`.
+
+This raises the old fixed limit of 100. To keep it, set both proxy limits to
+`100`. Older binaries reject the new proxy fields and nonzero per-user limits;
+remove them before rolling back to an older binary.

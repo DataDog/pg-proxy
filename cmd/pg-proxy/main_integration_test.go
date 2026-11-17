@@ -33,6 +33,7 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	defer admin.Close(context.Background())
 	t.Run("exports traces metrics and logs", func(t *testing.T) { verifyProxyOTLP(t, adminURL) })
 	t.Run("client TLS", func(t *testing.T) { verifyProxyTLS(t, adminURL, admin) })
+	t.Run("session admission limits", func(t *testing.T) { verifySessionAdmission(t, adminURL) })
 	t.Run("client authentication", func(t *testing.T) { verifyProxyAuthentication(t, adminURL, admin) })
 	t.Run("pool statistics", func(t *testing.T) { verifyProxyPoolStats(t, adminURL) })
 

@@ -29,7 +29,7 @@ func TestConclusiveSQLUnroutableErrorRequiresEveryJoinedCause(t *testing.T) {
 		"nil":                    {nil, false},
 		"wrapped refusal":        {fmt.Errorf("connect: %w", &net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), true},
 		"all conclusive":         {errors.Join(syscall.ECONNREFUSED, shutdown), true},
-		"nested all conclusive":  {fmt.Errorf("connect: %w", errors.Join(shutdown, errors.Join(syscall.ECONNREFUSED, &pgconn.PgError{Code: "XX000"}))), true},
+		"nested all conclusive":  {fmt.Errorf("connect: %w", errors.Join(shutdown, errors.Join(syscall.ECONNREFUSED, &pgconn.PgError{Code: "57P02"}))), true},
 		"refusal then timeout":   {errors.Join(syscall.ECONNREFUSED, context.DeadlineExceeded), false},
 		"timeout then refusal":   {errors.Join(context.DeadlineExceeded, syscall.ECONNREFUSED), false},
 		"refusal then password":  {errors.Join(syscall.ECONNREFUSED, password), false},
@@ -38,6 +38,7 @@ func TestConclusiveSQLUnroutableErrorRequiresEveryJoinedCause(t *testing.T) {
 		"password then shutdown": {errors.Join(password, shutdown), false},
 		"nested mixed":           {fmt.Errorf("connect: %w", errors.Join(shutdown, fmt.Errorf("retry: %w", errors.Join(syscall.ECONNREFUSED, context.DeadlineExceeded)))), false},
 		"multiple percent-w":     {fmt.Errorf("first: %w; second: %w", syscall.ECONNREFUSED, password), false},
+		"shutdown then internal": {errors.Join(shutdown, &pgconn.PgError{Code: "XX000"}), false},
 		"unknown cause":          {errors.Join(syscall.ECONNREFUSED, errors.New("unknown connection failure")), false},
 	}
 	for name, tc := range tests {

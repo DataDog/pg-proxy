@@ -236,7 +236,105 @@ func TestReleaseNonIdleDestroysBeforeRoleReset(t *testing.T) {
 	assert.False(t, emitted, "no role reset should be attempted on a backend being destroyed")
 }
 
+// noopRoleSession manages the role without issuing SQL.
+type noopRoleSession struct{}
+
+func (noopRoleSession) Set(context.Context, *pgxpool.Conn, []string) (string, error) {
+	return "test-token", nil
+}
+
+func (noopRoleSession) Reset(context.Context, *pgxpool.Conn, string, []string) error {
+	return nil
+}
+
+// TestReleaseResetSQL pins the statement Release runs on an idle link. Without a
+// RoleSession, a client's SET ROLE or SET SESSION AUTHORIZATION must not reach the
+// next client, and RESET ALL does not cover either. With one, the RoleSession owns
+// the role, so only GUCs are reset.
+func TestReleaseResetSQL(t *testing.T) {
+	tests := []struct {
+		name string
+		role RoleSession
+		want string
+	}{
+		{name: "without role management", want: "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"},
+		{name: "with role management", role: noopRoleSession{}, want: "RESET ALL"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			received := make(chan pgproto3.FrontendMessage, 1)
+			conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
+				msg, err := backend.Receive()
+				if err != nil {
+					return
+				}
+				received <- msg
+				if _, ok := msg.(*pgproto3.Query); ok {
+					// pgx reads results until ReadyForQuery, so one CommandComplete suffices.
+					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
+					backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+					_ = backend.Flush()
+				}
+				// Read the Terminate sent when the pool closes the connection.
+				_, _ = backend.Receive()
+			})
+			link, err := New(conn, Options{Role: test.role})
+			require.NoError(t, err)
+
+			require.NoError(t, link.Release())
+
+			// One simple query: the whole reset costs a single round trip. The backend
+			// buffers the query before replying, so a successful reset has already sent it.
+			select {
+			case msg := <-received:
+				require.Equal(t, &pgproto3.Query{String: test.want}, msg)
+			default:
+				t.Fatal("Release sent no reset query")
+			}
+		})
+	}
+}
+
+// TestReleaseResetFailureClosesConnection verifies that a failed reset counts
+// guc_reset_failure and closes the connection instead of returning it to the pool.
+func TestReleaseResetFailureClosesConnection(t *testing.T) {
+	metrics := newRecordingMetrics()
+	restore := pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics})
+	t.Cleanup(restore)
+
+	conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
+		if _, err := backend.Receive(); err != nil {
+			return
+		}
+		backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "XX000", Message: "reset failed"})
+		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		_ = backend.Flush()
+		// Read the Terminate sent when Release closes the connection.
+		_, _ = backend.Receive()
+	})
+	pgxConn := conn.Conn()
+	tags := []string{"database_cluster:test-cluster"}
+	link, err := New(conn, Options{MetricTags: tags})
+	require.NoError(t, err)
+
+	require.Error(t, link.Release())
+
+	assert.True(t, pgxConn.IsClosed(), "a connection whose reset failed must not return to the pool")
+	counts, emitted := metrics.getCount("datadog.pg_proxy.sessions.connections.guc_reset_failure", tags)
+	assert.True(t, emitted)
+	assert.Equal(t, []int64{1}, counts)
+}
+
 func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
+	t.Helper()
+	// Read the Terminate sent when Release closes the non-idle connection.
+	return newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) { _, _ = backend.Receive() })
+}
+
+// newSessionLinkTestPoolConnServing returns a pool conn whose test backend answers
+// the startup handshake and then hands the connection to serve.
+func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backend)) *pgxpool.Conn {
 	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
@@ -262,8 +360,7 @@ func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
 		}
 		handshakeResult <- nil
 
-		// Read the Terminate sent when Release closes the non-idle connection.
-		_, _ = backend.Receive()
+		serve(backend)
 	}()
 
 	config, err := pgxpool.ParseConfig("postgres://test@127.0.0.1/test?sslmode=disable")

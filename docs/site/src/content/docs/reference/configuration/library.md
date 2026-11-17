@@ -47,7 +47,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `RandomInt` | Random-number function used by routing. |
 | `Mirroring` | Session traffic-mirroring integration. |
 | `Metrics` | Optional session metric implementation; otherwise sessions use the global metric client. |
-| `EnableTraceParameters` | Set to `true` to capture raw bind values in Datadog and OTel query traces. Defaults to `false`; SQL text is unaffected. Also available in `session.Config`. |
+| `EnableTraceParameters` | Set to `true` to capture raw bind values in sampled Datadog and OTel query traces. Defaults to `false`; SQL text is unaffected. Also available in `session.Config`. |
 
 `topology.DefaultPostgresMessageBufferSize` is `10_240`. The local executable supplies it explicitly.
 
