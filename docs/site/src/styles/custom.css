@@ -1,3 +1,9 @@
+/*
+ * Unless explicitly stated otherwise all files in this repository are licensed
+ * under the Apache-2.0 License.
+ * This product includes software developed at Datadog (https://www.datadoghq.com/)
+ * Copyright 2026-Present Datadog, Inc.
+ */
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;450;500;550;600;650;700&family=Manrope:wght@400;500;600;650;700;750;800&display=swap');
 :root { --sl-font: 'DM Sans', system-ui, sans-serif; --sl-color-accent-low: #28183d; --sl-color-accent: #a879ed; --sl-color-accent-high: #e5d5ff; --sl-content-width: 48rem; --sl-text-h1: 2.65rem; }
 :root[data-theme='light'] { --sl-color-accent-low: #f2eafa; --sl-color-accent: #632ca6; --sl-color-accent-high: #472078; --sl-color-white: #201a2b; --sl-color-gray-1: #352e40; --sl-color-gray-2: #51495d; --sl-color-gray-3: #746b80; --sl-color-gray-4: #bdb6c7; --sl-color-gray-5: #e7e3ec; --sl-color-gray-6: #f8f7fa; --sl-color-black: #fff; }

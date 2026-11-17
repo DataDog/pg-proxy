@@ -13,6 +13,18 @@ header:
       Copyright 2026-Present Datadog, Inc.
   paths:
     - '**/*.go'
+    # Documentation site sources. JSON files and images cannot hold comments.
+    - 'docs/site/.gitignore'
+    - 'docs/site/*.md'
+    - 'docs/site/**/*.mjs'
+    - 'docs/site/**/*.ts'
+    - 'docs/site/**/*.css'
+    # Pages hold the header as YAML comments in the frontmatter, so it never renders.
+    - 'docs/site/src/content/docs/**/*.md'
   paths-ignore:
     - 'vendor/**'
+    - 'docs/site/node_modules/**'
+    - 'docs/site/dist/**'
+    - 'docs/site/dist-static/**'
+    - 'docs/site/.astro/**'
   comment: never
