@@ -223,6 +223,9 @@ type SQLIteration struct {
 }
 
 type SQLFallback struct {
+	// SQLResults is the exact credential evidence used for an indeterminate fallback,
+	// including cached polls. Other fallback reasons leave it empty.
+	SQLResults       []SQLHealthResultsSnapshot
 	Reason           string
 	TimeoutType      string
 	CachedPatroniAge time.Duration
@@ -1206,6 +1209,11 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, SQLHealthResultsSnapshot{
 			StartedAt: outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt, Results: outcome.Results,
 		})
+		if decision.routingResult == SQLRoutingResultCachedFallback && decision.fallbackReason == SQLHealthFallbackIndeterminate && w.sqlHooks.CachedFallback != nil {
+			for _, credential := range snapshot.results {
+				decision.fallbackSQLResults = append(decision.fallbackSQLResults, cloneSQLHealthResultsSnapshot(credential))
+			}
+		}
 		if decision.publish {
 			poolHealth.sqlRoutingActive = decision.routingResult == SQLRoutingResultConclusive || decision.routingResult == SQLRoutingResultRetainedSQL
 			resolved := snapshot.retainedIPs
@@ -1289,6 +1297,7 @@ func (w *HealthWorker) reportHybridDecision(
 	}
 	if decision.routingResult == SQLRoutingResultCachedFallback && w.sqlHooks.CachedFallback != nil {
 		w.sqlHooks.CachedFallback(SQLFallback{
+			SQLResults:       decision.fallbackSQLResults,
 			Reason:           decision.fallbackReason,
 			TimeoutType:      decision.timeoutType,
 			CachedPatroniAge: decision.cachedAge,

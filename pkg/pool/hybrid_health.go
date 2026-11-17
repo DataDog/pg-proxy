@@ -80,6 +80,8 @@ type hybridRoutingDecision struct {
 	timeoutType    string
 	cachedAge      time.Duration
 	hasCachedAge   bool
+	// Diagnostic evidence for this decision only; no additional cached history.
+	fallbackSQLResults []SQLHealthResultsSnapshot
 
 	leaderDetection   *LeaderDetectionComparison
 	routingComparison *LeaderRoutingComparison

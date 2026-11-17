@@ -3605,3 +3605,50 @@ func TestHybridEvaluationReconcilesOrderedCredentialRoles(t *testing.T) {
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[2].RoutingResult)
 	assert.Empty(t, iterations[2].FallbackReason)
 }
+
+// The fallback hook must carry the evidence for its own decision, not a later
+// comparison or just the credential that happened to complete last.
+func TestIndeterminateFallbackPreservesCachedCredentialEvidence(t *testing.T) {
+	const a, b = "10.0.0.1", "10.0.0.2"
+	sqlState := NewHealthState()
+	sqlState.Track([]string{a, b})
+	health := &PoolHealth{
+		state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: sqlState,
+		hybridPolicy:     newHybridHealthPolicy(true),
+		routingEnabledFn: func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+	}
+	var fallbacks []SQLFallback
+	w := &HealthWorker{
+		sqlHooks: SQLHealthWorkerHooks{CachedFallback: func(f SQLFallback, _ []string) { fallbacks = append(fallbacks, f) }},
+		hooks: HealthWorkerHooks{SQLPatroniCompared: func(s SQLPatroniHealthSnapshot, _ []string) {
+			// A telemetry consumer must not change the fallback's evidence.
+			for _, credential := range s.SQLResults {
+				credential.Results[0].Err = errors.New("comparison consumer changed its copy")
+			}
+		}},
+	}
+	first := &sqlHealthTarget{poolHealth: health, tags: []string{"database:first"}}
+	second := &sqlHealthTarget{poolHealth: health, tags: []string{"database:second"}}
+	at := time.Now().Add(-time.Second)
+	complete := func(target *sqlHealthTarget, start time.Time, err error) {
+		w.completeSQLHealthCheck(target, 0, start, []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
+			StartedAt: start,
+			Results:   []SQLHealthCheckResult{{IP: a, Err: err, Stage: SQLHealthCheckAcquireStage}, {IP: b, InRecovery: true, StartedAt: start, CompletedAt: start.Add(time.Millisecond)}},
+		})
+	}
+	complete(first, at, errors.New("cached EOF"))
+	complete(second, at.Add(2*time.Millisecond), errors.New("fresh reset"))
+	require.Len(t, fallbacks, 2)
+	require.Len(t, fallbacks[1].SQLResults, 2)
+	for i, want := range []string{"cached EOF", "fresh reset"} {
+		assert.Equal(t, SQLHealthFallbackIndeterminate, fallbacks[1].Reason)
+		assert.EqualError(t, fallbacks[1].SQLResults[i].Results[0].Err, want)
+		assert.Equal(t, SQLHealthCheckAcquireStage, fallbacks[1].SQLResults[i].Results[0].Stage)
+	}
+	assert.Equal(t, []string{"database:first"}, fallbacks[1].SQLResults[0].Tags)
+	assert.Equal(t, []string{"database:second"}, fallbacks[1].SQLResults[1].Tags)
+	complete(first, at.Add(4*time.Millisecond), context.DeadlineExceeded)
+	require.Len(t, fallbacks, 3)
+	assert.Equal(t, SQLHealthFallbackTimeout, fallbacks[2].Reason)
+	assert.Empty(t, fallbacks[2].SQLResults, "only indeterminate fallbacks copy diagnostic evidence")
+}
