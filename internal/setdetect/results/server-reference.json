@@ -1,0 +1,22 @@
+[
+  {
+    "query": "SELECT 1",
+    "median_us": 61.114,
+    "p99_us": 84.239
+  },
+  {
+    "query": "RESET ALL",
+    "median_us": 51.467,
+    "p99_us": 67.333
+  },
+  {
+    "query": "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL",
+    "median_us": 54.467,
+    "p99_us": 73.97
+  },
+  {
+    "query": "verify probe (pg_settings + users + 2 custom)",
+    "median_us": 1116.393,
+    "p99_us": 1396.726
+  }
+]

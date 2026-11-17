@@ -1,0 +1,394 @@
+[
+  {
+    "tag": "pg14",
+    "id": "pg-regress-01eceff29f",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- UPDATE / DELETE and Row-level security\n--\nSET SESSION AUTHORIZATION regress_rls_bob"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-2243d2772d",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "set parallel_setup_cost=0"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-25f1694c46",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- RLS policy does not apply to table owner when RLS disabled.\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-2ed01e2247",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- check error reporting with column privs\nSET SESSION AUTHORIZATION regress_priv_user1"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-34189d12b0",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "set default_with_oids to f"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-37f8b260d4",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- compatibility mode\nSET SESSION AUTHORIZATION regress_priv_user4"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-42436b2414",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- fail, mutual recursion\n\n--\n-- Mutual recursion via views\n--\nSET SESSION AUTHORIZATION regress_rls_bob"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-4f8effc919",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- FORCE ROW LEVEL SECURITY applies RLS to owners too\n--\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-50b7184e13",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- test column-level privileges when involved with DELETE\nSET SESSION AUTHORIZATION regress_priv_user1"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-683f16f6c3",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET row_security = on"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-6b92f51ade",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- Expression structure with SBV\n--\n-- Create view as table owner.  RLS should NOT be applied.\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-6c150e4619",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P4",
+    "sql": "DO $x$\nDECLARE\n\tr record;\n\tr2 record;\n\tcond text;\n\tidx_ctids tid[];\n\tss_ctids tid[];\n\tcount int;\n\tplan_ok bool;\n\tplan_line text;\nBEGIN\n\tFOR r IN SELECT colname, oper, typ, value[ordinality], matches[ordinality] FROM brinopers, unnest(op) WITH ORDINALITY AS oper LOOP\n\n\t\t-- prepare the condition\n\t\tIF r.value IS NULL THEN\n\t\t\tcond := format('%I %s %L', r.colname, r.oper, r.value);\n\t\tELSE\n\t\t\tcond := format('%I %s %L::%s', r.colname, r.oper, r.value, r.typ);\n\t\tEND IF;\n\n\t\t-- run the query using the brin index\n\t\tSET enable_seqscan = 0;\n\t\tSET enable_bitmapscan = 1;\n\n\t\tplan_ok := false;\n\t\tFOR plan_line IN EXECUTE format($y$EXPLAIN SELECT array_agg(ctid) FROM brintest WHERE %s $y$, cond) LOOP\n\t\t\tIF plan_line LIKE '%Bitmap Heap Scan on brintest%' THEN\n\t\t\t\tplan_ok := true;\n\t\t\tEND IF;\n\t\tEND LOOP;\n\t\tIF NOT plan_ok THEN\n\t\t\tRAISE WARNING 'did not get bitmap indexscan plan for %', r;\n\t\tEND IF;\n\n\t\tEXECUTE format($y$SELECT array_agg(ctid) FROM brintest WHERE %s $y$, cond)\n\t\t\tINTO idx_ctids;\n\n\t\t-- run the query using a seqscan\n\t\tSET enable_seqscan = 1;\n\t\tSET enable_bitmapscan = 0;\n\n\t\tplan_ok := false;\n\t\tFOR plan_line IN EXECUTE format($y$EXPLAIN SELECT array_agg(ctid) FROM brintest WHERE %s $y$, cond) LOOP\n\t\t\tIF plan_line LIKE '%Seq Scan on brintest%' THEN\n\t\t\t\tplan_ok := true;\n\t\t\tEND IF;\n\t\tEND LOOP;\n\t\tIF NOT plan_ok THEN\n\t\t\tRAISE WARNING 'did not get seqscan plan for %', r;\n\t\tEND IF;\n\n\t\tEXECUTE format($y$SELECT array_agg(ctid) FROM brintest WHERE %s $y$, cond)\n\t\t\tINTO ss_ctids;\n\n\t\t-- make sure both return the same results\n\t\tcount := array_length(idx_ctids, 1);\n\n\t\tIF NOT (count = array_length(ss_ctids, 1) AND\n\t\t\t\tidx_ctids @\u003e ss_ctids AND\n\t\t\t\tidx_ctids \u003c@ ss_ctids) THEN\n\t\t\t-- report the results of each scan to make the differences obvious\n\t\t\tRAISE WARNING 'something not right in %: count %', r, count;\n\t\t\tSET enable_seqscan = 1;\n\t\t\tSET enable_bitmapscan = 0;\n\t\t\tFOR r2 IN EXECUTE 'SELECT ' || r.colname || ' FROM brintest WHERE ' || cond LOOP\n\t\t\t\tRAISE NOTICE 'seqscan: %', r2;\n\t\t\tEND LOOP;\n\n\t\t\tSET enable_seqscan = 0;\n\t\t\tSET enable_bitmapscan = 1;\n\t\t\tFOR r2 IN EXECUTE 'SELECT ' || r.colname || ' FROM brintest WHERE ' || cond LOOP\n\t\t\t\tRAISE NOTICE 'bitmapscan: %', r2;\n\t\t\tEND LOOP;\n\t\tEND IF;\n\n\t\t-- make sure we found expected number of matches\n\t\tIF count != r.matches THEN RAISE WARNING 'unexpected number of results % for %', count, r; END IF;\n\tEND LOOP;\nEND;\n$x$"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-6e4831e031",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET enable_parallel_hash = on"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-6f954a133c",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- Table inheritance and RLS policy\n--\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-73bebeab26",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- FORCE ROW LEVEL SECURITY does not break RI\n--\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-7bc14f210d",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET ROLE regress_test_role_super"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-800de2ebbb",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- Sort pushdown can't go below where expressions are part of the rel target.\n-- In particular this is interesting for volatile expressions which have to\n-- go above joins since otherwise we'll incorrectly use expression evaluations\n-- across multiple rows.\nset enable_hashagg=off"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-8debbca242",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- fail, mutual recursion via views\n\n--\n-- Mutual recursion via .s.b views\n--\nSET SESSION AUTHORIZATION regress_rls_bob"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-8e204808fc",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- check pg_stats view filtering\n--\nSET row_security TO ON"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-914fc105ff",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "set min_parallel_index_scan_size = 0"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-940303d36f",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "set session role regress_priv_user2"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-9609a1e148",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- Formats\n--\n\nSET DateStyle TO 'US,Postgres'"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-a5232c9a42",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- Now check the results from bitmap indexscan\nSET enable_seqscan = OFF"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-aae0dffc70",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P4",
+    "sql": "DO $x$\nDECLARE\n\tr record;\n\tr2 record;\n\tcond text;\n\tidx_ctids tid[];\n\tss_ctids tid[];\n\tcount int;\n\tplan_ok bool;\n\tplan_line text;\nBEGIN\n\tFOR r IN SELECT colname, oper, typ, value[ordinality], matches[ordinality] FROM brinopers_bloom, unnest(op) WITH ORDINALITY AS oper LOOP\n\n\t\t-- prepare the condition\n\t\tIF r.value IS NULL THEN\n\t\t\tcond := format('%I %s %L', r.colname, r.oper, r.value);\n\t\tELSE\n\t\t\tcond := format('%I %s %L::%s', r.colname, r.oper, r.value, r.typ);\n\t\tEND IF;\n\n\t\t-- run the query using the brin index\n\t\tSET enable_seqscan = 0;\n\t\tSET enable_bitmapscan = 1;\n\n\t\tplan_ok := false;\n\t\tFOR plan_line IN EXECUTE format($y$EXPLAIN SELECT array_agg(ctid) FROM brintest_bloom WHERE %s $y$, cond) LOOP\n\t\t\tIF plan_line LIKE '%Bitmap Heap Scan on brintest_bloom%' THEN\n\t\t\t\tplan_ok := true;\n\t\t\tEND IF;\n\t\tEND LOOP;\n\t\tIF NOT plan_ok THEN\n\t\t\tRAISE WARNING 'did not get bitmap indexscan plan for %', r;\n\t\tEND IF;\n\n\t\tEXECUTE format($y$SELECT array_agg(ctid) FROM brintest_bloom WHERE %s $y$, cond)\n\t\t\tINTO idx_ctids;\n\n\t\t-- run the query using a seqscan\n\t\tSET enable_seqscan = 1;\n\t\tSET enable_bitmapscan = 0;\n\n\t\tplan_ok := false;\n\t\tFOR plan_line IN EXECUTE format($y$EXPLAIN SELECT array_agg(ctid) FROM brintest_bloom WHERE %s $y$, cond) LOOP\n\t\t\tIF plan_line LIKE '%Seq Scan on brintest_bloom%' THEN\n\t\t\t\tplan_ok := true;\n\t\t\tEND IF;\n\t\tEND LOOP;\n\t\tIF NOT plan_ok THEN\n\t\t\tRAISE WARNING 'did not get seqscan plan for %', r;\n\t\tEND IF;\n\n\t\tEXECUTE format($y$SELECT array_agg(ctid) FROM brintest_bloom WHERE %s $y$, cond)\n\t\t\tINTO ss_ctids;\n\n\t\t-- make sure both return the same results\n\t\tcount := array_length(idx_ctids, 1);\n\n\t\tIF NOT (count = array_length(ss_ctids, 1) AND\n\t\t\t\tidx_ctids @\u003e ss_ctids AND\n\t\t\t\tidx_ctids \u003c@ ss_ctids) THEN\n\t\t\t-- report the results of each scan to make the differences obvious\n\t\t\tRAISE WARNING 'something not right in %: count %', r, count;\n\t\t\tSET enable_seqscan = 1;\n\t\t\tSET enable_bitmapscan = 0;\n\t\t\tFOR r2 IN EXECUTE 'SELECT ' || r.colname || ' FROM brintest_bloom WHERE ' || cond LOOP\n\t\t\t\tRAISE NOTICE 'seqscan: %', r2;\n\t\t\tEND LOOP;\n\n\t\t\tSET enable_seqscan = 0;\n\t\t\tSET enable_bitmapscan = 1;\n\t\t\tFOR r2 IN EXECUTE 'SELECT ' || r.colname || ' FROM brintest_bloom WHERE ' || cond LOOP\n\t\t\t\tRAISE NOTICE 'bitmapscan: %', r2;\n\t\t\tEND LOOP;\n\t\tEND IF;\n\n\t\t-- make sure we found expected number of matches\n\t\tIF count != r.matches THEN RAISE WARNING 'unexpected number of results % for %', count, r; END IF;\n\tEND LOOP;\nEND;\n$x$"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-b34ace9608",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- test ORDER BY distance\nSET enable_indexscan = ON"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-ba58a31762",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- test that quals attached to an outer join have correct semantics,\n-- specifically that they don't re-use expressions computed below the join;\n-- we force a mergejoin so that coalesce(b.q1, 1) appears as a join input\n--\n\nset enable_hashjoin to off"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-bcabbbc910",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "set plpgsql.extra_warnings to 'shadowed_variables'"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-c29c75861a",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- Test INSERT+RETURNING applies SELECT policies as\n-- WithCheckOptions (meaning an error is thrown)\n--\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-c34485a287",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- After drop, should be unqualified\n\n-----   RECURSION    ----\n\n--\n-- Simple recursion\n--\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-caa39156ca",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET enable_partitionwise_join = on"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-cffbd11709",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P4",
+    "sql": "DO $x$\nDECLARE\n\tr record;\n\tr2 record;\n\tcond text;\n\tidx_ctids tid[];\n\tss_ctids tid[];\n\tcount int;\n\tplan_ok bool;\n\tplan_line text;\nBEGIN\n\tFOR r IN SELECT colname, oper, typ, value[ordinality], matches[ordinality] FROM brinopers_multi, unnest(op) WITH ORDINALITY AS oper LOOP\n\n\t\t-- prepare the condition\n\t\tIF r.value IS NULL THEN\n\t\t\tcond := format('%I %s %L', r.colname, r.oper, r.value);\n\t\tELSE\n\t\t\tcond := format('%I %s %L::%s', r.colname, r.oper, r.value, r.typ);\n\t\tEND IF;\n\n\t\t-- run the query using the brin index\n\t\tSET enable_seqscan = 0;\n\t\tSET enable_bitmapscan = 1;\n\n\t\tplan_ok := false;\n\t\tFOR plan_line IN EXECUTE format($y$EXPLAIN SELECT array_agg(ctid) FROM brintest_multi WHERE %s $y$, cond) LOOP\n\t\t\tIF plan_line LIKE '%Bitmap Heap Scan on brintest_multi%' THEN\n\t\t\t\tplan_ok := true;\n\t\t\tEND IF;\n\t\tEND LOOP;\n\t\tIF NOT plan_ok THEN\n\t\t\tRAISE WARNING 'did not get bitmap indexscan plan for %', r;\n\t\tEND IF;\n\n\t\tEXECUTE format($y$SELECT array_agg(ctid) FROM brintest_multi WHERE %s $y$, cond)\n\t\t\tINTO idx_ctids;\n\n\t\t-- run the query using a seqscan\n\t\tSET enable_seqscan = 1;\n\t\tSET enable_bitmapscan = 0;\n\n\t\tplan_ok := false;\n\t\tFOR plan_line IN EXECUTE format($y$EXPLAIN SELECT array_agg(ctid) FROM brintest_multi WHERE %s $y$, cond) LOOP\n\t\t\tIF plan_line LIKE '%Seq Scan on brintest_multi%' THEN\n\t\t\t\tplan_ok := true;\n\t\t\tEND IF;\n\t\tEND LOOP;\n\t\tIF NOT plan_ok THEN\n\t\t\tRAISE WARNING 'did not get seqscan plan for %', r;\n\t\tEND IF;\n\n\t\tEXECUTE format($y$SELECT array_agg(ctid) FROM brintest_multi WHERE %s $y$, cond)\n\t\t\tINTO ss_ctids;\n\n\t\t-- make sure both return the same results\n\t\tcount := array_length(idx_ctids, 1);\n\n\t\tIF NOT (count = array_length(ss_ctids, 1) AND\n\t\t\t\tidx_ctids @\u003e ss_ctids AND\n\t\t\t\tidx_ctids \u003c@ ss_ctids) THEN\n\t\t\t-- report the results of each scan to make the differences obvious\n\t\t\tRAISE WARNING 'something not right in %: count %', r, count;\n\t\t\tSET enable_seqscan = 1;\n\t\t\tSET enable_bitmapscan = 0;\n\t\t\tFOR r2 IN EXECUTE 'SELECT ' || r.colname || ' FROM brintest_multi WHERE ' || cond LOOP\n\t\t\t\tRAISE NOTICE 'seqscan: %', r2;\n\t\t\tEND LOOP;\n\n\t\t\tSET enable_seqscan = 0;\n\t\t\tSET enable_bitmapscan = 1;\n\t\t\tFOR r2 IN EXECUTE 'SELECT ' || r.colname || ' FROM brintest_multi WHERE ' || cond LOOP\n\t\t\t\tRAISE NOTICE 'bitmapscan: %', r2;\n\t\t\tEND LOOP;\n\t\tEND IF;\n\n\t\t-- make sure we found expected number of matches\n\t\tIF count != r.matches THEN RAISE WARNING 'unexpected number of results % for %', count, r; END IF;\n\tEND LOOP;\nEND;\n$x$"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-d304abf2ce",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "-- this will throw a warning and delete the variable\nSET plpgsql.extra_foo_warnings = true"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-e1cd9f68d9",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "set work_mem = '3MB'"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-e3d8202887",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--superuser, succeed\nSET SESSION AUTHORIZATION regress_priv_user4"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-edcdf52c58",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- INSERT ... ON CONFLICT DO UPDATE and Row-level security\n--\n\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pg-regress-f69f951226",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "--\n-- Test UPDATE+RETURNING applies SELECT policies as\n-- WithCheckOptions (meaning an error is thrown)\n--\nSET SESSION AUTHORIZATION regress_rls_alice"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-27bbc1d7b7",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET timezone = 'Europe/Paris'; RESET timezone"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-2e14c158ca",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('lock_timeout', NULL, false);"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-3ff2c7751b",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "/* server_reset */ SELECT set_config('application_name', NULL, false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-97a9da9ca8",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET application_name TO 'test'; SELECT 1; RESET application_name; SHOW application_name;"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-9de671e5e8",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('timezone', NULL, false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-ab5fef84fb",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P1",
+    "sql": "SET intervalstyle = 'sql_standard'; SET datestyle = 'SQL, DMY'; RESET intervalstyle; RESET datestyle"
+  },
+  {
+    "tag": "pg14",
+    "id": "pgdog-b8d7889e60",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('lock_timeout', NULL, false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "proxysql-50b2d4e155",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('TimeZone',NULL,false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "proxysql-cb647d448c",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('bytea_output',NULL,false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "proxysql-d3ffac9ee5",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('search_path','',false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "proxysql-e9b155f218",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('DateStyle',NULL,false)"
+  },
+  {
+    "tag": "pg14",
+    "id": "synth-p2-dddedbd008",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P2",
+    "sql": "SELECT set_config('app.tenant_id', $1::text, $2::boolean)"
+  },
+  {
+    "tag": "pg14",
+    "id": "synth-p6-edf41d18f9",
+    "kind": "dirty_but_unchanged",
+    "label": "dirty",
+    "category": "P6",
+    "sql": "UPDATE PG_SETTINGS SET SETTING = '3S' WHERE NAME = 'LOCK_TIMEOUT'"
+  }
+]

@@ -1,0 +1,1025 @@
+goos: linux
+goarch: amd64
+pkg: github.com/DataDog/pg-proxy/internal/setdetect
+cpu: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+BenchmarkClassify/substring/select1         	20492397	        17.56 ns/op	 455.52 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	19530710	        17.60 ns/op	 454.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20705682	        17.60 ns/op	 454.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20682778	        17.52 ns/op	 456.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20446190	        17.65 ns/op	 453.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20315059	        17.55 ns/op	 455.84 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20581484	        17.72 ns/op	 451.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20600828	        19.10 ns/op	 418.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20611647	        17.59 ns/op	 454.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select1         	20648880	        17.47 ns/op	 457.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4413462	        84.24 ns/op	2231.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4404723	        82.16 ns/op	2288.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4343437	        82.91 ns/op	2267.47 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4372039	        82.01 ns/op	2292.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4320068	        82.55 ns/op	2277.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4372502	        81.98 ns/op	2293.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4398672	        81.89 ns/op	2295.73 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4399988	        81.76 ns/op	2299.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4403368	        81.84 ns/op	2297.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/select200       	 4401537	        81.78 ns/op	2298.77 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6633520	        52.73 ns/op	7339.05 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6849034	        52.62 ns/op	7355.19 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6867438	        52.42 ns/op	7383.27 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6875836	        52.57 ns/op	7361.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6861819	        52.46 ns/op	7376.91 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6882238	        52.33 ns/op	7395.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6857722	        52.38 ns/op	7388.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6870991	        52.43 ns/op	7380.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6872523	        52.37 ns/op	7389.88 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/update400       	 6886072	        52.34 ns/op	7393.32 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96883	      3714 ns/op	2710.64 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96927	      3714 ns/op	2710.27 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96925	      3715 ns/op	2709.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96528	      3718 ns/op	2707.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96748	      3728 ns/op	2699.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96969	      3713 ns/op	2711.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   97029	      3711 ns/op	2712.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   97009	      3719 ns/op	2706.41 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   93783	      3816 ns/op	2637.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/inlist10k       	   96957	      3716 ns/op	2709.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	18013255	        19.96 ns/op	8815.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	17970950	        20.08 ns/op	8767.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	18048912	        20.84 ns/op	8444.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	14921300	        23.50 ns/op	7490.32 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	18055056	        19.99 ns/op	8803.76 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	17994660	        20.00 ns/op	8800.31 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	18035794	        19.98 ns/op	8806.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	17906983	        19.94 ns/op	8826.77 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	18051448	        20.02 ns/op	8789.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/multi           	17998974	        19.97 ns/op	8811.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	32457716	        11.29 ns/op	3011.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	32308906	        11.20 ns/op	3035.56 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	31917776	        11.19 ns/op	3037.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	32395725	        11.46 ns/op	2966.73 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	32342074	        11.88 ns/op	2861.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	29343435	        12.76 ns/op	2664.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	29266550	        12.00 ns/op	2834.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	32418798	        11.27 ns/op	3015.90 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	32448925	        11.11 ns/op	3061.64 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/substring/set             	30946426	        11.22 ns/op	3029.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21015519	        20.24 ns/op	 395.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21015325	        17.11 ns/op	 467.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21248918	        17.02 ns/op	 470.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21108889	        17.28 ns/op	 462.95 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21098640	        17.13 ns/op	 467.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21097234	        17.00 ns/op	 470.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21142910	        17.12 ns/op	 467.16 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21075624	        17.15 ns/op	 466.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21320380	        17.15 ns/op	 466.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select1     	21096715	        17.09 ns/op	 468.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4431190	        82.15 ns/op	2288.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4298900	        81.92 ns/op	2294.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4427586	        81.36 ns/op	2310.71 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4427698	        81.37 ns/op	2310.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4289966	        81.89 ns/op	2295.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4438396	        81.61 ns/op	2303.53 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4428166	        81.30 ns/op	2312.43 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4432450	        81.18 ns/op	2315.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4435538	        83.80 ns/op	2243.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/select200   	 4416609	        81.32 ns/op	2311.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6684110	        53.78 ns/op	7195.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6675880	        53.91 ns/op	7178.53 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6681421	        53.91 ns/op	7178.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6684891	        53.81 ns/op	7191.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6682892	        53.81 ns/op	7192.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6685159	        53.85 ns/op	7186.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6684984	        53.83 ns/op	7189.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6629748	        53.95 ns/op	7173.39 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6670039	        53.86 ns/op	7185.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/update400   	 6684156	        53.94 ns/op	7174.27 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96710	      3722 ns/op	2704.20 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96627	      3718 ns/op	2707.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   97038	      3715 ns/op	2709.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96951	      3732 ns/op	2697.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96776	      3736 ns/op	2694.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   93034	      3784 ns/op	2660.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96888	      3719 ns/op	2706.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96090	      3728 ns/op	2700.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96775	      3747 ns/op	2686.18 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/inlist10k   	   96769	      3728 ns/op	2699.87 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16924208	        21.25 ns/op	8283.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16893792	        25.60 ns/op	6874.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16964757	        21.45 ns/op	8206.08 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16977232	        22.31 ns/op	7890.47 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16926633	        21.23 ns/op	8289.59 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	17011519	        21.21 ns/op	8296.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16833558	        21.90 ns/op	8037.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16879670	        21.27 ns/op	8275.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16878967	        21.18 ns/op	8308.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/multi       	16513815	        21.30 ns/op	8262.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29719538	        12.09 ns/op	2813.22 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29757303	        12.09 ns/op	2812.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29720100	        12.19 ns/op	2788.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29686674	        12.22 ns/op	2781.32 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29794846	        12.14 ns/op	2799.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29803221	        12.10 ns/op	2809.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29750391	        12.11 ns/op	2807.18 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29703033	        12.10 ns/op	2810.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29670924	        15.18 ns/op	2240.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/word-boundary/set         	29761682	        12.09 ns/op	2811.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37701984	         9.930 ns/op	 805.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37769638	         9.661 ns/op	 828.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	35393002	        10.17 ns/op	 786.70 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	36782577	         9.640 ns/op	 829.88 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37244055	         9.682 ns/op	 826.27 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37116638	         9.619 ns/op	 831.73 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37687092	         9.973 ns/op	 802.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37273948	        10.65 ns/op	 750.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	37424643	         9.888 ns/op	 809.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select1       	35053683	         9.688 ns/op	 825.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1860546	       193.7 ns/op	 970.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1859132	       194.0 ns/op	 969.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1863210	       193.9 ns/op	 969.74 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1843723	       195.0 ns/op	 964.10 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1849790	       194.6 ns/op	 966.22 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1856943	       194.7 ns/op	 965.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1854572	       194.1 ns/op	 968.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1860692	       193.4 ns/op	 972.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1857799	       193.7 ns/op	 970.47 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/select200     	 1859536	       194.2 ns/op	 967.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       341.8 ns/op	1132.10 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       339.9 ns/op	1138.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       340.1 ns/op	1137.76 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       340.1 ns/op	1138.00 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       339.7 ns/op	1139.20 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       340.4 ns/op	1137.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       339.8 ns/op	1139.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       354.6 ns/op	1091.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	 1000000	       360.2 ns/op	1074.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/update400     	  993723	       356.7 ns/op	1084.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	35726293	         9.981 ns/op	1008519.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	37745446	         9.824 ns/op	1024586.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	36875380	        10.54 ns/op	954767.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	34265800	         9.917 ns/op	1014995.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	37082294	         9.855 ns/op	1021441.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	37695844	         9.807 ns/op	1026367.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	37088697	         9.695 ns/op	1038241.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	36738817	         9.682 ns/op	1039628.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	37300616	         9.682 ns/op	1039633.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/inlist10k     	37164823	         9.972 ns/op	1009442.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8445763	        42.27 ns/op	4163.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8506495	        42.27 ns/op	4163.59 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8511465	        42.23 ns/op	4167.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8532042	        42.18 ns/op	4172.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8539237	        42.20 ns/op	4170.38 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8530186	        42.23 ns/op	4168.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8502796	        42.26 ns/op	4165.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8564890	        42.21 ns/op	4169.20 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8525475	        42.25 ns/op	4165.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/multi         	 8502332	        42.23 ns/op	4167.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8304213	        43.30 ns/op	 785.19 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8328636	        43.33 ns/op	 784.74 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8304826	        43.32 ns/op	 784.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8329555	        43.27 ns/op	 785.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8306103	        43.29 ns/op	 785.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8284953	        43.22 ns/op	 786.73 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8265751	        43.25 ns/op	 786.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8323632	        43.63 ns/op	 779.27 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8329710	        43.29 ns/op	 785.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-regex/set           	 8319446	        43.77 ns/op	 776.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	34204860	         9.793 ns/op	 816.91 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36850452	         9.763 ns/op	 819.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36909584	         9.779 ns/op	 818.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	37101268	         9.709 ns/op	 824.00 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36977929	         9.711 ns/op	 823.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36908226	         9.736 ns/op	 821.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36977568	         9.733 ns/op	 821.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36815714	         9.732 ns/op	 822.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36874028	         9.705 ns/op	 824.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select1        	36741434	         9.801 ns/op	 816.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1616055	       222.7 ns/op	 844.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1623182	       223.7 ns/op	 840.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1628732	       222.0 ns/op	 846.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1629841	       221.2 ns/op	 849.90 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1625845	       222.0 ns/op	 846.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1624360	       222.2 ns/op	 846.10 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1628695	       221.5 ns/op	 848.93 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1628362	       221.0 ns/op	 850.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1628864	       221.7 ns/op	 848.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/select200      	 1621632	       222.2 ns/op	 846.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  930116	       376.2 ns/op	1028.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  951188	       376.6 ns/op	1027.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  955537	       377.1 ns/op	1026.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  964356	       375.8 ns/op	1029.76 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  964509	       380.4 ns/op	1017.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  951632	       407.8 ns/op	 949.00 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  959091	       376.8 ns/op	1027.04 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  959822	       375.7 ns/op	1030.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  958623	       375.2 ns/op	1031.56 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/update400      	  871526	       377.1 ns/op	1026.20 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36825841	         9.713 ns/op	1036374.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36995306	         9.728 ns/op	1034744.05 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36559030	         9.744 ns/op	1033091.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36557505	         9.700 ns/op	1037768.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	37224961	         9.701 ns/op	1037608.01 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	37266134	         9.709 ns/op	1036795.95 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36921542	         9.696 ns/op	1038114.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36991683	         9.767 ns/op	1030642.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36978217	         9.683 ns/op	1039568.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/inlist10k      	36820704	         9.740 ns/op	1033429.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    4501	     79540 ns/op	   2.21 MB/s	    7269 B/op	     142 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5124	     78870 ns/op	   2.23 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5044	     79749 ns/op	   2.21 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    4069	     78813 ns/op	   2.23 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5100	     78197 ns/op	   2.25 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5065	     82614 ns/op	   2.13 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    4591	     78962 ns/op	   2.23 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5043	     79228 ns/op	   2.22 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5131	     79504 ns/op	   2.21 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/multi          	    5073	     79333 ns/op	   2.22 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36727	      9797 ns/op	   3.47 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36894	      9820 ns/op	   3.46 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36354	      9967 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36061	      9917 ns/op	   3.43 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36374	      9801 ns/op	   3.47 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36915	      9803 ns/op	   3.47 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36766	      9849 ns/op	   3.45 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36326	      9973 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36910	      9870 ns/op	   3.44 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-auto/set            	   36584	      9758 ns/op	   3.48 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   38019	      9313 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   39028	      9317 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   38562	      9311 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   38833	      9297 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   38695	      9243 ns/op	   0.87 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   39464	      9186 ns/op	   0.87 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   39499	      9202 ns/op	   0.87 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   39332	      9333 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   39168	      9178 ns/op	   0.87 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select1          	   39538	      9309 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3169	    113220 ns/op	   1.66 MB/s	    8366 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3106	    116064 ns/op	   1.62 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3109	    115277 ns/op	   1.63 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3420	    115018 ns/op	   1.63 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3331	    115974 ns/op	   1.62 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3214	    117684 ns/op	   1.60 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3363	    114515 ns/op	   1.64 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3238	    115959 ns/op	   1.62 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3400	    113731 ns/op	   1.65 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/select200        	    3126	    122336 ns/op	   1.54 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2599	    141868 ns/op	   2.73 MB/s	   10183 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2673	    145124 ns/op	   2.67 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2684	    142941 ns/op	   2.71 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2667	    142042 ns/op	   2.72 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2674	    141002 ns/op	   2.74 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2624	    142003 ns/op	   2.73 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2590	    142186 ns/op	   2.72 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2719	    141283 ns/op	   2.74 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2636	    143031 ns/op	   2.71 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/update400        	    2714	    141436 ns/op	   2.74 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3299600 ns/op	   3.05 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3271561 ns/op	   3.08 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3292332 ns/op	   3.06 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3298030 ns/op	   3.05 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3269949 ns/op	   3.08 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3274428 ns/op	   3.07 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3285938 ns/op	   3.06 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3335556 ns/op	   3.02 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3251870 ns/op	   3.10 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/inlist10k        	     100	   3279297 ns/op	   3.07 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    4428	     80317 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    5121	     79007 ns/op	   2.23 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    4736	     80096 ns/op	   2.20 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    4243	     79932 ns/op	   2.20 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    4465	     78965 ns/op	   2.23 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    5100	     78639 ns/op	   2.24 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    5113	     78189 ns/op	   2.25 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    5101	     78590 ns/op	   2.24 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    5132	     80894 ns/op	   2.18 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/multi            	    5115	     79520 ns/op	   2.21 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgdog-on/set              	   36343	      9787 ns/op	   3.47 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   36794	      9812 ns/op	   3.47 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   37490	      9719 ns/op	   3.50 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   36752	      9722 ns/op	   3.50 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   37483	      9738 ns/op	   3.49 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   37022	      9783 ns/op	   3.48 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   34682	      9864 ns/op	   3.45 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   36950	      9741 ns/op	   3.49 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   37274	      9805 ns/op	   3.47 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgdog-on/set              	   36375	      9710 ns/op	   3.50 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/proxysql/select1          	 8354928	        42.88 ns/op	 186.57 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8296309	        42.90 ns/op	 186.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8386707	        42.91 ns/op	 186.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8405953	        43.19 ns/op	 185.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8428656	        42.85 ns/op	 186.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8346832	        42.86 ns/op	 186.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8436010	        42.83 ns/op	 186.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8360029	        44.69 ns/op	 179.01 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8323291	        42.82 ns/op	 186.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select1          	 8378726	        42.77 ns/op	 187.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  477994	       754.9 ns/op	 249.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  476608	       754.3 ns/op	 249.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  474313	       755.1 ns/op	 248.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  479184	       757.3 ns/op	 248.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  476188	       758.2 ns/op	 247.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  475093	       762.7 ns/op	 246.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  477669	       762.9 ns/op	 246.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  476346	       775.3 ns/op	 242.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  443985	      1161 ns/op	 161.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/select200        	  340587	       990.9 ns/op	 189.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  334321	      1074 ns/op	 360.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  334861	      1079 ns/op	 358.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  333736	      1074 ns/op	 360.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  322810	      1127 ns/op	 343.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  300944	      1140 ns/op	 339.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  314650	      1292 ns/op	 299.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  189735	      1792 ns/op	 215.93 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  331162	      1317 ns/op	 293.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  187776	      1756 ns/op	 220.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/update400        	  313124	      1124 ns/op	 344.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12093	     29790 ns/op	 337.90 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12094	     29802 ns/op	 337.76 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12093	     29759 ns/op	 338.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12092	     29765 ns/op	 338.18 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12072	     29796 ns/op	 337.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12099	     29746 ns/op	 338.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12085	     29781 ns/op	 338.01 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12074	     29815 ns/op	 337.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12117	     29708 ns/op	 338.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/inlist10k        	   12093	     29792 ns/op	 337.88 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  784260	       459.0 ns/op	 383.41 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  760466	       480.4 ns/op	 366.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  724257	       470.8 ns/op	 373.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  764317	       471.7 ns/op	 373.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  781806	       457.0 ns/op	 385.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  759225	       469.8 ns/op	 374.59 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  763576	       460.0 ns/op	 382.65 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  768216	       470.1 ns/op	 374.41 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  768567	       461.5 ns/op	 381.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/multi            	  766830	       470.0 ns/op	 374.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/proxysql/set              	   47618	      7335 ns/op	   4.64 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49228	      7264 ns/op	   4.68 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49660	      7283 ns/op	   4.67 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49387	      7359 ns/op	   4.62 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49460	      7282 ns/op	   4.67 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49254	      7304 ns/op	   4.65 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49156	      7300 ns/op	   4.66 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   48774	      7320 ns/op	   4.64 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49177	      7317 ns/op	   4.65 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/proxysql/set              	   49292	      7299 ns/op	   4.66 MB/s	    1120 B/op	      19 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38744	      9377 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38976	      9373 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   39392	      9292 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38318	      9416 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   37740	      9404 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38691	      9444 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38337	      9350 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38424	      9355 ns/op	   0.86 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   37998	      9416 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select1     	   38173	      9414 ns/op	   0.85 MB/s	     960 B/op	      16 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3686	    116757 ns/op	   1.61 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3216	    118653 ns/op	   1.58 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3198	    117014 ns/op	   1.61 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3686	    117975 ns/op	   1.59 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3276	    115580 ns/op	   1.63 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3732	    116797 ns/op	   1.61 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3128	    117770 ns/op	   1.60 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3051	    117259 ns/op	   1.60 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    3280	    118108 ns/op	   1.59 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/select200   	    2979	    118025 ns/op	   1.59 MB/s	    8352 B/op	     185 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2516	    146153 ns/op	   2.65 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2610	    144506 ns/op	   2.68 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2611	    145539 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2668	    143741 ns/op	   2.69 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2732	    144383 ns/op	   2.68 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2703	    145052 ns/op	   2.67 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2486	    144794 ns/op	   2.67 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2474	    145685 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2637	    145587 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/update400   	    2547	    146428 ns/op	   2.64 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3317774 ns/op	   3.03 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3315783 ns/op	   3.04 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3353871 ns/op	   3.00 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3331311 ns/op	   3.02 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3357931 ns/op	   3.00 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3379703 ns/op	   2.98 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3338379 ns/op	   3.02 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3352786 ns/op	   3.00 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3315530 ns/op	   3.04 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/inlist10k   	     100	   3336647 ns/op	   3.02 MB/s	  291880 B/op	    6344 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4830	     80222 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4977	     81438 ns/op	   2.16 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4912	     80485 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4969	     80281 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4428	     81960 ns/op	   2.15 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4999	     80605 ns/op	   2.18 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4946	     80774 ns/op	   2.18 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    5019	     81176 ns/op	   2.17 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4989	     80321 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/multi       	    4605	     79622 ns/op	   2.21 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   35950	      9990 ns/op	   3.40 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   36601	     10008 ns/op	   3.40 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   36111	     10051 ns/op	   3.38 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   36252	      9961 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   35781	      9980 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   36370	      9974 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   36339	      9941 ns/op	   3.42 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   36084	      9956 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   35995	      9989 ns/op	   3.40 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-parse/set         	   35881	     10015 ns/op	   3.40 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	22652443	        15.46 ns/op	 517.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23133084	        15.64 ns/op	 511.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23245162	        15.43 ns/op	 518.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	22961434	        15.64 ns/op	 511.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23335582	        15.37 ns/op	 520.41 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23223691	        15.45 ns/op	 517.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23182185	        15.61 ns/op	 512.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23644162	        15.49 ns/op	 516.38 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	22992122	        15.59 ns/op	 513.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select1 	23186922	        15.46 ns/op	 517.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1730545	       201.6 ns/op	 932.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1863706	       193.0 ns/op	 974.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1865904	       193.6 ns/op	 971.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1866108	       193.0 ns/op	 973.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1864166	       205.2 ns/op	 916.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1860210	       193.3 ns/op	 972.57 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1866338	       192.8 ns/op	 975.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1848379	       194.5 ns/op	 966.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1864228	       193.0 ns/op	 974.19 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/select200         	 1864555	       193.0 ns/op	 974.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2869	    145749 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2606	    144835 ns/op	   2.67 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2733	    143772 ns/op	   2.69 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2661	    145258 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2527	    148486 ns/op	   2.61 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2574	    145359 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2475	    146387 ns/op	   2.64 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2517	    145582 ns/op	   2.66 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2644	    145789 ns/op	   2.65 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/update400         	    2622	    149234 ns/op	   2.59 MB/s	   10168 B/op	     221 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   47740	      7493 ns/op	1343.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48262	      7469 ns/op	1347.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48246	      7466 ns/op	1348.22 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48252	      7458 ns/op	1349.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48038	      7481 ns/op	1345.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48358	      7439 ns/op	1353.22 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48002	      7465 ns/op	1348.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   47878	      7491 ns/op	1343.72 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48261	      7452 ns/op	1350.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/inlist10k         	   48294	      7467 ns/op	1348.01 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    4730	     80757 ns/op	   2.18 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    4994	     81720 ns/op	   2.15 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    5016	     82178 ns/op	   2.14 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    4641	     81776 ns/op	   2.15 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    4908	     81002 ns/op	   2.17 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    4996	     80159 ns/op	   2.20 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    4880	     80591 ns/op	   2.18 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    5048	     82956 ns/op	   2.12 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    5029	     80268 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/multi             	    5028	     80442 ns/op	   2.19 MB/s	    6880 B/op	     141 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   36174	     10100 ns/op	   3.37 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   35353	     10060 ns/op	   3.38 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   36115	     10139 ns/op	   3.35 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   36657	      9924 ns/op	   3.43 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   36734	      9973 ns/op	   3.41 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   36316	     10522 ns/op	   3.23 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   35528	     10234 ns/op	   3.32 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   35833	     10037 ns/op	   3.39 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   35904	     10043 ns/op	   3.39 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-prefilter/set               	   35569	     10979 ns/op	   3.10 MB/s	     856 B/op	      22 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  171098	      2035 ns/op	   3.93 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  190406	      1980 ns/op	   4.04 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  191074	      1960 ns/op	   4.08 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  194029	      1940 ns/op	   4.12 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  187347	      2004 ns/op	   3.99 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  186967	      1935 ns/op	   4.13 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  192507	      2037 ns/op	   3.93 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  186966	      2061 ns/op	   3.88 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  186198	      2080 ns/op	   3.85 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select1                	  167144	      2071 ns/op	   3.86 MB/s	     280 B/op	       7 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   15342	     23069 ns/op	   8.15 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   14997	     24310 ns/op	   7.73 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   15626	     22825 ns/op	   8.24 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   15561	     23456 ns/op	   8.02 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   15931	     22380 ns/op	   8.40 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   16555	     21845 ns/op	   8.61 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   16269	     22180 ns/op	   8.48 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   16374	     22170 ns/op	   8.48 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   16411	     21972 ns/op	   8.56 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/select200              	   16450	     22062 ns/op	   8.52 MB/s	    5384 B/op	      61 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14055	     25583 ns/op	  15.13 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14049	     25524 ns/op	  15.16 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14066	     25762 ns/op	  15.02 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14040	     25754 ns/op	  15.03 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14037	     25641 ns/op	  15.09 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14114	     25580 ns/op	  15.13 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   13995	     25811 ns/op	  14.99 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14017	     25888 ns/op	  14.95 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   14092	     25828 ns/op	  14.98 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/update400              	   13995	     25646 ns/op	  15.09 MB/s	    6024 B/op	      67 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     372	   1184017 ns/op	   8.50 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     369	    975444 ns/op	  10.32 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     370	    967777 ns/op	  10.40 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     366	    980057 ns/op	  10.27 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     363	    977753 ns/op	  10.30 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     360	    985523 ns/op	  10.21 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     376	    974778 ns/op	  10.33 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     373	    975144 ns/op	  10.32 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     366	    991257 ns/op	  10.15 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/inlist10k              	     363	    979427 ns/op	  10.28 MB/s	  288456 B/op	    2533 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   19590	     18313 ns/op	   9.61 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   19963	     18175 ns/op	   9.68 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   20047	     17958 ns/op	   9.80 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   20274	     17840 ns/op	   9.87 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   20270	     17800 ns/op	   9.89 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   20394	     17713 ns/op	   9.94 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   19999	     18006 ns/op	   9.77 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   19518	     18407 ns/op	   9.56 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   20052	     18051 ns/op	   9.75 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/multi                  	   19830	     18043 ns/op	   9.75 MB/s	    4488 B/op	      50 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	   99819	      3776 ns/op	   9.00 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	  101973	      3744 ns/op	   9.08 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	  101754	      3743 ns/op	   9.08 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	  101973	      3723 ns/op	   9.13 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	  100039	      3725 ns/op	   9.13 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	  102334	      3684 ns/op	   9.23 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	   97722	      3713 ns/op	   9.16 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	  100981	      3726 ns/op	   9.12 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	   99296	      3704 ns/op	   9.18 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-scan/set                    	   98444	      3708 ns/op	   9.17 MB/s	     712 B/op	      13 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	18291463	        19.02 ns/op	 420.62 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19341967	        18.49 ns/op	 432.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19497006	        18.53 ns/op	 431.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19427781	        18.70 ns/op	 427.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19439362	        18.53 ns/op	 431.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19109906	        18.53 ns/op	 431.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19419994	        18.51 ns/op	 432.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19445605	        18.65 ns/op	 428.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19433506	        18.50 ns/op	 432.38 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select1         	19466414	        18.50 ns/op	 432.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10377969	        34.40 ns/op	5465.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10439394	        34.39 ns/op	5467.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10353433	        34.77 ns/op	5406.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10470553	        34.37 ns/op	5469.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10361344	        34.76 ns/op	5407.78 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10468616	        34.36 ns/op	5471.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10344114	        34.76 ns/op	5408.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10446013	        34.39 ns/op	5466.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10343110	        34.39 ns/op	5466.43 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/select200       	10477155	        34.37 ns/op	5470.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5807176	        61.78 ns/op	6264.57 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5834517	        61.71 ns/op	6271.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5830522	        62.12 ns/op	6230.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5835661	        61.70 ns/op	6272.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5830869	        61.75 ns/op	6267.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5836963	        61.73 ns/op	6269.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5826966	        61.71 ns/op	6271.64 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5832655	        61.06 ns/op	6338.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5833370	        61.67 ns/op	6275.31 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/update400       	 5840446	        61.63 ns/op	6279.35 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  294807	      1217 ns/op	8269.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  300124	      1201 ns/op	8382.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  299298	      1202 ns/op	8373.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  299209	      1203 ns/op	8364.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  299714	      1203 ns/op	8364.65 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  299168	      1203 ns/op	8367.17 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  291808	      1205 ns/op	8351.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  298395	      1201 ns/op	8379.65 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  299428	      1202 ns/op	8374.64 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/inlist10k       	  299528	      1204 ns/op	8362.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10295520	        34.98 ns/op	5031.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10452754	        33.99 ns/op	5177.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10456754	        34.38 ns/op	5119.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10843314	        32.20 ns/op	5465.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	11199993	        32.34 ns/op	5442.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10554400	        33.71 ns/op	5220.32 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10433078	        34.47 ns/op	5106.43 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10454901	        34.22 ns/op	5143.39 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10443783	        34.35 ns/op	5124.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/multi           	10398309	        34.75 ns/op	5064.61 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18089410	        19.84 ns/op	1713.51 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18132986	        19.82 ns/op	1715.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18123030	        19.86 ns/op	1712.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18176346	        19.85 ns/op	1712.95 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18127177	        19.85 ns/op	1713.17 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18131392	        19.79 ns/op	1717.91 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18139664	        19.84 ns/op	1713.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18187164	        19.82 ns/op	1715.85 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	17974897	        19.91 ns/op	1707.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/pgquery-parse+cache/set             	18145896	        19.77 ns/op	1720.05 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20170792	        17.64 ns/op	 453.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20635254	        17.53 ns/op	 456.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20467504	        17.67 ns/op	 452.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	19875543	        17.69 ns/op	 452.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20412523	        17.69 ns/op	 452.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20381240	        17.69 ns/op	 452.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20510526	        17.66 ns/op	 453.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	19947912	        17.68 ns/op	 452.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20600587	        17.68 ns/op	 452.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select1                       	20510899	        17.59 ns/op	 454.91 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  922999	       379.1 ns/op	 495.87 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  929469	       378.6 ns/op	 496.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  923454	       386.6 ns/op	 486.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  929049	       378.2 ns/op	 497.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  922246	       384.9 ns/op	 488.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  894518	       378.6 ns/op	 496.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  924444	       381.0 ns/op	 493.41 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  923240	       379.2 ns/op	 495.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  926821	       380.4 ns/op	 494.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/select200                     	  890624	       382.2 ns/op	 491.93 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  589021	       614.3 ns/op	 630.00 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  586411	       616.0 ns/op	 628.20 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  573895	       615.5 ns/op	 628.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  586618	       615.7 ns/op	 628.52 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  590378	       615.7 ns/op	 628.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  584500	       630.9 ns/op	 613.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  591936	       615.5 ns/op	 628.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  588177	       615.6 ns/op	 628.62 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  561430	       615.7 ns/op	 628.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/update400                     	  581100	       613.0 ns/op	 631.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43866	      8328 ns/op	1208.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43630	      8242 ns/op	1221.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43504	      8247 ns/op	1220.53 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43350	      9026 ns/op	1115.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   42240	      8243 ns/op	1221.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43842	      8465 ns/op	1189.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43988	      8145 ns/op	1235.77 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43945	      8161 ns/op	1233.41 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   43476	      8172 ns/op	1231.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/inlist10k                     	   42708	      8255 ns/op	1219.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1238282	       290.7 ns/op	 605.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1234828	       292.6 ns/op	 601.59 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1230930	       292.6 ns/op	 601.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1228471	       293.0 ns/op	 600.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1231879	       291.9 ns/op	 602.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1232947	       292.1 ns/op	 602.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1231498	       292.3 ns/op	 602.09 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1211622	       301.0 ns/op	 584.73 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1000000	       305.7 ns/op	 575.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/multi                         	 1000000	       302.6 ns/op	 581.57 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13647352	        26.61 ns/op	1277.93 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13716818	        27.46 ns/op	1238.18 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13805097	        26.66 ns/op	1275.19 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13739674	        27.63 ns/op	1230.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13588154	        27.68 ns/op	1228.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	10385518	        33.10 ns/op	1027.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13655547	        27.74 ns/op	1225.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	12535416	        27.55 ns/op	1233.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13694745	        28.51 ns/op	1192.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/lexer/set                           	13719685	        27.14 ns/op	1252.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14741931	        24.42 ns/op	 327.62 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14855538	        24.20 ns/op	 330.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14710388	        24.40 ns/op	 327.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14977333	        24.22 ns/op	 330.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14704143	        24.23 ns/op	 330.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	13918966	        24.32 ns/op	 328.89 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14753174	        25.08 ns/op	 318.95 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14591049	        24.89 ns/op	 321.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14505183	        25.69 ns/op	 311.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select1         	14562618	        25.01 ns/op	 319.87 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       339.9 ns/op	 553.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       338.5 ns/op	 555.36 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       341.2 ns/op	 550.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       342.6 ns/op	 548.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       351.6 ns/op	 534.71 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       347.4 ns/op	 541.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       339.6 ns/op	 553.65 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       342.4 ns/op	 549.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       344.5 ns/op	 545.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/select200       	 1000000	       347.5 ns/op	 541.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  462932	       797.1 ns/op	 485.51 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  461305	       811.7 ns/op	 476.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  462010	       802.1 ns/op	 482.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  430330	       803.8 ns/op	 481.48 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  460002	       780.2 ns/op	 496.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  462999	       779.3 ns/op	 496.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  460136	       780.7 ns/op	 495.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  459489	       780.1 ns/op	 496.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  462945	       779.2 ns/op	 496.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/update400       	  414530	       782.5 ns/op	 494.56 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27799	     12932 ns/op	 778.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27864	     12938 ns/op	 778.00 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27829	     12943 ns/op	 777.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27849	     12934 ns/op	 778.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27858	     12932 ns/op	 778.39 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27890	     12913 ns/op	 779.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27842	     12939 ns/op	 777.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27850	     12932 ns/op	 778.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27880	     12923 ns/op	 778.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/inlist10k       	   27870	     12923 ns/op	 778.93 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       304.2 ns/op	 578.52 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       305.2 ns/op	 576.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       304.4 ns/op	 578.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       305.0 ns/op	 577.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       305.4 ns/op	 576.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       305.4 ns/op	 576.27 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       305.4 ns/op	 576.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       307.1 ns/op	 573.01 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       308.7 ns/op	 570.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/multi           	 1000000	       303.7 ns/op	 579.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11477376	        31.51 ns/op	1079.03 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11272268	        31.69 ns/op	1072.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11310933	        31.64 ns/op	1074.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11380986	        31.70 ns/op	1072.52 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11426799	        31.55 ns/op	1077.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11317543	        31.78 ns/op	1069.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11376140	        31.96 ns/op	1063.91 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11329110	        31.81 ns/op	1068.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11324666	        31.63 ns/op	1075.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage/set             	11331806	        31.72 ns/op	1071.83 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9311006	        38.78 ns/op	 206.29 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9310885	        38.78 ns/op	 206.32 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9262449	        38.86 ns/op	 205.88 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9220977	        39.03 ns/op	 204.96 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9324876	        38.78 ns/op	 206.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9294822	        38.66 ns/op	 206.95 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9291991	        38.72 ns/op	 206.59 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9277202	        38.79 ns/op	 206.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9277550	        38.76 ns/op	 206.38 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select1    	 9271971	        38.73 ns/op	 206.58 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2064372	       174.3 ns/op	1078.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2064525	       174.3 ns/op	1078.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2051516	       175.4 ns/op	1071.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2058780	       174.5 ns/op	1077.52 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2043076	       175.2 ns/op	1072.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2062111	       178.5 ns/op	1053.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2063373	       174.5 ns/op	1077.25 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2064907	       174.1 ns/op	1079.66 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2066990	       174.2 ns/op	1079.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/select200  	 2043826	       175.7 ns/op	1069.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  515635	       693.8 ns/op	 557.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  520128	       699.4 ns/op	 553.31 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  522213	       692.6 ns/op	 558.74 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  508544	       696.1 ns/op	 555.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  518942	       693.5 ns/op	 558.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  520448	       693.4 ns/op	 558.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  520952	       692.9 ns/op	 558.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  518036	       693.6 ns/op	 557.94 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  520838	       694.8 ns/op	 556.99 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/update400  	  505648	       693.2 ns/op	 558.26 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   61965	      5912 ns/op	1702.74 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   61804	      5802 ns/op	1734.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   62023	      5796 ns/op	1736.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   61944	      5801 ns/op	1735.10 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   59232	      5869 ns/op	1714.97 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   62254	      5799 ns/op	1735.76 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   62205	      5802 ns/op	1735.06 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   61531	      5799 ns/op	1735.86 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   62157	      5791 ns/op	1738.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/inlist10k  	   62160	      5791 ns/op	1738.31 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       306.8 ns/op	 573.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       302.0 ns/op	 582.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1200006	       300.0 ns/op	 586.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       301.1 ns/op	 584.45 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       301.1 ns/op	 584.53 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       301.6 ns/op	 583.64 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       302.0 ns/op	 582.81 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       301.0 ns/op	 584.67 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       300.8 ns/op	 585.10 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/multi      	 1000000	       302.2 ns/op	 582.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10214605	        35.21 ns/op	 965.52 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10242967	        35.10 ns/op	 968.62 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10177742	        35.21 ns/op	 965.68 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	 9949146	        37.11 ns/op	 916.18 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10209340	        35.22 ns/op	 965.46 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10240381	        35.30 ns/op	 963.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10216460	        35.22 ns/op	 965.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10259631	        35.22 ns/op	 965.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10275626	        35.02 ns/op	 970.82 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-swar/set        	10242105	        35.08 ns/op	 969.16 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	14397986	        25.00 ns/op	 320.02 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	14353647	        24.97 ns/op	 320.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	13743840	        26.19 ns/op	 305.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	14352579	        24.97 ns/op	 320.43 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	13752760	        26.18 ns/op	 305.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	14430163	        25.03 ns/op	 319.65 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	13720227	        26.29 ns/op	 304.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	14397992	        24.99 ns/op	 320.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	13726402	        26.45 ns/op	 302.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select1     	14399446	        29.70 ns/op	 269.33 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  644840	       561.0 ns/op	 335.13 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  640449	       560.7 ns/op	 335.28 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  641384	       560.3 ns/op	 335.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  643616	       563.8 ns/op	 333.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  643152	       561.6 ns/op	 334.77 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  631012	       561.6 ns/op	 334.79 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  639782	       560.5 ns/op	 335.42 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  642430	       560.4 ns/op	 335.49 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  641707	       560.5 ns/op	 335.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/select200   	  640803	       560.5 ns/op	 335.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  376507	       958.0 ns/op	 403.98 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  372670	       958.4 ns/op	 403.80 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  376207	       959.6 ns/op	 403.31 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  374691	       958.2 ns/op	 403.87 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  376423	       960.0 ns/op	 403.14 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  376917	       961.5 ns/op	 402.50 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  375326	       962.1 ns/op	 402.24 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  375842	       961.6 ns/op	 402.44 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  373021	       964.3 ns/op	 401.31 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/update400   	  376380	       962.5 ns/op	 402.08 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13046	     27582 ns/op	 364.95 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13066	     27550 ns/op	 365.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13053	     27575 ns/op	 365.05 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13028	     27628 ns/op	 364.34 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13041	     27606 ns/op	 364.63 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13044	     27626 ns/op	 364.37 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13018	     27722 ns/op	 363.11 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13030	     27615 ns/op	 364.51 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   13063	     27645 ns/op	 364.12 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/inlist10k   	   12980	     27699 ns/op	 363.40 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       300.3 ns/op	 586.15 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1200976	       300.0 ns/op	 586.75 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       300.9 ns/op	 584.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       302.0 ns/op	 582.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       314.3 ns/op	 559.92 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       300.2 ns/op	 586.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       300.5 ns/op	 585.71 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       301.7 ns/op	 583.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       301.3 ns/op	 584.21 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/multi       	 1000000	       363.8 ns/op	 483.77 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11428854	        31.06 ns/op	1094.51 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11500122	        30.93 ns/op	1099.17 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11558702	        31.10 ns/op	1093.23 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11514259	        31.02 ns/op	1096.07 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11590927	        31.04 ns/op	1095.30 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11463956	        31.09 ns/op	1093.55 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11524669	        31.08 ns/op	1094.08 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11589204	        31.09 ns/op	1093.69 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11559637	        31.06 ns/op	1094.54 MB/s	       0 B/op	       0 allocs/op
+BenchmarkClassify/two-stage-dfa/set         	11474414	        31.06 ns/op	1094.60 MB/s	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  894307	       370.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  982821	       364.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  900824	       531.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  915009	       373.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  947425	       370.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  989154	       366.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  986955	       362.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  983662	       362.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  986356	       378.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage                  	  918728	       378.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1201924	       297.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1215762	       296.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1228287	       292.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1228472	       291.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1000000	       350.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1000000	       313.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1000000	       324.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1232884	       291.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1254902	       286.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-swar             	 1256002	       286.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  865020	       409.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  870870	       409.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  874233	       412.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  865366	       409.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  875367	       409.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  875800	       409.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  870988	       408.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  874528	       409.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  868072	       410.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/two-stage-dfa              	  875275	       409.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 7769712	        43.34 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8366581	        42.67 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 7185822	        46.38 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8418369	        42.62 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8345676	        42.66 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8383404	        43.43 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8436770	        42.57 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8444546	        42.54 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8442522	        42.65 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/substring                            	 8445386	        42.59 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3940483	        91.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3949693	        91.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3941264	        91.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3947344	        91.04 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3946339	        91.08 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3946353	        91.07 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3945798	        91.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3940003	        91.05 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3947270	        91.03 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/word-boundary                        	 3946246	        90.98 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3305586	       108.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3306961	       108.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3305594	       108.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3306184	       109.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3308140	       108.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3303156	       108.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3307591	       108.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3293847	       109.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3298058	       109.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-regex                          	 3299708	       109.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       350.3 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       345.4 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       347.7 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       348.2 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       345.3 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       346.5 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       347.1 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       347.2 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       345.6 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-auto                           	 1000000	       344.4 ns/op	      17 B/op	       0 allocs/op
+BenchmarkTraffic/pgdog-on                             	    8834	     47864 ns/op	    3616 B/op	      77 allocs/op
+BenchmarkTraffic/pgdog-on                             	    8358	     48049 ns/op	    3593 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    8150	     47589 ns/op	    3604 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    8656	     48273 ns/op	    3602 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    8935	     48395 ns/op	    3604 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    9793	     47113 ns/op	    3604 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    9564	     47572 ns/op	    3601 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    7911	     48074 ns/op	    3604 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    9699	     47689 ns/op	    3602 B/op	      76 allocs/op
+BenchmarkTraffic/pgdog-on                             	    9060	     47132 ns/op	    3603 B/op	      76 allocs/op
+BenchmarkTraffic/proxysql                             	  499412	       730.6 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  503214	       729.8 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  499075	       725.0 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  501136	       730.3 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  493778	       722.2 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  502716	       727.2 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  492273	       723.1 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  500032	       726.4 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  502353	       725.8 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/proxysql                             	  500586	       726.4 ns/op	      12 B/op	       0 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9194	     48868 ns/op	    3602 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9262	     49133 ns/op	    3595 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9464	     48818 ns/op	    3597 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    8082	     49044 ns/op	    3605 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9414	     49328 ns/op	    3596 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9585	     49514 ns/op	    3602 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9510	     49236 ns/op	    3597 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9312	     48766 ns/op	    3595 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9002	     49165 ns/op	    3604 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-parse                        	    9144	     49467 ns/op	    3602 B/op	      76 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     32141 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     32156 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     31786 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     31830 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     32373 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     32442 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     33291 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     33092 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     32213 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-prefilter                    	   10000	     32508 ns/op	    2309 B/op	      49 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   29380	     11774 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   31724	     11362 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   22898	     13294 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   31894	     11628 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   32058	     11454 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   32354	     11424 ns/op	    2281 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   31784	     11588 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   31998	     11397 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   31874	     11516 ns/op	    2283 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-scan                         	   30806	     11598 ns/op	    2282 B/op	      28 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   23883	     12625 ns/op	     899 B/op	      19 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   33392	     10716 ns/op	     787 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   33500	     10829 ns/op	     787 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   33722	     10912 ns/op	     786 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   33776	     10857 ns/op	     786 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   34536	     10889 ns/op	     787 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   34323	     10676 ns/op	     785 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   33182	     10855 ns/op	     787 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   32462	     11062 ns/op	     788 B/op	      16 allocs/op
+BenchmarkTraffic/pgquery-parse+cache                  	   33421	     10950 ns/op	     786 B/op	      16 allocs/op
+BenchmarkTraffic/lexer                                	 1263559	       284.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1265113	       284.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1264584	       284.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1264935	       284.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1263603	       284.9 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1262414	       285.0 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1261191	       285.6 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1256671	       289.2 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1264795	       285.1 ns/op	       0 B/op	       0 allocs/op
+BenchmarkTraffic/lexer                                	 1261579	       285.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1964571	       183.5 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1955305	       184.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1955396	       184.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1957894	       183.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1963458	       183.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1964665	       183.3 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1952091	       190.4 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1791765	       198.8 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1920314	       186.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/HashXXH3_64                              	 1817779	       275.7 ns/op	       0 B/op	       0 allocs/op
+BenchmarkCgo/Scan/select1                             	  100743	      3064 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  162314	      1983 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  178113	      2031 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  176310	      2600 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  176019	      1959 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  188844	      1935 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  195368	      1922 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  190687	      2035 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  190479	      1925 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Scan/select1                             	  192639	      1945 ns/op	     280 B/op	       7 allocs/op
+BenchmarkCgo/Parse/select1                            	   37746	      9612 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   38628	      9417 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   38715	      9443 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   39034	      9295 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   38007	      9408 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   38320	      9511 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   37754	      9367 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   39278	      9326 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   38575	      9368 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/Parse/select1                            	   38836	      9476 ns/op	     960 B/op	      16 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  186776	      2030 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  180474	      2059 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  173360	      2048 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  178864	      2060 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  180708	      2020 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  180945	      2036 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  175552	      2032 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  178510	      2032 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  179506	      2031 ns/op	     208 B/op	       1 allocs/op
+BenchmarkCgo/ParseToJSON/select1                      	  180241	      2027 ns/op	     208 B/op	       1 allocs/op
+PASS

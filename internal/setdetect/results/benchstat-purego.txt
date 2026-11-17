@@ -1,0 +1,43 @@
+goos: linux
+goarch: amd64
+pkg: github.com/DataDog/pg-proxy/internal/setdetect/purego
+cpu: Intel(R) Xeon(R) Platinum 8259CL CPU @ 2.50GHz
+                               │ results/bench-purego.txt │
+                               │          sec/op          │
+Classify/crdb-parser/select1                 3.964µ ± 19%
+Classify/crdb-parser/select200               78.19µ ±  1%
+Classify/crdb-parser/update400               81.99µ ±  1%
+Classify/crdb-parser/inlist10k               1.212m ±  2%
+Classify/crdb-parser/multi                   44.90µ ±  7%
+Classify/crdb-parser/set                     10.22µ ±  1%
+geomean                                      49.17µ
+
+                               │ results/bench-purego.txt │
+                               │           B/s            │
+Classify/crdb-parser/select1                1.926Mi ± 16%
+Classify/crdb-parser/select200              2.294Mi ±  1%
+Classify/crdb-parser/update400              4.501Mi ±  1%
+Classify/crdb-parser/inlist10k              7.920Mi ±  2%
+Classify/crdb-parser/multi                  3.738Mi ±  7%
+Classify/crdb-parser/set                    3.171Mi ±  1%
+geomean                                     3.509Mi
+
+                               │ results/bench-purego.txt │
+                               │           B/op           │
+Classify/crdb-parser/select1                 2.008Ki ± 0%
+Classify/crdb-parser/select200               11.12Ki ± 0%
+Classify/crdb-parser/update400               14.54Ki ± 0%
+Classify/crdb-parser/inlist10k               730.0Ki ± 0%
+Classify/crdb-parser/multi                   8.138Ki ± 0%
+Classify/crdb-parser/set                     1.898Ki ± 0%
+geomean                                      12.42Ki
+
+                               │ results/bench-purego.txt │
+                               │        allocs/op         │
+Classify/crdb-parser/select1                   12.00 ± 0%
+Classify/crdb-parser/select200                 58.00 ± 0%
+Classify/crdb-parser/update400                 94.00 ± 0%
+Classify/crdb-parser/inlist10k                3.810k ± 0%
+Classify/crdb-parser/multi                     68.00 ± 0%
+Classify/crdb-parser/set                       11.00 ± 0%
+geomean                                        75.58

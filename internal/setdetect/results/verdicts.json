@@ -1,0 +1,17 @@
+{
+  "_corpus": "698f4373a4c6fe3f",
+  "lexer": "ab20e15596772539",
+  "pgdog-auto": "ebf1069b64c5dcaf",
+  "pgdog-on": "79c4149043c0bde9",
+  "pgdog-regex": "cecd757a130b92fd",
+  "pgquery-parse": "8ec67b833f32dc5c",
+  "pgquery-parse+cache": "8ec67b833f32dc5c",
+  "pgquery-prefilter": "8ec67b833f32dc5c",
+  "pgquery-scan": "d1c6eac19322c3e6",
+  "proxysql": "54050e20dafca898",
+  "substring": "86430d0c637c93ad",
+  "two-stage": "ab20e15596772539",
+  "two-stage-dfa": "ab20e15596772539",
+  "two-stage-swar": "ab20e15596772539",
+  "word-boundary": "edd25bc8599da2cb"
+}

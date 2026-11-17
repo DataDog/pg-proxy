@@ -1,0 +1,506 @@
+[
+  {
+    "detector": "substring",
+    "class": "select1",
+    "median_ns": 17.141509433962263,
+    "p99_ns": 18.169811320754718
+  },
+  {
+    "detector": "substring",
+    "class": "select200",
+    "median_ns": 81.17777777777778,
+    "p99_ns": 82.4888888888889
+  },
+  {
+    "detector": "substring",
+    "class": "update400",
+    "median_ns": 52.25806451612903,
+    "p99_ns": 53.46774193548387
+  },
+  {
+    "detector": "substring",
+    "class": "inlist10k",
+    "median_ns": 3699,
+    "p99_ns": 3791
+  },
+  {
+    "detector": "substring",
+    "class": "multi",
+    "median_ns": 20.07843137254902,
+    "p99_ns": 21.058823529411764
+  },
+  {
+    "detector": "substring",
+    "class": "set",
+    "median_ns": 12.709090909090909,
+    "p99_ns": 13.072727272727272
+  },
+  {
+    "detector": "word-boundary",
+    "class": "select1",
+    "median_ns": 18.18867924528302,
+    "p99_ns": 19.047169811320753
+  },
+  {
+    "detector": "word-boundary",
+    "class": "select200",
+    "median_ns": 80.53333333333333,
+    "p99_ns": 82.02222222222223
+  },
+  {
+    "detector": "word-boundary",
+    "class": "update400",
+    "median_ns": 53.26229508196721,
+    "p99_ns": 55.16393442622951
+  },
+  {
+    "detector": "word-boundary",
+    "class": "inlist10k",
+    "median_ns": 3700,
+    "p99_ns": 3759
+  },
+  {
+    "detector": "word-boundary",
+    "class": "multi",
+    "median_ns": 21.050505050505052,
+    "p99_ns": 22.151515151515152
+  },
+  {
+    "detector": "word-boundary",
+    "class": "set",
+    "median_ns": 13.86111111111111,
+    "p99_ns": 14.166666666666666
+  },
+  {
+    "detector": "pgdog-regex",
+    "class": "select1",
+    "median_ns": 9.333333333333334,
+    "p99_ns": 9.444444444444445
+  },
+  {
+    "detector": "pgdog-regex",
+    "class": "select200",
+    "median_ns": 194.14285714285714,
+    "p99_ns": 195.9047619047619
+  },
+  {
+    "detector": "pgdog-regex",
+    "class": "update400",
+    "median_ns": 338.9230769230769,
+    "p99_ns": 340.53846153846155
+  },
+  {
+    "detector": "pgdog-regex",
+    "class": "inlist10k",
+    "median_ns": 9.36,
+    "p99_ns": 14.8
+  },
+  {
+    "detector": "pgdog-regex",
+    "class": "multi",
+    "median_ns": 41.95384615384615,
+    "p99_ns": 43.184615384615384
+  },
+  {
+    "detector": "pgdog-regex",
+    "class": "set",
+    "median_ns": 43.04615384615385,
+    "p99_ns": 44.13846153846154
+  },
+  {
+    "detector": "pgdog-auto",
+    "class": "select1",
+    "median_ns": 9.976190476190476,
+    "p99_ns": 10.619047619047619
+  },
+  {
+    "detector": "pgdog-auto",
+    "class": "select200",
+    "median_ns": 238.22222222222223,
+    "p99_ns": 299.55555555555554
+  },
+  {
+    "detector": "pgdog-auto",
+    "class": "update400",
+    "median_ns": 380.0833333333333,
+    "p99_ns": 632.25
+  },
+  {
+    "detector": "pgdog-auto",
+    "class": "inlist10k",
+    "median_ns": 9.992063492063492,
+    "p99_ns": 10.452380952380953
+  },
+  {
+    "detector": "pgdog-auto",
+    "class": "multi",
+    "median_ns": 76181,
+    "p99_ns": 147908
+  },
+  {
+    "detector": "pgdog-auto",
+    "class": "set",
+    "median_ns": 8860,
+    "p99_ns": 23961
+  },
+  {
+    "detector": "pgdog-on",
+    "class": "select1",
+    "median_ns": 8349,
+    "p99_ns": 25273
+  },
+  {
+    "detector": "pgdog-on",
+    "class": "select200",
+    "median_ns": 107172,
+    "p99_ns": 222798
+  },
+  {
+    "detector": "pgdog-on",
+    "class": "update400",
+    "median_ns": 138036,
+    "p99_ns": 284310
+  },
+  {
+    "detector": "pgdog-on",
+    "class": "inlist10k",
+    "median_ns": 3109026,
+    "p99_ns": 4699270
+  },
+  {
+    "detector": "pgdog-on",
+    "class": "multi",
+    "median_ns": 75289,
+    "p99_ns": 162256
+  },
+  {
+    "detector": "pgdog-on",
+    "class": "set",
+    "median_ns": 8813,
+    "p99_ns": 24883
+  },
+  {
+    "detector": "proxysql",
+    "class": "select1",
+    "median_ns": 43.6231884057971,
+    "p99_ns": 47.31884057971015
+  },
+  {
+    "detector": "proxysql",
+    "class": "select200",
+    "median_ns": 775.6666666666666,
+    "p99_ns": 1149.1666666666667
+  },
+  {
+    "detector": "proxysql",
+    "class": "update400",
+    "median_ns": 1073,
+    "p99_ns": 1100.75
+  },
+  {
+    "detector": "proxysql",
+    "class": "inlist10k",
+    "median_ns": 29417,
+    "p99_ns": 37579
+  },
+  {
+    "detector": "proxysql",
+    "class": "multi",
+    "median_ns": 481.44444444444446,
+    "p99_ns": 496.44444444444446
+  },
+  {
+    "detector": "proxysql",
+    "class": "set",
+    "median_ns": 6469,
+    "p99_ns": 15380
+  },
+  {
+    "detector": "pgquery-parse",
+    "class": "select1",
+    "median_ns": 8368,
+    "p99_ns": 20420
+  },
+  {
+    "detector": "pgquery-parse",
+    "class": "select200",
+    "median_ns": 109800,
+    "p99_ns": 209580
+  },
+  {
+    "detector": "pgquery-parse",
+    "class": "update400",
+    "median_ns": 142558,
+    "p99_ns": 262613
+  },
+  {
+    "detector": "pgquery-parse",
+    "class": "inlist10k",
+    "median_ns": 3172770,
+    "p99_ns": 4753952
+  },
+  {
+    "detector": "pgquery-parse",
+    "class": "multi",
+    "median_ns": 78247,
+    "p99_ns": 174898
+  },
+  {
+    "detector": "pgquery-parse",
+    "class": "set",
+    "median_ns": 9128,
+    "p99_ns": 31834
+  },
+  {
+    "detector": "pgquery-prefilter",
+    "class": "select1",
+    "median_ns": 15,
+    "p99_ns": 16.30275229357798
+  },
+  {
+    "detector": "pgquery-prefilter",
+    "class": "select200",
+    "median_ns": 192.72727272727272,
+    "p99_ns": 201.36363636363637
+  },
+  {
+    "detector": "pgquery-prefilter",
+    "class": "update400",
+    "median_ns": 140362,
+    "p99_ns": 262498
+  },
+  {
+    "detector": "pgquery-prefilter",
+    "class": "inlist10k",
+    "median_ns": 7391,
+    "p99_ns": 15472
+  },
+  {
+    "detector": "pgquery-prefilter",
+    "class": "multi",
+    "median_ns": 76196,
+    "p99_ns": 163229
+  },
+  {
+    "detector": "pgquery-prefilter",
+    "class": "set",
+    "median_ns": 9156,
+    "p99_ns": 26125
+  },
+  {
+    "detector": "pgquery-scan",
+    "class": "select1",
+    "median_ns": 1655,
+    "p99_ns": 5640
+  },
+  {
+    "detector": "pgquery-scan",
+    "class": "select200",
+    "median_ns": 18536,
+    "p99_ns": 84757
+  },
+  {
+    "detector": "pgquery-scan",
+    "class": "update400",
+    "median_ns": 21859,
+    "p99_ns": 92138
+  },
+  {
+    "detector": "pgquery-scan",
+    "class": "inlist10k",
+    "median_ns": 749404,
+    "p99_ns": 1857187
+  },
+  {
+    "detector": "pgquery-scan",
+    "class": "multi",
+    "median_ns": 15277,
+    "p99_ns": 84902
+  },
+  {
+    "detector": "pgquery-scan",
+    "class": "set",
+    "median_ns": 3285,
+    "p99_ns": 18905
+  },
+  {
+    "detector": "pgquery-parse+cache",
+    "class": "select1",
+    "median_ns": 18.88421052631579,
+    "p99_ns": 26.757894736842104
+  },
+  {
+    "detector": "pgquery-parse+cache",
+    "class": "select200",
+    "median_ns": 34.4375,
+    "p99_ns": 35.28125
+  },
+  {
+    "detector": "pgquery-parse+cache",
+    "class": "update400",
+    "median_ns": 61.86666666666667,
+    "p99_ns": 63.44444444444444
+  },
+  {
+    "detector": "pgquery-parse+cache",
+    "class": "inlist10k",
+    "median_ns": 1225,
+    "p99_ns": 1246
+  },
+  {
+    "detector": "pgquery-parse+cache",
+    "class": "multi",
+    "median_ns": 34.296875,
+    "p99_ns": 35.359375
+  },
+  {
+    "detector": "pgquery-parse+cache",
+    "class": "set",
+    "median_ns": 20.74074074074074,
+    "p99_ns": 21
+  },
+  {
+    "detector": "lexer",
+    "class": "select1",
+    "median_ns": 17.46153846153846,
+    "p99_ns": 18.817307692307693
+  },
+  {
+    "detector": "lexer",
+    "class": "select200",
+    "median_ns": 374.5,
+    "p99_ns": 426.75
+  },
+  {
+    "detector": "lexer",
+    "class": "update400",
+    "median_ns": 609.1428571428571,
+    "p99_ns": 628
+  },
+  {
+    "detector": "lexer",
+    "class": "inlist10k",
+    "median_ns": 7930,
+    "p99_ns": 13670
+  },
+  {
+    "detector": "lexer",
+    "class": "multi",
+    "median_ns": 297.06666666666666,
+    "p99_ns": 306.8
+  },
+  {
+    "detector": "lexer",
+    "class": "set",
+    "median_ns": 26.545454545454547,
+    "p99_ns": 37.30681818181818
+  },
+  {
+    "detector": "two-stage",
+    "class": "select1",
+    "median_ns": 24.057471264367816,
+    "p99_ns": 25.816091954022987
+  },
+  {
+    "detector": "two-stage",
+    "class": "select200",
+    "median_ns": 337.0769230769231,
+    "p99_ns": 345.61538461538464
+  },
+  {
+    "detector": "two-stage",
+    "class": "update400",
+    "median_ns": 779.8333333333334,
+    "p99_ns": 847
+  },
+  {
+    "detector": "two-stage",
+    "class": "inlist10k",
+    "median_ns": 12821,
+    "p99_ns": 20387
+  },
+  {
+    "detector": "two-stage",
+    "class": "multi",
+    "median_ns": 302.26666666666665,
+    "p99_ns": 356.46666666666664
+  },
+  {
+    "detector": "two-stage",
+    "class": "set",
+    "median_ns": 32.44155844155844,
+    "p99_ns": 33.51948051948052
+  },
+  {
+    "detector": "two-stage-swar",
+    "class": "select1",
+    "median_ns": 39.114285714285714,
+    "p99_ns": 40.6
+  },
+  {
+    "detector": "two-stage-swar",
+    "class": "select200",
+    "median_ns": 173.79166666666666,
+    "p99_ns": 179.20833333333334
+  },
+  {
+    "detector": "two-stage-swar",
+    "class": "update400",
+    "median_ns": 692.3333333333334,
+    "p99_ns": 1104.5
+  },
+  {
+    "detector": "two-stage-swar",
+    "class": "inlist10k",
+    "median_ns": 5763,
+    "p99_ns": 7314
+  },
+  {
+    "detector": "two-stage-swar",
+    "class": "multi",
+    "median_ns": 300.07142857142856,
+    "p99_ns": 335.7142857142857
+  },
+  {
+    "detector": "two-stage-swar",
+    "class": "set",
+    "median_ns": 39.927536231884055,
+    "p99_ns": 41.492753623188406
+  },
+  {
+    "detector": "two-stage-dfa",
+    "class": "select1",
+    "median_ns": 24.962962962962962,
+    "p99_ns": 25.641975308641975
+  },
+  {
+    "detector": "two-stage-dfa",
+    "class": "select200",
+    "median_ns": 558.125,
+    "p99_ns": 571
+  },
+  {
+    "detector": "two-stage-dfa",
+    "class": "update400",
+    "median_ns": 956.6,
+    "p99_ns": 1294
+  },
+  {
+    "detector": "two-stage-dfa",
+    "class": "inlist10k",
+    "median_ns": 27311,
+    "p99_ns": 35685
+  },
+  {
+    "detector": "two-stage-dfa",
+    "class": "multi",
+    "median_ns": 298.57142857142856,
+    "p99_ns": 548.2142857142857
+  },
+  {
+    "detector": "two-stage-dfa",
+    "class": "set",
+    "median_ns": 30.67105263157895,
+    "p99_ns": 38.56578947368421
+  }
+]
