@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -22,16 +23,25 @@ import (
 func TestPublishedPasswordAuthenticationExamples(t *testing.T) {
 	verifier, err := scram.NewVerifier("example-password")
 	require.NoError(t, err)
+	secrets := t.TempDir()
+	for name, value := range map[string]string{
+		"orders_backend_password": "orders-password\n",
+		"alice_password":          "alice-password\n",
+		"bob_scram_verifier":      verifier.Encode() + "\n",
+	} {
+		require.NoError(t, os.WriteFile(filepath.Join(secrets, name), []byte(value), 0600))
+	}
+	t.Setenv("REPORTS_BACKEND_PASSWORD", "reports-password")
 	for _, extension := range []string{"yaml", "json"} {
 		t.Run(extension, func(t *testing.T) {
 			document, err := os.ReadFile("../../examples/password-auth." + extension)
 			require.NoError(t, err)
-			input := strings.NewReader(strings.ReplaceAll(string(document), "<Bob SCRAM verifier>", verifier.Encode()))
+			input := strings.NewReader(strings.ReplaceAll(string(document), "/run/secrets", secrets))
 			var shared pgconfig.Config
 			if extension == "yaml" {
-				shared, err = pgconfig.ReadYAML(input)
+				shared, err = readConfigYAML(input)
 			} else {
-				shared, err = pgconfig.ReadJSON(input)
+				shared, err = readConfigJSON(input)
 			}
 			require.NoError(t, err)
 			shared.Proxy.TLSCertFile, shared.Proxy.TLSKeyFile = clientTLSFiles(t)
@@ -39,7 +49,11 @@ func TestPublishedPasswordAuthenticationExamples(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, cfg.authenticate)
 			require.Len(t, cfg.databases, 2)
+			require.Equal(t, "orders-password", cfg.databases["orders-primary"].ConnConfig.Password)
+			require.Equal(t, "reports-password", cfg.databases["reports-primary"].ConnConfig.Password)
 			require.Len(t, shared.Users, 2)
+			require.Equal(t, "alice-password", string(shared.Users[0].StaticCredentials.Password))
+			require.Equal(t, verifier.Encode(), string(shared.Users[1].StaticCredentials.SCRAMSHA256))
 		})
 	}
 }

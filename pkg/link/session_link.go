@@ -226,14 +226,24 @@ func (link *SessionLink) Release() error {
 	// because RESET ALL resets to pg_settings.reset_val, which captures startup values.
 	// postgres docs on reset all: https://www.postgresql.org/docs/current/sql-reset.html
 	// pgx docs on client config startup packets: https://pkg.go.dev/github.com/jackc/pgx#ConnConfig
+	//
+	// RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). A RoleSession
+	// has already reset the role above. Without one, the same simple query (pgx sends a
+	// zero-argument Exec as one) resets identity first: any user may run RESET SESSION
+	// AUTHORIZATION, and RESET ROLE restores a connection-time role (ALTER ROLE ... SET
+	// role, or a startup option), which Postgres releases before the CVE-2024-10978 fix drop.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
+		resetSQL := "RESET ALL"
+		if link.role == nil {
+			resetSQL = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+		}
 		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := link.conn.Exec(resetCtx, "RESET ALL")
+		_, err := link.conn.Exec(resetCtx, resetSQL)
 		cancel()
 		if err != nil {
 			_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
 			link.conn.Conn().Close(context.Background())
-			pgproxy.Logger().Warn("Closing connection due to RESET ALL failure", "error", err)
+			pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetSQL, "error", err)
 			return err
 		}
 	}

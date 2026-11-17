@@ -10,11 +10,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
+
+	pgproxy "github.com/DataDog/pg-proxy"
 )
 
 func TestProxyAgainstPostgres(t *testing.T) {
@@ -30,6 +34,7 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	t.Run("client TLS", func(t *testing.T) { verifyProxyTLS(t, adminURL, admin) })
 	t.Run("session admission limits", func(t *testing.T) { verifySessionAdmission(t, adminURL) })
 	t.Run("client authentication", func(t *testing.T) { verifyProxyAuthentication(t, adminURL, admin) })
+	t.Run("pool statistics", func(t *testing.T) { verifyProxyPoolStats(t, adminURL) })
 
 	// Minimum connections must open during startup, before the periodic health check.
 	for _, minimum := range []string{"pool_min_conns=3", "pool_min_idle_conns=3"} {
@@ -200,5 +205,71 @@ proxy:
 		require.NoError(t, serveErr)
 	case <-time.After(10 * time.Second):
 		t.Fatal("proxy did not drain idle clients")
+	}
+}
+
+type gaugeRecorder struct {
+	pgproxy.NoopMetrics
+	mu     sync.Mutex
+	gauges map[string][][]string
+}
+
+func (r *gaugeRecorder) Gauge(name string, _ float64, tags []string, _ float64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges[name] = append(r.gauges[name], slices.Clone(tags))
+	return nil
+}
+
+func (r *gaugeRecorder) snapshot() map[string][][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot := make(map[string][][]string, len(r.gauges))
+	for name, calls := range r.gauges {
+		snapshot[name] = slices.Clone(calls)
+	}
+	return snapshot
+}
+
+// Stub collectors stand in for DogStatsD and OTel; the backend selection decides
+// whether newProxy starts collection.
+func verifyProxyPoolStats(t *testing.T, backendURL string) {
+	for _, tc := range []struct {
+		name      string
+		metrics   metricBackend
+		namespace string
+	}{
+		{"metrics disabled", metricNone, ""},
+		{"dogstatsd", metricDogStatsD, ""},
+		{"otel with custom namespace", metricOTel, "custom."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &gaugeRecorder{gauges: make(map[string][][]string)}
+			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: recorder, MetricNamespace: tc.namespace}))
+			cfg := backendConfig(t, backendURL)
+			cfg.telemetry.Metrics = tc.metrics
+			proxy, err := newProxy(t.Context(), cfg)
+			require.NoError(t, err)
+			defer proxy.server.Close()
+
+			// Ticks fire at two and four seconds; close between them.
+			time.Sleep(3 * time.Second)
+			proxy.inventory.Close()
+			got := recorder.snapshot()
+			if tc.metrics == metricNone {
+				require.Empty(t, got)
+				return
+			}
+			tags := []string{"database:" + cfg.databases["primary"].ConnConfig.Database, "database_cluster:local"}
+			want := map[string][][]string{pgproxy.MetricName("pg_proxy.sessions.waiting"): {tags}}
+			poolTags := append(slices.Clone(tags), "direct_pool:false")
+			for _, name := range []string{"pool_total", "pool_acquired", "pool_acquired_total", "pool_idle", "pool_constructing", "pool_max"} {
+				want[pgproxy.MetricName("pg_proxy.connections."+name)] = [][]string{poolTags}
+			}
+			require.Equal(t, want, got)
+
+			time.Sleep(2 * time.Second)
+			require.Equal(t, want, recorder.snapshot(), "collection continued after Close")
+		})
 	}
 }

@@ -61,7 +61,11 @@ to enable static users and non-loopback listeners. Each user needs an explicit
 logical-database list. Proxy usernames are independent of backend accounts.
 See [client authentication](../../docs/client-authentication.md).
 It rejects JWT, mirroring, and other unsupported options with explicit startup errors.
-The library schema remains broader than this command.
+The library schema remains broader than this command. The command also reads
+its own `*_file` and `*_env` credential references and resolves them into these
+types before validation; see
+[credential references](../../docs/client-authentication.md#credential-references).
+`ReadJSON` and `ReadYAML` do not accept those fields.
 
 [`pool.PGXConfig`](../pool/config.go) consumes a `Database` and returns a pgx pool
 configuration without opening connections. It supports direct backends and takes
