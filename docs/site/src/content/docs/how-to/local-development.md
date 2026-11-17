@@ -32,13 +32,27 @@ databases:
     sslmode: disable
     max_conns: 10
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 proxy:
   listener_address: '127.0.0.1:15432'
   postgres_msg_buffer_size: 10240
 ```
+
+Validate the file before starting the proxy:
+
+```sh
+./bin/pg-proxy -config proxy.yaml -validate-config
+```
+
+This checks syntax, field types, required settings, routing references, pool bounds,
+authentication policy, and local TLS files. It exits with status 0 on success or 1
+on a configuration error. Errors include field paths and source locations when
+available. Validation does not connect to PostgreSQL, open a listener, or start
+telemetry, so database access and port availability still need a runtime check.
 
 Start the OSS binary:
 
@@ -100,6 +114,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
+| `-validate-config` | `false` | Run local configuration checks and exit without starting the proxy. |
 | `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
 | `-tracing` | `OTEL_TRACES_EXPORTER` selection | `otel` or `none`; overrides the trace exporter selector and cannot be combined with `-telemetry`. |
 | `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in traces. SQL text is recorded regardless. |

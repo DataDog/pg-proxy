@@ -93,3 +93,23 @@ func TestPGXConfigRejectsUnsupportedAndInvalidSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestPGXConfigFieldDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		field  string
+		modify func(*config.Database)
+	}{
+		{"host", func(d *config.Database) { d.Host = "" }},
+		{"dbname", func(d *config.Database) { d.DBName = "" }},
+		{"username", func(d *config.Database) { d.Username = ""; d.Password = "" }},
+		{"sslmode", func(d *config.Database) { d.SSLMode = "test-password" }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			database := directDatabase()
+			tc.modify(&database)
+			_, err := PGXConfig(database)
+			require.ErrorContains(t, err, tc.field)
+			require.NotContains(t, err.Error(), "test-password")
+		})
+	}
+}

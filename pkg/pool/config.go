@@ -27,8 +27,17 @@ func PGXConfig(database config.Database) (*pgxpool.Config, error) {
 	if database.PostgresHost != "" || database.RouteThroughEnvoy || len(database.LoadBalancedServers) > 0 {
 		return nil, errors.New("direct pools do not support postgres_host, route_through_envoy, or load_balanced_servers")
 	}
-	if database.Host == "" || database.DBName == "" || database.Username == "" {
-		return nil, errors.New("database host, dbname, and username are required")
+	for _, field := range []struct{ name, value string }{
+		{"host", database.Host}, {"dbname", database.DBName}, {"username", database.Username},
+	} {
+		if field.value == "" {
+			return nil, fmt.Errorf("database %s is required", field.name)
+		}
+	}
+	switch database.SSLMode {
+	case "", "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+	default:
+		return nil, errors.New("database sslmode must be disable, allow, prefer, require, verify-ca, or verify-full")
 	}
 	if database.MaxConns < 0 || database.MinConns < 0 || database.MinIdleConns < 0 || database.MaxConnLifetime < 0 || database.MaxConnLifetimeJitter < 0 {
 		return nil, errors.New("database pool settings must not be negative")
@@ -52,7 +61,7 @@ func PGXConfig(database config.Database) (*pgxpool.Config, error) {
 	cfg, err := pgxpool.ParseConfig(connection)
 	if err != nil {
 		// Parser errors may contain credentials or other input values.
-		return nil, errors.New("invalid database connection configuration")
+		return nil, errors.New("invalid database connection configuration: check PG* environment settings and backend TLS files")
 	}
 	for key, value := range connectionRuntimeParams(database.ConnectionOptions) {
 		cfg.ConnConfig.RuntimeParams[key] = value

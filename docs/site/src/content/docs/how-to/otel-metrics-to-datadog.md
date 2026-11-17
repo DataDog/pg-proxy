@@ -50,9 +50,13 @@ exporters:
 service:
   pipelines:
     metrics:
-      receivers: [otlp]
-      processors: [transform/pg_proxy_datadog_rates, batch]
-      exporters: [datadog]
+      receivers:
+        - otlp
+      processors:
+        - transform/pg_proxy_datadog_rates
+        - batch
+      exporters:
+        - datadog
 ```
 
 The transform applies only to monotonic delta counters in the `pg-proxy` instrumentation scope with the `datadog.pg_proxy.` prefix. It leaves gauges, histograms, and other scopes unchanged. If you embed the library with a different `MetricNamespace`, change the pattern to match, for example `^acme[.]pg_proxy[.]` for `acme.`. If you export to several backends, use this transform only in the Datadog pipeline.

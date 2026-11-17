@@ -40,11 +40,13 @@ users:
 - static_credentials:
     username: alice
     password: replace-with-client-password
-  databases: [orders]
+  databases:
+    - orders
 - static_credentials:
     username: bob
     scram_sha_256: 'SCRAM-SHA-256$4096:<base64-salt>$<base64-stored-key>:<base64-server-key>'
-  databases: [orders]
+  databases:
+    - orders
 ```
 
 The verifier above shows the format, not a usable value. Supply a PostgreSQL
@@ -86,3 +88,11 @@ Follow the [configuration extension guide](../../docs/extending-configuration.md
 to change a nested field for your application, add settings, or contribute a
 shared library field. The guide follows an application that supplies database
 passwords through environment variables and converts them for the library.
+
+Reader errors include field paths and source locations when available. Unknown
+fields list the allowed names for that section. Decoder values are not included
+in errors, so a misplaced password does not appear in the message.
+
+For the standalone binary, use `pg-proxy -config proxy.yaml -validate-config`
+to run local startup checks and exit before opening listeners or backend pools.
+Successful validation does not prove database connectivity or port availability.

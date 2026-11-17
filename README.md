@@ -166,9 +166,11 @@ databases:
     sslmode: disable
     max_conns: 10
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 proxy:
   listener_address: '127.0.0.1:15432'
   postgres_msg_buffer_size: 10240
@@ -218,6 +220,24 @@ database's `sslmode` setting.
 and listener settings come from that file. The OSS binary has no separate backend,
 listener, database, or session-limit flags and does not read `PG_PROXY_BACKEND_URL`.
 The session limit remains 100. File changes require a restart.
+
+Check a configuration without starting the proxy:
+
+```sh
+./bin/pg-proxy -config proxy.yaml -validate-config
+```
+
+This runs the same local checks as startup: file syntax and field types, required
+settings, routing references, pool bounds, authentication policy, and local TLS
+certificate/key files. It exits with status 0 on success or 1 on a configuration
+error. Errors identify the affected field and include source locations for parse
+failures, without printing configuration values. Unknown fields list the allowed
+names; YAML uses snake_case and JSON uses camelCase.
+
+Validation does not open a listener, connect to PostgreSQL, or start telemetry.
+It does not check database reachability, whether PostgreSQL accepts credentials,
+or whether the listener port is available. The usual flags and environment
+settings still apply, so validate in the same environment used to run the proxy.
 
 Role passthrough is rejected; all queries use the backend user. Query cancellation is supported. SIGINT/SIGTERM
 stop acceptance and allow up to five seconds for sessions and pools to close.

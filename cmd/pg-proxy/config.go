@@ -76,7 +76,7 @@ func (c telemetryConfig) validate() error {
 func parseConfig(args []string) (config, error) {
 	var path string
 	var tracing, telemetry string
-	var traceParameters bool
+	var traceParameters, validateOnly bool
 	var logLevel slog.Level
 	flags := flag.NewFlagSet("pg-proxy", flag.ContinueOnError)
 	flags.StringVar(&telemetry, "telemetry", "", "all-signal preset: datadog, otel, or none (default: OTEL_*_EXPORTER selection)")
@@ -84,6 +84,7 @@ func parseConfig(args []string) (config, error) {
 	flags.BoolVar(&traceParameters, "trace-parameters", false, "include raw bind parameter values in query traces (default: disabled; SQL text is always recorded)")
 	flags.TextVar(&logLevel, "log-level", slog.LevelInfo, "minimum proxy log level for stderr and OTLP: DEBUG, INFO, WARN, or ERROR")
 	flags.StringVar(&path, "config", "", "JSON or YAML configuration file")
+	flags.BoolVar(&validateOnly, "validate-config", false, "validate configuration and local TLS files, then exit without starting the proxy")
 	if err := flags.Parse(args); err != nil {
 		return config{}, err
 	}
@@ -95,7 +96,7 @@ func parseConfig(args []string) (config, error) {
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return config{}, errors.New("could not open configuration file")
+		return config{}, fmt.Errorf("could not open configuration file %q: %w", path, err)
 	}
 	defer file.Close()
 	var shared pgconfig.Config
@@ -108,7 +109,7 @@ func parseConfig(args []string) (config, error) {
 		return config{}, errors.New("configuration file must use .json, .yaml, or .yml")
 	}
 	if err != nil {
-		return config{}, err
+		return config{}, fmt.Errorf("%s: %w", path, err)
 	}
 	tracingSet := false
 	flags.Visit(func(f *flag.Flag) {
@@ -121,7 +122,7 @@ func parseConfig(args []string) (config, error) {
 		return config{}, err
 	}
 	resolved.LogLevel = logLevel
-	return (config{telemetry: resolved, telemetryWarnings: telemetryPresetWarnings(telemetry)}).withSharedConfig(shared)
+	return (config{validateOnly: validateOnly, telemetry: resolved, telemetryWarnings: telemetryPresetWarnings(telemetry)}).withSharedConfig(shared)
 }
 
 // Collect diagnostics during configuration, then log them through the selected
@@ -256,16 +257,16 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		return config{}, errors.New("mirroring configuration is not implemented by the OSS binary")
 	}
 	cfg.databases = make(map[string]*pgxpool.Config, len(shared.Databases))
-	for _, database := range shared.Databases {
+	for i, database := range shared.Databases {
 		if database.Name == "" {
-			return config{}, errors.New("database name is required")
+			return config{}, fmt.Errorf("databases[%d].name: database name is required", i)
 		}
 		if _, exists := cfg.databases[database.Name]; exists {
-			return config{}, errors.New("database names must be unique")
+			return config{}, fmt.Errorf("databases[%d].name: database names must be unique", i)
 		}
 		settings, err := pool.PGXConfig(database)
 		if err != nil {
-			return config{}, err
+			return config{}, fmt.Errorf("databases[%d]: %w", i, err)
 		}
 		cfg.databases[database.Name] = settings
 	}

@@ -37,6 +37,7 @@ import (
 
 // config holds validated startup settings for the OSS binary.
 type config struct {
+	validateOnly      bool
 	telemetry         telemetryConfig
 	telemetryWarnings []string
 	listenAddress     string
@@ -58,6 +59,10 @@ func main() {
 		slog.Error("invalid configuration", "error", err)
 		os.Exit(1)
 	}
+	if cfg.validateOnly {
+		fmt.Fprintln(os.Stdout, "configuration valid (database connectivity and listener availability were not checked)")
+		return
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := runWithTelemetry(ctx, cfg); err != nil {
@@ -76,20 +81,22 @@ func (c config) validate() error {
 		return errors.New("databases, clusters, and logical_databases must not be empty")
 	}
 	usedDatabases := make(map[string]bool, len(c.databases))
-	for name, primary := range c.clusters {
+	for _, name := range slices.Sorted(maps.Keys(c.clusters)) {
+		primary := c.clusters[name]
 		if name == "" || c.databases[primary] == nil {
-			return errors.New("each cluster must have a name and refer to a configured primary database")
+			return fmt.Errorf("clusters[%q].primary: each cluster must have a name and refer to a configured primary database", name)
 		}
 		usedDatabases[primary] = true
 	}
-	for name, logical := range c.logicalDatabases {
+	for _, name := range slices.Sorted(maps.Keys(c.logicalDatabases)) {
+		logical := c.logicalDatabases[name]
 		if _, exists := c.clusters[logical.Cluster]; name == "" || !exists {
-			return errors.New("each logical database must have a name and refer to a configured cluster")
+			return fmt.Errorf("logical_databases[%q].cluster: each logical database must have a name and refer to a configured cluster", name)
 		}
 	}
-	for name := range c.databases {
+	for _, name := range slices.Sorted(maps.Keys(c.databases)) {
 		if !usedDatabases[name] {
-			return errors.New("each database must be used by a cluster")
+			return fmt.Errorf("databases[%q]: each database must be used by a cluster", name)
 		}
 	}
 	return nil
