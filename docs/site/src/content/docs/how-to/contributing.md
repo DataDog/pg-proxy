@@ -91,6 +91,33 @@ PG_PROXY_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres
 The `integration` build tag is required in both cases. The normal unit-test
 command does not execute these PostgreSQL-backed tests.
 
+### PostgreSQL regression suite
+
+The `test/regress` suite runs PostgreSQL's own regression tests (`pg_regress`, as used by `make installcheck`) through PG Proxy for every supported PostgreSQL major version. No upstream tests or expected outputs are copied into this repository: [versions.json](https://github.com/DataDog/pg-proxy/blob/main/test/regress/versions.json) pins each source release and its checksum, and the [image](https://github.com/DataDog/pg-proxy/blob/main/test/regress/image/Dockerfile) downloads and builds it. CI runs one job per version on every pull request.
+
+```sh
+go test -tags=integration,regress -timeout=60m -v ./test/regress
+```
+
+By default only the newest version runs. Set `PG_PROXY_REGRESS_PG_MAJORS=14,17`, or `all`, to select others. The first run of a version builds its image, which takes a few minutes.
+
+`TestInstallcheckDirect` runs the full upstream schedule without the proxy and must pass completely; it checks the setup itself. `TestInstallcheckThroughProxy` runs the schedule through PG Proxy and compares the results with [`baseline/pg<major>.txt`](https://github.com/DataDog/pg-proxy/tree/main/test/regress/baseline). Each entry names a cause, explained at the top of the file:
+
+- `skip`: left out of the schedule because PG Proxy cannot pass it by design, such as large-object functions or `SET ROLE` across transactions.
+- `isolate`: left out of the schedule because its failure would break later tests. These are not established as by design and are worth re-checking as PG Proxy improves.
+- `fail`: runs and is expected to fail.
+
+The run fails when a test fails without a `fail` entry, when a `fail` entry passes, or when a scheduled test reports no result. Update the baseline in the same change that fixes or breaks compatibility. `PG_PROXY_REGRESS_UPDATE=1` rewrites the `fail` entries from a run and keeps the other entries and their reasons.
+
+| Variable | Effect |
+| --- | --- |
+| `PG_PROXY_REGRESS_PG_MAJORS` | Comma-separated major versions from `versions.json`, or `all` (default: the newest) |
+| `PG_PROXY_REGRESS_UPDATE` | Rewrite the `fail` entries of each baseline from this run |
+| `PG_PROXY_REGRESS_ARTIFACTS` | Directory for `pg_regress` output and `regression.diffs` (default: a new temporary directory, logged) |
+| `PG_PROXY_REGRESS_BUILD_LOG` | Print the image build log |
+
+PG Proxy does not forward client startup parameters to backend connections, so the suite sets the time zone, date style, and options that `pg_regress` sends at startup as database defaults instead.
+
 ## Guidelines
 
 - **Tests:** include tests with every change. Bug fixes should include a test that fails without the fix. Changes that reach PostgreSQL should be covered by an integration test.
