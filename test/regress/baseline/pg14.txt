@@ -113,13 +113,25 @@ isolate union                        # backend-reuse: relation "t1" already exis
 isolate updatable_views              # backend-reuse: relation "t1" already exists
 isolate vacuum_parallel              # session-reset: output differs
 isolate xid                          # backend-reuse: relation "snapshot_test" already exists
+fail alter_operator               # session-reset: role is reset after each transaction, so checks run as the backend user
 fail amutils                      # depends-on-skipped: indexes from skipped tests are missing
+fail cluster                      # session-reset: role is reset after each transaction, so checks run as the backend user
+fail constraints                  # session-reset: role is reset after each transaction, so checks run as the backend user
 fail create_index                 # session-reset: column b.relkind does not exist (runs: later tests use its objects)
+fail create_procedure             # session-reset: role is reset after each transaction, so checks run as the backend user
+fail create_schema                # session-reset: role is reset after each transaction, so checks run as the backend user
+fail dependency                   # session-reset: role is reset after each transaction, so checks run as the backend user
 fail float8                       # session-reset: output differs (runs: later tests use its objects)
+fail insert                       # session-reset: role is reset after each transaction, so checks run as the backend user
 fail join_hash                    # depends-on-skipped: plan differs without objects from skipped tests
+fail lock                         # session-reset: role is reset after each transaction, so checks run as the backend user
 fail misc                         # depends-on-skipped: relation "tmp" from a skipped test is missing
+fail multirangetypes              # session-reset: role is reset after each transaction, so checks run as the backend user
 fail rangetypes                   # session-reset: output differs (runs: later tests use its objects)
 fail select_into                  # depends-on-skipped: relation "b" from a skipped test is missing
 fail sequence                     # backend-reuse: relation "t1" already exists
+fail subscription                 # session-reset: role is reset after each transaction, so checks run as the backend user
 fail transactions                 # session-reset: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
+fail update                       # session-reset: role is reset after each transaction, so checks run as the backend user
+fail vacuum                       # session-reset: role is reset after each transaction, so checks run as the backend user
 fail with                         # depends-on-skipped: relation "a" from a skipped test is missing

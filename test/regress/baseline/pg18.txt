@@ -123,10 +123,23 @@ isolate vacuum_parallel              # session-reset: output differs
 isolate window                       # session-reset: output differs
 isolate without_overlaps             # session-reset: output differs
 isolate xid                          # backend-reuse: relation "snapshot_test" already exists
+fail alter_operator               # session-reset: role is reset after each transaction, so checks run as the backend user
 fail amutils                      # depends-on-skipped: indexes from skipped tests are missing
+fail constraints                  # session-reset: role is reset after each transaction, so checks run as the backend user
+fail copyselect                   # backend-reuse: test2 from an earlier test is now created as the backend user
 fail create_index                 # session-reset: output differs (runs: later tests use its objects)
+fail create_procedure             # session-reset: role is reset after each transaction, so checks run as the backend user
+fail create_schema                # session-reset: role is reset after each transaction, so checks run as the backend user
+fail dependency                   # session-reset: role is reset after each transaction, so checks run as the backend user
 fail float8                       # session-reset: output differs (runs: later tests use its objects)
+fail insert                       # session-reset: role is reset after each transaction, so checks run as the backend user
+fail lock                         # session-reset: role is reset after each transaction, so checks run as the backend user
+fail merge                        # session-reset: role is reset after each transaction, so checks run as the backend user
+fail multirangetypes              # session-reset: role is reset after each transaction, so checks run as the backend user
 fail psql                         # statement-names: pg_prepared_statements and errors show proxy names
 fail rangetypes                   # session-reset: output differs (runs: later tests use its objects)
+fail select_into                  # session-reset: role is reset after each transaction, so checks run as the backend user
 fail sequence                     # switchover-hint: hint appended to nextval()/setval() read-only errors
+fail subscription                 # session-reset: role is reset after each transaction, so checks run as the backend user
 fail transactions                 # session-reset: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
+fail update                       # session-reset: role is reset after each transaction, so checks run as the backend user
