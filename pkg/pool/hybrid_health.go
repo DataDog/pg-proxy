@@ -82,6 +82,8 @@ type sqlDowntimeWindow struct {
 // hybridHealthPolicy owns the state needed to choose between a complete SQL snapshot and the
 // latest Patroni snapshot. It deliberately does not schedule checks or mutate PoolHealth; the
 // health worker supplies observations and applies the returned decisions.
+// The decision flow and examples are documented at:
+// https://github.com/DataDog/pg-proxy/blob/main/pkg/pool/README.md#sql-health-decision-flow
 type hybridHealthPolicy struct {
 	mu             sync.Mutex
 	routingEnabled bool
@@ -188,6 +190,18 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 		p.reconcilePatroniRoutingLocked(&decision, previousLeader, previousUnique, observedAt)
 	}
 	return decision
+}
+
+// observePublishedPatroniRouting records hybrid publication when Patroni owns routing (including
+// cached fallback). Record the publication itself, including when empty SQL discovery restores
+// Patroni ownership, rather than waiting for the next refresh.
+func (p *hybridHealthPolicy) observePublishedPatroniRouting(health map[string]bool, observedAt time.Time) *LeaderRoutingComparison {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.routingEnabled {
+		return nil
+	}
+	return p.recordRoutingLeaderLocked("hybrid", health, observedAt, SQLRoutingResultCachedFallback)
 }
 
 // reconcilePatroniRoutingLocked updates the routing decision and recovery state.

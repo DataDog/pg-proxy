@@ -11,6 +11,8 @@ import (
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	pgproxy "github.com/DataDog/pg-proxy"
 )
 
 func TestTraceMessageTypePreservesFmtType(t *testing.T) {
@@ -83,5 +85,32 @@ func TestTraceStateAddMessageSkipsDataMessages(t *testing.T) {
 	want := []string{"*pgproto3.Query", "*pgproto3.ReadyForQuery"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("getMessages() = %v, want %v", got, want)
+	}
+}
+
+type samplingSpan struct {
+	pgproxy.Span
+	sampled bool
+}
+
+func (s samplingSpan) Sampled() bool { return s.sampled }
+
+func TestTraceStateSampled(t *testing.T) {
+	testCases := []struct {
+		name string
+		root pgproxy.Span
+		want bool
+	}{
+		{"no root", nil, false},
+		{"root without sampling decision", struct{ pgproxy.Span }{}, true},
+		{"sampled root", samplingSpan{sampled: true}, true},
+		{"unsampled root", samplingSpan{sampled: false}, false},
+	}
+
+	for _, testCase := range testCases {
+		traceState := &TraceState{rootTrace: testCase.root}
+		if got := traceState.Sampled(); got != testCase.want {
+			t.Fatalf("%s: Sampled() = %v, want %v", testCase.name, got, testCase.want)
+		}
 	}
 }

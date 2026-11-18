@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Go library configuration"
 description: "Go types and callbacks for configuring PG Proxy in your application."
 ---
@@ -47,7 +51,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `RandomInt` | Random-number function used by routing. |
 | `Mirroring` | Session traffic-mirroring integration. |
 | `Metrics` | Optional session metric implementation; otherwise sessions use the global metric client. |
-| `EnableTraceParameters` | Set to `true` to capture raw bind values in Datadog and OTel query traces. Defaults to `false`; SQL text is unaffected. Also available in `session.Config`. |
+| `EnableTraceParameters` | Set to `true` to capture raw bind values in sampled Datadog and OTel query traces. Defaults to `false`; SQL text is unaffected. Also available in `session.Config`. |
 
 `topology.DefaultPostgresMessageBufferSize` is `10_240`. The local executable supplies it explicitly.
 

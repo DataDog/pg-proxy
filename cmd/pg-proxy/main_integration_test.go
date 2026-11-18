@@ -10,11 +10,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
+
+	pgproxy "github.com/DataDog/pg-proxy"
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
 
 func TestProxyAgainstPostgres(t *testing.T) {
@@ -28,7 +33,9 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	defer admin.Close(context.Background())
 	t.Run("exports traces metrics and logs", func(t *testing.T) { verifyProxyOTLP(t, adminURL) })
 	t.Run("client TLS", func(t *testing.T) { verifyProxyTLS(t, adminURL, admin) })
+	t.Run("session admission limits", func(t *testing.T) { verifySessionAdmission(t, adminURL) })
 	t.Run("client authentication", func(t *testing.T) { verifyProxyAuthentication(t, adminURL, admin) })
+	t.Run("pool statistics", func(t *testing.T) { verifyProxyPoolStats(t, adminURL) })
 
 	// Minimum connections must open during startup, before the periodic health check.
 	for _, minimum := range []string{"pool_min_conns=3", "pool_min_idle_conns=3"} {
@@ -48,23 +55,44 @@ func TestProxyAgainstPostgres(t *testing.T) {
 			}, 5*time.Second, 10*time.Millisecond)
 		})
 	}
-	t.Run("startup failure closes earlier pools", func(t *testing.T) {
-		url, err := connectionString(ctx, "sslmode=disable", "application_name=pg-proxy-partial-startup")
-		require.NoError(t, err)
-		cfg := backendConfig(t, url)
-		unreachable := cfg.databases["primary"].Copy()
-		unreachable.ConnConfig.Port = 1
-		unreachable.ConnConfig.ConnectTimeout = time.Second
-		cfg.databases["unreachable"] = unreachable
-		cfg.clusters["zz-failure"] = "unreachable"
-		_, err = newProxy(ctx, cfg)
-		require.Error(t, err)
-		require.Eventually(t, func() bool {
-			var connections int
-			err := admin.QueryRow(ctx, "select count(*) from pg_stat_activity where application_name = 'pg-proxy-partial-startup'").Scan(&connections)
-			return err == nil && connections == 0
-		}, 5*time.Second, 10*time.Millisecond)
-	})
+	// A database that refuses connections must stop startup and close every
+	// pool that opened.
+	for _, tc := range []struct {
+		name, application, wantErr string
+		wire                       func(*config)
+	}{
+		{
+			name: "unreachable primary closes other backends", application: "pg-proxy-partial-startup",
+			wantErr: `connect to backend "zz-failure" primary`,
+			wire:    func(cfg *config) { cfg.clusters["zz-failure"] = pgconfig.Cluster{Primary: "unreachable"} },
+		},
+		{
+			name: "unreachable replica closes its cluster", application: "pg-proxy-replica-startup",
+			wantErr: `connect to backend "local" replica: failed to open test conn to postgres for unreachable`,
+			wire: func(cfg *config) {
+				cfg.databases["reachable"] = cfg.databases["primary"].Copy()
+				cfg.clusters["local"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"reachable", "unreachable"}}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, err := connectionString(ctx, "sslmode=disable", "application_name="+tc.application)
+			require.NoError(t, err)
+			cfg := backendConfig(t, url)
+			unreachable := cfg.databases["primary"].Copy()
+			unreachable.ConnConfig.Port = 1
+			unreachable.ConnConfig.ConnectTimeout = time.Second
+			cfg.databases["unreachable"] = unreachable
+			tc.wire(&cfg)
+			_, err = newProxy(ctx, cfg)
+			require.ErrorContains(t, err, tc.wantErr)
+			require.Eventually(t, func() bool {
+				var connections int
+				err := admin.QueryRow(ctx, "select count(*) from pg_stat_activity where application_name = $1", tc.application).Scan(&connections)
+				return err == nil && connections == 0
+			}, 5*time.Second, 10*time.Millisecond)
+		})
+	}
 	_, err = admin.Exec(ctx, "CREATE ROLE reports_user LOGIN PASSWORD 'reports-password'")
 	require.NoError(t, err)
 	_, err = admin.Exec(ctx, "CREATE DATABASE reports OWNER reports_user")
@@ -199,5 +227,71 @@ proxy:
 		require.NoError(t, serveErr)
 	case <-time.After(10 * time.Second):
 		t.Fatal("proxy did not drain idle clients")
+	}
+}
+
+type gaugeRecorder struct {
+	pgproxy.NoopMetrics
+	mu     sync.Mutex
+	gauges map[string][][]string
+}
+
+func (r *gaugeRecorder) Gauge(name string, _ float64, tags []string, _ float64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gauges[name] = append(r.gauges[name], slices.Clone(tags))
+	return nil
+}
+
+func (r *gaugeRecorder) snapshot() map[string][][]string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	snapshot := make(map[string][][]string, len(r.gauges))
+	for name, calls := range r.gauges {
+		snapshot[name] = slices.Clone(calls)
+	}
+	return snapshot
+}
+
+// Stub collectors stand in for DogStatsD and OTel; the backend selection decides
+// whether newProxy starts collection.
+func verifyProxyPoolStats(t *testing.T, backendURL string) {
+	for _, tc := range []struct {
+		name      string
+		metrics   metricBackend
+		namespace string
+	}{
+		{"metrics disabled", metricNone, ""},
+		{"dogstatsd", metricDogStatsD, ""},
+		{"otel with custom namespace", metricOTel, "custom."},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := &gaugeRecorder{gauges: make(map[string][][]string)}
+			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: recorder, MetricNamespace: tc.namespace}))
+			cfg := backendConfig(t, backendURL)
+			cfg.telemetry.Metrics = tc.metrics
+			proxy, err := newProxy(t.Context(), cfg)
+			require.NoError(t, err)
+			defer proxy.server.Close()
+
+			// Ticks fire at two and four seconds; close between them.
+			time.Sleep(3 * time.Second)
+			proxy.inventory.Close()
+			got := recorder.snapshot()
+			if tc.metrics == metricNone {
+				require.Empty(t, got)
+				return
+			}
+			tags := []string{"database:" + cfg.databases["primary"].ConnConfig.Database, "database_cluster:local"}
+			want := map[string][][]string{pgproxy.MetricName("pg_proxy.sessions.waiting"): {tags}}
+			poolTags := append(slices.Clone(tags), "direct_pool:false")
+			for _, name := range []string{"pool_total", "pool_acquired", "pool_acquired_total", "pool_idle", "pool_constructing", "pool_max"} {
+				want[pgproxy.MetricName("pg_proxy.connections."+name)] = [][]string{poolTags}
+			}
+			require.Equal(t, want, got)
+
+			time.Sleep(2 * time.Second)
+			require.Equal(t, want, recorder.snapshot(), "collection continued after Close")
+		})
 	}
 }

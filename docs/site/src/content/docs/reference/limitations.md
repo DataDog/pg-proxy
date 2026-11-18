@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Limitations"
 description: "Transaction-pooling constraints and current implementation limits of PG Proxy."
 ---
@@ -13,7 +17,7 @@ PG Proxy also has specific boundaries around prepared statements and connection 
 
 ## Traces can contain sensitive data
 
-When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The OSS binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters`. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.
+When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The OSS binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters` on sampled traces. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.
 
 ## Client messages have no configured size limit
 

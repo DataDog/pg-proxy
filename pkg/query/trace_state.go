@@ -252,6 +252,17 @@ func (t *TraceState) SetTag(key string, value interface{}) {
 	}
 }
 
+// Sampled reports whether the current root trace will be kept, so callers can
+// skip building tag values the tracer would drop. Roots that do not implement
+// pgproxy.SamplingReporter are treated as kept.
+func (t *TraceState) Sampled() bool {
+	if t.rootTrace == nil {
+		return false
+	}
+	reporter, ok := t.rootTrace.(pgproxy.SamplingReporter)
+	return !ok || reporter.Sampled()
+}
+
 func (t *TraceState) FinishTrace(errs ...error) {
 	messages := t.getMessages()
 	t.trace = finishSpan(t.trace, messages, t.rowsNumber, t.rowsSize, errs...)

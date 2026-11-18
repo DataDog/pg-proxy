@@ -229,3 +229,34 @@ func TestApplicationAndProxyShareTrace(t *testing.T) {
 		require.Equal(t, app.SpanContext().TraceID(), span.SpanContext().TraceID())
 	}
 }
+
+func TestSpanSampled(t *testing.T) {
+	unsampled := strings.TrimSuffix(parent, "01") + "00"
+	for _, tc := range []struct {
+		name, sql string
+		want      bool
+	}{
+		{"local root", "select 1", true},
+		{"sampled parent", "select 1 /*traceparent='" + parent + "'*/", true},
+		{"unsampled parent", "select 1 /*traceparent='" + unsampled + "'*/", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			installTracer(t)
+			root, _ := pgproxy.Tracing().StartRoot("query", tc.sql)
+			defer root.Finish(nil)
+			require.Equal(t, tc.want, root.(pgproxy.SamplingReporter).Sampled())
+		})
+	}
+	t.Run("never sample", func(t *testing.T) {
+		provider := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.NeverSample()))
+		t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
+		root, _ := proxyotel.NewTracer(provider.Tracer("pg-proxy")).StartRoot("query", "select 1")
+		defer root.Finish(nil)
+		require.False(t, root.(pgproxy.SamplingReporter).Sampled())
+	})
+	t.Run("nil provider with sampled parent", func(t *testing.T) {
+		root, _ := proxyotel.NewTracer(nil).StartRoot("query", "select 1 /*traceparent='"+parent+"'*/")
+		defer root.Finish(nil)
+		require.False(t, root.(pgproxy.SamplingReporter).Sampled(), "non-recording spans export nothing")
+	})
+}

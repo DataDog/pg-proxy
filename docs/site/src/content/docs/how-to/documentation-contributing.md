@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Contribute to the documentation"
 description: "Edit, preview, and validate the Astro documentation site."
 ---
@@ -47,6 +51,12 @@ For unfinished pages, add `draft: true` to the frontmatter. View the draft at it
 Link to other pages with relative URLs, such as `../../how-to/local-development/` from `explanation/pooling.md`, so the site works at any path prefix. Link to repository files with full `https://github.com/DataDog/pg-proxy/blob/main/...` URLs.
 
 Sidebar page entries use `{ slug: "path/to/page" }` so their labels match the page title. Set the title in the page frontmatter rather than adding a separate navigation label.
+
+Use block-style YAML mappings and lists in examples: put each mapping entry or
+list item on its own line instead of using inline collections. Empty `{}` and `[]`
+are allowed because YAML needs them to represent empty collections. Run `go test -run '^TestDocumentationYAMLStyle$' .` from the repository
+root to check YAML examples in Markdown and YAML files under `docs/`, `examples/`,
+`pkg/`, and `cmd/`, plus Markdown files in the repository root.
 
 Keep the homepage as an index. Put appearance changes in `src/styles/custom.css`. Use ordinary Markdown for content.
 

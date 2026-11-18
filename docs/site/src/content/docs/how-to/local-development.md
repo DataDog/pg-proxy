@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Local development"
 description: "Build, run, and test the OSS binary from its repository."
 ---
@@ -32,13 +36,31 @@ databases:
     sslmode: disable
     max_conns: 10
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 proxy:
   listener_address: '127.0.0.1:15432'
   postgres_msg_buffer_size: 10240
 ```
+
+Validate the file before starting the proxy:
+
+```sh
+./bin/pg-proxy -config proxy.yaml -validate-config
+```
+
+This checks syntax, field types, required settings, routing references, pool bounds,
+authentication policy, local TLS files, and selected telemetry protocols and
+exporter conflicts. It exits with status 0 on success or 1
+on a configuration error. Errors include field paths and source locations when
+available. Independent issues are reported together, one per line, including
+errors in different databases, routes, credential references, and listener
+settings. Syntax or field-type errors must be fixed before the decoded settings
+can be checked reliably. Validation does not connect to PostgreSQL, open a listener, or start
+telemetry, so database access and port availability still need a runtime check.
 
 Start the OSS binary:
 
@@ -84,7 +106,7 @@ go test -race -tags=integration -count=1 ./...
 
 ## 5. Stop the local proxy
 
-Close test clients and press `Ctrl+C` in the proxy terminal. SIGINT and SIGTERM stop acceptance and allow up to five seconds for sessions and pools to close. An unfinished transaction can exhaust that deadline and cause a nonzero exit. Startup or runtime errors also cause a nonzero exit. Query cancellation is supported.
+Close test clients and press `Ctrl+C` in the proxy terminal. SIGINT and SIGTERM stop acceptance and allow up to `proxy.shutdown_grace_period` for sessions and pools to close (30 seconds by default). An unfinished transaction can exhaust that deadline and cause a nonzero exit. Startup or runtime errors also cause a nonzero exit. Query cancellation is supported.
 
 For Datadog and OTel configuration, see [Telemetry configuration](../../reference/observability/).
 
@@ -97,19 +119,26 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
+| `proxy.max_sessions` | `100000` | Maximum established client sessions across all users in this proxy process. |
+| `proxy.default_max_user_sessions` | `10000` | Default established-session cap for each client user. |
+| `users[].max_sessions` | Inherit the per-user default | Override for one authenticated user across logical databases. |
+| `proxy.shutdown_grace_period` | `30s` | Maximum session and pool cleanup time after SIGINT or SIGTERM; a positive duration such as `30s` or `2m`. |
 | `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
+| `clusters[].replicas` | None | Database names used as replica pools for the cluster. Each must be a configured database other than the cluster primary. Replica databases default to `max_conn_lifetime: 15m` and `max_conn_lifetime_jitter: 5m`. See [Read routing](../../explanation/read-routing/). |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
+| `-validate-config` | `false` | Run local configuration checks and exit without starting the proxy. |
+| `logical_databases[].read_clusters` | None | Maps configured cluster names to a `weight` from 0 to 255 (default `1`). Any entry, including weight `0`, enables read routing for the logical database. |
 | `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
 | `-tracing` | `OTEL_TRACES_EXPORTER` selection | `otel` or `none`; overrides the trace exporter selector and cannot be combined with `-telemetry`. |
-| `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in traces. SQL text is recorded regardless. |
+| `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in sampled traces. SQL text is recorded regardless. |
 | `-log-level` | `INFO` | Minimum severity for proxy logs on stderr and through OTLP. Use `DEBUG` for local diagnostics. |
 
-The client-session cap is currently fixed at 100. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
+Omitted or zero session limits use the defaults above; negative limits are rejected. Session limits do not change backend pool sizes. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
 
 ### Backend connection settings
 
-Use direct database settings and inline backend credentials in the file. `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. The OSS binary rejects replicas, read clusters, credential references, discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
+Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. Cluster `replicas` and logical-database `read_clusters` configure [read routing](../../explanation/read-routing/). The OSS binary rejects discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
 
 ### Client authentication
 

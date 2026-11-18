@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Introduction"
 description: "How-to guides, reference, and explanation for PG Proxy."
 ---
@@ -9,7 +13,7 @@ PG Proxy sits between PostgreSQL clients and their databases. The Go library han
 
 There are two ways to use PG Proxy: run the supplied application or use the Go library to build your own.
 
-**Run the PG Proxy application:** Configure it with YAML. Start with the OSS binary configuration in [Local development](how-to/local-development/). The current application is for local development; we plan to ship a production-ready default application with the open-source release.
+**Run the PG Proxy application:** Configure it with YAML. Start with [Local development](how-to/local-development/), then follow [Run in production](how-to/run-in-production/) to deploy it with TLS and password authentication.
 
 **Build your own application with the Go library:** Supply your own configuration, authentication, routing, and telemetry integrations. See [Go library configuration](reference/configuration/library/) and [Packages](reference/packages/).
 
@@ -30,6 +34,7 @@ Since then, we've spent a lot of time running it, fixing it, and learning what w
 Complete a specific task once you know the basics.
 
 - [Local development](how-to/local-development/): Build, run, and test the OSS binary.
+- [Run in production](how-to/run-in-production/): Deploy the binary with TLS, authentication, sizing, telemetry, and safe restarts.
 - [Send OTel metrics to Datadog](how-to/otel-metrics-to-datadog/): Configure the Collector to export event counters as rates.
 - [Contribute to PG Proxy](how-to/contributing/): Report bugs, propose changes, and prepare a pull request.
 - [Contribute to the documentation](how-to/documentation-contributing/): Edit, preview, and validate the documentation site.

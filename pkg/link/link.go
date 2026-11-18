@@ -54,7 +54,9 @@ type Link interface {
 type RoleSession interface {
 	// Set changes the Postgres role after acquire; returns opaque token for Reset.
 	Set(ctx context.Context, conn *pgxpool.Conn, tags []string) (token string, err error)
-	// Reset restores the role before the conn returns to the pool.
+	// Reset restores the role before the conn returns to the pool. It must also undo a
+	// client's SET ROLE or SET SESSION AUTHORIZATION: with a RoleSession, Release runs
+	// only RESET ALL, which leaves both in place.
 	Reset(ctx context.Context, conn *pgxpool.Conn, token string, tags []string) error
 }
 

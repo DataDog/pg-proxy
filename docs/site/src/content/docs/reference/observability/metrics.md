@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Metrics"
 description: "Metric clients, session overrides, and selected metric names."
 ---
@@ -62,7 +66,7 @@ The body-size metric can omit trailing padding accepted by the decoder and does 
 | `pool_constructing` | Connections being created. |
 | `pool_max` | Maximum connections. |
 
-The caller controls when the export function runs; supplying a metric client does not by itself schedule pool-stat collection.
+When a metrics backend is configured, the `pg-proxy` binary exports these gauges and `sessions.waiting` every 2 seconds for each cluster's primary pool, tagged `database:<dbname>` and `database_cluster:<cluster>`. It stops at shutdown. Library embedders start the same collection with `backend.Runtime.StartStats`, which `Runtime.Close` stops. Supplying a metric client does not start collection by itself.
 
 ## Pool waits and connection reuse
 
@@ -70,10 +74,10 @@ These names use the prefix `datadog.pg_proxy.` and are emitted through the proce
 
 | Name after prefix | Type | Meaning |
 | --- | --- | --- |
-| `sessions.waiting` | Gauge | Sessions currently waiting for backend checkout, exported when backend statistics collection runs. |
+| `sessions.waiting` | Gauge | Sessions currently waiting for backend checkout, exported every 2 seconds with the [connection-pool gauges](#connection-pool-gauges). |
 | `sessions.connect_wait_us` | Distribution | Time through a successful backend acquisition, in microseconds. Failed acquisitions are not included. |
 | `sessions.connections.destroyed.release_non_idle` | Count | Backend connections closed because release found a state unsafe for reuse; includes a `state` tag. |
-| `sessions.connections.guc_reset_failure` | Count | Failures running `RESET ALL` before connection reuse. |
+| `sessions.connections.guc_reset_failure` | Count | Failed resets before connection reuse. The reset runs `RESET ALL`; without role management it first runs `RESET SESSION AUTHORIZATION` and `RESET ROLE`. |
 
 A high waiting count together with an acquired count near the pool maximum suggests pool pressure. Low PostgreSQL CPU alone does not rule it out: open transactions can retain connections between statements.
 
@@ -107,7 +111,7 @@ flushes on shutdown. Use a receiver with a metrics pipeline, then run queries
 and look for `datadog.pg_proxy.messages.queries` and
 `datadog.pg_proxy.messages`.
 
-This exports existing measurements; it does not schedule pool-stat collection.
+The binary also collects [connection-pool gauges](#connection-pool-gauges) every 2 seconds. The exporter sends the latest values at each export interval.
 See the [telemetry configuration](../) for endpoint settings.
 Embedders supply a metric client through `pgproxy.Dependencies.Metrics`, described
 in [Go library configuration](../../configuration/library/).

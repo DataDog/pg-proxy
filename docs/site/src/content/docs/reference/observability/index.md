@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Telemetry configuration"
 description: "Flags, environment variables, and examples for Datadog and OpenTelemetry."
 ---
@@ -85,7 +89,7 @@ An endpoint configures where data goes; it does not enable export.
 
 ### Export timing and sampling
 
-Metrics export every 60 seconds by default. For local development, set `OTEL_METRIC_EXPORT_INTERVAL=1000` to export every second. Exporting metrics does not schedule [pool-stat collection](metrics/#connection-pool-gauges).
+Metrics export every 60 seconds by default. For local development, set `OTEL_METRIC_EXPORT_INTERVAL=1000` to export every second. The binary collects [connection-pool gauges](metrics/#connection-pool-gauges) every 2 seconds. Each export sends their latest values.
 
 The default trace sampler follows an incoming parent's sampling decision and samples new root traces. Application trace context comes from [SQL comments](tracing/#propagation).
 
@@ -159,6 +163,8 @@ pg-proxy \
 ```
 
 This flag does not enable tracing by itself or change the parameters sent to PostgreSQL. SQL text, including literal values, is still recorded as `db.statement`; error messages are also unaffected. Parameter capture does not obfuscate values. See [Recorded data](tracing/#recorded-data).
+
+Values are added only to sampled traces, so unsampled traces skip the formatting cost. The decision is the one made when the root span starts: the Datadog sampling priority, or the OTel span's sampled flag. A trace kept later, for example because it contains an error, has no `db.parameters`.
 
 For the Go library, the equivalent option is `EnableTraceParameters`, also `false` by default.
 

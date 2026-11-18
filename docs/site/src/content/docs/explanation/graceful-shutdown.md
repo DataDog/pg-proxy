@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Graceful shutdown"
 description: "How sessions drain, when connections close, and what clients must handle."
 ---
@@ -17,7 +21,7 @@ This describes the current PG Proxy library's drain implementation. Requiring re
 
 The application controls how long it waits for sessions and pools to close. An unfinished transaction, including a client idle inside a transaction, can prevent draining from completing within that time. Forced termination, network failures, and shutdown deadlines can still interrupt work.
 
-The local reference binary handles `SIGINT` and `SIGTERM`, stops acceptance, and allows up to five seconds for cleanup. If cleanup exceeds that deadline, it reports an error and exits unsuccessfully. This is the example's policy, not a fixed library-wide grace period.
+The local reference binary handles `SIGINT` and `SIGTERM`, stops acceptance, and allows up to `proxy.shutdown_grace_period` for cleanup (30 seconds by default). Set a positive duration such as `30s` or `2m` in YAML, or `shutdownGracePeriod` in JSON. If cleanup exceeds that deadline, it reports an error and exits unsuccessfully. This is the example's policy, not a fixed library-wide grace period.
 
 ## Client behavior matters
 

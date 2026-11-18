@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Authentication and TLS"
 description: "How client authentication, TLS, and SCRAM channel binding fit together."
 ---
@@ -31,3 +35,7 @@ PG Proxy's built-in SCRAM helper currently offers only `SCRAM-SHA-256`. A client
 Support varies across poolers. As checked in October 2026, [PgBouncer's SCRAM implementation](https://github.com/pgbouncer/pgbouncer/blob/master/src/scram.c) also rejects clients that require channel binding. This is not a constraint of pooling itself; check the implementation and version when comparing authentication support.
 
 See [Go library configuration](../../reference/configuration/library/) for listener integration and [Limitations](../../reference/limitations/) for other compatibility boundaries.
+
+## Startup diagnostics
+
+Resolver hooks should wrap `listener.ErrLogicalDatabaseNotConfigured` or `listener.ErrBackendNotReady` so these failures log `reason=logical_database_not_configured` or `reason=backend_not_ready`. Client responses remain generic. Hooks should log safe resource and verified identity details where available; arbitrary hook errors and authentication payloads must stay out of client responses and startup logs.

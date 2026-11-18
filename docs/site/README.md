@@ -1,3 +1,10 @@
+<!--
+Unless explicitly stated otherwise all files in this repository are licensed
+under the Apache-2.0 License.
+This product includes software developed at Datadog (https://www.datadoghq.com/)
+Copyright 2026-Present Datadog, Inc.
+-->
+
 # Documentation
 
 This directory holds the PG Proxy documentation site. It uses [starlight as the framework](https://starlight.astro.build/). The homepage and guides are ordinary Markdown in `src/content/docs`.
@@ -60,10 +67,17 @@ published pages. Remove the flag and add navigation links when it is ready.
 
    ```yaml
    ---
+   # Unless explicitly stated otherwise all files in this repository are licensed
+   # under the Apache-2.0 License.
+   # This product includes software developed at Datadog (https://www.datadoghq.com/)
+   # Copyright 2026-Present Datadog, Inc.
    title: "A specific page title"
    description: "What the reader will learn or accomplish."
    ---
    ```
+
+   Keep the license header as YAML comments inside the frontmatter, not as an
+   HTML comment, so it does not reach the built page. CI checks both.
 
 2. For a published page, add its slug to the matching sidebar section in `astro.config.mjs` and its
    link to `src/content/docs/index.md`. For example, `how-to/set-pool-limits.md`
@@ -99,6 +113,15 @@ To host the site below a path prefix, pass it: `npm run build:static -- /pg-prox
 The prefix is part of the generated URLs, so rebuild when changing it. Upload the
 contents of `dist-static/` with `index.html` at the site root. The ordinary
 `dist/` output assumes hosting at `/` with directory-index routing.
+
+## Deployment
+
+[`.github/workflows/docs-pages.yml`](../../.github/workflows/docs-pages.yml)
+runs `npm run build:static` and deploys `dist-static/` to GitHub Pages on each
+push to `main` that changes `docs/site/`. It reads the path prefix from the
+Pages settings, so the same workflow works for a private site, a public
+project site (`/pg-proxy/`), or a custom domain. Run it by hand from the
+Actions tab with **Run workflow**.
 
 ## Astro guides
 

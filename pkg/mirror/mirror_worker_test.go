@@ -774,7 +774,7 @@ func TestMirrorWorker_SeededCatalogReparsesWithoutParse(t *testing.T) {
 	}
 }
 
-// Without the seed the same batch is exactly the staging failure: a bare Bind.
+// Without the seed, the same batch sends a bare Bind for a statement the shadow never parsed.
 func TestMirrorWorker_UnseededCatalogSendsBareBind(t *testing.T) {
 	q := newMirrorQueue(queueCapRoomy, nil)
 	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{PreparedStatement: "s1"}, expectation: query.BindReply})

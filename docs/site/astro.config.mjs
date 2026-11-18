@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
@@ -32,6 +37,7 @@ export default defineConfig({
       ] },
       { label: 'How-to guides', items: [
         { slug: 'how-to/local-development' },
+        { slug: 'how-to/run-in-production' },
         { slug: 'how-to/otel-metrics-to-datadog' },
         { slug: 'how-to/contributing' },
         { slug: 'how-to/documentation-contributing' },

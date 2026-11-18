@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Client connection options"
 description: "PG Proxy client startup options, defaults, and connection examples."
 ---
@@ -12,9 +16,9 @@ Place these arguments inside the PostgreSQL startup `options` parameter using th
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `pg_proxy.dynamic_routing` | `false` client request | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
-| `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. |
+| `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. Cached statements are not classified, so extended-protocol reads use the main backend. See [Read routing](../../../explanation/read-routing/#classifying-work). |
 
-These values are read during connection startup. Reconnect to change them. The local executable has one static backend; a routing option does not create read replicas or configure additional backends.
+These values are read during connection startup. Reconnect to change them. A routing option does not create read replicas; configure them in the proxy configuration file. See [Read routing](../../../explanation/read-routing/).
 
 ## Connection examples
 
