@@ -19,7 +19,7 @@ require (
 	github.com/testcontainers/testcontainers-go v0.44.0
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/vmihailenco/msgpack/v5 v5.4.1
-	github.com/xdg-go/scram v1.1.2
+	github.com/xdg-go/scram v1.4.0
 	github.com/xdg-go/stringprep v1.0.4
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.43.0
@@ -109,7 +109,6 @@ require (
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/trailofbits/go-mutexasserts v0.0.0-20250514102930-c1f3d2e37561 // indirect
-	github.com/xdg-go/pbkdf2 v1.0.0 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/collector/component v1.61.0 // indirect
