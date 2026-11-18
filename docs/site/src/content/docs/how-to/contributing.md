@@ -15,7 +15,7 @@ Include as much information as possible.
 
 To help us pinpoint the issue, please include:
 
-- **PG Proxy version:** the release tag or commit SHA you built from. For a built binary, `go version -m ./pg-proxy` prints the module version.
+- **PG Proxy version:** the commit SHA you built from (`git rev-parse HEAD` in your checkout).
 - **PostgreSQL version** of the backend (`SELECT version();`).
 - **Machine:** operating system, architecture, and Go version (`go version`).
 - **Client:** the driver or tool and its version (for example pgx, psql, JDBC).

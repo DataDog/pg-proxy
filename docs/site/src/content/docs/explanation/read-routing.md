@@ -59,7 +59,10 @@ The SQL classifier identifies work eligible for read routing. These examples des
 | `SELECT * FROM items FOR UPDATE` | No |
 | `SELECT * INTO copy_of_items FROM items` | No |
 | `BEGIN` | No |
+| `START TRANSACTION READ ONLY` | No |
 | `INSERT`, `UPDATE`, `DELETE`, or `EXPLAIN` | No |
+
+The route is chosen when a transaction starts, from its first statement. A transaction that opens with plain `BEGIN`, as most ORMs do, runs entirely on the main cluster, even if every statement in it is a read. Open read-only transactions with `BEGIN READ ONLY` to make them eligible.
 
 A string containing multiple statements must have every statement classified as read-only. The classifier also examines common-table expressions and checks function calls against the list below. Classification is a routing heuristic, not a substitute for PostgreSQL permissions or read-only enforcement.
 
@@ -91,7 +94,7 @@ The current check examines the first direct function call in the `SELECT` list. 
 
 Any `read_clusters` entry turns on read routing, including an entry with weight `0`. With routing on, the main backend still sends eligible reads to its own replicas, as described next. To keep all reads on a primary, remove `read_clusters` and do not configure replicas for that cluster. `pg-proxy` logs a warning when all weights are zero.
 
-**Choosing a pool within a cluster.** The current backend runtime sends roughly 90% of eligible replica-routed acquisitions to replica pools and retains 10% on that cluster's primary pool. Replica selection uses round robin. If replica acquisition fails, fallback to the primary is rate limited and can itself fail.
+**Choosing a pool within a cluster.** The current backend runtime sends roughly 90% of eligible replica-routed acquisitions to replica pools and retains 10% on that cluster's primary pool. Replica selection uses round robin. If no replica connection is available within 50 ms, because the replica pool is busy or the replica is down, the proxy uses the primary instead. These fallbacks are limited to 100 per second for each cluster (burst 100). Over that limit, the client gets the error `primary database fallback rate limit exceeded for cluster:<name>`. The `pg_proxy.replica_acquire_fallback` metric counts fallbacks, tagged `outcome:allowed` or `outcome:rate_limited`.
 
 The 90/10 policy describes this second decision. It does not mean every configuration sends exactly 90% of all queries to physical replicas.
 

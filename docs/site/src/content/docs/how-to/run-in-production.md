@@ -9,7 +9,7 @@ If you need features the binary does not configure, such as discovered replicas 
 
 ## 1. Build the binary
 
-Build from a tagged commit or a known `main` commit with Go 1.26 or newer and CGO enabled:
+There are no releases yet. Build from a known `main` commit, and record it, with Go 1.26 or newer and CGO enabled:
 
 ```sh
 git clone https://github.com/DataDog/pg-proxy.git
@@ -78,7 +78,7 @@ users:
 
 **Replicas.** To send eligible reads to replicas, list them under `clusters[].replicas` and add `read_clusters` to the logical database. The binary's replicas are static: each must accept a connection at startup, and there are no replica health checks. If a replica checkout fails, the read falls back to the primary. See [Read routing](../../explanation/read-routing/) for an example and its consistency limits.
 
-Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../local-development/#settings) lists the other options.
+Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../../reference/configuration/configuration-file/) lists the other options.
 
 ## 4. Size pools and sessions
 

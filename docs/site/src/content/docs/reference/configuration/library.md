@@ -5,7 +5,7 @@ description: "Go types and callbacks for configuring PG Proxy in your applicatio
 
 When building your own Go application with the PG Proxy library, use the types and callbacks below to configure its listener, authentication, routing, and telemetry.
 
-If you run the `pg-proxy` binary, see [`pg-proxy` binary settings](../../../how-to/local-development/#settings) for the options it exposes.
+If you run the `pg-proxy` binary, see [configuration file reference](../../../reference/configuration/configuration-file/) for the options it exposes.
 
 ## Process dependencies
 
@@ -30,6 +30,9 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `TLSConfig`, `RequireTLS` | Client-side TLS configuration and requirement. |
 | `Admission` | Session admission policy. |
 | `Authenticate` | Authentication callback supplied by the application. |
+| `AuthenticationMessageLimit` | Maximum message body size during authentication, in bytes. `0` means no limit. The binary uses 16 KiB. |
+| `StartupTimeout` | Time allowed for TLS, startup, and authentication. `0` means no limit. The binary uses 10 seconds. |
+| `MaxPendingConnections` | Maximum connections in startup at once; more are closed. `0` means no limit. The binary uses 100. |
 | `LoadShedder` | Load-shedding integration. |
 | `Sessions` | Required session registry for lookup and lifecycle management. |
 | `Runtime` | Routing inventory and session integrations. |

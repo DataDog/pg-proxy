@@ -27,24 +27,20 @@ Since then, we've run it in production, fixed it, and learned what works. We thi
 
 ## How-to guides
 
-Complete a specific task once you know the basics.
-
-- [Local development](how-to/local-development/): Build, run, and test the `pg-proxy` binary.
+- [Local development](how-to/local-development/): Build `pg-proxy` and run it against a local PostgreSQL database.
 - [Run in production](how-to/run-in-production/): Deploy the binary with TLS, authentication, sizing, telemetry, and safe restarts.
-- [Send OTel metrics to Datadog](how-to/otel-metrics-to-datadog/): Configure the Collector to export event counters as rates.
-- [Contribute to PG Proxy](how-to/contributing/): Report bugs, propose changes, and prepare a pull request.
-- [Contribute to the documentation](how-to/documentation-contributing/): Edit, preview, and validate the documentation site.
 - [Set connection and session limits](how-to/set-pool-limits/): Configure the connection pool and client-session cap.
+- [Send OTel metrics to Datadog](how-to/otel-metrics-to-datadog/): Configure the Collector to export event counters as rates.
 
 ## Reference
 
-The technical details.
-
 ### Configuration
 
-- [`pg-proxy` binary settings](how-to/local-development/#settings): The configuration file, flags, and defaults.
+- [Configuration file](reference/configuration/configuration-file/) and [flags](reference/configuration/command-line/): every `pg-proxy` binary setting and its default.
 - [Client connection options](reference/configuration/client-connections/): PG Proxy session options, defaults, and connection examples.
-- [Timeouts](reference/configuration/timeouts/): Backend statement limits and transaction overrides.
+- [Timeouts](reference/configuration/timeouts/): Backend statement limits, transaction overrides, shutdown, and fixed limits.
+- [Client TLS](reference/configuration/client-tls/): TLS between clients and the proxy.
+- [Client authentication](reference/configuration/client-authentication/): Password and SCRAM users, and credential references.
 
 ### Observability
 
@@ -52,18 +48,19 @@ The technical details.
 - [Metrics](reference/observability/metrics/): Metric clients, session overrides, and selected measurements.
 - [Tracing](reference/observability/tracing/): Span operations, propagation, and recorded data.
 
-### Compatibility
+### Compatibility and operations
 
+- [Requirements and tested versions](reference/requirements/): Go, operating systems, PostgreSQL versions, and client features.
 - [Transaction-pooling compatibility](reference/compatibility/): Session state, prepared statements, and connection reuse.
+- [Troubleshooting](reference/troubleshooting/): Common startup and connection errors.
 
 ### Go library
 
 - [Go library configuration](reference/configuration/library/): Process dependencies, listener settings, and routing interfaces.
+- [Adapting configuration](reference/configuration/adapting-configuration/): Change parts of the configuration schema in your application.
 - [Packages](reference/packages/): Responsibilities of the library's public packages.
 
 ## Explanation
-
-Understand the design and the reasons behind it.
 
 - [Authentication and TLS](explanation/authentication/): Understand client authentication, transport security, and channel binding.
 - [Transaction pooling](explanation/pooling/): Understand how client sessions share backend connections.
@@ -71,3 +68,8 @@ Understand the design and the reasons behind it.
 - [Read routing](explanation/read-routing/): How the proxy selects clusters and replica pools.
 - [Traffic mirroring](explanation/traffic-mirroring/): Replay traffic on a separate database and understand what can be dropped.
 - [Graceful shutdown](explanation/graceful-shutdown/): How sessions drain and clients reconnect.
+
+## Contribute
+
+- [Contribute to PG Proxy](how-to/contributing/): Report bugs, propose changes, and prepare a pull request.
+- [Contribute to the documentation](how-to/documentation-contributing/): Edit, preview, and validate the documentation site.

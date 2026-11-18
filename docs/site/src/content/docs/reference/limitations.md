@@ -17,7 +17,7 @@ When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQ
 
 ## Client messages have no configured size limit
 
-PG Proxy's server does not currently set a maximum body size for client messages. The protocol reader buffers the declared body before decoding it, so a sufficiently large message can exhaust proxy memory and interrupt other clients. The message-buffer setting controls flushing replies to clients; it does not limit incoming messages.
+After authentication, PG Proxy does not limit the body size of client messages. (During authentication, the `pg-proxy` binary limits messages to 16 KiB; see [fixed limits](../configuration/timeouts/#fixed-limits-in-the-binary).) The protocol reader buffers the declared body before decoding it, so a sufficiently large message can exhaust proxy memory and interrupt other clients. The message-buffer setting controls flushing replies to clients; it does not limit incoming messages.
 
 The `datadog.pg_proxy.client_messages.body_length_bytes` metric estimates size from decoded fields after a successful read. Some message decoders accept trailing padding without retaining it in those fields, so the metric can underreport the body that was buffered. It cannot enforce a memory limit or report a message that exhausts memory before decoding finishes. See [Metrics](../observability/metrics/) and [Go library configuration](../configuration/library/).
 

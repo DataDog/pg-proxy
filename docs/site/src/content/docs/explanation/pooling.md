@@ -29,6 +29,8 @@ An unfinished transaction also matters during shutdown because it can prevent a 
 
 ## Session state belongs to the backend
 
+When a backend connection goes back to the pool, the proxy runs `RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL` on it, so settings from one client do not leak to the next. If the reset fails or takes longer than 5 seconds, the proxy closes that connection instead of reusing it. A connection released in the middle of a protocol exchange, such as an unfinished `COPY`, is also closed.
+
 A later transaction may acquire another connection. Use transaction-scoped settings such as `SET LOCAL`, and avoid relying on temporary tables or session-level locks across transactions. [Transaction-pooling compatibility](../../reference/compatibility/) describes these boundaries.
 
 [Prepared statements](../prepared-statements/) receive special handling: the proxy tracks client statement names and prepares statements on newly selected backend connections as needed.
@@ -36,4 +38,4 @@ A later transaction may acquire another connection. Use transaction-scoped setti
 ## Related documentation
 
 - [Set connection and session limits](../../how-to/set-pool-limits/) for the practical steps.
-- [Local development settings](../../how-to/local-development/#settings) for defaults and shutdown behavior.
+- [Configuration file](../../reference/configuration/configuration-file/) for defaults and shutdown behavior.

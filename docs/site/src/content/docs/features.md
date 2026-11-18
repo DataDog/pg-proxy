@@ -37,7 +37,7 @@ Start with [Observability](../reference/observability/), then use the [metrics](
 
 Map client-facing database names to backend clusters, set pool limits, and supply PostgreSQL startup settings such as statement timeouts. The `pg-proxy` binary reads a YAML or JSON configuration file; applications embedding the library supply configuration through Go interfaces.
 
-See [`pg-proxy` binary settings](../how-to/local-development/#settings), [Timeouts](../reference/configuration/timeouts/), and [Go library configuration](../reference/configuration/library/).
+See [Configuration file](../reference/configuration/configuration-file/), [Timeouts](../reference/configuration/timeouts/), and [Go library configuration](../reference/configuration/library/).
 
 ## Authentication and TLS integration
 

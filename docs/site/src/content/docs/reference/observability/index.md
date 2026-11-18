@@ -5,7 +5,7 @@ description: "Flags, environment variables, and examples for Datadog and OpenTel
 
 The `pg-proxy` binary reads telemetry settings from command-line flags and environment variables. `proxy.yaml` contains database and listener settings; it has no telemetry fields.
 
-The examples use Bash or Zsh, `pg-proxy` on your PATH, and an existing [database configuration](../../how-to/local-development/#2-run-against-a-development-database). For applications using the Go library, see [Go telemetry configuration](../configuration/library/#telemetry-settings).
+The examples use Bash or Zsh, `pg-proxy` on your PATH, and an existing [database configuration](../../how-to/local-development/#3-configure-and-start-the-proxy). For applications using the Go library, see [Go telemetry configuration](../configuration/library/#telemetry-settings).
 
 ## Backend selection
 

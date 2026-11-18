@@ -9,9 +9,13 @@ Graceful shutdown gives active transactions an opportunity to finish before the 
 
 The application stops accepting new connections and signals existing sessions to drain. A session that has no active backend work can close promptly. A busy session continues processing until it reaches an idle state that is safe to release.
 
-At that point, the proxy sends an administrative-shutdown error and closes the client connection. The client or its connection pool must establish a new connection to an available proxy. Sessions and open transactions are not transferred to another process.
+At that point, the proxy sends this error and closes the client connection:
 
-This describes the current PG Proxy library's drain implementation. Requiring reconnection on shutdown is not a rule of transaction pooling or the PostgreSQL protocol; other implementations can support connection handoff during a restart.
+```text
+FATAL 57P01: Pg-proxy session has been terminated. Reconnect to continue.
+```
+
+SQLSTATE `57P01` is `admin_shutdown`, the same code PostgreSQL sends when its server shuts down. Most drivers and connection pools already treat it as a reason to reconnect. Because the proxy waits until the session is idle, no transaction is lost: the client can reconnect and run its next transaction on another proxy. Sessions are not handed off to another process.
 
 ## Deadlines still apply
 

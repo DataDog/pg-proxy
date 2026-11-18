@@ -56,4 +56,4 @@ The built-in server composition consumes the user, logical database, and recogni
 
 See [Prepared statements](../../../explanation/prepared-statements/) and [Read routing](../../../explanation/read-routing/) for how the corresponding session options affect queries.
 
-See [`pg-proxy` binary settings](../../../how-to/local-development/#settings) for backend and routing settings, or [Go library configuration](../library/) when constructing the library directly.
+See [Configuration file](../../../reference/configuration/configuration-file/) for backend and routing settings, or [Go library configuration](../library/) when constructing the library directly.

@@ -9,7 +9,7 @@ If you use `-telemetry datadog`, the proxy already sends metrics through DogStat
 
 ## Prerequisites
 
-- `pg-proxy` on your PATH and a working [database configuration](../local-development/#2-run-against-a-development-database).
+- `bin/pg-proxy` built and a working `proxy.yaml`, from [Local development](../local-development/).
 - [OpenTelemetry Collector Contrib 0.163.2](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.163.2), the version validated with this configuration.
 - A Datadog API key and your Datadog site.
 
@@ -84,7 +84,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
 export OTEL_METRIC_EXPORT_INTERVAL=1000
 
-pg-proxy -config proxy.yaml
+./bin/pg-proxy -config proxy.yaml
 ```
 
 Omit `-telemetry` so these per-signal settings take effect. The one-second export interval is for local feedback; the SDK default is 60 seconds. Add trace and log pipelines to the Collector before enabling those exporters.
