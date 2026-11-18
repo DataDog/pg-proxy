@@ -1,17 +1,19 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+
+# Called from ci.yml so the required CI gate covers these jobs; it can also run
+# on its own from the Actions tab. It has no concurrency group: a reusable
+# workflow shares the caller's, and its own would cancel the caller.
 name: PostgreSQL regression
 
 on:
-  pull_request:
-  push:
-    branches: [main]
+  workflow_call:
   workflow_dispatch:
 
 permissions:
   contents: read
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
 
 env:
   CGO_ENABLED: '1'

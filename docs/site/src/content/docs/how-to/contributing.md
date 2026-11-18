@@ -93,7 +93,7 @@ command does not execute these PostgreSQL-backed tests.
 
 ### PostgreSQL regression suite
 
-The `test/regress` suite runs PostgreSQL's own regression tests (`pg_regress`, as used by `make installcheck`) through PG Proxy for every supported PostgreSQL major version. No upstream tests or expected outputs are copied into this repository: [versions.json](https://github.com/DataDog/pg-proxy/blob/main/test/regress/versions.json) pins each source release and its checksum, and the [image](https://github.com/DataDog/pg-proxy/blob/main/test/regress/image/Dockerfile) downloads and builds it. CI runs one job per version on every pull request.
+The `test/regress` suite runs PostgreSQL's own regression tests (`pg_regress`, as used by `make installcheck`) through PG Proxy for every supported PostgreSQL major version. No upstream tests or expected outputs are copied into this repository: [versions.json](https://github.com/DataDog/pg-proxy/blob/main/test/regress/versions.json) pins each source release and its checksum, and the [image](https://github.com/DataDog/pg-proxy/blob/main/test/regress/image/Dockerfile) downloads and builds it. CI runs one job per version on every pull request, as part of the required CI gate.
 
 ```sh
 go test -tags=integration,regress -timeout=60m -v ./test/regress

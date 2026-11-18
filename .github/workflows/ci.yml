@@ -51,6 +51,7 @@ jobs:
       - go # Includes every toolchain in the matrix.
       - integration
       - docs
+      - regress # Includes every PostgreSQL version in the matrix.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -172,3 +173,7 @@ jobs:
         run: npm ci
       - name: Build static site and check links
         run: npm run build:static
+
+  regress:
+    name: PostgreSQL regression
+    uses: ./.github/workflows/regress.yml
