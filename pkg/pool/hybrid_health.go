@@ -81,6 +81,8 @@ type sqlDowntimeWindow struct {
 // hybridHealthPolicy owns the state needed to choose between a complete SQL snapshot and the
 // latest Patroni snapshot. It deliberately does not schedule checks or mutate PoolHealth; the
 // health worker supplies observations and applies the returned decisions.
+// The decision flow and examples are documented at:
+// https://github.com/DataDog/pg-proxy/blob/main/pkg/pool/README.md#sql-health-decision-flow
 type hybridHealthPolicy struct {
 	mu             sync.Mutex
 	routingEnabled bool

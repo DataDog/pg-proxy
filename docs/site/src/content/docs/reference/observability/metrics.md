@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Metrics"
 description: "Metric clients, session overrides, and selected metric names."
 ---
@@ -73,7 +77,7 @@ These names use the prefix `datadog.pg_proxy.` and are emitted through the proce
 | `sessions.waiting` | Gauge | Sessions currently waiting for backend checkout, exported every 2 seconds with the [connection-pool gauges](#connection-pool-gauges). |
 | `sessions.connect_wait_us` | Distribution | Time through a successful backend acquisition, in microseconds. Failed acquisitions are not included. |
 | `sessions.connections.destroyed.release_non_idle` | Count | Backend connections closed because release found a state unsafe for reuse; includes a `state` tag. |
-| `sessions.connections.guc_reset_failure` | Count | Failures running `RESET ALL` before connection reuse. |
+| `sessions.connections.guc_reset_failure` | Count | Failed resets before connection reuse. The reset runs `RESET ALL`; without role management it first runs `RESET SESSION AUTHORIZATION` and `RESET ROLE`. |
 
 A high waiting count together with an acquired count near the pool maximum suggests pool pressure. Low PostgreSQL CPU alone does not rule it out: open transactions can retain connections between statements.
 

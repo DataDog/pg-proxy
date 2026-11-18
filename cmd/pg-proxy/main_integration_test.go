@@ -19,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
 
 func TestProxyAgainstPostgres(t *testing.T) {
@@ -32,6 +33,7 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	defer admin.Close(context.Background())
 	t.Run("exports traces metrics and logs", func(t *testing.T) { verifyProxyOTLP(t, adminURL) })
 	t.Run("client TLS", func(t *testing.T) { verifyProxyTLS(t, adminURL, admin) })
+	t.Run("session admission limits", func(t *testing.T) { verifySessionAdmission(t, adminURL) })
 	t.Run("client authentication", func(t *testing.T) { verifyProxyAuthentication(t, adminURL, admin) })
 	t.Run("pool statistics", func(t *testing.T) { verifyProxyPoolStats(t, adminURL) })
 
@@ -53,23 +55,44 @@ func TestProxyAgainstPostgres(t *testing.T) {
 			}, 5*time.Second, 10*time.Millisecond)
 		})
 	}
-	t.Run("startup failure closes earlier pools", func(t *testing.T) {
-		url, err := connectionString(ctx, "sslmode=disable", "application_name=pg-proxy-partial-startup")
-		require.NoError(t, err)
-		cfg := backendConfig(t, url)
-		unreachable := cfg.databases["primary"].Copy()
-		unreachable.ConnConfig.Port = 1
-		unreachable.ConnConfig.ConnectTimeout = time.Second
-		cfg.databases["unreachable"] = unreachable
-		cfg.clusters["zz-failure"] = "unreachable"
-		_, err = newProxy(ctx, cfg)
-		require.Error(t, err)
-		require.Eventually(t, func() bool {
-			var connections int
-			err := admin.QueryRow(ctx, "select count(*) from pg_stat_activity where application_name = 'pg-proxy-partial-startup'").Scan(&connections)
-			return err == nil && connections == 0
-		}, 5*time.Second, 10*time.Millisecond)
-	})
+	// A database that refuses connections must stop startup and close every
+	// pool that opened.
+	for _, tc := range []struct {
+		name, application, wantErr string
+		wire                       func(*config)
+	}{
+		{
+			name: "unreachable primary closes other backends", application: "pg-proxy-partial-startup",
+			wantErr: `connect to backend "zz-failure" primary`,
+			wire:    func(cfg *config) { cfg.clusters["zz-failure"] = pgconfig.Cluster{Primary: "unreachable"} },
+		},
+		{
+			name: "unreachable replica closes its cluster", application: "pg-proxy-replica-startup",
+			wantErr: `connect to backend "local" replica: failed to open test conn to postgres for unreachable`,
+			wire: func(cfg *config) {
+				cfg.databases["reachable"] = cfg.databases["primary"].Copy()
+				cfg.clusters["local"] = pgconfig.Cluster{Primary: "primary", Replicas: []string{"reachable", "unreachable"}}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			url, err := connectionString(ctx, "sslmode=disable", "application_name="+tc.application)
+			require.NoError(t, err)
+			cfg := backendConfig(t, url)
+			unreachable := cfg.databases["primary"].Copy()
+			unreachable.ConnConfig.Port = 1
+			unreachable.ConnConfig.ConnectTimeout = time.Second
+			cfg.databases["unreachable"] = unreachable
+			tc.wire(&cfg)
+			_, err = newProxy(ctx, cfg)
+			require.ErrorContains(t, err, tc.wantErr)
+			require.Eventually(t, func() bool {
+				var connections int
+				err := admin.QueryRow(ctx, "select count(*) from pg_stat_activity where application_name = $1", tc.application).Scan(&connections)
+				return err == nil && connections == 0
+			}, 5*time.Second, 10*time.Millisecond)
+		})
+	}
 	_, err = admin.Exec(ctx, "CREATE ROLE reports_user LOGIN PASSWORD 'reports-password'")
 	require.NoError(t, err)
 	_, err = admin.Exec(ctx, "CREATE DATABASE reports OWNER reports_user")

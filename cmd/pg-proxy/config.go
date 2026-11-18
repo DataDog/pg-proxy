@@ -15,13 +15,16 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
+	"github.com/DataDog/pg-proxy/pkg/limiter"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
@@ -230,6 +233,27 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if err := shared.ValidateCredentials(); err != nil {
 		return config{}, err
 	}
+	cfg.sessionLimits = limiter.Params{
+		GlobalLimit:       shared.Proxy.MaxSessions,
+		DefaultServiceMax: shared.Proxy.DefaultMaxUserSessions,
+	}
+	for _, user := range shared.Users {
+		if user.MaxSessions < 0 {
+			return config{}, errors.New("users[].max_sessions must not be negative")
+		}
+		if user.MaxSessions > 0 {
+			cfg.sessionLimits.Quotas = append(cfg.sessionLimits.Quotas, limiter.ServiceQuota{Name: user.StaticCredentials.Username, Max: user.MaxSessions})
+		}
+	}
+	cfg.sessionLimits = cfg.sessionLimitParams()
+	cfg.shutdownGracePeriod = defaultShutdownGracePeriod
+	if shared.Proxy.ShutdownGracePeriod != "" {
+		grace, err := time.ParseDuration(shared.Proxy.ShutdownGracePeriod)
+		if err != nil || grace <= 0 {
+			return config{}, errors.New("proxy.shutdown_grace_period must be a positive duration such as 30s or 2m")
+		}
+		cfg.shutdownGracePeriod = grace
+	}
 	var err error
 	cfg.tlsConfig, err = clientTLSConfig(shared.Proxy)
 	if err != nil {
@@ -255,6 +279,12 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if shared.Mirroring != nil {
 		return config{}, errors.New("mirroring configuration is not implemented by the OSS binary")
 	}
+	replicas := make(map[string]bool)
+	for _, cluster := range shared.Clusters {
+		for _, replica := range cluster.Replicas {
+			replicas[replica] = true
+		}
+	}
 	cfg.databases = make(map[string]*pgxpool.Config, len(shared.Databases))
 	for _, database := range shared.Databases {
 		if database.Name == "" {
@@ -263,25 +293,24 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		if _, exists := cfg.databases[database.Name]; exists {
 			return config{}, errors.New("database names must be unique")
 		}
+		// Replicas default to the library's replica connection lifetime, so
+		// connections spread across replicas after a rolling restart.
+		if replicas[database.Name] && database.MaxConnLifetime == 0 {
+			database.MaxConnLifetime = pool.ReplicaMaxConnLifetime
+			if database.MaxConnLifetimeJitter == 0 {
+				database.MaxConnLifetimeJitter = pool.ReplicaMaxConnLifetimeJitter
+			}
+		}
 		settings, err := pool.PGXConfig(database)
 		if err != nil {
 			return config{}, err
 		}
 		cfg.databases[database.Name] = settings
 	}
-	cfg.clusters = make(map[string]string, len(shared.Clusters))
-	for name, cluster := range shared.Clusters {
-		if len(cluster.Replicas) > 0 {
-			return config{}, errors.New("replica routing is not implemented by the OSS binary")
-		}
-		cfg.clusters[name] = cluster.Primary
-	}
+	cfg.clusters = maps.Clone(shared.Clusters)
 	cfg.logicalDatabases = make(map[string]topology.LogicalDatabase, len(shared.LogicalDatabases))
 	for name, logical := range shared.LogicalDatabases {
-		if len(logical.ReadClusters) > 0 {
-			return config{}, errors.New("read-cluster routing is not implemented by the OSS binary")
-		}
-		cfg.logicalDatabases[name] = topology.LogicalDatabase{Cluster: logical.Cluster}
+		cfg.logicalDatabases[name] = topology.LogicalDatabase{Cluster: logical.Cluster, ReadClusters: readClusters(logical.ReadClusters)}
 	}
 	cfg.listenAddress = shared.Proxy.ListenerAddress
 	if cfg.listenAddress == "" {
@@ -292,6 +321,23 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
 	return cfg, cfg.validate()
+}
+
+// readClusters converts read-cluster settings to the runtime view. An empty
+// entry (`reports: {}` or `reports: null`) uses the default weight.
+func readClusters(settings map[string]*pgconfig.ReadCluster) topology.ReadClusters {
+	if len(settings) == 0 {
+		return nil
+	}
+	clusters := make(topology.ReadClusters, len(settings))
+	for name, read := range settings {
+		var weight *uint8
+		if read != nil {
+			weight = read.Weight
+		}
+		clusters[name] = &topology.ReadCluster{Weight: topology.NormalizedWeight(weight)}
+	}
+	return clusters
 }
 
 // clientTLSConfig loads the certificate and key used to accept TLS client connections.

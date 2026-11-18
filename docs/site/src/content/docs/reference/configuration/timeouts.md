@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Timeouts"
 description: "Configure backend statement timeouts without relying on session affinity."
 ---
@@ -56,3 +60,9 @@ The setting ends with the transaction. A standalone `SET statement_timeout` foll
 A statement timeout is enforced by PostgreSQL. Inside an explicit transaction, handle the error and roll back before continuing. A client disconnect or timeout may instead leave the client uncertain about the outcome. Reconnecting does not establish whether a write committed; retry only when the operation's semantics make that safe.
 
 PostgreSQL documents the exact [statement timeout semantics](https://www.postgresql.org/docs/current/runtime-config-client.html#GUC-STATEMENT-TIMEOUT) and [SET LOCAL behavior](https://www.postgresql.org/docs/current/sql-set.html).
+
+## Shutdown grace period
+
+The OSS binary's `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) bounds session and pool cleanup after `SIGINT` or `SIGTERM`. It accepts a positive Go duration string, such as `30s` or `2m`. Omitted or empty values use `30s`; zero, negative, invalid, and overflowing durations fail at startup.
+
+This limit starts when shutdown begins, not when a transaction starts. It does not change statement or connection timeouts. Give the service manager a longer stop timeout so it does not kill the process before cleanup and telemetry flushing finish. See [Run in production](../../../how-to/run-in-production/#7-restart-and-roll-out-changes).

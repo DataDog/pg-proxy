@@ -1097,10 +1097,11 @@ func (w *HealthWorker) runSQLHealthGroup(
 	if checksEnabled {
 		group.poolHealth.sqlScheduleMu.Lock()
 		resolved := w.prober.Lookup(group.poolHealth.host, group.poolHealth.patroniTags)
-		for _, ip := range resolved {
+		toProbe = group.poolHealth.refreshSQLResolved(w.hooks.SQLPotentialCompared != nil, resolved, w.absenceThreshold)
+		// Successful probes of retained IPs must gain protection even when DNS omits them.
+		for _, ip := range toProbe {
 			resolvedSet[ip] = struct{}{}
 		}
-		toProbe = group.poolHealth.refreshSQLResolved(w.hooks.SQLPotentialCompared != nil, resolved, w.absenceThreshold)
 		group.poolHealth.sqlScheduleMu.Unlock()
 	}
 

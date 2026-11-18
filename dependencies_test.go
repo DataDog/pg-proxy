@@ -124,8 +124,8 @@ func TestMetricNamespace(t *testing.T) {
 		name, namespace, want string
 	}{
 		{name: "empty selects the default", namespace: "", want: "datadog."},
-		{name: "custom", namespace: "dd.orgstore.", want: "dd.orgstore."},
-		{name: "missing trailing dot is added", namespace: "dd.orgstore", want: "dd.orgstore."},
+		{name: "custom", namespace: "acme.db.", want: "acme.db."},
+		{name: "missing trailing dot is added", namespace: "acme.db", want: "acme.db."},
 		// A namespace that is itself a prefix of "pg_proxy." must still apply.
 		{name: "prefix of pg_proxy", namespace: "pg_", want: "pg_."},
 		{name: "repeated segment", namespace: "pg_pg.", want: "pg_pg."},
@@ -162,13 +162,13 @@ func TestEmptyMetricNamespaceDefaultsToDatadog(t *testing.T) {
 
 func TestInvalidMetricNamespaceIsRejected(t *testing.T) {
 	for _, ns := range []string{
-		"1abc",        // must start with a letter
-		".abc",        // must start with a letter
-		"_abc",        // must start with a letter
-		"dd-orgstore", // '-' not allowed
-		"dd orgstore", // space not allowed
-		"dd/orgstore.",
-		"dd.örgstore.",
+		"1abc",    // must start with a letter
+		".abc",    // must start with a letter
+		"_abc",    // must start with a letter
+		"acme-db", // '-' not allowed
+		"acme db", // space not allowed
+		"acme/db.",
+		"acme.dö.",
 	} {
 		t.Run(ns, func(t *testing.T) {
 			_, err := NormalizeMetricNamespace(ns)
