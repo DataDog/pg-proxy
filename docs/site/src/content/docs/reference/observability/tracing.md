@@ -106,13 +106,6 @@ The tags total at most about 4 KB and 256 positions. When a limit drops
 positions, the root also gets `db.parameters.truncated=true`. Invalid UTF-8 is
 escaped as `\xNN` for both tracers.
 
-These tags replace the earlier `db.parameters` tag on the child span, which
-joined the raw values with commas. A value containing a comma could not be told
-apart from two values, binary values were unreadable, and its size was
-unbounded. Saved views, monitors and notebooks that query `@db.parameters` must
-move to `@db.parameters.0` and the following positions, which are on the root
-span.
-
 Values are recorded only when the root span's head sampling decision keeps the
 trace: a Datadog sampling priority above zero, or an OTel span that is recording
 and sampled. Traces kept later, for example because they contain errors, omit

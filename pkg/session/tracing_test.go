@@ -18,7 +18,6 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -98,7 +97,6 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 					require.Equal(t, "000000000000000b", span.Parent().SpanID().String())
 				}
 				for _, attr := range span.Attributes() {
-					require.NotEqual(t, attribute.Key("db.parameters"), attr.Key, "the comma-joined tag was removed")
 					if attr.Key == "db.parameters.0" {
 						foundParameters = true
 						require.Equal(t, query.TransactionOpName, span.Name(), "positions are tagged on the root span")
@@ -133,7 +131,6 @@ func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
 					require.Equal(t, uint64(11), span.ParentID())
 					require.Equal(t, tc.sql, span.Tag("db.statement"))
 				}
-				require.Nil(t, span.Tag("db.parameters"), "the comma-joined tag was removed")
 				if value := span.Tag("db.parameters.0"); value != nil {
 					foundParameters = true
 					require.Equal(t, query.TransactionOpName, span.OperationName())

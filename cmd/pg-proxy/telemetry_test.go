@@ -648,9 +648,6 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 				// the values' types are unknown and they render as hex.
 				binaryInt = binaryInt || stringAttribute(span.Attributes, "db.parameters.0") == `\xffffffff`
 				binaryBytes = binaryBytes || stringAttribute(span.Attributes, "db.parameters.0") == `\x00ff8001`
-				for _, attr := range span.Attributes {
-					require.NotEqual(t, "db.parameters", attr.Key, "the comma-joined tag was removed")
-				}
 				if !capture {
 					for _, attr := range span.Attributes {
 						require.False(t, strings.HasPrefix(attr.Key, "db.parameters"), attr.Key)

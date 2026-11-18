@@ -50,11 +50,6 @@ func (c *Capture) Render(tags Tagger) {
 	if !c.recorded {
 		return
 	}
-	c.render(tags)
-	c.Reset()
-}
-
-func (c *Capture) render(tags Tagger) {
 	truncated := c.truncated
 	// Render every value into one buffer and convert it to a string once; each
 	// tag value is a substring of it, so the tags cost one allocation in all.
@@ -83,6 +78,7 @@ func (c *Capture) render(tags Tagger) {
 	if truncated {
 		tags.SetTag(TruncatedTag, true)
 	}
+	c.Reset()
 }
 
 func appendParam(dst []byte, p *param, v []byte) []byte {
