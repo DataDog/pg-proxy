@@ -22,7 +22,7 @@ Start with the operating model you need. These are starting points for evaluatio
   <tbody>
     <tr>
       <th scope="row">PG Proxy</th>
-      <td>Embed pooling in a Go application.</td>
+      <td>Run the standalone <code>pg-proxy</code> binary, or embed pooling in a Go application.</td>
       <td>Transaction</td>
     </tr>
     <tr>
@@ -50,7 +50,7 @@ Start with the operating model you need. These are starting points for evaluatio
 
 Pooling documentation: [PgBouncer](https://www.pgbouncer.org/features.html), [Pgpool-II](https://www.pgpool.net/docs/latest/en/html/runtime-config-connection-pooling.html), [Odyssey](https://pg-odyssey.tech/features/pooling.html), [PgDog](https://docs.pgdog.dev/features/connection-pooler/).
 
-PG Proxy's main distinction is its [embedding model](../../reference/configuration/library/). Its API is evolving, and the application owns production setup. See [Features](../../features/) for its current capabilities.
+PG Proxy's main distinction is its [embedding model](../../reference/configuration/library/). The Go API may change between releases. See [Features](../../features/) for its current capabilities.
 
 ## Capability comparison
 
@@ -65,7 +65,7 @@ Each table covers one area. Follow the source links for configuration details an
   <tbody>
     <tr>
       <th scope="row">PG Proxy</th>
-      <td>Embeddable Go library; application supplies operating policies.</td>
+      <td>Standalone binary with a YAML or JSON file, or an embeddable Go library where the application supplies operating policies.</td>
     </tr>
     <tr>
       <th scope="row">PgBouncer</th>
@@ -95,7 +95,7 @@ Each table covers one area. Follow the source links for configuration details an
   <tbody>
     <tr>
       <th scope="row">PG Proxy</th>
-      <td>Protocol-level named statements; optional caching of unnamed statements.</td>
+      <td>Named and unnamed protocol-level statements across backend connections; optional per-connection caching of unnamed statements.</td>
     </tr>
     <tr>
       <th scope="row">PgBouncer</th>
@@ -155,7 +155,7 @@ Each table covers one area. Follow the source links for configuration details an
   <tbody>
     <tr>
       <th scope="row">PG Proxy</th>
-      <td>Logging and metrics interfaces, plus query spans through a tracer configured by the application.</td>
+      <td>The binary exports logs, metrics, and query traces over OTLP/HTTP or to the Datadog Agent. The library exposes logging, metrics, and tracing interfaces.</td>
     </tr>
     <tr>
       <th scope="row">PgBouncer</th>

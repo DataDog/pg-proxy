@@ -55,8 +55,12 @@ type Credentials struct {
 
 `DatabaseSettings` holds the shared fields without credentials. Embedding it
 keeps your application on the same field definitions as the library. It includes
-connection options, pool size, and discovery settings. Your application still
-needs to reject settings it does not support.
+the connection fields, `max_conns`, `connection_options`, and discovery settings.
+It does not include the pool tuning fields (`min_conns`, `min_idle_conns`,
+`max_conn_lifetime`, `max_conn_lifetime_jitter`), `application_name`, or
+`runtime_params`; those are on `pgconfig.Database`. To accept them, also embed
+`pgconfig.PoolConfig` and copy the extra fields in `LibraryConfig`. Your
+application still needs to reject settings it does not support.
 
 The containing config must also use your database type. `ConfigSections` lets you
 choose each section's type without copying the top-level fields or their tags:

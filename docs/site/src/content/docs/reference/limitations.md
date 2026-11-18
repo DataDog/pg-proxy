@@ -37,6 +37,8 @@ See [Read routing](../../explanation/read-routing/) for the selection rules and 
 
 ## Configuration changes and pool replacement
 
+This section applies to applications that embed the library and refresh configuration with `pkg/warden`. The `pg-proxy` binary reads its configuration file once at startup; restart it to apply changes, which closes all sessions.
+
 When the configuration reconciler detects a changed cluster definition or a changed database used by that cluster, it recreates the cluster's backend and closes the previous one. This can replace an entire pool even when only one backend setting changed.
 
 The replacement is not warmed to its configured capacity before taking traffic. A successful connection check does not mean all pool connections are ready, so the first requests after a change may spend extra time opening connections. The reconciler also does not guarantee that the old backend remains available if replacement creation fails.

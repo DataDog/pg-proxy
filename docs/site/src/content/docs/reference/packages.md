@@ -11,7 +11,7 @@ The public Go API lives under `pkg/`; the `pg-proxy` binary lives under `cmd/pg-
 
 | Package | Role |
 | --- | --- |
-| `.` (`pgproxy`) | Process-wide `Bootstrap` / `Dependencies` (Logger, Metrics, Tracer) |
+| `.` (`pgproxy`) | Process-wide `Bootstrap` / `Dependencies` (`LogHandler`, `Metrics`, `MetricNamespace`, `Tracer`) |
 | `pkg/actions` | Portable frontend-message decision state machine |
 | `pkg/auth` | Static SCRAM users and explicit database grants |
 | `pkg/backend` | Within-cluster routing, connection checkout, and session-link construction |

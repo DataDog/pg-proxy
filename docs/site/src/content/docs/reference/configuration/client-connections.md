@@ -15,7 +15,7 @@ Place these arguments inside the PostgreSQL startup `options` parameter using th
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `pg_proxy.dynamic_routing` | `false` client request | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
+| `pg_proxy.dynamic_routing` | `false` | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
 | `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. Cached statements are not classified, so extended-protocol reads use the main backend. See [Read routing](../../../explanation/read-routing/#classifying-work). |
 
 These values are read during connection startup. Reconnect to change them. A routing option does not create read replicas; configure them in the proxy configuration file. See [Read routing](../../../explanation/read-routing/).
@@ -47,7 +47,8 @@ psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable&connect_timeo
 ## Parsing and invalid values
 
 - Use `true` or `false` for boolean values. Invalid boolean tokens that reach the boolean parser produce a warning and resolve to `false`.
-- Repeated recognized assignments generally use the last matched value. Avoid duplicate keys, particularly malformed ones, because unmatched tokens can be ignored by the parser.
+- If a key appears more than once, the last occurrence wins.
+- Values can contain only letters, digits, `_`, and `$`. Parsing of a value stops at any other character, so `tru-e` is read as `tru`, which is not a valid boolean.
 - Unknown matched `pg_proxy.*` keys are warned about and ignored. Nonmatching option text is not interpreted as a proxy option. Malformed percent-encoding causes startup to fail.
 
 The parser expects the literal `-c pg_proxy.` form with a space after `-c`. Use the examples above instead of relying on other PostgreSQL option spellings.

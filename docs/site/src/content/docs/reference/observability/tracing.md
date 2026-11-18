@@ -20,7 +20,7 @@ PG Proxy records query and protocol spans with either Datadog or OpenTelemetry. 
 | `Batch execution and proxying` | Grouped batch execution. |
 | `Returning rows to client` | Returning results. |
 
-The OpenTelemetry adapter marks the incoming request span as `SERVER` and its processing child spans as `INTERNAL`. The native Datadog adapter preserves its existing `server` kind for both root and child spans. Both adapters set the database system to `postgres`. The exact query `-- ping` does not start a root trace.
+The OpenTelemetry adapter marks the incoming request span as `SERVER` and its processing child spans as `INTERNAL`. The native Datadog adapter marks both root and child spans as `server`. Both adapters set the database system to `postgres`. The exact query `-- ping` does not start a root trace.
 
 ## Propagation
 
@@ -75,7 +75,7 @@ For batches, use `Batch execution and proxying` rather than assuming every query
 
 ## Recorded data
 
-The root span receives the query text as `db.statement`. The trace state tracks up to 15 protocol-message types; `DataRow` and `CopyData` messages are excluded from that list. Additional messages set `messages_truncated`.
+The root span receives the query text as `db.statement`. Each child span records the type names of the first 15 protocol messages it handles, as `messages`; `DataRow` and `CopyData` messages are not counted. If there are more, the child span gets `messages_truncated`. `rowsTotalSize` is a human-readable string such as `1.2 kB`, not a number.
 
 For OTel export, SQL and captured parameter strings containing invalid UTF-8 are quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
 
@@ -90,8 +90,9 @@ when constructing sessions directly) to `true` to enable it.
 Values are recorded only when the root span's head sampling decision keeps the
 trace: a Datadog sampling priority above zero, or an OTel span that is recording
 and sampled. Traces kept later, for example because they contain errors, omit
-`db.parameters`. Tracers that do not implement `pgproxy.SamplingReporter` are
-treated as keeping every trace.
+`db.parameters`. Root spans that do not implement `pgproxy.SamplingReporter`
+are treated as sampled. `db.parameters` is set on the child span that is active
+when the `Bind` arrives, not on the root span.
 
 Disabling capture skips parameter formatting and trace tagging; it does not change
 the values forwarded to PostgreSQL. SQL text in `db.statement`, including literal
