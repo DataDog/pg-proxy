@@ -114,8 +114,9 @@ policy first checks whether it can keep the previous SQL leader; otherwise it
 uses Patroni, with the old-leader protections below.
 
 Retries happen before the policy sees a result. The library makes one attempt
-unless the application supplies `RunWithRetry`. The [dd-source adapter](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/pg-proxy/pools/sql_health_check.go) currently
-allows two attempts total, but does not retry `57P02`, `57P03`, or `28P01`.
+unless the application supplies `RunWithRetry`. Each adapter picks its own retry
+policy. For example, an adapter can allow two attempts total, but not retry
+`57P02`, `57P03`, or `28P01`.
 Not retrying an error does not make it proof of instance failure: `28P01` only
 says those credentials were rejected.
 

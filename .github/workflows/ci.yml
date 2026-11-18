@@ -28,9 +28,9 @@ env:
   GOTOOLCHAIN: local
   GOWORK: 'off'
 
-# Repository rules should require the single, stable "CI gate" check, alongside
-# devflow/mergegate. Keep the individual checks below as dependencies ("children")
-# of that gate, not standalone checks that need separate repository settings.
+# Repository rules should require the single, stable "CI gate" check. Keep the
+# individual checks below as dependencies ("children") of that gate, not
+# standalone checks that need separate repository settings.
 # When adding a job, add its ID to ci-gate.needs in the same change. The gate
 # validates that list so a forgotten dependency fails CI instead of bypassing it.
 # Keep required CI in this workflow; separate workflows are not covered by this gate.

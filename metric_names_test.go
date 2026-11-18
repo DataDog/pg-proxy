@@ -124,13 +124,13 @@ func stringValue(lit *ast.BasicLit) (string, bool) {
 
 func TestPrefixedMetricName(t *testing.T) {
 	for value, want := range map[string]bool{
-		"pg_proxy.sessions":             false,
-		"datadog.pg_proxy.sessions":     true,
-		"dd.orgstore.pg_proxy.sessions": true,
-		"pg_pg.pg_proxy.sessions":       true,
-		"-c pg_proxy.option":            false, // prose, not a metric name
-		`-c pg_proxy\.(\w+)=([\w$]+)`:   false,
-		"unrelated":                     false,
+		"pg_proxy.sessions":           false,
+		"datadog.pg_proxy.sessions":   true,
+		"acme.db.pg_proxy.sessions":   true,
+		"pg_pg.pg_proxy.sessions":     true,
+		"-c pg_proxy.option":          false, // prose, not a metric name
+		`-c pg_proxy\.(\w+)=([\w$]+)`: false,
+		"unrelated":                   false,
 	} {
 		require.Equal(t, want, prefixedMetricName(value), value)
 	}

@@ -1098,7 +1098,7 @@ func (s *Session) startMirrorWorker(tags []string) {
 	// Snapshot on the session goroutine: the worker must not read pStmtState itself.
 	// Confirmed-only is enough: this runs only with s.link == nil, and the release path
 	// invalidates pending stmts just before clearing the link. The backend-remap abort does
-	// not (OSQQUERY-558), so a stmt left pending there costs one batch, counted by catalog_miss.
+	// not, so a stmt left pending there costs one batch, counted by catalog_miss.
 	s.mirrorWorker = mirror.NewWorker(s.mirror, acquire, tags, s.pStmtState.ListConfirmedNamedStmts())
 	go s.mirrorWorker.Run()
 }
