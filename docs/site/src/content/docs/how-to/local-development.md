@@ -7,7 +7,7 @@ title: "Local development"
 description: "Run pg-proxy from source against a local PostgreSQL database."
 ---
 
-This guide runs `pg-proxy` from source with `go run`, in front of a disposable local PostgreSQL database.
+This guide runs `pg-proxy` from source, in front of a disposable local PostgreSQL database.
 
 You need Go 1.26 or newer, a C compiler with CGO enabled (the SQL parser uses `libpg_query`), Docker or another way to run PostgreSQL, and `psql`. Ports `5432` and `15432` must be free.
 
@@ -20,28 +20,26 @@ cd pg-proxy
 
 ## 2. Start PostgreSQL
 
-Start a disposable PostgreSQL 18 server in Docker:
+You can use a PostgreSQL server you already run: change the backend settings in the next step to match it. If it listens on `127.0.0.1:5432`, also set `proxy.listener_address` to a free port, because the proxy uses `5432` by default.
+
+If you don't have one, start a disposable PostgreSQL 18 server in Docker. It listens on port `15432`, which leaves the standard PostgreSQL port `5432` for the proxy:
 
 ```sh title="Start PostgreSQL"
 docker run --detach --rm \
   --name pg-proxy-dev \
-  --publish 127.0.0.1:5432:5432 \
+  --publish 127.0.0.1:15432:5432 \
   --env POSTGRES_PASSWORD=postgres \
   postgres:18
 ```
 
 | Setting | Value |
 | --- | --- |
-| Address | `127.0.0.1:5432` |
+| Address | `127.0.0.1:15432` |
 | Database | `postgres` |
 | User | `postgres` |
 | Password | `postgres` |
 
 `--rm` deletes the container and its data when it stops.
-
-:::tip
-To use a database you already run, skip this step and change the backend settings in the next step.
-:::
 
 ## 3. Configure and start the proxy
 
@@ -51,7 +49,7 @@ Save this as `proxy.yaml` in your `pg-proxy` checkout:
 databases:
   - name: primary
     host: 127.0.0.1
-    port: 5432
+    port: 15432
     dbname: postgres
     username: postgres
     password: postgres
@@ -63,11 +61,9 @@ clusters:
 logical_databases:
   local_db:
     cluster: local
-proxy:
-  listener_address: 127.0.0.1:15432
 ```
 
-The proxy listens on `127.0.0.1:5432`, the standard PostgreSQL port, by default. PostgreSQL already uses that port here, so the file moves the proxy to `15432`.
+The file has no `proxy` section, so the proxy listens on its default address, `127.0.0.1:5432`.
 
 Check the file:
 
@@ -83,7 +79,7 @@ Start `pg-proxy`:
 go run ./cmd/pg-proxy -config proxy.yaml -telemetry none
 ```
 
-The first run compiles the proxy, which takes a little longer. Wait for the `proxy ready` log line. The proxy listens on `127.0.0.1:15432`.
+The first run compiles the proxy, which takes a little longer. Wait for the `proxy ready` log line. The proxy listens on `127.0.0.1:5432`.
 
 :::caution
 Without password authentication, `pg-proxy` trusts any client on the local machine that connects with the backend user name, and runs its queries as that backend user. Use this mode only with disposable databases. To require passwords, see [Client authentication](../../reference/configuration/client-authentication/).
@@ -95,7 +91,7 @@ In another terminal:
 
 ```sh
 psql \
-  --dbname 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' \
+  --dbname 'postgres://postgres@127.0.0.1:5432/local_db?sslmode=disable' \
   --no-align \
   --tuples-only \
   --command 'select 1'
