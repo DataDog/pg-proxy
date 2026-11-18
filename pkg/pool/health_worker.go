@@ -1163,6 +1163,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		snapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		if len(snapshot.retainedIPs) == 0 {
 			poolHealth.routingMu.Lock()
+			if policy := poolHealth.hybridPolicy; policy != nil && !scheduledAt.Before(poolHealth.routingChangedAt) {
+				decision = policy.clearRoutingBansForEmptyDiscovery()
+			}
 			if poolHealth.sqlRoutingActive {
 				poolHealth.sqlRoutingActive = false
 				patroniHealth := poolHealth.patroniHealthState.Snapshot()
@@ -1175,6 +1178,15 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			poolHealth.routingMu.Unlock()
 			return false
 		}
+		poolHealth.routingMu.Lock()
+		defer poolHealth.routingMu.Unlock()
+		policy := poolHealth.hybridPolicy
+		if policy == nil || scheduledAt.Before(poolHealth.routingChangedAt) {
+			return false // A poll spanning a mode transition cannot affect the new mode.
+		}
+		fresh := SQLHealthResultsSnapshot{
+			StartedAt: outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt, Results: outcome.Results,
+		}
 		// DNS can discover another IP while this credential is running. An older poll
 		// must not evaluate a partial IP set using cached data to fill that new address.
 		completedIPs := make(map[string]bool, len(outcome.Results))
@@ -1183,6 +1195,8 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		}
 		for _, ip := range snapshot.retainedIPs {
 			if !completedIPs[ip] {
+				// A shutdown is useful per-IP evidence even without a complete topology.
+				decision = policy.observeSQLShutdowns(snapshot.retainedIPs, fresh)
 				return false
 			}
 		}
@@ -1198,15 +1212,23 @@ func (w *HealthWorker) completeSQLHealthCheck(
 				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: credential.StartedAt, Results: results})
 			}
 		}
-		poolHealth.routingMu.Lock()
-		defer poolHealth.routingMu.Unlock()
-		policy := poolHealth.hybridPolicy
-		if policy == nil || scheduledAt.Before(poolHealth.routingChangedAt) {
-			return false // A poll spanning a mode transition cannot publish under the new mode.
+		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, fresh)
+		if !decision.publish && decision.routingResult == SQLRoutingResultPatroniRecovery {
+			// Old SQL evidence cannot replace the recovery route, but shutdown bans
+			// must still remove IPs from the route clients currently read.
+			current := poolHealth.state.Snapshot()
+			changed := false
+			for ip := range decision.routingBannedIPs {
+				if current.Health[ip] {
+					current.Health[ip] = false
+					changed = true
+				}
+			}
+			if changed {
+				poolHealth.publishRoutingSnapshot(current.Health, current.Resolved)
+				decision.routingComparison = policy.observePublishedRouting(current.Health, time.Now(), decision.routingResult)
+			}
 		}
-		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, SQLHealthResultsSnapshot{
-			StartedAt: outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt, Results: outcome.Results,
-		})
 		if decision.publish {
 			poolHealth.sqlRoutingActive = decision.routingResult == SQLRoutingResultConclusive || decision.routingResult == SQLRoutingResultRetainedSQL
 			resolved := snapshot.retainedIPs
@@ -1225,8 +1247,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		// Cached errors remain evidence for the decision, but are not new probe events.
 		w.reportConclusiveErrors([]completedSQLHealthCheck{{target: target, outcome: outcome}}, decision)
 	}
-	// Empty discovery can publish a Patroni route without evaluating a SQL iteration.
-	if applied || decision.routingComparison != nil {
+	// Empty discovery can publish a Patroni route, and a partial poll can record bans,
+	// without evaluating a SQL iteration.
+	if applied || decision.routingComparison != nil || len(decision.routingBanChanges) != 0 {
 		w.reportHybridDecision(poolHealth, decision, applied)
 	}
 }

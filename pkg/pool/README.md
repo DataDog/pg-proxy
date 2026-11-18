@@ -237,14 +237,24 @@ response, or `57P03` containing `the database system is shutting down`.
 Timeouts, connection refusal, authentication failures, startup responses, and
 `57P01` administrative connection termination do not create a ban.
 
+Any accepted credential poll can record a shutdown ban for its IP, even if DNS
+added another candidate that the poll did not check. Partial polls still cannot
+select a SQL route or clear a ban using a successful role result.
+
+If older SQL evidence cannot replace a Patroni recovery route, shutdown bans
+still mark those IPs unhealthy in the published route. This does not select a
+replacement leader or change the recovery freshness boundary.
+
 Banned IPs remain discovery candidates and continue to be probed. Their results
 do not force SQL fallback, and cached Patroni fallback cannot select them. A
 successful role result from a poll started after the latest observed shutdown
 clears it, provided the current credential evidence contains neither shutdown
 nor conflicting roles for that IP. Cached successes and polls already in flight
-when the ban was observed cannot clear it. Removing an IP from the retained SQL candidate set also
-removes its ban; the map is bounded by that set, rather than growing with every
-historical address. There is no time-based expiry.
+when the ban was observed cannot clear it. Removing an IP from the retained SQL
+candidate set also removes its ban, including when the last candidate is evicted
+and routing returns to Patroni. Raw DNS misses alone do not clear retained bans.
+The map is bounded by the retained set, rather than growing with every historical
+address. There is no time-based expiry.
 
 `SQLHealthWorkerHooks.RoutingBanChanged` reports transitions with the IP, new
 `Banned` state, and reason, including during shadow evaluation. The event list is

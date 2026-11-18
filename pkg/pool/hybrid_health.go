@@ -214,12 +214,18 @@ func (p *hybridHealthPolicy) observePatroni(health map[string]bool, observedAt t
 // cached fallback). Record the publication itself, including when empty SQL discovery restores
 // Patroni ownership, rather than waiting for the next refresh.
 func (p *hybridHealthPolicy) observePublishedPatroniRouting(health map[string]bool, observedAt time.Time) *LeaderRoutingComparison {
+	return p.observePublishedRouting(health, observedAt, SQLRoutingResultCachedFallback)
+}
+
+// observePublishedRouting records an actual worker publication, including a ban
+// exclusion that preserves the existing routing source and recovery state.
+func (p *hybridHealthPolicy) observePublishedRouting(health map[string]bool, observedAt time.Time, routingResult string) *LeaderRoutingComparison {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if !p.routingEnabled {
 		return nil
 	}
-	return p.recordRoutingLeaderLocked("hybrid", health, observedAt, SQLRoutingResultCachedFallback)
+	return p.recordRoutingLeaderLocked("hybrid", health, observedAt, routingResult)
 }
 
 // reconcilePatroniRoutingLocked updates the routing decision and recovery state.
@@ -287,6 +293,39 @@ func (p *hybridHealthPolicy) observeSQL(
 	return p.observeSQLRound(candidateIPs, outcome, SQLHealthResultsSnapshot{
 		ScheduledAt: observedAt, ObservedAt: observedAt, Results: outcome.Results,
 	})
+}
+
+// clearRoutingBansForEmptyDiscovery removes bans for the empty retained SQL set
+// without evaluating a SQL routing decision or changing leadership history.
+func (p *hybridHealthPolicy) clearRoutingBansForEmptyDiscovery() hybridRoutingDecision {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return hybridRoutingDecision{
+		routingEnabled: p.routingEnabled,
+		routingBanChanges: p.updateRoutingBanlistLocked(
+			nil, SQLHealthCheckOutcome{}, SQLHealthResultsSnapshot{},
+		),
+	}
+}
+
+// observeSQLShutdowns records shutdown evidence even when discovery has added an IP
+// this poll did not check. Partial evidence cannot select a route or clear a ban
+// with a successful role result.
+func (p *hybridHealthPolicy) observeSQLShutdowns(candidateIPs []string, fresh SQLHealthResultsSnapshot) hybridRoutingDecision {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	decision := hybridRoutingDecision{routingEnabled: p.routingEnabled}
+	var shutdowns []SQLHealthCheckResult
+	for _, result := range fresh.Results {
+		if isPostgresShutdownError(result.Err) {
+			shutdowns = append(shutdowns, result)
+		}
+	}
+	if len(shutdowns) != 0 {
+		fresh.Results = shutdowns
+		decision.routingBanChanges = p.updateRoutingBanlistLocked(candidateIPs, SQLHealthCheckOutcome{Results: shutdowns}, fresh)
+	}
+	return decision
 }
 
 // observeSQLRound distinguishes this completed poll from cached credential evidence. Only a
