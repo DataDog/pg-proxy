@@ -18,6 +18,7 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 	"go.opentelemetry.io/otel/trace"
@@ -88,19 +89,19 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxyotel.NewTracer(provider.Tracer("test"))}))
 			runParameterQuery(t, tc.sql, tc.enable)
-			foundRoot, foundHandling, foundParameters := false, false, false
+			foundRoot, foundParameters := false, false
 			for _, span := range recorder.Ended() {
 				switch span.Name() {
 				case query.TransactionOpName:
 					foundRoot = true
 					require.Equal(t, "0000000000000000000000000000002a", span.SpanContext().TraceID().String())
 					require.Equal(t, "000000000000000b", span.Parent().SpanID().String())
-				case query.HandlingMessagesOpName:
-					foundHandling = true
 				}
 				for _, attr := range span.Attributes() {
-					if attr.Key == "db.parameters" {
+					require.NotEqual(t, attribute.Key("db.parameters"), attr.Key, "the comma-joined tag was removed")
+					if attr.Key == "db.parameters.0" {
 						foundParameters = true
+						require.Equal(t, query.TransactionOpName, span.Name(), "positions are tagged on the root span")
 						require.Equal(t, privateParameter, attr.Value.AsString())
 					}
 					if attr.Key == "db.statement" {
@@ -111,8 +112,7 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 					}
 				}
 			}
-			require.True(t, foundRoot)
-			require.True(t, foundHandling, "the span that carries db.parameters must be recorded")
+			require.True(t, foundRoot, "the span that carries the parameters must be recorded")
 			require.Equal(t, tc.wantParameters, foundParameters)
 		})
 	}
@@ -125,24 +125,22 @@ func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
 			t.Cleanup(tracer.Stop)
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxydatadog.Tracer{}}))
 			runParameterQuery(t, tc.sql, tc.enable)
-			foundRoot, foundHandling, foundParameters := false, false, false
+			foundRoot, foundParameters := false, false
 			for _, span := range tracer.FinishedSpans() {
-				switch span.OperationName() {
-				case query.TransactionOpName:
+				if span.OperationName() == query.TransactionOpName {
 					foundRoot = true
 					require.Equal(t, uint64(42), span.TraceID())
 					require.Equal(t, uint64(11), span.ParentID())
 					require.Equal(t, tc.sql, span.Tag("db.statement"))
-				case query.HandlingMessagesOpName:
-					foundHandling = true
 				}
-				if value := span.Tag("db.parameters"); value != nil {
+				require.Nil(t, span.Tag("db.parameters"), "the comma-joined tag was removed")
+				if value := span.Tag("db.parameters.0"); value != nil {
 					foundParameters = true
+					require.Equal(t, query.TransactionOpName, span.OperationName())
 					require.Equal(t, privateParameter, value)
 				}
 			}
-			require.True(t, foundRoot)
-			require.True(t, foundHandling, "mocktracer keeps unsampled spans, so the gate is what drops the tag")
+			require.True(t, foundRoot, "mocktracer keeps unsampled spans, so the gate is what drops the tags")
 			require.Equal(t, tc.wantParameters, foundParameters)
 		})
 	}

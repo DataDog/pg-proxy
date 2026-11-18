@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 )
 
 type RequestType = string
@@ -46,6 +47,10 @@ type TraceState struct {
 	// Fixed-size buffer for messages - keeps first MaxTrackedMessages messages
 	messages     [MaxTrackedMessages]string
 	messageCount int // Number of messages currently stored
+	// The root trace's Bind values, rendered on the root span when it finishes.
+	// It is allocated on the first sampled capture, so sessions without
+	// parameter capture do not carry it.
+	bindParams *bindparams.Capture
 }
 
 // AddMessage records msg in the trace's message buffer, so it can be attached to
@@ -263,6 +268,22 @@ func (t *TraceState) Sampled() bool {
 	return !ok || reporter.Sampled()
 }
 
+// RecordBindParameters copies b's values to render as db.parameters.N tags on
+// the root span when it finishes. Only the root trace's first Bind is kept.
+// Callers check Sampled first: copying is the cost of this feature, and an
+// unsampled trace would drop the tags.
+func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
+	if t.rootTrace == nil {
+		return
+	}
+	if t.bindParams == nil {
+		t.bindParams = &bindparams.Capture{}
+	} else if t.bindParams.Recorded() {
+		return
+	}
+	t.bindParams.Record(b, parseOIDs, describedOIDs)
+}
+
 func (t *TraceState) FinishTrace(errs ...error) {
 	messages := t.getMessages()
 	t.trace = finishSpan(t.trace, messages, t.rowsNumber, t.rowsSize, errs...)
@@ -273,6 +294,13 @@ func (t *TraceState) FinishTrace(errs ...error) {
 
 func (t *TraceState) FinishRootTrace(errs ...error) {
 	t.FinishTrace(errs...) // Ensure trace is cleaned up first
+	if t.bindParams != nil && t.bindParams.Recorded() {
+		if t.rootTrace != nil {
+			t.bindParams.Render(t.rootTrace.SetTag)
+		} else {
+			t.bindParams.Reset()
+		}
+	}
 	t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)
 
 	t.rootQuery = ""

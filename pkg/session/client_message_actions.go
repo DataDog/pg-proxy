@@ -30,16 +30,14 @@ const (
 // DecideClientMessageAction returns the set of actions to take to handle a message received
 // from a client to their Session. (See ClientMessageAction docs for the set of actions.)
 func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (ClientMessageAction, error) {
-	var observeParameters func(string)
-	// A nil hook skips joining the parameters, which is most of the cost.
-	if s.enableTraceParameters && s.obsVals.traceState.Sampled() {
-		observeParameters = func(params string) {
-			s.obsVals.traceState.SetTag("db.parameters", params)
-		}
-	}
+	// Bind values are copied only for traces the tracer keeps.
+	sampled := s.enableTraceParameters && s.obsVals.traceState.Sampled()
 	return actions.DecideClientMessageAction(msg, s.actionState(), actions.Hooks{
 		MessageObserved: func(msg pgproto3.FrontendMessage) {
 			s.obsVals.traceState.AddMessage(msg)
+			if s.enableTraceParameters && observesClientMessage(msg, sampled) {
+				s.observeClientMessage(msg, sampled)
+			}
 			if s.hooks.FrontendMessage != nil {
 				s.hooks.FrontendMessage(msg)
 			}
@@ -59,8 +57,7 @@ func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (Clien
 		NamedPreparedStmtObserved: func(name, sql string) {
 			recordNamedPreparedStatement(name, sql, s.obsVals.traceState, s.obsVals.clientServiceAccount)
 		},
-		BindParametersObserved: observeParameters,
-		ErrorActionCreated:     logFlushError,
+		ErrorActionCreated: logFlushError,
 	})
 }
 

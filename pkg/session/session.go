@@ -172,6 +172,7 @@ type Session struct {
 	hooks                 Hooks
 	decorateLink          bool
 	enableTraceParameters bool
+	paramTypes            bindParamTypes
 
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
@@ -1407,6 +1408,9 @@ func (s *Session) flushPostgres() (bool, error) {
 		action, err := query.DecidePgMessageAction(msg, expectation, s.obsVals.traceState)
 		if err != nil {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
+		}
+		if s.enableTraceParameters {
+			s.observeBackendMessage(msg)
 		}
 
 		if action.AddNewPreparedStatement {

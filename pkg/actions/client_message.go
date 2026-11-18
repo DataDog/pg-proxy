@@ -6,7 +6,6 @@
 package actions
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -97,7 +96,6 @@ type Hooks struct {
 	QueryClassificationFailed func(string, PGQueryProtocolType, error)
 	QueryParseFinished        func(string, PGQueryProtocolType, time.Duration)
 	NamedPreparedStmtObserved func(string, string)
-	BindParametersObserved    func(string)
 	ErrorActionCreated        func(*pgproto3.ErrorResponse, error)
 }
 
@@ -225,12 +223,6 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		}, nil
 
 	case *pgproto3.Bind:
-		// TODO handle tracing named prepared statements
-		if hooks.BindParametersObserved != nil {
-			if params := GetParameterString(m); params != "" {
-				hooks.BindParametersObserved(params)
-			}
-		}
 		action := ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.BindReply}
 		// handle unnamed prepared statements with no auto-caching
 		clientName := m.PreparedStatement
@@ -362,11 +354,6 @@ func FindPotentiallyExistingPreparedStatement(clientName string, state prepared.
 	}
 	action := NewFlushErrorAction(BuildPreparedStatementDoesNotExistErrorResponse(clientName))
 	return "", nil, &action
-}
-
-// GetParameterString formats Bind parameters for optional diagnostics.
-func GetParameterString(msg *pgproto3.Bind) string {
-	return string(bytes.Join(msg.Parameters, []byte(",")))
 }
 
 // NewFlushErrorAction returns a ClientMessageAction that ensures PostgreSQL flushes pending messages

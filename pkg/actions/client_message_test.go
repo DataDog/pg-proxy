@@ -518,39 +518,6 @@ func TestFindPotentiallyExistingPreparedStatement(t *testing.T) {
 	}
 }
 
-func TestGetParameterString(t *testing.T) {
-	tests := []struct {
-		params   []string
-		expected string
-	}{
-		{
-			params:   []string{},
-			expected: "",
-		},
-		{
-			params:   []string{"hello", "world"},
-			expected: "hello,world",
-		},
-		{
-			params:   []string{"foo"},
-			expected: "foo",
-		},
-	}
-	for _, test := range tests {
-		var params [][]byte
-		for _, param := range test.params {
-			params = append(params, []byte(param))
-		}
-
-		bindMsg := &pgproto3.Bind{
-			Parameters: params,
-		}
-
-		result := GetParameterString(bindMsg)
-		assert.Equal(t, test.expected, result)
-	}
-}
-
 // A held link covers both buffered protocol work and active/failed transactions.
 func TestPingShortcutBoundaries(t *testing.T) {
 	for _, tc := range []struct {
