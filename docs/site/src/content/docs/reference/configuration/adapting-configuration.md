@@ -55,14 +55,17 @@ type Credentials struct {
 
 `DatabaseSettings` holds the shared fields without credentials. Embedding it
 keeps your application on the same field definitions as the library. It includes
-the connection fields, `max_conns`, `connection_options`, and discovery settings.
+the connection fields, `max_conns`, `connection_options`, and the discovery fields
+(`postgres_host`, `route_through_envoy`, `load_balanced_servers`).
 It does not include the pool tuning fields (`min_conns`, `min_idle_conns`,
 `max_conn_lifetime`, `max_conn_lifetime_jitter`), `application_name`, or
 `runtime_params`; those are on `pgconfig.Database`. To accept the pool tuning
 fields, also embed `pgconfig.PoolConfig` with a `yaml:",inline"` tag; without
 the tag, YAML rejects them. Add your own `ApplicationName` and `RuntimeParams`
-fields if you need those. Then copy all of them into each `pgconfig.Database`
-in the `LibraryConfig` method below. Your
+fields if you need those. The `LibraryConfig` method below copies only
+`DatabaseSettings`; if you add these fields, also set `PoolConfig:
+database.PoolConfig`, `ApplicationName`, and `RuntimeParams` in its
+`pgconfig.Database` literal, or they are silently dropped. Your
 application still needs to reject settings it does not support.
 
 The containing config must also use your database type. `ConfigSections` lets you

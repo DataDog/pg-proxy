@@ -74,7 +74,7 @@ The SQL classifier identifies work eligible for read routing. These examples des
 | `SELECT count(*) FROM items` | Yes |
 | `SELECT * FROM items FOR UPDATE` | No |
 | `SELECT * INTO copy_of_items FROM items` | No |
-| `SELECT count(*) INTO item_count FROM items` | Yes (known issue; see below) |
+| `SELECT count(*) INTO item_count FROM items` | Yes (known issue: this creates table `item_count`; see below) |
 | `BEGIN` | No |
 | `START TRANSACTION READ ONLY` | No |
 | `INSERT`, `UPDATE`, `DELETE`, or `EXPLAIN` | No |
@@ -113,11 +113,11 @@ The check examines only the first direct function call in the `SELECT` list (and
 
 Where such a statement runs decides what happens, and that is not predictable:
 
-- On a hot-standby replica, the write fails with SQLSTATE `25006` (read-only transaction). The proxy adds a note to that error suggesting a leader switchover, which is misleading in this case.
-- On a primary, the write succeeds. Read-routed work can run on a primary: about 10% of eligible reads stay on the cluster primary, a busy replica falls back to the primary, and a read cluster's primary is a writable server.
-- PG Proxy does not check that a configured replica is actually read-only. If it is writable, the write succeeds there.
+- On a hot-standby replica, the write fails with SQLSTATE `25006` (read-only transaction). The proxy appends "(a PostgreSQL leader switchover may be in progress; retry shortly)" to the error message. That advice is wrong here: a retry can reach a primary and run the write.
+- On a primary, the write succeeds. Read-routed work can run on a primary: about 10% of eligible reads go to the selected cluster's primary (all of them when that cluster has no replicas), a read falls back to the primary when no replica connection is available within 50 ms, and a read cluster's `primary` is writable unless you point it at a physical replica.
+- The `pg-proxy` binary does not check that a configured replica is actually read-only. If it is writable, the write succeeds there.
 
-To keep a write that is hidden in a `SELECT` on the main primary, run it inside an explicit transaction (`BEGIN` … `COMMIT`); a plain `BEGIN` is never routed. Or send that work to a logical database with no `read_clusters`, whose clients do not set `pg_proxy.dynamic_routing=true`.
+To keep a write that is hidden in a `SELECT` on the main primary, run it inside an explicit transaction (`BEGIN` … `COMMIT`); a plain `BEGIN` is never routed. Or send that work through a logical database that has no `read_clusters`, and connect without `pg_proxy.dynamic_routing=true`.
 
 ## Two routing decisions
 

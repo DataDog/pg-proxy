@@ -47,8 +47,9 @@ psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable&connect_timeo
 ## Parsing and invalid values
 
 - Use `true` or `false` for boolean values. Invalid boolean tokens that reach the boolean parser produce a warning and resolve to `false`.
-- If a key appears more than once, the last well-formed occurrence wins. An occurrence the parser does not match, such as one with an empty value, is ignored, so an earlier value stays. Avoid repeating keys.
-- Values can contain only letters, digits, `_`, and `$`. Parsing of a value stops at any other character. `tru-e` is read as `tru`, which is not a valid boolean, so the option is `false` and a warning is logged. Truncation can also produce a valid value: `true-x` is read as `true`.
+- If a boolean option appears more than once, the last well-formed occurrence wins. An occurrence the parser does not match, such as one with an empty value, is ignored, so an earlier value stays. Avoid repeating keys.
+- Boolean values can contain only ASCII letters, digits, `_`, and `$`. Parsing of a value stops at any other character. `tru-e` is read as `tru`, which is not a valid boolean, so the option is `false` and an `invalid bool` warning is logged. Truncation can also produce a valid value: `true-x` is read as `true`.
+- `pg_proxy.priority` is parsed differently: the proxy reads the whole value up to the next space and uses the last occurrence, even an empty one. Anything that is not an integer from `0` to `5`, such as `1-5`, logs an `invalid priority` warning and uses the default, `3`.
 - Unknown matched `pg_proxy.*` keys are warned about and ignored. Nonmatching option text is not interpreted as a proxy option. Malformed percent-encoding causes startup to fail.
 
 The parser expects the literal `-c pg_proxy.` form with a space after `-c`. Use the examples above instead of relying on other PostgreSQL option spellings.

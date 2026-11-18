@@ -92,7 +92,7 @@ These counters use the prefix `datadog.pg_proxy.session.` and the process-wide m
 | `message_mirrored` | Message copies admitted to the queue. This does not mean replay succeeded. |
 | `message_mirror_dropped` | Copies rejected by capacity limits; `reason:session` or `reason:global` identifies the budget. |
 | `mirror.replayed` | Messages forwarded to a shadow link (`kind:msg`), completed flushes (`kind:flush`), or a `Parse` skipped because the shadow connection already had the statement (`kind:parse_existing`; also counted as `kind:msg`). This is not a result-equivalence check. |
-| `mirror.replay_errors` | Replay failures, tagged by `op`: `acquire` (could not get a shadow connection), `flush` (flush or drain failed), `stmt_rejected` (an error occurred in a batch that created a prepared statement, so the statement may be missing and the connection was discarded), or `reparse_budget` (the shared memory budget could not admit a `Parse` that re-creates a statement, so the batch was skipped). |
+| `mirror.replay_errors` | Replay failures, tagged by `op`: `acquire` (could not get a shadow connection), `flush` (flush or drain failed), `stmt_rejected` (an error occurred in a batch that created a prepared statement, so the statement may be missing and the connection was discarded), or `reparse_budget` (the session's queue limit or the shared byte budget could not admit a `Parse` that re-creates a missing statement on the shadow connection, so the batch was skipped). |
 | `mirror.worker.stop_timeout` | Worker teardown exceeded its first waiting period and attempted to force-close its shadow link. |
 | `mirror.worker.stop_abandoned` | The worker still had not stopped after the second waiting period. |
 

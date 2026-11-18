@@ -37,7 +37,7 @@ See [Read routing](../../explanation/read-routing/) for the selection rules and 
 
 ## Configuration changes and pool replacement
 
-This section applies to applications that embed the library and refresh configuration with `pkg/warden`. The `pg-proxy` binary reads its configuration file, credential files, and certificates once at startup. To apply changes, restart it with `SIGTERM`; each client session drains and closes. The binary does not handle `SIGHUP`: unlike PgBouncer, `SIGHUP` does not reload the configuration, and it ends the process at once without draining sessions.
+This section applies to applications that embed the library and refresh configuration with `pkg/warden`. The `pg-proxy` binary reads its configuration file, credential files, and certificates once at startup. To apply changes, stop it with `SIGTERM` and start it again. Sessions drain at transaction boundaries for up to `proxy.shutdown_grace_period`; see [Graceful shutdown](../../explanation/graceful-shutdown/). The binary does not handle `SIGHUP`: unlike PgBouncer, `SIGHUP` does not reload the configuration. It kills the process at once without draining sessions, unless `SIGHUP` was already ignored at launch, for example under `nohup`.
 
 When the configuration reconciler detects a changed cluster definition or a changed database used by that cluster, it recreates the cluster's backend and closes the previous one. This can replace an entire pool even when only one backend setting changed.
 
