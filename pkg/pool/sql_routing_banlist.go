@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 )
 
@@ -120,7 +121,7 @@ func isPostgresShutdownError(err error) bool {
 		return false
 	}
 	switch postgresErr.Code {
-	case sqlHealthCheckCrashShutdown:
+	case pgerrcode.AdminShutdown, sqlHealthCheckCrashShutdown:
 		return true
 	case sqlHealthCheckCannotConnectNow:
 		return strings.Contains(postgresErr.Message, "the database system is shutting down")
