@@ -76,20 +76,34 @@ role query can answer a question that another credential's error could not.
 Then we check **all IPs** pessimistically: an unknown role on another IP could hide
 a second primary, so one known primary is not enough by itself.
 
+Before combining successful roles, we remove an older observation only when
+another successful probe of the **same IP started after the older probe
+finished**, including retries. For example, a standby probe at
+`12:00:00.000–.010` is replaced by a primary probe at `12:00:01.000–.010`.
+The same rule handles a later primary-to-standby change. Arrival order and the
+whole credential round's completion time do not establish that order: another
+slow IP can delay that round after this IP's probe has finished.
+
+Overlapping probes, missing timestamps, and invalid intervals cannot establish
+which role is newer, so their conflicting successful results still require
+Patroni fallback. Errors do not replace successful roles. Raw per-credential
+snapshots remain available for diagnosis.
+
 | Results for the same IP | How routing treats that IP |
 | --- | --- |
 | Primary + errors | Primary. The errors do not erase the successful answer. |
 | Standby + errors | Standby. The errors do not erase the successful answer. |
-| Primary + standby | The successful answers disagree: `conflicting_roles`. Do not choose a SQL route. |
+| Primary + standby | Use the newer role only if the probe intervals establish its order as described above. Otherwise, `conflicting_roles`: do not choose a SQL route. |
 | No successful answer, but an error that proves the IP cannot serve traffic | Unusable. This can resolve another credential's timeout on the same IP. |
 | Only errors that do not prove its role or availability | Unknown. A timeout is unknown too. |
 
 A successful answer is not necessarily newer than another credential's error.
 These rules describe which saved answer the policy trusts.
 
-The aggregate `Health` map marks an IP healthy if any credential saw it as primary.
-The policy also keeps the original results: **primary + standby does not become a
-safe SQL route just because that map says true**.
+After removing provably older successful roles, the aggregate `Health` map marks
+an IP healthy if any remaining credential result saw it as primary. The policy
+also checks the remaining evidence: **an unresolved primary + standby conflict
+does not become a safe SQL route just because that map says true**.
 
 Across IPs, the checks run in this order: conflicting roles, more than one primary,
 then unknown results. If none apply, SQL has a definite answer: either one primary
