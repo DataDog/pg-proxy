@@ -769,12 +769,12 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{ip: {}}, health.sqlComparisonLatest)
 	assert.Empty(t, snapshot.health, "comparison must derive roles from the latest credential results")
 
-	// Determinate shutdown evidence resolves the same-IP timeouts and is reported once.
-	shutdown := &pgconn.PgError{Code: "57P01"}
-	complete(c, t0.Add(3*time.Second), shutdown)
+	// Determinate startup evidence resolves the same-IP timeouts and is reported once.
+	startup := &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}
+	complete(c, t0.Add(3*time.Second), startup)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	require.Len(t, conclusiveErrors, 1)
-	assert.Same(t, shutdown, conclusiveErrors[0])
+	assert.Same(t, startup, conclusiveErrors[0])
 	complete(a, t0.Add(3*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	assert.Len(t, conclusiveErrors, 1, "cached errors are evidence, not new probe events")
@@ -2550,7 +2550,7 @@ func TestHybridTelemetryUsesDecisionRoutingMode(t *testing.T) {
 		result  string
 		wantTag string
 	}{
-		{"conclusive before disable", true, &pgconn.PgError{Code: "57P01"}, SQLRoutingResultConclusive, "sql_health_routing_enabled:true"},
+		{"conclusive before disable", true, &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, SQLRoutingResultConclusive, "sql_health_routing_enabled:true"},
 		{"fallback before disable", true, context.DeadlineExceeded, SQLRoutingResultCachedFallback, "sql_health_routing_enabled:true"},
 		{"shadow before enable", false, nil, SQLRoutingResultShadow, "sql_health_routing_enabled:false"},
 	} {
@@ -3676,7 +3676,8 @@ func TestPartialSQLPollRecordsShutdownBan(t *testing.T) {
 	}{
 		{"crash shutdown", &pgconn.PgError{Code: "57P02"}, true, false},
 		{"shutting down", &pgconn.PgError{Code: "57P03", Message: "the database system is shutting down"}, true, false},
-		{"admin termination", &pgconn.PgError{Code: "57P01"}, false, false},
+		{"admin termination", &pgconn.PgError{Code: "57P01"}, true, false},
+		{"startup", &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, false, false},
 		{"shadow shutdown", &pgconn.PgError{Code: "57P02"}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

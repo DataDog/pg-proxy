@@ -232,10 +232,12 @@ See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 
 ## SQL shutdown banlist
 
-The hybrid policy remembers an IP after a PostgreSQL `57P02` crash-shutdown
-response, or `57P03` containing `the database system is shutting down`.
-Timeouts, connection refusal, authentication failures, startup responses, and
-`57P01` administrative connection termination do not create a ban.
+The hybrid policy remembers an IP after PostgreSQL `57P01` administrative
+termination, `57P02` crash shutdown, or `57P03` containing
+`the database system is shutting down`. Timeouts, connection refusal,
+authentication failures, and startup responses do not create a ban.
+`57P01` can also mean an individual session was terminated; banning its IP until
+a fresh successful role probe is an intentional policy choice.
 Wrapped and joined errors are checked cause by cause. Any qualifying shutdown
 cause creates a ban, regardless of other causes or their order.
 

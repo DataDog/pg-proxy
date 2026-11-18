@@ -1218,16 +1218,16 @@ func TestHybridHealthUsesSuccessfulRoleWhenOtherCredentialHasInvalidPasswordOnSa
 	assert.Empty(t, decision.fallbackReason)
 }
 
-func TestHybridHealthPrimaryTakesPrecedenceOverAdminShutdownOnSameIP(t *testing.T) {
+func TestHybridHealthPrimaryTakesPrecedenceOverStartupOnSameIP(t *testing.T) {
 	const primaryIP, otherIP = "10.0.0.1", "10.0.0.2"
 	primary := SQLHealthCheckResult{IP: primaryIP}
-	terminated := SQLHealthCheckResult{IP: primaryIP, Err: &pgconn.PgError{Code: "57P01"}}
+	startup := SQLHealthCheckResult{IP: primaryIP, Err: &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}}
 	for _, tc := range []struct {
 		name    string
 		results []SQLHealthCheckResult
 	}{
-		{name: "primary then admin shutdown", results: []SQLHealthCheckResult{primary, terminated}},
-		{name: "admin shutdown then primary", results: []SQLHealthCheckResult{terminated, primary}},
+		{name: "primary then startup", results: []SQLHealthCheckResult{primary, startup}},
+		{name: "startup then primary", results: []SQLHealthCheckResult{startup, primary}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			policy := newHybridHealthPolicy(true)
@@ -1405,6 +1405,7 @@ func TestHybridHealthRoutingBanlistShutdownWinsOverSameRoundSuccess(t *testing.T
 	crash := &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}
 	for name, shutdown := range map[string]error{
 		"plain":              crash,
+		"admin termination":  admin,
 		"admin before crash": errors.Join(admin, crash),
 		"crash before admin": errors.Join(crash, admin),
 		"wrapped joined":     fmt.Errorf("connect: %w", errors.Join(admin, crash)),
