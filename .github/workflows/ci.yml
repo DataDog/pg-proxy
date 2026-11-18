@@ -68,7 +68,7 @@ jobs:
         run: go run ./.github/ci-gate
 
   license-headers:
-    name: Go license headers
+    name: License headers
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -79,7 +79,7 @@ jobs:
         with:
           go-version-file: go.mod
           cache-dependency-path: go.sum
-      - name: Check Go license headers
+      - name: Check Go and documentation site license headers
         run: go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
 
   go:
