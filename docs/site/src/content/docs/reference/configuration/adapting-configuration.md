@@ -54,19 +54,22 @@ type Credentials struct {
 ```
 
 `DatabaseSettings` holds the shared fields without credentials. Embedding it
-keeps your application on the same field definitions as the library. It includes
-the connection fields, `max_conns`, `connection_options`, and the discovery fields
-(`postgres_host`, `route_through_envoy`, `load_balanced_servers`).
-It does not include the pool tuning fields (`min_conns`, `min_idle_conns`,
-`max_conn_lifetime`, `max_conn_lifetime_jitter`), `application_name`, or
-`runtime_params`; those are on `pgconfig.Database`. To accept the pool tuning
-fields, also embed `pgconfig.PoolConfig` with a `yaml:",inline"` tag; without
-the tag, YAML rejects them. Add your own `ApplicationName` and `RuntimeParams`
-fields if you need those. The `LibraryConfig` method below copies only
-`DatabaseSettings`; if you add these fields, also set `PoolConfig:
-database.PoolConfig`, `ApplicationName`, and `RuntimeParams` in its
-`pgconfig.Database` literal, or they are silently dropped. Your
-application still needs to reject settings it does not support.
+keeps your application on the same field definitions as the library.
+
+- **Included:** the connection fields, `max_conns`, `connection_options`, and the
+  discovery fields (`postgres_host`, `route_through_envoy`, `load_balanced_servers`).
+- **Not included:** the pool tuning fields (`min_conns`, `min_idle_conns`,
+  `max_conn_lifetime`, `max_conn_lifetime_jitter`), `application_name`, and
+  `runtime_params`. These are on `pgconfig.Database`.
+- **To accept them:** embed `pgconfig.PoolConfig` with a `yaml:",inline"` tag
+  (without the tag, a strict YAML reader rejects the fields), and add your own `ApplicationName`
+  and `RuntimeParams` fields if you need them. The `LibraryConfig` method below
+  copies `DatabaseSettings` and sets the username and resolved password. If you
+  add these fields, also set `PoolConfig: database.PoolConfig`, `ApplicationName`,
+  and `RuntimeParams` in its `pgconfig.Database` literal, or they are silently
+  dropped.
+
+Your application still needs to reject settings it does not support.
 
 The containing config must also use your database type. `ConfigSections` lets you
 choose each section's type without copying the top-level fields or their tags:
@@ -134,13 +137,13 @@ immutable once you hand the result to the proxy.
 
 ## Reading your format
 
-Use your own reader to decode into `AppConfig`. The library's `ReadJSON` and
-`ReadYAML` read the library type and will reject `password_env`. Keep the same
-checks as the [library readers](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/json.go): use
-`DisallowUnknownFields()` for JSON or `KnownFields(true)` for YAML, and reject
-anything after the first document. Return fixed decode errors, since parser
-errors can include input values that contain a misplaced password. After decoding,
-call `LibraryConfig()` to resolve credentials and validate the library value.
+Decode into `AppConfig` with `pgconfig.ReadJSONAs[AppConfig]` or
+`pgconfig.ReadYAMLAs[AppConfig]`. They apply the same checks as the library's
+`ReadJSON` and `ReadYAML`: unknown fields are rejected, anything after the first
+document is rejected, and decode errors report positions and field paths but
+not field values, which could contain a misplaced password. `ReadJSON` and `ReadYAML` themselves read the
+library type, so they would reject `password_env`. After decoding, call
+`LibraryConfig()` to resolve credentials and validate the library value.
 
 Credential validation does not check routes or listener options. Your application
 still needs to check the settings it uses and report an error for anything it

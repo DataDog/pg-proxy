@@ -75,11 +75,11 @@ For batches, use `Batch execution and proxying` rather than assuming every query
 
 ## Recorded data
 
-The root span receives the query text as `db.statement`. Each child span records the type names of the first 15 protocol messages it handles, as `messages`; `DataRow` and `CopyData` messages are not counted. If there are more, the child span gets `messages_truncated`.
+The root span receives the query text as `db.statement`.
 
 For OTel export, SQL and captured parameter strings containing invalid UTF-8 are quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
 
-Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`, a human-readable string such as `1.2 kB`, not a number. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
+Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`. `messages` lists the type names of the first 15 protocol messages the span handled; `DataRow` and `CopyData` messages are not counted, and if there are more, the span gets `messages_truncated`. `rowsTotalSize` is a human-readable string such as `1.2 kB`, not a number. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
 
 The `pg-proxy` binary omits bind parameter values by default in both Datadog and OTel
 modes. Set `-trace-parameters=true` to capture actual values as `db.parameters`,
@@ -88,7 +88,7 @@ set `server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTrace
 when constructing sessions directly) to `true` to enable it.
 
 Values are recorded only when the root span's head sampling decision keeps the
-trace: a Datadog sampling priority above zero, or an OTel span that is recording
+trace: a Datadog sampling priority above zero or not yet set, or an OTel span that is recording
 and sampled. Traces kept later, for example because they contain errors, omit
 `db.parameters`. Root spans that do not implement `pgproxy.SamplingReporter`
 are treated as sampled. `db.parameters` is set on the child span that is active

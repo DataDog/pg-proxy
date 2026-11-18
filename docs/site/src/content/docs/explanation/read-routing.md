@@ -48,7 +48,7 @@ logical_databases:
         weight: 1
 ```
 
-`pg-proxy` validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica uses a different `dbname` or username than its cluster's primary, or when a read cluster's primary uses a different `dbname` or username than the primary of the logical database's cluster. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
+`pg-proxy` validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica uses a different `dbname` or username than its cluster's primary, or when a read cluster's primary uses a different `dbname` or username than the main primary (the primary of the logical database's cluster). That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
 
 Replica databases default to a `max_conn_lifetime` of 15 minutes with 5 minutes of `max_conn_lifetime_jitter`, matching the library's replica pools. The defaults apply only when `max_conn_lifetime` is unset; an explicit `max_conn_lifetime_jitter` is kept.
 
@@ -71,10 +71,11 @@ The SQL classifier identifies work eligible for read routing. These examples des
 | `SELECT * FROM items` | Yes |
 | `SHOW statement_timeout` | Yes |
 | `BEGIN READ ONLY` | Yes |
+| `BEGIN ISOLATION LEVEL SERIALIZABLE READ ONLY` | Yes (known issue: a hot-standby replica rejects it with SQLSTATE `0A000`, "cannot use serializable mode in a hot standby"; use `REPEATABLE READ` for read-only transactions that may go to a replica) |
 | `SELECT count(*) FROM items` | Yes |
 | `SELECT * FROM items FOR UPDATE` | No |
 | `SELECT * INTO copy_of_items FROM items` | No |
-| `SELECT count(*) INTO item_count FROM items` | Yes (known issue: this creates table `item_count`; see below) |
+| `SELECT count(*) INTO item_count FROM items` | Yes (known issue: on a writable server, this creates table `item_count`; see below) |
 | `BEGIN` | No |
 | `START TRANSACTION READ ONLY` | No |
 | `INSERT`, `UPDATE`, `DELETE`, or `EXPLAIN` | No |
@@ -103,7 +104,7 @@ The classifier recognizes these function names for read routing:
 
 Names must match the list, including any schema qualifier. For example, `SELECT count(*) FROM items` is eligible, but `SELECT pg_catalog.count(*) FROM items` is not. The list is fixed in the classifier; it is not a YAML setting, and the proxy does not look up whether a function is read-only in PostgreSQL.
 
-The check examines only the first direct function call in the `SELECT` list (and in the `SELECT` list of each common-table expression). If that name is not in the list, the statement is not eligible. Functions anywhere else are not checked, so these statements are classified as reads:
+The check looks only at the first item in the `SELECT` list that is itself a function call (and the first such item in each common-table expression's `SELECT` list). If that name is not in the list, the statement is not eligible. Functions anywhere else are not checked, so these statements are classified as reads:
 
 - `SELECT count(*), my_writer() FROM items`: a second function in the `SELECT` list.
 - `SELECT * FROM items WHERE my_writer()` or `SELECT * FROM my_writer()`: a function in another clause.
@@ -113,8 +114,8 @@ The check examines only the first direct function call in the `SELECT` list (and
 
 Where such a statement runs decides what happens, and that is not predictable:
 
-- On a hot-standby replica, the write fails with SQLSTATE `25006` (read-only transaction). The proxy appends "(a PostgreSQL leader switchover may be in progress; retry shortly)" to the error message. That advice is wrong here: a retry can reach a primary and run the write.
-- On a primary, the write succeeds. Read-routed work can run on a primary: about 10% of eligible reads go to the selected cluster's primary (all of them when that cluster has no replicas), a read falls back to the primary when no replica connection is available within 50 ms, and a read cluster's `primary` is writable unless you point it at a physical replica.
+- On a hot-standby replica, a write such as `INSERT`, `UPDATE`, `DELETE`, or `SELECT INTO` fails with SQLSTATE `25006` (read-only transaction). When PostgreSQL reports messages in English, the proxy appends "(a PostgreSQL leader switchover may be in progress; retry shortly)" to the error message. That advice is wrong here: a retry can reach a primary and run the write.
+- On a primary, the write succeeds. Read-routed work can run on a primary: about 10% of eligible reads go to the selected cluster's primary (all of them when that cluster has no replicas), a read falls back to the primary when no replica connection is available within 50 ms (subject to the fallback rate limit described below), and a read cluster's `primary` is writable unless you point it at a physical replica.
 - The `pg-proxy` binary does not check that a configured replica is actually read-only. If it is writable, the write succeeds there.
 
 To keep a write that is hidden in a `SELECT` on the main primary, run it inside an explicit transaction (`BEGIN` … `COMMIT`); a plain `BEGIN` is never routed. Or send that work through a logical database that has no `read_clusters`, and connect without `pg_proxy.dynamic_routing=true`.

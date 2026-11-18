@@ -24,7 +24,7 @@ With no flags or exporter variables set, PG Proxy exports no telemetry and write
 
 `-telemetry` selects all three backends instead of using the `OTEL_*_EXPORTER` selectors. In Datadog mode, the native SDK also reads `OTEL_TRACES_EXPORTER`, so conflicting values can still fail startup; see [Conflicting OTel settings](#conflicting-otel-settings).
 
-At startup, PG Proxy warns when a preset overrides a conflicting exporter selector, naming the ignored variable and selected backend. Unset, empty, and matching settings are quiet, except that with `-telemetry datadog` any non-empty `OTEL_METRICS_EXPORTER`, including `none`, is reported. Native Datadog trace conflicts retain the startup checks below rather than being reported as ignored. These warnings follow `-log-level`.
+At startup, PG Proxy warns when a preset overrides a conflicting exporter selector, naming the ignored variable and selected backend. Unset, empty, and matching settings are quiet, except that with `-telemetry datadog` any non-blank `OTEL_METRICS_EXPORTER`, including `none`, is reported. Native Datadog trace conflicts retain the startup checks below rather than being reported as ignored. These warnings follow `-log-level`.
 
 **`-telemetry` and `-tracing` cannot be used together**: startup fails even if `-tracing` is `none`. Without `-telemetry`, `-tracing otel` or `-tracing none` overrides only the trace selector.
 
