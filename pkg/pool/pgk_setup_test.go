@@ -34,106 +34,106 @@ func TestSetupPool_PGK(t *testing.T) {
 			name:             "replica pool - all healthy pools",
 			initialInstances: []string{},
 			resolvedIps: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,
-				"10.131.126.77": true,
+				"10.0.0.76": true,
+				"10.0.0.77": true,
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			numIterations: repeatedHealthChecks,
 		},
 		{
 			name: "replica pool - no resolved ips, but still healthy",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			resolvedIps: []string{},
 			healthyPgInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,
-				"10.131.126.77": true,
+				"10.0.0.76": true,
+				"10.0.0.77": true,
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			numIterations: repeatedHealthChecks,
 		},
 		{
-			name: "replica pool - could not health check or resolve 10.131.126.77, pg instance removed from map",
+			name: "replica pool - could not health check or resolve 10.0.0.77, pg instance removed from map",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			resolvedIps: []string{},
 			healthyPgInstances: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,
-				// 10.131.126.77 not resolved and not last known healthy, so it is removed
+				"10.0.0.76": true,
+				// 10.0.0.77 not resolved and not last known healthy, so it is removed
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			numIterations: 1,
 		},
 		{
 			name: "replica pool - retains healthy instance through repeated discovery misses",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			resolvedIps: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,
-				"10.131.126.77": true,
+				"10.0.0.76": true,
+				"10.0.0.77": true,
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			numIterations: repeatedHealthChecks,
 		},
 		{
 			name: "replica pool - removes unhealthy instance absent from discovery",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
+				"10.0.0.76",
+				"10.0.0.77",
 			},
 			resolvedIps: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76",
-				// 10.131.126.77 is no longer healthy
+				"10.0.0.76",
+				// 10.0.0.77 is no longer healthy
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,
-				// 10.131.126.77 should be removed from pool when absent from discovery and not healthy
+				"10.0.0.76": true,
+				// 10.0.0.77 should be removed from pool when absent from discovery and not healthy
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
-				// 10.131.126.77 should be removed from pool
+				"10.0.0.76",
+				// 10.0.0.77 should be removed from pool
 			},
 			numIterations: repeatedHealthChecks,
 		},
@@ -142,68 +142,68 @@ func TestSetupPool_PGK(t *testing.T) {
 			name:             "leader pool - 1 healthy leader, 3 resolved ips",
 			initialInstances: []string{},
 			resolvedIps: []string{
-				"10.131.126.76",
-				"10.131.126.77",
-				"10.131.126.78",
+				"10.0.0.76",
+				"10.0.0.77",
+				"10.0.0.78",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,
-				"10.131.126.77": false,
-				"10.131.126.78": false,
+				"10.0.0.76": true,
+				"10.0.0.77": false,
+				"10.0.0.78": false,
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			numIterations: repeatedHealthChecks,
 		},
 		{
 			name: "leader pool - retains healthy leader through repeated discovery misses",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
-				"10.131.126.78",
+				"10.0.0.76",
+				"10.0.0.77",
+				"10.0.0.78",
 			},
 			resolvedIps: []string{
-				// "10.131.126.76", do not resolve, but should remain
-				"10.131.126.77",
-				"10.131.126.78",
+				// "10.0.0.76", do not resolve, but should remain
+				"10.0.0.77",
+				"10.0.0.78",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true, // Should remain healthy and in pool for leader
-				"10.131.126.77": false,
-				"10.131.126.78": false,
+				"10.0.0.76": true, // Should remain healthy and in pool for leader
+				"10.0.0.77": false,
+				"10.0.0.78": false,
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			numIterations: repeatedHealthChecks,
 		},
 		{
 			name: "leader pool - retains last healthy leader through discovery and health failures",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
-				"10.131.126.78",
+				"10.0.0.76",
+				"10.0.0.77",
+				"10.0.0.78",
 			},
 			resolvedIps: []string{
-				// "10.131.126.76", do not resolve, but should remain
-				"10.131.126.77",
-				"10.131.126.78",
+				// "10.0.0.76", do not resolve, but should remain
+				"10.0.0.77",
+				"10.0.0.78",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76",
+				"10.0.0.76",
 			},
 			notHealthyAfterIterationNum: 1,
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": false, // Becomes unhealthy, but not removed because was last known healthy instance
-				"10.131.126.77": false,
-				"10.131.126.78": false,
+				"10.0.0.76": false, // Becomes unhealthy, but not removed because was last known healthy instance
+				"10.0.0.77": false,
+				"10.0.0.78": false,
 			},
 			expectedHealthyPgInstanceIps: []string{},
 			numIterations:                repeatedHealthChecks,
@@ -211,10 +211,10 @@ func TestSetupPool_PGK(t *testing.T) {
 		{
 			name: "leader pool - no leader, 4 initial instances, 0 resolved IPs",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
-				"10.131.126.78",
-				"10.131.126.79",
+				"10.0.0.76",
+				"10.0.0.77",
+				"10.0.0.78",
+				"10.0.0.79",
 			},
 			resolvedIps: []string{
 				// No IPs resolved
@@ -233,27 +233,27 @@ func TestSetupPool_PGK(t *testing.T) {
 		{
 			name: "leader pool - has leader, 4 initial instances, 3 resolved IPs (including leader)",
 			initialInstances: []string{
-				"10.131.126.76",
-				"10.131.126.77",
-				"10.131.126.78",
-				"10.131.126.79", // This one won't be in resolved IPs and should be cleaned up
+				"10.0.0.76",
+				"10.0.0.77",
+				"10.0.0.78",
+				"10.0.0.79", // This one won't be in resolved IPs and should be cleaned up
 			},
 			resolvedIps: []string{
-				"10.131.126.76", // Leader IP
-				"10.131.126.77",
-				"10.131.126.78",
+				"10.0.0.76", // Leader IP
+				"10.0.0.77",
+				"10.0.0.78",
 			},
 			healthyPgInstances: []string{
-				"10.131.126.76", // Only this one is connectable (becomes the leader)
+				"10.0.0.76", // Only this one is connectable (becomes the leader)
 			},
 			expectedPgInstanceHealths: map[string]bool{
-				"10.131.126.76": true,  // Leader, healthy
-				"10.131.126.77": false, // In resolution but not connectable
-				"10.131.126.78": false, // In resolution but not connectable
-				// 10.131.126.79 should be removed (not in current resolution, not the leader)
+				"10.0.0.76": true,  // Leader, healthy
+				"10.0.0.77": false, // In resolution but not connectable
+				"10.0.0.78": false, // In resolution but not connectable
+				// 10.0.0.79 should be removed (not in current resolution, not the leader)
 			},
 			expectedHealthyPgInstanceIps: []string{
-				"10.131.126.76", // Only the leader
+				"10.0.0.76", // Only the leader
 			},
 			numIterations: repeatedHealthChecks,
 		},

@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Configuration file"
 description: "Every key the pg-proxy binary reads from its YAML or JSON configuration file, with defaults and validation rules."
 ---
