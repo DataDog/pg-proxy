@@ -49,4 +49,4 @@ See [Go library configuration](../../reference/configuration/library/) for liste
 
 ## Startup diagnostics
 
-A `Hooks.ResolveStartup` function should wrap `listener.ErrLogicalDatabaseNotConfigured` or `listener.ErrBackendNotReady` so these failures log `reason=logical_database_not_configured` or `reason=backend_not_ready`. Client responses remain generic. Hooks should log safe resource and verified identity details where available; arbitrary hook errors and authentication payloads must stay out of client responses and startup logs.
+If you build a `listener.Listener` directly, its `listener.Hooks.ResolveStartup` function should wrap `listener.ErrLogicalDatabaseNotConfigured` or `listener.ErrBackendNotReady` so these failures log `reason=logical_database_not_configured` or `reason=backend_not_ready`. `pkg/server` already does this. Client responses remain generic. Hooks should log safe resource and verified identity details where available; arbitrary hook errors and authentication payloads must stay out of client responses and startup logs.

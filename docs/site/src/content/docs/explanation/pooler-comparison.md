@@ -95,7 +95,7 @@ Each table covers one area. Follow the source links for configuration details an
   <tbody>
     <tr>
       <th scope="row">PG Proxy</th>
-      <td>Named and unnamed protocol-level statements across backend connections; optional per-connection caching of unnamed statements.</td>
+      <td>Named and unnamed protocol-level statements across backend connections; optional caching of unnamed statements, turned on by each client with <code>pg_proxy.auto_cached_prepared_statements</code>.</td>
     </tr>
     <tr>
       <th scope="row">PgBouncer</th>
@@ -155,7 +155,7 @@ Each table covers one area. Follow the source links for configuration details an
   <tbody>
     <tr>
       <th scope="row">PG Proxy</th>
-      <td>The binary exports logs, metrics, and query traces over OTLP/HTTP or to the Datadog Agent. The library exposes logging, metrics, and tracing interfaces.</td>
+      <td>The binary exports logs, metrics, and query traces over OTLP/HTTP, or sends traces and DogStatsD metrics to the Datadog Agent and writes JSON logs to stderr. The library exposes logging, metrics, and tracing interfaces.</td>
     </tr>
     <tr>
       <th scope="row">PgBouncer</th>

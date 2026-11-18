@@ -61,7 +61,7 @@ PG Proxy handles routing; copying data, keeping databases in sync, and deciding 
 
 Control client-session admission separately from backend pool capacity, with global and per-user caps.
 
-Applications that embed the library can supply a load-shedding policy to reject new connections or backend work under load. The `pg-proxy` binary does not shed load.
+Applications that embed the library can supply a load-shedding policy to reject new connections or backend work under load. The `pg-proxy` binary has no load-shedding policy. Besides the session caps, it only closes new connections while 100 are already in TLS or startup.
 
 See [Set connection and session limits](../how-to/set-pool-limits/), [Client connection options](../reference/configuration/client-connections/), and [Go library configuration](../reference/configuration/library/).
 

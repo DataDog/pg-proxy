@@ -48,7 +48,7 @@ logical_databases:
         weight: 1
 ```
 
-`pg-proxy` validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica uses a different `dbname` or username than its cluster's primary, or when a read cluster's primary differs from the logical database's primary. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
+`pg-proxy` validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica uses a different `dbname` or username than its cluster's primary, or when a read cluster's primary uses a different `dbname` or username than the primary of the logical database's cluster. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
 
 Replica databases default to a `max_conn_lifetime` of 15 minutes with 5 minutes of `max_conn_lifetime_jitter`, matching the library's replica pools. The defaults apply only when `max_conn_lifetime` is unset; an explicit `max_conn_lifetime_jitter` is kept.
 
@@ -74,7 +74,7 @@ The SQL classifier identifies work eligible for read routing. These examples des
 | `SELECT count(*) FROM items` | Yes |
 | `SELECT * FROM items FOR UPDATE` | No |
 | `SELECT * INTO copy_of_items FROM items` | No |
-| `SELECT count(*) INTO item_count FROM items` | Yes (known issue; fails on a replica) |
+| `SELECT count(*) INTO item_count FROM items` | Yes (known issue; see below) |
 | `BEGIN` | No |
 | `START TRANSACTION READ ONLY` | No |
 | `INSERT`, `UPDATE`, `DELETE`, or `EXPLAIN` | No |
@@ -103,14 +103,21 @@ The classifier recognizes these function names for read routing:
 
 Names must match the list, including any schema qualifier. For example, `SELECT count(*) FROM items` is eligible, but `SELECT pg_catalog.count(*) FROM items` is not. The list is fixed in the classifier; it is not a YAML setting, and the proxy does not look up whether a function is read-only in PostgreSQL.
 
-The check examines only the first direct function call in the `SELECT` list. If that name is not in the list, the statement is not eligible. Functions anywhere else are not checked, so these statements are classified as reads and can go to a replica:
+The check examines only the first direct function call in the `SELECT` list (and in the `SELECT` list of each common-table expression). If that name is not in the list, the statement is not eligible. Functions anywhere else are not checked, so these statements are classified as reads:
 
 - `SELECT count(*), my_writer() FROM items`: a second function in the `SELECT` list.
 - `SELECT * FROM items WHERE my_writer()` or `SELECT * FROM my_writer()`: a function in another clause.
 - `SELECT 1 + my_writer()`: a function inside an expression.
 - `SELECT count(*) INTO item_count FROM items`: the function check runs before the `INTO` check.
+- `SELECT my_writer() UNION SELECT 1`: a function in a set operation.
 
-On a replica, a write fails with a read-only error; it is not applied. If your application calls functions that write from a `SELECT`, send that work to a logical database without `read_clusters` or replicas.
+Where such a statement runs decides what happens, and that is not predictable:
+
+- On a hot-standby replica, the write fails with SQLSTATE `25006` (read-only transaction). The proxy adds a note to that error suggesting a leader switchover, which is misleading in this case.
+- On a primary, the write succeeds. Read-routed work can run on a primary: about 10% of eligible reads stay on the cluster primary, a busy replica falls back to the primary, and a read cluster's primary is a writable server.
+- PG Proxy does not check that a configured replica is actually read-only. If it is writable, the write succeeds there.
+
+To keep a write that is hidden in a `SELECT` on the main primary, run it inside an explicit transaction (`BEGIN` … `COMMIT`); a plain `BEGIN` is never routed. Or send that work to a logical database with no `read_clusters`, whose clients do not set `pg_proxy.dynamic_routing=true`.
 
 ## Two routing decisions
 
