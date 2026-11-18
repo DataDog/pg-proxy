@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,7 +49,7 @@ func TestSQLRoutingBanlistClearsWhenCandidatesDisappear(t *testing.T) {
 }
 
 func TestIsPostgresShutdownError(t *testing.T) {
-	admin := &pgconn.PgError{Code: "57P01"}
+	admin := &pgconn.PgError{Code: pgerrcode.AdminShutdown}
 	crash := &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}
 	shutdown := &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow, Message: "the database system is shutting down"}
 	startup := &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow, Message: "the database system is starting up"}
@@ -73,21 +74,22 @@ func TestIsPostgresShutdownError(t *testing.T) {
 				Message: "the database system is starting up",
 			},
 		},
-		"admin termination":       {err: &pgconn.PgError{Code: "57P01"}},
-		"generic cannot connect":  {err: &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}},
-		"authentication failure":  {err: &pgconn.PgError{Code: "28P01"}},
-		"connection refused":      {err: syscall.ECONNREFUSED},
-		"wrapped crash":           {err: fmt.Errorf("probe: %w", &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}), want: true},
-		"non-Postgres error":      {err: context.DeadlineExceeded},
-		"admin before crash":      {err: errors.Join(admin, crash), want: true},
-		"crash before admin":      {err: errors.Join(crash, admin), want: true},
-		"startup before shutdown": {err: errors.Join(startup, shutdown), want: true},
-		"shutdown before startup": {err: errors.Join(shutdown, startup), want: true},
+		"admin termination":         {err: admin, want: true},
+		"wrapped admin termination": {err: fmt.Errorf("probe: %w", admin), want: true},
+		"generic cannot connect":    {err: &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}},
+		"authentication failure":    {err: &pgconn.PgError{Code: "28P01"}},
+		"connection refused":        {err: syscall.ECONNREFUSED},
+		"wrapped crash":             {err: fmt.Errorf("probe: %w", &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}), want: true},
+		"non-Postgres error":        {err: context.DeadlineExceeded},
+		"admin before crash":        {err: errors.Join(admin, crash), want: true},
+		"crash before admin":        {err: errors.Join(crash, admin), want: true},
+		"startup before shutdown":   {err: errors.Join(startup, shutdown), want: true},
+		"shutdown before startup":   {err: errors.Join(shutdown, startup), want: true},
 		"nested wrapped shutdown": {
 			err:  fmt.Errorf("connect: %w", errors.Join(admin, fmt.Errorf("attempt: %w", errors.Join(startup, crash)))),
 			want: true,
 		},
-		"joined without shutdown":  {err: errors.Join(admin, startup, context.DeadlineExceeded)},
+		"joined without shutdown":  {err: errors.Join(startup, context.DeadlineExceeded)},
 		"nil error":                {},
 		"typed nil Postgres error": {err: (*pgconn.PgError)(nil)},
 	}
