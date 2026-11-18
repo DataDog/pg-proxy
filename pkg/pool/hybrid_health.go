@@ -11,7 +11,6 @@ import (
 	"maps"
 	"net"
 	"slices"
-	"strings"
 	"sync"
 	"time"
 
@@ -36,18 +35,7 @@ const (
 	SQLHealthFallbackMultiplePrimaries = "multiple_primaries"
 	SQLHealthFallbackConflictingRoles  = "conflicting_roles"
 	SQLHealthFallbackStaleEvidence     = "stale_sql_evidence"
-
-	SQLRoutingBanReasonPostgresShutdown   = "postgres_shutdown"
-	SQLRoutingUnbanReasonConclusiveResult = "conclusive_result"
-	SQLRoutingUnbanReasonDNSRemoved       = "dns_removed"
 )
-
-// SQLRoutingBanChange reports one IP entering or leaving the SQL routing banlist.
-type SQLRoutingBanChange struct {
-	IP     string
-	Banned bool // New state: true on entry, false on recovery or candidate removal.
-	Reason string
-}
 
 // LeaderDetectionComparison pairs independent SQL and Patroni observations of a new leader.
 // When HasDowntimeComparison is true, the downtime fields share the first conclusive SQL
@@ -131,14 +119,14 @@ type hybridHealthPolicy struct {
 	detectionTiming      leaderTiming[sqlDowntimeWindow]
 	routingTiming        leaderTiming[string]
 	sqlDowntimeStartedAt time.Time
-	routingBannedIPs     map[string]time.Time
+	routingBannedIPs     sqlRoutingBanlist
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
 	return &hybridHealthPolicy{
 		routingEnabled:   routingEnabled,
 		patroniHealth:    make(map[string]bool),
-		routingBannedIPs: make(map[string]time.Time),
+		routingBannedIPs: make(sqlRoutingBanlist),
 	}
 }
 
@@ -302,7 +290,7 @@ func (p *hybridHealthPolicy) clearRoutingBansForEmptyDiscovery() hybridRoutingDe
 	defer p.mu.Unlock()
 	return hybridRoutingDecision{
 		routingEnabled: p.routingEnabled,
-		routingBanChanges: p.updateRoutingBanlistLocked(
+		routingBanChanges: p.routingBannedIPs.update(
 			nil, SQLHealthCheckOutcome{}, SQLHealthResultsSnapshot{},
 		),
 	}
@@ -323,7 +311,7 @@ func (p *hybridHealthPolicy) observeSQLShutdowns(candidateIPs []string, fresh SQ
 	}
 	if len(shutdowns) != 0 {
 		fresh.Results = shutdowns
-		decision.routingBanChanges = p.updateRoutingBanlistLocked(candidateIPs, SQLHealthCheckOutcome{Results: shutdowns}, fresh)
+		decision.routingBanChanges = p.routingBannedIPs.update(candidateIPs, SQLHealthCheckOutcome{Results: shutdowns}, fresh)
 	}
 	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
 	return decision
@@ -344,7 +332,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		routingEnabled: p.routingEnabled,
 		routingResult:  SQLRoutingResultShadow,
 	}
-	decision.routingBanChanges = p.updateRoutingBanlistLocked(candidateIPs, outcome, fresh)
+	decision.routingBanChanges = p.routingBannedIPs.update(candidateIPs, outcome, fresh)
 	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
 	routingOutcome := p.routingEligibleOutcomeLocked(outcome)
 	fallbackReason, timeoutType := sqlHealthFallback(routingOutcome)
@@ -562,108 +550,11 @@ func (p *hybridHealthPolicy) routingEligibleOutcomeLocked(outcome SQLHealthCheck
 	return routingOutcome
 }
 
-func (p *hybridHealthPolicy) updateRoutingBanlistLocked(
-	candidateIPs []string,
-	outcome SQLHealthCheckOutcome,
-	fresh SQLHealthResultsSnapshot,
-) []SQLRoutingBanChange {
-	candidates := make(map[string]struct{}, len(candidateIPs))
-	for _, ip := range candidateIPs {
-		candidates[ip] = struct{}{}
-	}
-	successfulResults := make(map[string]struct{})
-	shutdownResults := make(map[string]struct{})
-	for _, result := range fresh.Results {
-		if result.Err == nil {
-			successfulResults[result.IP] = struct{}{}
-		}
-	}
-	// Conflicting successful roles cannot establish recovery.
-	_, conflictingIPs := aggregateSQLComparisonRoles(outcome.Results)
-	for _, ip := range conflictingIPs {
-		delete(successfulResults, ip)
-	}
-	for _, result := range outcome.Results {
-		if isPostgresShutdownError(result.Err) {
-			shutdownResults[result.IP] = struct{}{}
-		}
-	}
-
-	var changes []SQLRoutingBanChange
-	for ip := range p.routingBannedIPs {
-		if _, retained := candidates[ip]; !retained {
-			delete(p.routingBannedIPs, ip)
-			changes = append(changes, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonDNSRemoved})
-		}
-	}
-	for ip := range shutdownResults {
-		if _, retained := candidates[ip]; !retained {
-			continue
-		}
-		if _, alreadyBanned := p.routingBannedIPs[ip]; !alreadyBanned {
-			p.routingBannedIPs[ip] = fresh.ObservedAt
-			changes = append(changes, SQLRoutingBanChange{IP: ip, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown})
-		}
-	}
-	// Repeated fresh shutdown evidence moves the recovery boundary without emitting another
-	// transition. Cached shutdown results must not keep moving that boundary on unrelated polls.
-	for _, result := range fresh.Results {
-		if isPostgresShutdownError(result.Err) {
-			if bannedAt, banned := p.routingBannedIPs[result.IP]; banned && fresh.ObservedAt.After(bannedAt) {
-				p.routingBannedIPs[result.IP] = fresh.ObservedAt
-			}
-		}
-	}
-	for ip := range successfulResults {
-		// Credential checks for one host run concurrently, so a success and shutdown result in the
-		// same round have no reliable ordering. Keep the IP banned until a later clean round proves
-		// that it can conclusively report a PostgreSQL role again.
-		if _, shuttingDown := shutdownResults[ip]; shuttingDown {
-			continue
-		}
-		if bannedAt, wasBanned := p.routingBannedIPs[ip]; wasBanned && fresh.ScheduledAt.After(bannedAt) {
-			delete(p.routingBannedIPs, ip)
-			changes = append(changes, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult})
-		}
-	}
-	slices.SortFunc(changes, func(a, b SQLRoutingBanChange) int { return strings.Compare(a.IP, b.IP) })
-	return changes
-}
-
 func (p *hybridHealthPolicy) applyRoutingBanlistLocked(health map[string]bool) {
 	for ip := range p.routingBannedIPs {
 		if _, present := health[ip]; present {
 			health[ip] = false
 		}
-	}
-}
-
-func isPostgresShutdownError(err error) bool {
-	// A connection failure may join several PostgreSQL errors. Any qualifying
-	// shutdown cause must win, regardless of its position in the error tree.
-	switch wrapped := err.(type) {
-	case interface{ Unwrap() []error }:
-		for _, cause := range wrapped.Unwrap() {
-			if isPostgresShutdownError(cause) {
-				return true
-			}
-		}
-		return false
-	case interface{ Unwrap() error }:
-		return isPostgresShutdownError(wrapped.Unwrap())
-	}
-
-	var postgresErr *pgconn.PgError
-	if !errors.As(err, &postgresErr) || postgresErr == nil {
-		return false
-	}
-	switch postgresErr.Code {
-	case sqlHealthCheckCrashShutdown:
-		return true
-	case sqlHealthCheckCannotConnectNow:
-		return strings.Contains(postgresErr.Message, "the database system is shutting down")
-	default:
-		return false
 	}
 }
 
