@@ -21,7 +21,7 @@ In `proxy.yaml`, change `max_conns` on the relevant entry in `databases`. For ex
 databases:
   - name: primary
     host: 127.0.0.1
-    port: 5432
+    port: 15432
     dbname: postgres
     username: postgres
     password: postgres
@@ -33,17 +33,17 @@ Keep the rest of your configuration, including `clusters`, `logical_databases`, 
 
 ## 3. Restart and check connectivity
 
-From your `pg-proxy` checkout, run the previously built executable:
+From your `pg-proxy` checkout, build the binary and start it:
 
 ```sh
-./bin/pg-proxy \
-  -config proxy.yaml -telemetry none
+go build -o bin/pg-proxy ./cmd/pg-proxy
+./bin/pg-proxy -config proxy.yaml -telemetry none
 ```
 
 Wait for the `proxy ready` log line. In another terminal:
 
 ```sh
-psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' \
+psql 'postgres://postgres@127.0.0.1:5432/local_db?sslmode=disable' \
   -At -v ON_ERROR_STOP=1 -c 'select 1'
 ```
 

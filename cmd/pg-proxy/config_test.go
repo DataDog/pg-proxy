@@ -214,7 +214,7 @@ func TestConfigRequiredAndDefaults(t *testing.T) {
 	shared.Proxy = pgconfig.Proxy{}
 	cfg, err := (config{}).withSharedConfig(shared)
 	require.NoError(t, err)
-	require.Equal(t, "127.0.0.1:15432", cfg.listenAddress)
+	require.Equal(t, "127.0.0.1:5432", cfg.listenAddress)
 	require.Equal(t, 10240, cfg.messageBufferSize)
 }
 
