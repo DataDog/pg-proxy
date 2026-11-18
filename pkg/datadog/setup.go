@@ -42,18 +42,9 @@ type Options struct {
 // require Agent log collection; this helper does not send logs over the network.
 func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 	deps := opts.Dependencies
-	// The public SDK also reads OTel exporter selection. Fail before starting
-	// clients rather than silently disabling native tracing or routing it to OTLP.
 	if deps.Tracer == nil {
-		switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER"))) {
-		case "otlp":
-			if os.Getenv("DD_TRACE_AGENT_PROTOCOL_VERSION") == "" {
-				return deps, nil, errors.New("native Datadog tracing requires OTEL_TRACES_EXPORTER to be unset or DD_TRACE_AGENT_PROTOCOL_VERSION to be set")
-			}
-		case "none":
-			if os.Getenv("DD_TRACE_ENABLED") == "" {
-				return deps, nil, errors.New("native Datadog tracing requires OTEL_TRACES_EXPORTER to be unset or DD_TRACE_ENABLED to be set")
-			}
+		if err := ValidateTracingEnvironment(); err != nil {
+			return deps, nil, err
 		}
 	}
 	service := os.Getenv("DD_SERVICE")
@@ -147,4 +138,23 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 		return nil
 	})
 	return deps, shutdown, nil
+}
+
+// ValidateTracingEnvironment checks native tracing's exporter-selection
+// constraints without starting clients or replacing the process-global tracer.
+// Callers that supply their own tracer do not need these environment settings.
+func ValidateTracingEnvironment() error {
+	// The public SDK also reads OTel exporter selection. Reject conflicts rather
+	// than silently disabling native tracing or routing it to OTLP.
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("OTEL_TRACES_EXPORTER"))) {
+	case "otlp":
+		if os.Getenv("DD_TRACE_AGENT_PROTOCOL_VERSION") == "" {
+			return errors.New("native Datadog tracing requires OTEL_TRACES_EXPORTER to be unset or DD_TRACE_AGENT_PROTOCOL_VERSION to be set")
+		}
+	case "none":
+		if os.Getenv("DD_TRACE_ENABLED") == "" {
+			return errors.New("native Datadog tracing requires OTEL_TRACES_EXPORTER to be unset or DD_TRACE_ENABLED to be set")
+		}
+	}
+	return nil
 }

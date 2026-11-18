@@ -51,9 +51,11 @@ databases:
     connection_options:
       statement_timeout: "30s"
 clusters:
-  orders: {primary: orders-primary}
+  orders:
+    primary: orders-primary
 logical_databases:
-  orders: {cluster: orders}
+  orders:
+    cluster: orders
 proxy:
   listener_address: "0.0.0.0:15432"
   password_auth_enabled: true
@@ -67,11 +69,13 @@ users:
   - static_credentials:
       username: orders_app
       scram_sha_256: "<SCRAM verifier>"
-    databases: [orders]
+    databases:
+      - orders
   - static_credentials:
       username: monitor
       scram_sha_256: "<monitor SCRAM verifier>"
-    databases: [orders]
+    databases:
+      - orders
 ```
 
 **Backends.** Use `sslmode: verify-full` so the proxy checks the backend's certificate. Every client of a logical database shares that database's backend account, so its PostgreSQL permissions apply to all of them. Use separate backend accounts and routes when clients need different permissions. Set server-side limits such as `statement_timeout` in `connection_options`; see [Timeouts](../../reference/configuration/timeouts/).

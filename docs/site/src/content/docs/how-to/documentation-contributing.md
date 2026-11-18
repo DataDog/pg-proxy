@@ -52,6 +52,12 @@ Link to other pages with relative URLs, such as `../../how-to/local-development/
 
 Sidebar page entries use `{ slug: "path/to/page" }` so their labels match the page title. Set the title in the page frontmatter rather than adding a separate navigation label.
 
+Use block-style YAML mappings and lists in examples: put each mapping entry or
+list item on its own line instead of using inline collections. Empty `{}` and `[]`
+are allowed because YAML needs them to represent empty collections. Run `go test -run '^TestDocumentationYAMLStyle$' .` from the repository
+root to check YAML examples in Markdown and YAML files under `docs/`, `examples/`,
+`pkg/`, and `cmd/`, plus Markdown files in the repository root.
+
 Keep the homepage as an index. Put appearance changes in `src/styles/custom.css`. Use ordinary Markdown for content.
 
 ## 4. Preview edits

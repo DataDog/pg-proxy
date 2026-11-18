@@ -36,13 +36,31 @@ databases:
     sslmode: disable
     max_conns: 10
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 proxy:
   listener_address: '127.0.0.1:15432'
   postgres_msg_buffer_size: 10240
 ```
+
+Validate the file before starting the proxy:
+
+```sh
+./bin/pg-proxy -config proxy.yaml -validate-config
+```
+
+This checks syntax, field types, required settings, routing references, pool bounds,
+authentication policy, local TLS files, and selected telemetry protocols and
+exporter conflicts. It exits with status 0 on success or 1
+on a configuration error. Errors include field paths and source locations when
+available. Independent issues are reported together, one per line, including
+errors in different databases, routes, credential references, and listener
+settings. Syntax or field-type errors must be fixed before the decoded settings
+can be checked reliably. Validation does not connect to PostgreSQL, open a listener, or start
+telemetry, so database access and port availability still need a runtime check.
 
 Start the OSS binary:
 
@@ -109,6 +127,7 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
 | `clusters[].replicas` | None | Database names used as replica pools for the cluster. Each must be a configured database other than the cluster primary. Replica databases default to `max_conn_lifetime: 15m` and `max_conn_lifetime_jitter: 5m`. See [Read routing](../../explanation/read-routing/). |
 | `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
+| `-validate-config` | `false` | Run local configuration checks and exit without starting the proxy. |
 | `logical_databases[].read_clusters` | None | Maps configured cluster names to a `weight` from 0 to 255 (default `1`). Any entry, including weight `0`, enables read routing for the logical database. |
 | `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
 | `-tracing` | `OTEL_TRACES_EXPORTER` selection | `otel` or `none`; overrides the trace exporter selector and cannot be combined with `-telemetry`. |

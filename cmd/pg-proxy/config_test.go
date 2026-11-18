@@ -393,6 +393,7 @@ func TestTelemetryPresetWarnings(t *testing.T) {
 	path := writeConfig(t, "json", string(data))
 	for _, tc := range []struct {
 		name, preset, traces, metrics, logs string
+		nativeProtocol, nativeEnabled       string
 		want                                []string
 	}{
 		{name: "unset none", preset: "none"},
@@ -412,14 +413,14 @@ func TestTelemetryPresetWarnings(t *testing.T) {
 			"ignoring OTEL_METRICS_EXPORTER: -telemetry otel selects OTLP metrics",
 			"ignoring OTEL_LOGS_EXPORTER: -telemetry otel selects OTLP logs",
 		}},
-		{name: "datadog overrides exporters", preset: "datadog", traces: "otlp", metrics: "otlp", logs: "otlp", want: []string{
+		{name: "datadog overrides exporters", preset: "datadog", traces: "otlp", nativeProtocol: "0.4", metrics: "otlp", logs: "otlp", want: []string{
 			"ignoring OTEL_METRICS_EXPORTER: -telemetry datadog selects DogStatsD metrics",
 			"ignoring OTEL_LOGS_EXPORTER: -telemetry datadog selects JSON stderr logs",
 		}},
 		{name: "datadog enables metrics", preset: "datadog", metrics: "none", want: []string{
 			"ignoring OTEL_METRICS_EXPORTER: -telemetry datadog selects DogStatsD metrics",
 		}},
-		{name: "native trace setting is not ignored", preset: "datadog", traces: "none"},
+		{name: "native trace setting is not ignored", preset: "datadog", traces: "none", nativeEnabled: "true"},
 		{name: "invalid value omitted", preset: "otel", metrics: "secret-invalid-value", want: []string{
 			"ignoring OTEL_METRICS_EXPORTER: -telemetry otel selects OTLP metrics",
 		}},
@@ -428,6 +429,8 @@ func TestTelemetryPresetWarnings(t *testing.T) {
 			t.Setenv("OTEL_TRACES_EXPORTER", tc.traces)
 			t.Setenv("OTEL_METRICS_EXPORTER", tc.metrics)
 			t.Setenv("OTEL_LOGS_EXPORTER", tc.logs)
+			t.Setenv("DD_TRACE_AGENT_PROTOCOL_VERSION", tc.nativeProtocol)
+			t.Setenv("DD_TRACE_ENABLED", tc.nativeEnabled)
 			args := []string{"-config", path}
 			if tc.preset != "" {
 				args = append(args, "-telemetry", tc.preset)

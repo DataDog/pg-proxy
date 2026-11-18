@@ -93,3 +93,36 @@ func TestPGXConfigRejectsUnsupportedAndInvalidSettings(t *testing.T) {
 		})
 	}
 }
+
+func TestPGXConfigFieldDiagnostics(t *testing.T) {
+	for _, tc := range []struct {
+		field  string
+		modify func(*config.Database)
+	}{
+		{"host", func(d *config.Database) { d.Host = "" }},
+		{"dbname", func(d *config.Database) { d.DBName = "" }},
+		{"username", func(d *config.Database) { d.Username = ""; d.Password = "" }},
+		{"sslmode", func(d *config.Database) { d.SSLMode = "test-password" }},
+	} {
+		t.Run(tc.field, func(t *testing.T) {
+			database := directDatabase()
+			tc.modify(&database)
+			_, err := PGXConfig(database)
+			require.ErrorContains(t, err, tc.field)
+			require.NotContains(t, err.Error(), "test-password")
+		})
+	}
+}
+
+func TestPGXConfigReportsAllSettingsIssues(t *testing.T) {
+	database := directDatabase()
+	database.Host, database.DBName = "", ""
+	database.Port, database.MaxConns, database.MinConns = 70000, 1, 4
+	database.MinIdleConns = 5
+	database.SSLMode = "test-password"
+	_, err := PGXConfig(database)
+	for _, message := range []string{"host is required", "dbname is required", "port is out of range", "sslmode must be", "min_conns:", "min_idle_conns:"} {
+		require.ErrorContains(t, err, message)
+	}
+	require.NotContains(t, err.Error(), "test-password")
+}
