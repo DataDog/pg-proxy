@@ -325,6 +325,7 @@ func (p *hybridHealthPolicy) observeSQLShutdowns(candidateIPs []string, fresh SQ
 		fresh.Results = shutdowns
 		decision.routingBanChanges = p.updateRoutingBanlistLocked(candidateIPs, SQLHealthCheckOutcome{Results: shutdowns}, fresh)
 	}
+	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
 	return decision
 }
 
@@ -638,8 +639,22 @@ func (p *hybridHealthPolicy) applyRoutingBanlistLocked(health map[string]bool) {
 }
 
 func isPostgresShutdownError(err error) bool {
+	// A connection failure may join several PostgreSQL errors. Any qualifying
+	// shutdown cause must win, regardless of its position in the error tree.
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, cause := range wrapped.Unwrap() {
+			if isPostgresShutdownError(cause) {
+				return true
+			}
+		}
+		return false
+	case interface{ Unwrap() error }:
+		return isPostgresShutdownError(wrapped.Unwrap())
+	}
+
 	var postgresErr *pgconn.PgError
-	if !errors.As(err, &postgresErr) {
+	if !errors.As(err, &postgresErr) || postgresErr == nil {
 		return false
 	}
 	switch postgresErr.Code {

@@ -809,6 +809,26 @@ func (s *PoolHealth) publishRoutingSnapshot(health map[string]bool, resolved []s
 	s.notifySubscribers()
 }
 
+// publishRoutingBanExclusionsLocked removes banned IPs from the current route
+// without selecting a replacement or changing routing ownership. The caller holds routingMu.
+func (s *PoolHealth) publishRoutingBanExclusionsLocked(policy *hybridHealthPolicy, decision *hybridRoutingDecision) {
+	if !decision.routingEnabled || len(decision.routingBannedIPs) == 0 {
+		return
+	}
+	current := s.state.Snapshot()
+	changed := false
+	for ip := range decision.routingBannedIPs {
+		if current.Health[ip] {
+			current.Health[ip] = false
+			changed = true
+		}
+	}
+	if changed {
+		s.publishRoutingSnapshot(current.Health, current.Resolved)
+		decision.routingComparison = policy.observePublishedRouting(current.Health, time.Now(), decision.routingResult)
+	}
+}
+
 func (s *PoolHealth) routingPolicy() (*hybridHealthPolicy, func(context.Context) SQLHealthFeatureFlagEvaluation) {
 	s.routingMu.Lock()
 	defer s.routingMu.Unlock()
@@ -1197,6 +1217,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			if !completedIPs[ip] {
 				// A shutdown is useful per-IP evidence even without a complete topology.
 				decision = policy.observeSQLShutdowns(snapshot.retainedIPs, fresh)
+				poolHealth.publishRoutingBanExclusionsLocked(policy, &decision)
 				return false
 			}
 		}
@@ -1216,18 +1237,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		if !decision.publish && decision.routingResult == SQLRoutingResultPatroniRecovery {
 			// Old SQL evidence cannot replace the recovery route, but shutdown bans
 			// must still remove IPs from the route clients currently read.
-			current := poolHealth.state.Snapshot()
-			changed := false
-			for ip := range decision.routingBannedIPs {
-				if current.Health[ip] {
-					current.Health[ip] = false
-					changed = true
-				}
-			}
-			if changed {
-				poolHealth.publishRoutingSnapshot(current.Health, current.Resolved)
-				decision.routingComparison = policy.observePublishedRouting(current.Health, time.Now(), decision.routingResult)
-			}
+			poolHealth.publishRoutingBanExclusionsLocked(policy, &decision)
 		}
 		if decision.publish {
 			poolHealth.sqlRoutingActive = decision.routingResult == SQLRoutingResultConclusive || decision.routingResult == SQLRoutingResultRetainedSQL

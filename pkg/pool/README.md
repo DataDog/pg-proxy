@@ -236,10 +236,14 @@ The hybrid policy remembers an IP after a PostgreSQL `57P02` crash-shutdown
 response, or `57P03` containing `the database system is shutting down`.
 Timeouts, connection refusal, authentication failures, startup responses, and
 `57P01` administrative connection termination do not create a ban.
+Wrapped and joined errors are checked cause by cause. Any qualifying shutdown
+cause creates a ban, regardless of other causes or their order.
 
 Any accepted credential poll can record a shutdown ban for its IP, even if DNS
-added another candidate that the poll did not check. Partial polls still cannot
-select a SQL route or clear a ban using a successful role result.
+added another candidate that the poll did not check. With SQL routing enabled,
+the ban also marks that IP unhealthy in the current published route immediately.
+Partial polls still cannot select a replacement or clear a ban using a successful
+role result. Routing ownership and retained addresses stay unchanged.
 
 If older SQL evidence cannot replace a Patroni recovery route, shutdown bans
 still mark those IPs unhealthy in the published route. This does not select a

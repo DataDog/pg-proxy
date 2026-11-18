@@ -1401,33 +1401,44 @@ func TestHybridHealthRoutingBanlistPersistsUntilConclusiveResult(t *testing.T) {
 }
 
 func TestHybridHealthRoutingBanlistShutdownWinsOverSameRoundSuccess(t *testing.T) {
-	const primary = "10.0.0.1"
-	policy := newHybridHealthPolicy(true)
-	policy.observePatroni(map[string]bool{primary: true}, time.Now())
+	admin := &pgconn.PgError{Code: "57P01"}
+	crash := &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}
+	for name, shutdown := range map[string]error{
+		"plain":              crash,
+		"admin before crash": errors.Join(admin, crash),
+		"crash before admin": errors.Join(crash, admin),
+		"wrapped joined":     fmt.Errorf("connect: %w", errors.Join(admin, crash)),
+	} {
+		t.Run(name, func(t *testing.T) {
+			const primary = "10.0.0.1"
+			policy := newHybridHealthPolicy(true)
+			policy.observePatroni(map[string]bool{primary: true}, time.Now())
 
-	mixed := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
-		Results: []SQLHealthCheckResult{
-			{IP: primary, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
-			{IP: primary},
-		},
-		PrimaryIPs: []string{primary},
-	}, time.Now())
-	require.Equal(t, []SQLRoutingBanChange{{
-		IP:     primary,
-		Banned: true,
-		Reason: SQLRoutingBanReasonPostgresShutdown,
-	}}, mixed.routingBanChanges)
-	assert.Equal(t, map[string]bool{primary: false}, mixed.health)
+			mixed := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{
+					{IP: primary, Err: shutdown},
+					{IP: primary},
+				},
+				PrimaryIPs: []string{primary},
+			}, time.Now())
+			require.Equal(t, []SQLRoutingBanChange{{
+				IP:     primary,
+				Banned: true,
+				Reason: SQLRoutingBanReasonPostgresShutdown,
+			}}, mixed.routingBanChanges)
+			assert.Equal(t, map[string]bool{primary: false}, mixed.health)
 
-	recovered := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
-		Results:    []SQLHealthCheckResult{{IP: primary}},
-		PrimaryIPs: []string{primary},
-	}, time.Now())
-	assert.Equal(t, []SQLRoutingBanChange{{
-		IP:     primary,
-		Reason: SQLRoutingUnbanReasonConclusiveResult,
-	}}, recovered.routingBanChanges)
-	assert.Equal(t, map[string]bool{primary: true}, recovered.health)
+			recovered := policy.observeSQL([]string{primary}, SQLHealthCheckOutcome{
+				Results:    []SQLHealthCheckResult{{IP: primary}},
+				PrimaryIPs: []string{primary},
+			}, time.Now())
+			assert.Equal(t, []SQLRoutingBanChange{{
+				IP:     primary,
+				Reason: SQLRoutingUnbanReasonConclusiveResult,
+			}}, recovered.routingBanChanges)
+			assert.Equal(t, map[string]bool{primary: true}, recovered.health)
+		})
+	}
 }
 
 func TestHybridHealthRoutingBanlistClearsWhenDNSDropsIP(t *testing.T) {
@@ -1453,6 +1464,10 @@ func TestHybridHealthRoutingBanlistClearsWhenDNSDropsIP(t *testing.T) {
 }
 
 func TestIsPostgresShutdownError(t *testing.T) {
+	admin := &pgconn.PgError{Code: "57P01"}
+	crash := &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}
+	shutdown := &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow, Message: "the database system is shutting down"}
+	startup := &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow, Message: "the database system is starting up"}
 	tests := map[string]struct {
 		err  error
 		want bool
@@ -1474,12 +1489,23 @@ func TestIsPostgresShutdownError(t *testing.T) {
 				Message: "the database system is starting up",
 			},
 		},
-		"admin termination":      {err: &pgconn.PgError{Code: "57P01"}},
-		"generic cannot connect": {err: &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}},
-		"authentication failure": {err: &pgconn.PgError{Code: "28P01"}},
-		"connection refused":     {err: syscall.ECONNREFUSED},
-		"wrapped crash":          {err: fmt.Errorf("probe: %w", &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}), want: true},
-		"non-Postgres error":     {err: context.DeadlineExceeded},
+		"admin termination":       {err: &pgconn.PgError{Code: "57P01"}},
+		"generic cannot connect":  {err: &pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}},
+		"authentication failure":  {err: &pgconn.PgError{Code: "28P01"}},
+		"connection refused":      {err: syscall.ECONNREFUSED},
+		"wrapped crash":           {err: fmt.Errorf("probe: %w", &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}), want: true},
+		"non-Postgres error":      {err: context.DeadlineExceeded},
+		"admin before crash":      {err: errors.Join(admin, crash), want: true},
+		"crash before admin":      {err: errors.Join(crash, admin), want: true},
+		"startup before shutdown": {err: errors.Join(startup, shutdown), want: true},
+		"shutdown before startup": {err: errors.Join(shutdown, startup), want: true},
+		"nested wrapped shutdown": {
+			err:  fmt.Errorf("connect: %w", errors.Join(admin, fmt.Errorf("attempt: %w", errors.Join(startup, crash)))),
+			want: true,
+		},
+		"joined without shutdown":  {err: errors.Join(admin, startup, context.DeadlineExceeded)},
+		"nil error":                {},
+		"typed nil Postgres error": {err: (*pgconn.PgError)(nil)},
 	}
 	for name, test := range tests {
 		t.Run(name, func(t *testing.T) {

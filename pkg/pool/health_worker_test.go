@@ -3672,16 +3672,20 @@ func TestPartialSQLPollRecordsShutdownBan(t *testing.T) {
 		name    string
 		err     error
 		wantBan bool
+		shadow  bool
 	}{
-		{"crash shutdown", &pgconn.PgError{Code: "57P02"}, true},
-		{"shutting down", &pgconn.PgError{Code: "57P03", Message: "the database system is shutting down"}, true},
-		{"admin termination", &pgconn.PgError{Code: "57P01"}, false},
+		{"crash shutdown", &pgconn.PgError{Code: "57P02"}, true, false},
+		{"shutting down", &pgconn.PgError{Code: "57P03", Message: "the database system is shutting down"}, true, false},
+		{"admin termination", &pgconn.PgError{Code: "57P01"}, false, false},
+		{"shadow shutdown", &pgconn.PgError{Code: "57P02"}, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			health := newTestPoolHealth(a)
 			health.sqlHealthState = NewHealthState()
 			health.sqlHealthState.Track([]string{a})
-			health.hybridPolicy = newHybridHealthPolicy(true)
+			health.hybridPolicy = newHybridHealthPolicy(!tc.shadow)
+			updates := make(chan *PoolHealth, 1)
+			health.subscribers = map[HealthUpdates]chan *PoolHealth{HealthUpdates(updates): updates}
 			var iterations []SQLIteration
 			var changes []SQLRoutingBanChange
 			w := &HealthWorker{absenceThreshold: 5, sqlHooks: SQLHealthWorkerHooks{
@@ -3700,6 +3704,10 @@ func TestPartialSQLPollRecordsShutdownBan(t *testing.T) {
 				Results: []SQLHealthCheckResult{{IP: a}},
 			})
 			require.True(t, health.IsHealthy(a))
+			<-updates
+			policy := health.hybridPolicy
+			recoveryAt, noPrimaryAt := policy.patroniRecoveryAt, policy.sqlNoPrimaryAt
+			ownedBySQL := health.sqlRoutingActive
 
 			// B was discovered while the current credential was checking only A.
 			health.sqlHealthState.Track([]string{a, b})
@@ -3710,6 +3718,22 @@ func TestPartialSQLPollRecordsShutdownBan(t *testing.T) {
 			_, banned := health.hybridPolicy.routingBannedIPs[a]
 			require.Equal(t, tc.wantBan, banned)
 			assert.NotContains(t, health.hybridPolicy.routingBannedIPs, b)
+			wantHealthy := !tc.wantBan || tc.shadow
+			require.Equal(t, wantHealthy, health.IsHealthy(a), "a published shutdown leader must be excluded immediately outside shadow mode")
+			assert.False(t, health.IsHealthy(b), "partial evidence must not select newly discovered B")
+			assert.Equal(t, []string{a}, health.Snapshot().Resolved, "exclusions must preserve published membership")
+			assert.ElementsMatch(t, []string{a, b}, health.sqlHealthState.Snapshot().Resolved, "partial exclusions must preserve SQL candidates")
+			assert.Equal(t, ownedBySQL, health.sqlRoutingActive)
+			assert.Equal(t, recoveryAt, policy.patroniRecoveryAt)
+			assert.Equal(t, noPrimaryAt, policy.sqlNoPrimaryAt)
+			select {
+			case <-updates:
+				assert.False(t, wantHealthy, "only a routing exclusion should notify the pool")
+			default:
+				assert.True(t, wantHealthy, "the pool must be notified immediately when A is excluded")
+			}
+			w.applyPatroniHealth(health, map[string]bool{a: true}, nil, []string{a}, time.Now())
+			assert.Equal(t, wantHealthy, health.IsHealthy(a), "an ordinary Patroni refresh must not revive banned A")
 			if tc.wantBan {
 				require.Equal(t, []SQLRoutingBanChange{{IP: a, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown}}, changes)
 				w.completeSQLHealthCheck(current, 0, time.Now(), []string{a}, map[string]struct{}{a: {}}, SQLHealthCheckOutcome{
@@ -3727,8 +3751,12 @@ func TestPartialSQLPollRecordsShutdownBan(t *testing.T) {
 				Results: []SQLHealthCheckResult{{IP: a, Err: context.DeadlineExceeded}, {IP: b, Err: context.DeadlineExceeded}},
 			})
 			require.Len(t, iterations, 2)
-			assert.Equal(t, SQLRoutingResultCachedFallback, iterations[1].RoutingResult)
-			assert.Equal(t, !tc.wantBan, health.IsHealthy(a), "cached success and Patroni must not undo a shutdown ban")
+			wantResult := SQLRoutingResultCachedFallback
+			if tc.shadow {
+				wantResult = SQLRoutingResultShadow
+			}
+			assert.Equal(t, wantResult, iterations[1].RoutingResult)
+			assert.Equal(t, wantHealthy, health.IsHealthy(a), "cached success and Patroni must not undo a shutdown ban")
 			assert.False(t, health.IsHealthy(b))
 			if tc.wantBan {
 				assert.Len(t, changes, 1, "the same ban must not be reported again")
