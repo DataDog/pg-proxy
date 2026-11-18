@@ -171,6 +171,9 @@ func nodeError(format string, node *yaml.Node, path, message string) error {
 // Use the schema tags, including embedded YAML inline fields and embedded JSON
 // fields, so diagnostics stay in sync when new settings are added.
 func configFields(typ reflect.Type, format string) map[string]reflect.Type {
+	for typ.Kind() == reflect.Pointer {
+		typ = typ.Elem()
+	}
 	fields := make(map[string]reflect.Type)
 	for i := 0; i < typ.NumField(); i++ {
 		field := typ.Field(i)

@@ -98,3 +98,32 @@ func TestConfigurationReportsAllInvalidSections(t *testing.T) {
 		require.Len(t, strings.Split(err.Error(), "\n"), 3)
 	}
 }
+
+func TestEmbeddedPointerSchemaDiagnostics(t *testing.T) {
+	type database struct {
+		*DatabaseSettings `yaml:",inline"`
+	}
+	type application struct {
+		Databases []database `json:"databases" yaml:"databases"`
+	}
+	for _, format := range []string{"json", "yaml"} {
+		t.Run(format, func(t *testing.T) {
+			read := ReadJSONAs[application]
+			valid := `{"databases":[{"name":"db","host":"localhost"}]}`
+			invalid := `{"databases":[{"name":"db","typo":"private-value","port":"private-value"}]}`
+			if format == "yaml" {
+				read = ReadYAMLAs[application]
+				valid = "databases:\n- name: db\n  host: localhost\n"
+				invalid = "databases:\n- name: db\n  typo: private-value\n  port: private-value\n"
+			}
+			cfg, err := read(strings.NewReader(valid))
+			require.NoError(t, err)
+			require.NotNil(t, cfg.Databases[0].DatabaseSettings)
+			require.Equal(t, "localhost", cfg.Databases[0].Host)
+			require.NotPanics(t, func() { _, err = read(strings.NewReader(invalid)) })
+			require.ErrorContains(t, err, "databases[0].typo")
+			require.ErrorContains(t, err, "databases[0].port")
+			require.NotContains(t, err.Error(), "private-value")
+		})
+	}
+}

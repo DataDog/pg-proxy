@@ -177,3 +177,79 @@ proxy:
 	}
 	require.NotContains(t, string(output), `\n`, "issues should be printed on separate lines")
 }
+
+func TestValidationRejectsLocalTelemetryStartupErrors(t *testing.T) {
+	data, err := json.Marshal(ossConfig())
+	require.NoError(t, err)
+	path := writeConfig(t, "json", string(data))
+	for _, tc := range []struct {
+		name, preset string
+		environment  map[string]string
+		messages     []string
+	}{
+		{"global OTLP protocol", "otel", map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}, []string{"OTEL_EXPORTER_OTLP_PROTOCOL must be http/protobuf"}},
+		{"per signal protocols", "otel", map[string]string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "grpc", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc", "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "grpc"}, []string{"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL"}},
+		{"native OTLP conflict", "datadog", map[string]string{"OTEL_TRACES_EXPORTER": "otlp"}, []string{"DD_TRACE_AGENT_PROTOCOL_VERSION"}},
+		{"native none conflict", "datadog", map[string]string{"OTEL_TRACES_EXPORTER": "none"}, []string{"DD_TRACE_ENABLED"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, key := range []string{"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "DD_TRACE_AGENT_PROTOCOL_VERSION", "DD_TRACE_ENABLED"} {
+				t.Setenv(key, "")
+			}
+			for key, value := range tc.environment {
+				t.Setenv(key, value)
+			}
+			var previous string
+			for _, validateOnly := range []bool{false, true} {
+				args := []string{"-config", path, "-telemetry", tc.preset}
+				if validateOnly {
+					args = append(args, "-validate-config")
+				}
+				_, err := parseConfig(args)
+				for _, message := range tc.messages {
+					require.ErrorContains(t, err, message)
+				}
+				if previous != "" {
+					require.EqualError(t, err, previous)
+				}
+				previous = err.Error()
+			}
+			cfg, err := resolveTelemetry(tc.preset, "none", false, false)
+			require.NoError(t, err)
+			_, shutdown, err := setupTelemetry(t.Context(), cfg)
+			for _, message := range tc.messages {
+				require.ErrorContains(t, err, message)
+			}
+			require.Nil(t, shutdown, "local validation must fail before providers start")
+		})
+	}
+}
+
+func TestValidationAcceptsTelemetryOverridesWithoutStartingProviders(t *testing.T) {
+	data, err := json.Marshal(ossConfig())
+	require.NoError(t, err)
+	path := writeConfig(t, "json", string(data))
+	for _, tc := range []struct {
+		name, preset string
+		environment  map[string]string
+	}{
+		{"disabled telemetry ignores protocol", "none", map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc"}},
+		{"signal protocols override global", "otel", map[string]string{"OTEL_EXPORTER_OTLP_PROTOCOL": "grpc", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "http/protobuf", "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL": "http/protobuf"}},
+		{"native protocol override", "datadog", map[string]string{"OTEL_TRACES_EXPORTER": "otlp", "DD_TRACE_AGENT_PROTOCOL_VERSION": "0.4"}},
+		{"native enabled override", "datadog", map[string]string{"OTEL_TRACES_EXPORTER": "none", "DD_TRACE_ENABLED": "true"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, key := range []string{"OTEL_EXPORTER_OTLP_PROTOCOL", "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "OTEL_EXPORTER_OTLP_METRICS_PROTOCOL", "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL", "OTEL_TRACES_EXPORTER", "OTEL_METRICS_EXPORTER", "OTEL_LOGS_EXPORTER", "DD_TRACE_AGENT_PROTOCOL_VERSION", "DD_TRACE_ENABLED"} {
+				t.Setenv(key, "")
+			}
+			for key, value := range tc.environment {
+				t.Setenv(key, value)
+			}
+			// An invalid exporter endpoint must not be parsed by offline validation.
+			t.Setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "invalid-endpoint")
+			cfg, err := parseConfig([]string{"-config", path, "-telemetry", tc.preset, "-validate-config"})
+			require.NoError(t, err)
+			require.True(t, cfg.validateOnly)
+		})
+	}
+}

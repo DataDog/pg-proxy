@@ -49,7 +49,8 @@ Validate the file before starting the proxy:
 ```
 
 This checks syntax, field types, required settings, routing references, pool bounds,
-authentication policy, and local TLS files. It exits with status 0 on success or 1
+authentication policy, local TLS files, and selected telemetry protocols and
+exporter conflicts. It exits with status 0 on success or 1
 on a configuration error. Errors include field paths and source locations when
 available. Independent issues are reported together, one per line, including
 errors in different databases, routes, credential references, and listener

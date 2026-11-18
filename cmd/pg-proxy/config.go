@@ -24,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
+	proxydatadog "github.com/DataDog/pg-proxy/pkg/datadog"
 	"github.com/DataDog/pg-proxy/pkg/limiter"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/topology"
@@ -63,17 +64,38 @@ type telemetryConfig struct {
 	CaptureBindParameters bool
 }
 
+// validate checks only local choices; it never creates telemetry providers.
+// Startup and offline configuration validation share this check.
 func (c telemetryConfig) validate() error {
+	var issues []error
 	if c.Traces > traceOTel {
-		return errors.New("invalid trace backend")
+		issues = append(issues, errors.New("invalid trace backend"))
 	}
 	if c.Metrics > metricOTel {
-		return errors.New("invalid metric backend")
+		issues = append(issues, errors.New("invalid metric backend"))
 	}
 	if c.Logs > logsOTel {
-		return errors.New("invalid log output")
+		issues = append(issues, errors.New("invalid log output"))
 	}
-	return nil
+	if c.Traces == traceDatadog {
+		issues = append(issues, proxydatadog.ValidateTracingEnvironment())
+	}
+	seen := make(map[string]bool)
+	for _, signal := range []struct {
+		name    string
+		enabled bool
+	}{
+		{"TRACES", c.Traces == traceOTel}, {"METRICS", c.Metrics == metricOTel}, {"LOGS", c.Logs == logsOTel},
+	} {
+		if !signal.enabled {
+			continue
+		}
+		if err := validateOTLPProtocol(signal.name); err != nil && !seen[err.Error()] {
+			seen[err.Error()] = true
+			issues = append(issues, err)
+		}
+	}
+	return errors.Join(issues...)
 }
 
 func parseConfig(args []string) (config, error) {
@@ -125,7 +147,7 @@ func parseConfig(args []string) (config, error) {
 	resolved, telemetryErr := resolveTelemetry(telemetry, tracing, tracingSet, traceParameters)
 	resolved.LogLevel = logLevel
 	cfg, settingsErr := (config{validateOnly: validateOnly, telemetry: resolved, telemetryWarnings: telemetryPresetWarnings(telemetry)}).withSharedConfig(shared)
-	if err := errors.Join(fileErr, telemetryErr, settingsErr); err != nil {
+	if err := errors.Join(fileErr, telemetryErr, resolved.validate(), settingsErr); err != nil {
 		return config{}, err
 	}
 	return cfg, nil
