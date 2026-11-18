@@ -50,7 +50,8 @@ After the configuration is valid, the proxy opens a connection to every backend.
 | `FATAL: could not establish connection` | `invalid_credentials` | Wrong password, unknown user, or a logical database that is not in the user's `databases` list. |
 | `FATAL: TLS is required` | `tls_required` | `tls_required` is on and the client connected without TLS. Use `sslmode=require` or `verify-full`. |
 | `FATAL: pg-proxy is at capacity. Please retry.` (SQLSTATE `53300`) | Not logged | A session limit was reached: `proxy.max_sessions`, `proxy.default_max_user_sessions`, or the user's `max_sessions`. See [Set connection and session limits](../../how-to/set-pool-limits/). |
-| Connection refused | None | The proxy is not running, or listens on another address. Check `proxy.listener_address` (default `127.0.0.1:15432`). |
+| Connection refused | None | The proxy is not running, or listens on another address. Check `proxy.listener_address` (default `127.0.0.1:5432`). |
+| Proxy exits at startup with `address already in use` | None | Another process, often a local PostgreSQL server, already listens on `proxy.listener_address`. The default `127.0.0.1:5432` is the standard PostgreSQL port; set `proxy.listener_address` to a free port such as `127.0.0.1:15432`. |
 | Connection closes after about 10 seconds | Varies | The client did not finish TLS, startup, and authentication within 10 seconds. |
 
 ## Queries are slow or wait

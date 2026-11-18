@@ -96,7 +96,7 @@ A map from the name clients connect to, to its routing.
 
 | YAML key | JSON key | Default | Description |
 | --- | --- | --- | --- |
-| `listener_address` | `listenerAddress` | `127.0.0.1:15432` | IP address and port to listen on. Without password authentication, only loopback addresses are accepted. Host names are always rejected. |
+| `listener_address` | `listenerAddress` | `127.0.0.1:5432` | IP address and port to listen on. Without password authentication, only loopback addresses are accepted. Host names are always rejected. |
 | `password_auth_enabled` | `passwordAuthEnabled` | `false` | Turn on password/SCRAM authentication for the users in `users`. Requires `tls_required: true` and a certificate and key. See [Client authentication](../client-authentication/). |
 | `tls_cert_file` | `tlsCertFile` | None | PEM server certificate for client TLS. Set together with `tls_key_file`. See [Client TLS](../client-tls/). |
 | `tls_key_file` | `tlsKeyFile` | None | Unencrypted PEM private key for `tls_cert_file`. |

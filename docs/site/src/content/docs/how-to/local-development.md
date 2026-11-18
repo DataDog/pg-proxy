@@ -50,7 +50,11 @@ clusters:
 logical_databases:
   local_db:
     cluster: local
+proxy:
+  listener_address: 127.0.0.1:15432
 ```
+
+The proxy listens on `127.0.0.1:5432`, the standard PostgreSQL port, by default. PostgreSQL already uses that port here, so the file moves the proxy to `15432`.
 
 Check the file:
 
