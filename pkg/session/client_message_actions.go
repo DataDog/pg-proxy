@@ -36,7 +36,7 @@ func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (Clien
 		MessageObserved: func(msg pgproto3.FrontendMessage) {
 			s.obsVals.traceState.AddMessage(msg)
 			if s.enableTraceParameters && observesClientMessage(msg, sampled) {
-				s.observeClientMessage(msg, sampled)
+				s.observeClientMessage(msg)
 			}
 			if s.hooks.FrontendMessage != nil {
 				s.hooks.FrontendMessage(msg)

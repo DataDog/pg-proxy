@@ -26,7 +26,7 @@ func BenchmarkObserveDescribe(b *testing.B) {
 		ready := &pgproto3.ReadyForQuery{TxStatus: 'I'}
 		b.ReportAllocs()
 		for b.Loop() {
-			s.observeClientMessage(msg, false)
+			s.observeClientMessage(msg)
 			s.observeBackendMessage(reply)
 			s.observeBackendMessage(ready)
 		}

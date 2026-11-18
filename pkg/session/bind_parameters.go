@@ -14,10 +14,11 @@ import (
 )
 
 const (
-	// maxDescribedStmts bounds the parameter types a session remembers. When it
-	// is full the cache starts over; a forgotten statement only renders as
-	// unknown types until it is described again.
-	maxDescribedStmts = 512
+	// maxDescribedStmts bounds the named statements whose described types a
+	// session remembers, about 20 KB at most. When it is full an arbitrary entry
+	// is evicted; that statement renders as unknown types until it is described
+	// again.
+	maxDescribedStmts = 256
 	// maxPendingDescribes bounds the Describe messages awaiting a reply in one
 	// cycle; replies beyond it are not recorded.
 	maxPendingDescribes = 64
@@ -28,21 +29,52 @@ const (
 // in one cycle, and Bind it in binary in a later one, so the backend's
 // ParameterDescription must outlive the trace that carried it.
 //
-// Statements are keyed by proxy name, a hash of the SQL and declared types, so
-// a key always denotes the same statement. A session's unnamed statement, when
-// it is not auto-cached, has the empty key and is forgotten when replaced.
+// Statements with a proxy name are keyed by it: a hash of the SQL and declared
+// types, so a key always denotes the same statement. The unnamed statement,
+// when it is not auto-cached, is replaced by each unnamed Parse or simple
+// Query; unnamedGen counts those, so that a reply describing a replaced
+// statement is dropped instead of being taken for the current one.
 type bindParamTypes struct {
 	described map[string][]uint32
-	// describing holds the keys of this cycle's statement Describes, in send
-	// order; the first answered of them have had their ParameterDescription.
-	describing []string
+	// describing holds this cycle's statement Describes, in send order; the
+	// first answered of them have had their ParameterDescription.
+	describing []pendingDescribe
 	answered   int
-	unnamed    []uint32 // declared types of the last unnamed Parse
+
+	unnamed          []uint32 // declared types of the unnamed statement
+	unnamedDescribed []uint32 // its types as the backend described them
+	unnamedGen       uint64
+}
+
+// pendingDescribe is a statement Describe awaiting its ParameterDescription.
+// declared counts the leading parameters Parse gave a type, decided when the
+// Describe is sent so the queue stays small.
+type pendingDescribe struct {
+	stmt     describedStmt
+	declared int
+}
+
+// declaredPrefix returns how many leading parameters parseOIDs gives a type.
+func declaredPrefix(parseOIDs []uint32) int {
+	if i := slices.Index(parseOIDs, 0); i >= 0 {
+		return i
+	}
+	return len(parseOIDs)
+}
+
+// describedStmt names where a statement's described types are kept: the
+// unnamed slot of generation gen, or the map entry for key.
+type describedStmt struct {
+	key     string
+	unnamed bool
+	gen     uint64
 }
 
 // observesClientMessage reports whether observeClientMessage needs msg. It is
-// small enough to inline, so unsampled Binds and the Execute, Sync and Flush
-// messages around them, the bulk of extended-protocol traffic, skip the call.
+// the only gate on Bind: unsampled Binds are filtered here, not again in
+// observeClientMessage. It is small enough to inline, so unsampled Binds and
+// the Execute, Sync and Flush messages around them, the bulk of
+// extended-protocol traffic, skip the call.
 func observesClientMessage(msg pgproto3.FrontendMessage, sampled bool) bool {
 	switch msg.(type) {
 	case *pgproto3.Parse, *pgproto3.Query, *pgproto3.Describe:
@@ -53,36 +85,35 @@ func observesClientMessage(msg pgproto3.FrontendMessage, sampled bool) bool {
 	return false
 }
 
-// observeClientMessage records type information from msg and copies a sampled
-// trace's Bind values. It runs before the actions layer renames statements, so
-// statement names are the client's.
-func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage, sampled bool) {
+// observeClientMessage records type information from msg and copies a Bind's
+// values; callers filter with observesClientMessage. It runs before the actions
+// layer renames statements, so statement names are the client's.
+func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
 	t := &s.paramTypes
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
 		if !s.stmtHasProxyName(m.Name) {
-			t.unnamed = m.ParameterOIDs // pgproto3 allocates it per message
-			delete(t.described, "")
+			t.replaceUnnamed(m.ParameterOIDs) // pgproto3 allocates it per message
 		}
 	case *pgproto3.Query:
 		// A simple query destroys the unnamed statement.
 		if !s.autoPreparedStatementsEnabled() {
-			t.unnamed = nil
-			delete(t.described, "")
+			t.replaceUnnamed(nil)
 		}
 	case *pgproto3.Describe:
 		if m.ObjectType != 'S' || len(t.describing) >= maxPendingDescribes {
 			return
 		}
-		if key, _, ok := s.bindStmt(m.Name); ok {
-			t.describing = append(t.describing, key)
+		if stmt, parseOIDs, ok := s.findStmt(m.Name); ok {
+			t.describing = append(t.describing, pendingDescribe{stmt: stmt, declared: declaredPrefix(parseOIDs)})
 		}
 	case *pgproto3.Bind:
-		if !sampled {
-			return
+		stmt, parseOIDs, ok := s.findStmt(m.PreparedStatement)
+		var describedOIDs []uint32
+		if ok {
+			describedOIDs = t.describedOIDs(stmt)
 		}
-		key, parseOIDs, _ := s.bindStmt(m.PreparedStatement)
-		s.obsVals.traceState.RecordBindParameters(m, parseOIDs, t.described[key])
+		s.obsVals.traceState.RecordBindParameters(m, parseOIDs, describedOIDs)
 	}
 }
 
@@ -95,18 +126,9 @@ func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
 		if t.answered >= len(t.describing) {
 			return
 		}
-		key := t.describing[t.answered]
+		pending := &t.describing[t.answered]
 		t.answered++
-		// Transaction-pooled clients describe the same statements over and
-		// over; keep the copy they already have.
-		if known, ok := t.described[key]; ok && slices.Equal(known, m.ParameterOIDs) {
-			return
-		}
-		if t.described == nil || len(t.described) >= maxDescribedStmts {
-			t.described = make(map[string][]uint32)
-		}
-		// pgproto3 reuses the message's slice, so keep a copy.
-		t.described[key] = slices.Clone(m.ParameterOIDs)
+		t.remember(pending, m.ParameterOIDs)
 	case *pgproto3.ReadyForQuery:
 		// Describes that failed get no reply; forget them at the end of the cycle.
 		t.describing = t.describing[:0]
@@ -114,20 +136,68 @@ func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
 	}
 }
 
-// bindStmt returns the cache key and declared parameter types of the statement
-// a client Bind or Describe names.
-func (s *Session) bindStmt(clientName string) (key string, parseOIDs []uint32, ok bool) {
+func (t *bindParamTypes) replaceUnnamed(parseOIDs []uint32) {
+	t.unnamed = parseOIDs
+	t.unnamedDescribed = nil
+	t.unnamedGen++
+}
+
+func (t *bindParamTypes) describedOIDs(stmt describedStmt) []uint32 {
+	if stmt.unnamed {
+		if stmt.gen != t.unnamedGen {
+			return nil
+		}
+		return t.unnamedDescribed
+	}
+	return t.described[stmt.key]
+}
+
+// remember records the types a ParameterDescription reports for a statement.
+func (t *bindParamTypes) remember(pending *pendingDescribe, oids []uint32) {
+	stmt := pending.stmt
+	// Declared types win, so there is nothing to keep if all are declared.
+	if pending.declared >= len(oids) {
+		return
+	}
+	// Transaction-pooled clients describe the same statements over and over;
+	// keep the copy already held.
+	if known := t.describedOIDs(stmt); known != nil && slices.Equal(known, oids) {
+		return
+	}
+	// pgproto3 reuses the message's slice, so keep a copy.
+	oids = slices.Clone(oids)
+	if stmt.unnamed {
+		if stmt.gen == t.unnamedGen {
+			t.unnamedDescribed = oids
+		}
+		return
+	}
+	if t.described == nil {
+		t.described = make(map[string][]uint32)
+	}
+	if _, ok := t.described[stmt.key]; !ok && len(t.described) >= maxDescribedStmts {
+		for key := range t.described { // map order is random, so this evicts an arbitrary entry
+			delete(t.described, key)
+			break
+		}
+	}
+	t.described[stmt.key] = oids
+}
+
+// findStmt returns where the described types of the statement a client Bind or
+// Describe names are kept, and its declared types.
+func (s *Session) findStmt(clientName string) (stmt describedStmt, parseOIDs []uint32, ok bool) {
 	if !s.stmtHasProxyName(clientName) {
-		return "", s.paramTypes.unnamed, true
+		return describedStmt{unnamed: true, gen: s.paramTypes.unnamedGen}, s.paramTypes.unnamed, true
 	}
-	stmt := s.pStmtState.FindPendingNamedStmtFromClientName(clientName)
-	if stmt == nil {
-		stmt = s.pStmtState.FindConfirmedNamedStmtFromClientName(clientName)
+	found := s.pStmtState.FindPendingNamedStmtFromClientName(clientName)
+	if found == nil {
+		found = s.pStmtState.FindConfirmedNamedStmtFromClientName(clientName)
 	}
-	if stmt == nil {
-		return "", nil, false
+	if found == nil {
+		return describedStmt{}, nil, false
 	}
-	return stmt.GetProxyName(), stmt.GetParamOIDs(), true
+	return describedStmt{key: found.GetProxyName()}, found.GetParamOIDs(), true
 }
 
 func (s *Session) stmtHasProxyName(clientName string) bool {

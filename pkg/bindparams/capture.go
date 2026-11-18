@@ -16,7 +16,8 @@ const (
 	// header and its first ArrayElementLimit small elements.
 	copyLimit = 512
 	// copyTotalLimit bounds the bytes copied per Bind, so a Bind with many large
-	// values costs no more to copy than TotalLimit can show.
+	// values costs no more to copy than TotalLimit can show. A value it cuts
+	// short renders its prefix and "(+N bytes)"; positions after it are dropped.
 	copyTotalLimit = 4 * TotalLimit
 	// retainLimit is the largest buffer a Capture keeps between traces, so idle
 	// sessions do not each hold the largest Bind they once saw.
@@ -40,7 +41,7 @@ type Capture struct {
 	data      []byte
 	out       []byte
 	recorded  bool
-	truncated bool // positions or bytes were dropped while copying
+	truncated bool // positions were dropped while copying
 }
 
 // Recorded reports whether Record has run since the last Reset.
@@ -87,11 +88,15 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 		if v == nil {
 			continue
 		}
-		take := min(len(v), copyLimit)
-		if rest := need - off; take > rest {
-			take = rest
+		rest := need - off
+		if rest == 0 && len(v) > 0 {
+			// The copy budget is spent: drop this and later positions, as the
+			// render cap would, rather than tag them with no value.
+			c.params = c.params[:i]
 			c.truncated = true
+			break
 		}
+		take := min(len(v), copyLimit, rest)
 		p.size = int32(len(v))
 		p.n = uint32(copy(data[off:], v[:take]))
 		off += take

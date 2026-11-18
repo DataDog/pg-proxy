@@ -118,13 +118,13 @@ func appendScalar(dst []byte, oid uint32, v []byte, limit int, quoteText bool) (
 			return dst, false
 		}
 		v = v[1:]
-	case pgtype.TextOID, pgtype.VarcharOID, pgtype.BPCharOID, pgtype.NameOID,
-		pgtype.JSONOID, pgtype.XMLOID, pgtype.UnknownOID:
 	default:
-		return dst, false
+		if !isTextType(oid) {
+			return dst, false
+		}
 	}
 	if quoteText {
-		return appendQuoted(dst, v, limit), true
+		return appendQuoted(dst, v, limit, false), true
 	}
 	return appendText(dst, v, len(v), limit), true
 }
@@ -241,11 +241,12 @@ func appendArray(dst []byte, elem uint32, v []byte, size int) ([]byte, bool) {
 			if complete {
 				return dst, false
 			}
-			// A partly copied element: show text, drop anything else.
+			// A partly copied element: show text, marked as cut; drop
+			// anything else, and the comma before it.
 			if isTextType(elem) {
-				dst = appendQuoted(dst, v[rp:], elementLimit)
+				dst = appendQuoted(dst, v[rp:], elementLimit, true)
 				shown++
-			} else {
+			} else if shown > 0 {
 				dst = dst[:len(dst)-1]
 			}
 			break
@@ -456,8 +457,9 @@ func appendText(dst []byte, v []byte, size, limit int) []byte {
 }
 
 // appendQuoted appends an array element as a double-quoted string, escaping
-// quotes and backslashes as PostgreSQL array literals do.
-func appendQuoted(dst []byte, v []byte, limit int) []byte {
+// quotes and backslashes as PostgreSQL array literals do. A "…" follows when
+// the element is longer than limit or cut reports that v is only its prefix.
+func appendQuoted(dst []byte, v []byte, limit int, cut bool) []byte {
 	shown := cutText(v, limit)
 	dst = append(dst, '"')
 	for len(shown) > 0 {
@@ -473,7 +475,7 @@ func appendQuoted(dst []byte, v []byte, limit int) []byte {
 		shown = shown[i+1:]
 	}
 	dst = append(dst, '"')
-	if len(v) > limit {
+	if cut || len(v) > limit {
 		dst = append(dst, "…"...)
 	}
 	return dst

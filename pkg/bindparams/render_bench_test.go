@@ -7,7 +7,7 @@ package bindparams
 
 import "testing"
 
-func discardTag(string, any) {}
+var discardTag = TagFunc(func(string, any) {})
 
 // BenchmarkRender measures decoding and formatting when the root trace
 // finishes, excluding the tracer's own SetTag cost.

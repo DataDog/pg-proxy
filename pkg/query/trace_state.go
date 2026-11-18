@@ -296,7 +296,7 @@ func (t *TraceState) FinishRootTrace(errs ...error) {
 	t.FinishTrace(errs...) // Ensure trace is cleaned up first
 	if t.bindParams != nil && t.bindParams.Recorded() {
 		if t.rootTrace != nil {
-			t.bindParams.Render(t.rootTrace.SetTag)
+			t.bindParams.Render(t.rootTrace)
 		} else {
 			t.bindParams.Reset()
 		}

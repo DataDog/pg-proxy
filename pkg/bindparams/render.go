@@ -33,17 +33,28 @@ var tagKeys = func() (keys [MaxParams]string) {
 	return keys
 }()
 
-// Render passes one tag per captured position to setTag, then resets the
-// capture. It does nothing if nothing was recorded.
-func (c *Capture) Render(setTag func(key string, value any)) {
+// Tagger receives the rendered tags. pgproxy.Span implements it.
+type Tagger interface {
+	SetTag(key string, value any)
+}
+
+// TagFunc adapts a function to Tagger.
+type TagFunc func(key string, value any)
+
+// SetTag calls f.
+func (f TagFunc) SetTag(key string, value any) { f(key, value) }
+
+// Render sets one tag per captured position on tags, then resets the capture.
+// It does nothing if nothing was recorded.
+func (c *Capture) Render(tags Tagger) {
 	if !c.recorded {
 		return
 	}
-	c.render(setTag)
+	c.render(tags)
 	c.Reset()
 }
 
-func (c *Capture) render(setTag func(key string, value any)) {
+func (c *Capture) render(tags Tagger) {
 	truncated := c.truncated
 	// Render every value into one buffer and convert it to a string once; each
 	// tag value is a substring of it, so the tags cost one allocation in all.
@@ -66,11 +77,11 @@ func (c *Capture) render(setTag func(key string, value any)) {
 	start := 0
 	for i := range rendered {
 		end := int(c.params[i].end)
-		setTag(tagKeys[i], values[start:end])
+		tags.SetTag(tagKeys[i], values[start:end])
 		start = end
 	}
 	if truncated {
-		setTag(TruncatedTag, true)
+		tags.SetTag(TruncatedTag, true)
 	}
 }
 

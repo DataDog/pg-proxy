@@ -25,14 +25,14 @@ func render(t *testing.T, b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) m
 	var c Capture
 	c.Record(b, parseOIDs, describedOIDs)
 	tags := map[string]any{}
-	c.Render(func(key string, value any) {
+	c.Render(TagFunc(func(key string, value any) {
 		_, dup := tags[key]
 		require.False(t, dup, "tag %s set twice", key)
 		if s, ok := value.(string); ok {
 			require.True(t, utf8.ValidString(s), "tag %s is not valid UTF-8: %q", key, s)
 		}
 		tags[key] = value
-	})
+	}))
 	require.False(t, c.Recorded(), "Render must reset the capture")
 	return tags
 }
@@ -266,11 +266,11 @@ func FuzzRender(f *testing.F) {
 		}
 		var c Capture
 		c.Record(&pgproto3.Bind{ParameterFormatCodes: []int16{format}, Parameters: [][]byte{v}}, []uint32{oid}, nil)
-		c.Render(func(key string, value any) {
+		c.Render(TagFunc(func(key string, value any) {
 			if s, ok := value.(string); ok && !utf8.ValidString(s) {
 				t.Fatalf("%s is not valid UTF-8: %q", key, s)
 			}
-		})
+		}))
 	})
 }
 
@@ -317,7 +317,7 @@ func TestRecordBoundsTheCopy(t *testing.T) {
 	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
 	assert.LessOrEqual(t, len(c.data), copyTotalLimit)
 	tags := map[string]any{}
-	c.Render(func(key string, value any) { tags[key] = value })
+	c.Render(TagFunc(func(key string, value any) { tags[key] = value }))
 	assert.Equal(t, strings.Repeat("\x00", ValueLimit)+"(+1048320 bytes)", tags["db.parameters.0"])
 	assert.LessOrEqual(t, cap(c.data), retainLimit, "large buffers are not kept")
 }
@@ -329,13 +329,13 @@ func TestRecordCopiesValues(t *testing.T) {
 	c.Record(&pgproto3.Bind{Parameters: [][]byte{buf}}, nil, nil)
 	copy(buf, "after!")
 	var got any
-	c.Render(func(_ string, value any) { got = value })
+	c.Render(TagFunc(func(_ string, value any) { got = value }))
 	assert.Equal(t, "before", got)
 }
 
 func TestRenderWithoutRecordDoesNothing(t *testing.T) {
 	var c Capture
-	c.Render(func(string, any) { t.Fatal("no tags expected") })
+	c.Render(TagFunc(func(string, any) { t.Fatal("no tags expected") }))
 }
 
 func TestRenderTruncatedArrayCopy(t *testing.T) {
@@ -354,4 +354,49 @@ func TestNumericLargeIntegerAgainstBigInt(t *testing.T) {
 	n.SetString(strings.Repeat("9", 100), 10)
 	v := encode(t, pgtype.NumericOID, pgtype.Numeric{Int: n, Valid: true})
 	assert.Equal(t, strings.Repeat("9", 100), render(t, binaryBind(v), []uint32{pgtype.NumericOID}, nil)["db.parameters.0"])
+}
+
+// arrayOf builds a one-dimensional binary array of elem from raw element values.
+func arrayOf(elem uint32, values ...[]byte) []byte {
+	v := binary.BigEndian.AppendUint32(nil, 1)
+	v = binary.BigEndian.AppendUint32(v, 0)
+	v = binary.BigEndian.AppendUint32(v, elem)
+	v = binary.BigEndian.AppendUint32(v, uint32(len(values)))
+	v = binary.BigEndian.AppendUint32(v, 1)
+	for _, value := range values {
+		v = binary.BigEndian.AppendUint32(v, uint32(len(value)))
+		v = append(v, value...)
+	}
+	return v
+}
+
+func TestRenderPartlyCopiedTextElementIsMarked(t *testing.T) {
+	// The copy ends partway into the second element, fewer bytes in than
+	// elementLimit, so only the cut mark tells it apart from a complete value.
+	v := arrayOf(pgtype.TextOID, []byte(strings.Repeat("a", 430)), []byte(strings.Repeat("b", 2000)))
+	copied := copyLimit - 20 - (4 + 430) - 4 // header, first element, second length
+	require.Less(t, copied, elementLimit)
+	got := render(t, binaryBind(v), []uint32{pgtype.TextArrayOID}, nil)["db.parameters.0"]
+	assert.Equal(t, `array[len=2]{"`+strings.Repeat("a", elementLimit)+`"…,"`+strings.Repeat("b", copied)+`"…}`, got)
+}
+
+func TestRenderPartlyCopiedFirstElementKeepsBrace(t *testing.T) {
+	v := arrayOf(pgtype.NumericOID, make([]byte, 600))
+	got := render(t, binaryBind(v), []uint32{pgtype.NumericArrayOID}, nil)["db.parameters.0"]
+	assert.Equal(t, "array[len=1]{…}", got)
+}
+
+func TestRecordDropsPositionsPastTheCopyBudget(t *testing.T) {
+	values := make([][]byte, 40)
+	for i := range values {
+		values[i] = make([]byte, 500)
+	}
+	var c Capture
+	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
+	require.Len(t, c.params, 33, "32 whole values, then one cut short")
+	assert.Equal(t, uint32(copyTotalLimit-32*500), c.params[32].n)
+	assert.True(t, c.truncated)
+
+	c.Record(&pgproto3.Bind{Parameters: values[:32]}, nil, nil)
+	assert.False(t, c.truncated, "shortening values alone drops no position")
 }

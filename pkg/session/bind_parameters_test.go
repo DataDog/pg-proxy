@@ -169,24 +169,24 @@ func TestBindParametersOnlyOnSampledRoots(t *testing.T) {
 func TestDescribeTrackingIsBounded(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
 	for range maxPendingDescribes + 10 {
-		s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}, false)
+		s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
 	}
 	assert.Len(t, s.paramTypes.describing, maxPendingDescribes)
 	s.observeBackendMessage(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	assert.Empty(t, s.paramTypes.describing, "unanswered describes are dropped at the end of the cycle")
 
-	for i := range maxDescribedStmts + 1 {
-		s.paramTypes.describing = append(s.paramTypes.describing, strconv.Itoa(i))
+	for i := range maxDescribedStmts + 10 {
+		s.paramTypes.describing = append(s.paramTypes.describing, pendingDescribe{stmt: describedStmt{key: strconv.Itoa(i)}})
 		s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int4OID}})
 		s.observeBackendMessage(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	}
-	assert.LessOrEqual(t, len(s.paramTypes.described), maxDescribedStmts)
-	assert.Contains(t, s.paramTypes.described, strconv.Itoa(maxDescribedStmts), "the newest statement survives the reset")
+	assert.Len(t, s.paramTypes.described, maxDescribedStmts, "a full cache evicts one entry, not all of them")
+	assert.Contains(t, s.paramTypes.described, strconv.Itoa(maxDescribedStmts+9), "the newest statement is kept")
 }
 
 func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
-	s.paramTypes.describing = []string{"a", "b"}
+	s.paramTypes.describing = []pendingDescribe{{stmt: describedStmt{key: "a"}}, {stmt: describedStmt{key: "b"}}}
 	reused := []uint32{pgtype.Int4OID}
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: reused})
 	reused[0] = pgtype.TextOID // pgproto3 reuses the slice for the next message
@@ -196,18 +196,76 @@ func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 		"a reply with no Describe left is ignored")
 }
 
+func TestDescribedTypesSkipFullyDeclaredStatements(t *testing.T) {
+	s := New(Config{EnableTraceParameters: true})
+	s.paramTypes.describing = []pendingDescribe{{stmt: describedStmt{key: "a"}, declared: declaredPrefix([]uint32{pgtype.Int8OID})}}
+	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
+	assert.Empty(t, s.paramTypes.described, "Parse already declared every type")
+}
+
 func TestUnnamedStatementTypesAreForgottenWhenReplaced(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
-	s.observeClientMessage(&pgproto3.Parse{ParameterOIDs: []uint32{pgtype.Int4OID}}, false)
-	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}, false)
-	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int4OID}})
-	require.Contains(t, s.paramTypes.described, "")
+	describe := func(oids ...uint32) {
+		s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
+		s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: oids})
+	}
+	s.observeClientMessage(&pgproto3.Parse{})
+	describe(pgtype.Int4OID)
+	assert.Equal(t, []uint32{pgtype.Int4OID}, s.paramTypes.unnamedDescribed)
 
-	s.observeClientMessage(&pgproto3.Parse{}, false)
-	assert.NotContains(t, s.paramTypes.described, "")
-	assert.Empty(t, s.paramTypes.unnamed)
+	s.observeClientMessage(&pgproto3.Parse{})
+	assert.Empty(t, s.paramTypes.unnamedDescribed)
 
-	s.observeClientMessage(&pgproto3.Parse{ParameterOIDs: []uint32{pgtype.Int4OID}}, false)
-	s.observeClientMessage(&pgproto3.Query{String: "SELECT 1"}, false)
+	s.observeClientMessage(&pgproto3.Parse{ParameterOIDs: []uint32{pgtype.Int4OID}})
+	s.observeClientMessage(&pgproto3.Query{String: "SELECT 1"})
 	assert.Empty(t, s.paramTypes.unnamed, "a simple query destroys the unnamed statement")
 }
+
+// In a pipeline, a reply can describe an unnamed statement that a later Parse
+// has already replaced; its types must not be taken for the new statement.
+func TestLateDescriptionOfReplacedUnnamedStatementIsDropped(t *testing.T) {
+	s := New(Config{EnableTraceParameters: true})
+	s.observeClientMessage(&pgproto3.Parse{Query: "SELECT $1"})
+	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
+	s.observeClientMessage(&pgproto3.Parse{Query: "SELECT $1::text"})
+	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
+	assert.Empty(t, s.paramTypes.unnamedDescribed)
+	stmt, _, ok := s.findStmt("")
+	require.True(t, ok)
+	assert.Nil(t, s.paramTypes.describedOIDs(stmt))
+}
+
+// A Bind naming a statement the proxy does not know must not borrow another
+// statement's types.
+func TestBindOfUnknownStatementHasNoTypes(t *testing.T) {
+	traceState := &query.TraceState{}
+	s := New(Config{EnableTraceParameters: true, TraceState: traceState})
+	s.observeClientMessage(&pgproto3.Parse{})
+	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
+	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
+
+	span := &recordingSpan{}
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: recordingTracer{span: span}}))
+	traceState.StartRootTrace(&pgproto3.Parse{Query: "SELECT 1"})
+	s.observeClientMessage(&pgproto3.Bind{PreparedStatement: "missing", ParameterFormatCodes: []int16{1}, Parameters: [][]byte{int8Param(7)}})
+	traceState.FinishRootTrace()
+	assert.Equal(t, `\x0000000000000007`, span.tags["db.parameters.0"], "unknown type, so hex")
+}
+
+// recordingSpan keeps the tags set on it.
+type recordingSpan struct{ tags map[string]any }
+
+func (s *recordingSpan) StartChild(string) pgproxy.Span { return s }
+func (s *recordingSpan) SetTag(key string, value any) {
+	if s.tags == nil {
+		s.tags = map[string]any{}
+	}
+	s.tags[key] = value
+}
+func (*recordingSpan) Finish(error) {}
+
+type recordingTracer struct{ span *recordingSpan }
+
+func (t recordingTracer) StartRoot(string, string) (pgproxy.Span, bool)   { return t.span, false }
+func (recordingTracer) HasQueryContext(string) bool                       { return false }
+func (recordingTracer) WarnNamedPreparedStatement(string, string, string) {}
