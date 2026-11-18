@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Limitations"
 description: "Transaction-pooling constraints and current implementation limits of PG Proxy."
 ---
@@ -13,11 +17,11 @@ PG Proxy also has specific boundaries around prepared statements and connection 
 
 ## Traces can contain sensitive data
 
-When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The OSS binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters` on sampled traces. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.
+When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The `pg-proxy` binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters` on sampled traces. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.
 
 ## Client messages have no configured size limit
 
-PG Proxy's server does not currently set a maximum body size for client messages. The protocol reader buffers the declared body before decoding it, so a sufficiently large message can exhaust proxy memory and interrupt other clients. The message-buffer setting controls flushing replies to clients; it does not limit incoming messages.
+After authentication, PG Proxy does not limit the body size of client messages. (During authentication, the `pg-proxy` binary limits messages to 16 KiB; see [fixed limits](../configuration/timeouts/#fixed-limits-in-the-binary).) The protocol reader buffers the declared body before decoding it, so a sufficiently large message can exhaust proxy memory and interrupt other clients. The message-buffer setting controls flushing replies to clients; it does not limit incoming messages.
 
 The `datadog.pg_proxy.client_messages.body_length_bytes` metric estimates size from decoded fields after a successful read. Some message decoders accept trailing padding without retaining it in those fields, so the metric can underreport the body that was buffered. It cannot enforce a memory limit or report a message that exhausts memory before decoding finishes. See [Metrics](../observability/metrics/) and [Go library configuration](../configuration/library/).
 

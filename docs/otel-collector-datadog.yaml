@@ -41,6 +41,10 @@ exporters:
 service:
   pipelines:
     metrics:
-      receivers: [otlp]
-      processors: [transform/pg_proxy_datadog_rates, batch]
-      exporters: [datadog]
+      receivers:
+        - otlp
+      processors:
+        - transform/pg_proxy_datadog_rates
+        - batch
+      exporters:
+        - datadog

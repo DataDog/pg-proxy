@@ -6,6 +6,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,8 +14,10 @@ import (
 	"testing"
 
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
+	"github.com/DataDog/pg-proxy/pkg/limiter"
 	"github.com/DataDog/pg-proxy/pkg/scram"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestPublishedPasswordAuthenticationExamples(t *testing.T) {
@@ -106,7 +109,6 @@ users:
 		"roles":               func(c *pgconfig.Config) { c.Users[0].PGRoles = []string{"reader"} },
 		"email":               func(c *pgconfig.Config) { c.Users[0].Email = "private-email" },
 		"group":               func(c *pgconfig.Config) { c.Users[0].Group = "private-group" },
-		"session limits":      func(c *pgconfig.Config) { c.Users[0].MaxSessions = 1 },
 	} {
 		t.Run(name, func(t *testing.T) {
 			shared := passwordConfig(t)
@@ -116,4 +118,48 @@ users:
 			require.NotContains(t, err.Error(), "client-password-sentinel")
 		})
 	}
+}
+
+func TestUserSessionLimits(t *testing.T) {
+	for _, format := range []string{"yaml", "json"} {
+		t.Run(format, func(t *testing.T) {
+			shared := passwordConfig(t)
+			shared.Proxy.MaxSessions = 4
+			shared.Proxy.DefaultMaxUserSessions = 2
+			shared.Users[0].MaxSessions = 1
+			var data []byte
+			var err error
+			if format == "json" {
+				data, err = json.Marshal(shared)
+			} else {
+				data, err = yaml.Marshal(shared)
+			}
+			require.NoError(t, err)
+			cfg, err := parseConfig([]string{"-config", writeConfig(t, format, string(data)), "-telemetry", "none"})
+			require.NoError(t, err)
+			admission := limiter.New(cfg.sessionLimitParams())
+			require.NoError(t, admission.RegisterSession("alice"))
+			require.Error(t, admission.RegisterSession("alice"))
+			require.NoError(t, admission.RegisterSession("bob"))
+			require.NoError(t, admission.RegisterSession("bob"))
+			require.Error(t, admission.RegisterSession("bob"))
+			require.NoError(t, admission.RegisterSession("carol"))
+			require.Error(t, admission.RegisterSession("carol"))
+			require.NoError(t, admission.DeregisterSession("alice"))
+			require.NoError(t, admission.RegisterSession("carol"))
+			require.Equal(t, int32(4), admission.GetGlobalCount())
+		})
+	}
+	shared := passwordConfig(t)
+	shared.Users[0].MaxSessions = -1
+	_, err := (config{}).withSharedConfig(shared)
+	require.ErrorContains(t, err, "users[0].max_sessions")
+	shared.Users[0].MaxSessions = 0
+	cfg, err := (config{}).withSharedConfig(shared)
+	require.NoError(t, err)
+	admission := limiter.New(cfg.sessionLimitParams())
+	for i := 0; i < 10_000; i++ {
+		require.NoError(t, admission.RegisterSession("alice"))
+	}
+	require.Error(t, admission.RegisterSession("alice"))
 }

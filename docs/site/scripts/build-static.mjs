@@ -1,3 +1,8 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 import { readdir, readFile, writeFile, rm } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
@@ -82,6 +87,12 @@ for (const file of files) {
     html,
     ids: new Set([...html.matchAll(/\bid=(['"])(.*?)\1/gs)].map((match) => decodeHTML(match[2]))),
   });
+}
+
+// Source files carry a license header as comments. Fail if it leaks into a page.
+const licenseHeader = 'Unless explicitly stated otherwise all files in this repository';
+for (const [file, page] of pages) {
+  if (page.html.includes(licenseHeader)) throw new Error(`${file}: license header rendered into page`);
 }
 
 // Fail the build on broken page links, anchors, redirects, or asset URLs.

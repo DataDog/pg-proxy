@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Client connection options"
 description: "PG Proxy client startup options, defaults, and connection examples."
 ---
@@ -12,9 +16,9 @@ Place these arguments inside the PostgreSQL startup `options` parameter using th
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `pg_proxy.dynamic_routing` | `false` client request | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
-| `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. |
+| `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. Cached statements are not classified, so extended-protocol reads use the main backend. See [Read routing](../../../explanation/read-routing/#classifying-work). |
 
-These values are read during connection startup. Reconnect to change them. The local executable has one static backend; a routing option does not create read replicas or configure additional backends.
+These values are read during connection startup. Reconnect to change them. A routing option does not create read replicas; configure them in the proxy configuration file. See [Read routing](../../../explanation/read-routing/).
 
 ## Connection examples
 
@@ -50,10 +54,10 @@ The parser expects the literal `-c pg_proxy.` form with a space after `-c`. Use 
 
 ## Client settings versus backend settings
 
-The client connects to a logical database on the proxy. The OSS binary's configuration file chooses the physical PostgreSQL database and pool settings. Set `databases[].max_conns` there, not in the client connection string.
+The client connects to a logical database on the proxy. The `pg-proxy` configuration file chooses the physical PostgreSQL database and pool settings. Set `databases[].max_conns` there, not in the client connection string.
 
 The built-in server composition consumes the user, logical database, and recognized proxy session options. It does not forward every client startup parameter to the backend. For example, sending `application_name` or an arbitrary `-c` setting does not by itself configure the backend session through this composition.
 
 See [Prepared statements](../../../explanation/prepared-statements/) and [Read routing](../../../explanation/read-routing/) for how the corresponding session options affect queries.
 
-See [OSS binary settings](../../../how-to/local-development/#settings) for backend and routing settings, or [Go library configuration](../library/) when constructing the library directly.
+See [Configuration file](../../../reference/configuration/configuration-file/) for backend and routing settings, or [Go library configuration](../library/) when constructing the library directly.

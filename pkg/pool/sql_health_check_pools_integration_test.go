@@ -51,6 +51,7 @@ type delayedIntegrationSQLHealthProber struct {
 
 	mu           sync.Mutex
 	blockNextIP  string
+	standbyIP    string
 	blockStarted chan struct{}
 	releaseBlock chan struct{}
 }
@@ -65,6 +66,9 @@ func (p *delayedIntegrationSQLHealthProber) Probe(
 
 	p.mu.Lock()
 	shouldBlock := p.blockNextIP == ip
+	if err == nil && p.standbyIP == ip {
+		inRecovery = true
+	}
 	if shouldBlock {
 		p.blockNextIP = ""
 	}
@@ -80,6 +84,12 @@ func (p *delayedIntegrationSQLHealthProber) blockNext(ip string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.blockNextIP = ip
+}
+
+func (p *delayedIntegrationSQLHealthProber) demote(ip string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.standbyIP = ip
 }
 
 func startSQLHealthCheckIntegrationPostgres(t *testing.T) (context.Context, string, *pgx.ConnConfig) {
@@ -181,7 +191,9 @@ func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T)
 		blockStarted: make(chan struct{}),
 		releaseBlock: make(chan struct{}),
 	}
-	fastProber := registrySQLHealthProber{pools: fastPools}
+	fastProber := &delayedIntegrationSQLHealthProber{
+		inner: registrySQLHealthProber{pools: fastPools},
+	}
 	checkers := []*SQLHealthChecker{
 		NewSQLHealthChecker(context.Background(), SQLHealthCheckPoolsConfig{}, SQLHealthCheckerConfig{
 			Pools: slowPools, Prober: slowProber,
@@ -275,8 +287,19 @@ func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T)
 		assert.False(t, target.sqlRoundRunning())
 	}
 
-	// The next round lets both credentials confirm the replacement. The following round applies DNS
-	// absence cleanup and closes both old probe pools.
+	// Both aliases still reach the writable server, so DNS absence alone must not
+	// evict the old address, even after both credentials confirm the replacement.
+	w.RefreshSQL()
+	w.RefreshSQL()
+	assert.ElementsMatch(t, []string{oldIP, replacementIP}, health.sqlHealthState.Snapshot().Resolved)
+	assert.Equal(t, 2, slowPools.Len())
+	assert.Equal(t, 2, fastPools.Len())
+
+	// Simulate demotion only for the old alias after each real database query.
+	// One round records standby results from both credentials; the next applies
+	// DNS absence cleanup and closes both old probe pools.
+	slowProber.demote(oldIP)
+	fastProber.demote(oldIP)
 	w.RefreshSQL()
 	w.RefreshSQL()
 	assert.Equal(t, []string{replacementIP}, health.sqlHealthState.Snapshot().Resolved)

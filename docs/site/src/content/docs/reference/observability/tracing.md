@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Tracing"
 description: "Query spans, propagation, and trace metadata in the current library."
 ---
@@ -77,7 +81,7 @@ For OTel export, SQL and captured parameter strings containing invalid UTF-8 are
 
 Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
 
-The OSS binary omits bind parameter values by default in both Datadog and OTel
+The `pg-proxy` binary omits bind parameter values by default in both Datadog and OTel
 modes. Set `-trace-parameters=true` to capture actual values as `db.parameters`,
 without obfuscation. The library also defaults to capture disabled; embedders can
 set `server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTraceParameters`

@@ -1,16 +1,16 @@
-<!--
-Unless explicitly stated otherwise all files in this repository are licensed
-under the Apache-2.0 License.
-This product includes software developed at Datadog (https://www.datadoghq.com/)
-Copyright 2026-Present Datadog, Inc.
--->
+---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+title: "Client authentication"
+description: "Password and SCRAM-SHA-256 client authentication in the pg-proxy binary, and credential references."
+---
 
-# Client authentication
-
-The standalone command supports opt-in password/SCRAM authentication. Start with
-the complete [YAML](../examples/password-auth.yaml) or
-[JSON](../examples/password-auth.json) example. Replace the hosts, credential sources,
-certificate paths, and every `<...>` placeholder before starting.
+The `pg-proxy` binary supports opt-in password/SCRAM authentication. Start with
+the complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) or
+[JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) example. Replace the hosts, credential sources,
+and certificate paths before starting.
 
 Set `proxy.password_auth_enabled: true` and `proxy.tls_required: true`, with a
 valid TLS certificate/key pair. JSON calls these `passwordAuthEnabled` and
@@ -23,7 +23,8 @@ Each `users` entry requires a unique `static_credentials.username`, exactly one
 JSON uses `staticCredentials` and `scramSHA256`. Usernames and database names
 match exactly, including case. Unknown users and databases outside the user's
 list are denied. Wildcards have no special meaning. Static mode rejects `email`,
-`group`, `pg_roles`, and nonzero `max_sessions` rather than ignoring them.
+`group`, and `pg_roles` rather than ignoring them.
+Optional `max_sessions` sets a per-user admission cap.
 
 Each credential can be inline, or come from a file or an environment variable;
 see [credential references](#credential-references).
@@ -95,7 +96,7 @@ redacts credentials; `Verifier.Encode` explicitly returns the stored value.
 
 ### Credential references
 
-The standalone command can read a credential from a file or an environment
+The `pg-proxy` binary can read a credential from a file or an environment
 variable instead of the configuration file. This lets you keep the
 configuration file free of secrets, for example in version control, and supply
 the values from Kubernetes Secrets, systemd credentials, or similar.
@@ -117,7 +118,8 @@ users:
   - static_credentials:
       username: bob
       scram_sha_256_env: BOB_SCRAM_VERIFIER
-    databases: [orders]
+    databases:
+      - orders
 ```
 
 Rules:
@@ -139,10 +141,10 @@ Rules:
 The verifier helper above prints a trailing newline, so you can redirect its
 output directly to a `scram_sha_256_file`.
 
-This is a feature of the standalone command only. `pkg/config` and its
+This is a feature of the `pg-proxy` binary only. `pkg/config` and its
 `ReadJSON`/`ReadYAML` readers accept inline credentials only; embedding
 applications resolve their own references. See
-[adapting configuration](extending-configuration.md).
+[adapting configuration](../adapting-configuration/).
 
 ## Connecting
 
@@ -153,7 +155,7 @@ psql "host=proxy.example.com port=15432 dbname=orders user=alice sslmode=verify-
 ```
 
 Enter Alice's client password when prompted. Bob uses `user=bob` and his client
-password. Neither client needs a backend password. See [client TLS](client-connections.md)
+password. Neither client needs a backend password. See [client TLS](../client-tls/)
 for certificate setup. SCRAM-SHA-256-PLUS/channel binding is not implemented.
 
 ## Defaults and failures
@@ -177,27 +179,11 @@ logs and client errors.
 Cancellation still uses the session PID and secret on a separate connection.
 Both TLS cancellation and legacy plaintext cancellation work when TLS is required.
 No new password exchange is performed for cancellation. Configuration and
-credential changes require a restart. The existing global and per-user default
-session limits remain 100.
+credential changes require a restart.
 
-## Integration tests
-
-The standalone test uses the shared `internal/itest` PostgreSQL container fixture.
-GitHub Actions runs authentication, TLS, cancellation, and the other integration
-tests together with race detection. It uses public Docker Hub images by default:
-
-```sh
-go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
-```
-
-Alternatively, set `PG_PROXY_TEST_DATABASE_URL` to use an external disposable
-PostgreSQL instance with superuser access. The suite creates databases and
-fixture roles, so never use a shared or production database:
-
-```sh
-PG_PROXY_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' \
-  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
-```
-
-The `integration` build tag is required in both cases. The normal unit-test
-command does not execute these PostgreSQL-backed tests.
+The global session cap defaults to 100,000 (`proxy.max_sessions`); the per-user
+default is 10,000 (`proxy.default_max_user_sessions`). Set `users[].max_sessions`
+to override one user's limit across all allowed logical databases. Omitted or
+zero values use the applicable default; negative values fail at startup. JSON
+uses `maxSessions` and `defaultMaxUserSessions`. These caps are independent of
+backend pool sizes and the 100 pending-startup slots.

@@ -1,10 +1,15 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 
 export default defineConfig({
   redirects: {
-    '/reference/local-command': '/how-to/local-development/#settings',
-    '/reference/configuration/local-development': '/how-to/local-development/#settings',
+    '/reference/local-command': '/reference/configuration/configuration-file/',
+    '/reference/configuration/local-development': '/reference/configuration/configuration-file/',
     '/guides/run-locally': '/how-to/local-development/',
     '/tutorials/first-query': '/how-to/local-development/',
     '/concepts/architecture': '/',
@@ -12,7 +17,7 @@ export default defineConfig({
     '/concepts/pooling': '/explanation/pooling/',
     '/explanation/observability': '/reference/observability/',
     '/introduction': '/',
-    '/reference/configuration/yaml': '/how-to/local-development/#settings',
+    '/reference/configuration/yaml': '/reference/configuration/configuration-file/',
     '/explanation/introduction': '/',
   },
   integrations: [starlight({
@@ -32,24 +37,30 @@ export default defineConfig({
       ] },
       { label: 'How-to guides', items: [
         { slug: 'how-to/local-development' },
-        { slug: 'how-to/otel-metrics-to-datadog' },
-        { slug: 'how-to/contributing' },
-        { slug: 'how-to/documentation-contributing' },
+        { slug: 'how-to/run-in-production' },
         { slug: 'how-to/set-pool-limits' },
+        { slug: 'how-to/otel-metrics-to-datadog' },
       ] },
       { label: 'Reference', items: [
         { label: 'Configuration', items: [
+          { slug: 'reference/configuration/configuration-file' },
+          { slug: 'reference/configuration/command-line' },
           { slug: 'reference/configuration/timeouts' },
           { slug: 'reference/configuration/client-connections' },
+          { slug: 'reference/configuration/client-tls' },
+          { slug: 'reference/configuration/client-authentication' },
         ] },
         { label: 'Observability', items: [
           { slug: 'reference/observability' },
           { slug: 'reference/observability/metrics' },
           { slug: 'reference/observability/tracing' },
         ] },
+        { slug: 'reference/requirements' },
         { slug: 'reference/compatibility' },
+        { slug: 'reference/troubleshooting' },
         { label: 'Go library', items: [
           { slug: 'reference/configuration/library' },
+          { slug: 'reference/configuration/adapting-configuration' },
           { slug: 'reference/packages' },
         ] },
       ] },
@@ -60,6 +71,10 @@ export default defineConfig({
         { slug: 'explanation/read-routing' },
         { slug: 'explanation/traffic-mirroring' },
         { slug: 'explanation/graceful-shutdown' },
+      ] },
+      { label: 'Contribute', items: [
+        { slug: 'how-to/contributing' },
+        { slug: 'how-to/documentation-contributing' },
       ] },
     ],
   })],

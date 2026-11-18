@@ -1,11 +1,15 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Compare poolers"
 description: "How PG Proxy compares with PgBouncer, Pgpool-II, Odyssey, and PgDog."
 ---
 
 PG Proxy is useful when an application needs to compose PostgreSQL pooling with its own authentication, routing configuration, admission policy, and telemetry. PgBouncer, Pgpool-II, Odyssey, and PgDog offer standalone poolers with established configuration and administration interfaces.
 
-This comparison describes the current PG Proxy checkout and upstream documentation reviewed on **October 14, 2026**. PG Proxy's portable library is still being extracted; the local example is not a production server. The tables compare documented capabilities, not measured performance.
+This comparison describes the current PG Proxy checkout and upstream documentation reviewed on **October 14, 2026**. PG Proxy ships as the `pg-proxy` binary and as a Go library. The tables compare documented capabilities, not measured performance.
 
 ## At a glance
 

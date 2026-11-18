@@ -1,11 +1,15 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Telemetry configuration"
 description: "Flags, environment variables, and examples for Datadog and OpenTelemetry."
 ---
 
-The OSS binary reads telemetry settings from command-line flags and environment variables. `proxy.yaml` contains database and listener settings; it has no telemetry fields.
+The `pg-proxy` binary reads telemetry settings from command-line flags and environment variables. `proxy.yaml` contains database and listener settings; it has no telemetry fields.
 
-The examples use Bash or Zsh, `pg-proxy` on your PATH, and an existing [database configuration](../../how-to/local-development/#2-run-against-a-development-database). For applications using the Go library, see [Go telemetry configuration](../configuration/library/#telemetry-settings).
+The examples use Bash or Zsh, `pg-proxy` on your PATH, and an existing [database configuration](../../how-to/local-development/#3-configure-and-start-the-proxy). For applications using the Go library, see [Go telemetry configuration](../configuration/library/#telemetry-settings).
 
 ## Backend selection
 
@@ -64,7 +68,7 @@ pg-proxy -config proxy.yaml
 | Variable | Default | Purpose |
 | --- | --- | --- |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | `https://localhost:4318` | Base URL. The SDK appends `/v1/traces`, `/v1/metrics`, or `/v1/logs`. Use `http://` for a receiver without TLS. |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | The only protocol supported by the OSS binary. Other values fail startup for enabled signals. |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | `http/protobuf` | The only protocol `pg-proxy` supports. Other values fail startup for enabled signals. |
 
 Per-signal settings override shared settings. For example, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` overrides `OTEL_EXPORTER_OTLP_ENDPOINT` for traces. Use `METRICS` or `LOGS` in place of `TRACES` for the other signals.
 

@@ -1,4 +1,8 @@
 ---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
 title: "Traffic mirroring"
 description: "How PG Proxy replays traffic on a separate database without waiting for its replies."
 ---
@@ -27,6 +31,6 @@ Monitor queued-message counts, drops, and replay errors through the [mirroring m
 
 ## Application integration
 
-The application supplies the mirroring policy and a callback to acquire shadow connections through `server.RuntimeConfig.Mirroring`. The policy names the source and shadow databases, sets the per-session queue size, and requires a future expiry time. The local reference binary does not configure mirroring.
+The application supplies the mirroring policy and a callback to acquire shadow connections through `server.RuntimeConfig.Mirroring`. The policy names the source and shadow databases, sets the per-session queue size, and requires a future expiry time. The `pg-proxy` binary does not support mirroring and fails at startup if the configuration has a `mirroring` section.
 
 See [Go library configuration](../../reference/configuration/library/#traffic-mirroring) for the fields and [Limitations](../../reference/limitations/) for deployment boundaries.

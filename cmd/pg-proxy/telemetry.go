@@ -96,13 +96,6 @@ func setupTelemetry(ctx context.Context, cfg telemetryConfig) (deps pgproxy.Depe
 	if cfg.Traces != traceOTel && cfg.Metrics != metricOTel && cfg.Logs != logsOTel {
 		return deps, shutdown, nil
 	}
-	for signal, enabled := range map[string]bool{"TRACES": cfg.Traces == traceOTel, "METRICS": cfg.Metrics == metricOTel, "LOGS": cfg.Logs == logsOTel} {
-		if enabled {
-			if err := validateOTLPProtocol(signal); err != nil {
-				return deps, shutdown, err
-			}
-		}
-	}
 	res, err := resource.New(ctx, resource.WithAttributes(attribute.String("service.name", "pg-proxy")), resource.WithFromEnv())
 	if err != nil {
 		return deps, shutdown, errors.New("invalid OpenTelemetry resource configuration")

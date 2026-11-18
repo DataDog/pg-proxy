@@ -493,6 +493,44 @@ func TestHybridHealthPatroniRecoversBeforeNextSQLCompletion(t *testing.T) {
 	assert.Equal(t, map[string]bool{oldIP: false, newIP: false}, freshNegative.health)
 }
 
+func TestHybridHealthSQLFreshnessAfterPatroniLeaderChange(t *testing.T) {
+	for _, gap := range []map[string]bool{nil, {"A": true, "B": true}} {
+		for _, tc := range []struct {
+			name, primary string
+			offset        time.Duration
+			want          string
+		}{
+			{"old", "A", -time.Millisecond, SQLRoutingResultCachedFallback},
+			{"equal", "A", 0, SQLRoutingResultCachedFallback},
+			{"fresh", "A", time.Millisecond, SQLRoutingResultConclusive},
+			{"agreement", "B", -time.Millisecond, SQLRoutingResultConclusive},
+		} {
+			t.Run(fmt.Sprintf("%s/ambiguous_gap_%t", tc.name, gap != nil), func(t *testing.T) {
+				policy := newHybridHealthPolicy(true)
+				before := time.Now()
+				policy.observePatroni(map[string]bool{"A": true}, before)
+				policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: []string{"A"}}, before)
+				policy.observePatroni(gap, before.Add(500*time.Millisecond))
+				changedAt := before.Add(time.Second)
+				policy.observePatroni(map[string]bool{"B": true}, changedAt)
+				policy.observePatroni(map[string]bool{"B": true}, before.Add(3*time.Second))
+				decision := policy.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{
+					StartedAt: changedAt.Add(tc.offset), PrimaryIPs: []string{tc.primary},
+				}, before.Add(4*time.Second))
+				require.True(t, decision.publish)
+				assert.Equal(t, tc.want, decision.routingResult)
+				leader := tc.primary
+				if tc.want == SQLRoutingResultCachedFallback {
+					leader = "B"
+					assert.Equal(t, SQLHealthFallbackStaleEvidence, decision.fallbackReason)
+					assert.Empty(t, policy.supersededPatroniLeader)
+				}
+				assert.Equal(t, []string{leader}, healthyIPs(decision.health))
+			})
+		}
+	}
+}
+
 func TestHybridHealthPatroniRecoveryFollowsLeaderLoss(t *testing.T) {
 	policy := newHybridHealthPolicy(true)
 	started := time.Now()
@@ -767,6 +805,11 @@ func TestHybridHealthRoutingFlagToggleDropsLeadershipState(t *testing.T) {
 				require.Equal(t, current, decision.health)
 			}
 			policy.setRoutingEnabled(true)
+			assert.True(t, policy.patroniLeaderChangedAt.IsZero())
+			// No previous-mode recovery barrier may reject the first new-mode SQL result.
+			initial := policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"A"}}, started.Add(5500*time.Millisecond))
+			require.True(t, initial.publish)
+			require.Equal(t, SQLRoutingResultConclusive, initial.routingResult)
 			// Old no-primary/recovery/retention must not initiate a new recovery.
 			assert.False(t, policy.observePatroni(map[string]bool{"E": true}, started.Add(6*time.Second)).publish)
 			policy.observePatroni(map[string]bool{"A": true}, started.Add(7*time.Second))
@@ -775,8 +818,9 @@ func TestHybridHealthRoutingFlagToggleDropsLeadershipState(t *testing.T) {
 			require.True(t, fallback.publish)
 			assert.Equal(t, SQLRoutingResultCachedFallback, fallback.routingResult)
 			assert.Equal(t, []string{"A"}, healthyIPs(fallback.health))
-			// Unknown start times must not retain the previous mode's recovery barrier.
-			selected := policy.observeSQL(candidates, SQLHealthCheckOutcome{PrimaryIPs: []string{"D"}}, started.Add(9*time.Second))
+			selected := policy.observeSQL(candidates, SQLHealthCheckOutcome{
+				StartedAt: started.Add(8500 * time.Millisecond), PrimaryIPs: []string{"D"},
+			}, started.Add(9*time.Second))
 			require.True(t, selected.publish)
 			assert.Equal(t, SQLRoutingResultConclusive, selected.routingResult)
 			assert.Equal(t, []string{"D"}, healthyIPs(selected.health))
@@ -1606,4 +1650,36 @@ func TestHybridHealthPatroniRecoveryRespectsRoutingBan(t *testing.T) {
 	assert.True(t, bannedAgain.publish, "active recovery still publishes loss of its allowed leader")
 	assert.Empty(t, healthyIPs(bannedAgain.health), "active recovery must not route back to banned A")
 	assert.Contains(t, policy.routingBannedIPs, "A")
+}
+
+func TestHybridHealthBannedPatroniLeaderDoesNotInvalidateSQLLeader(t *testing.T) {
+	policy, started := policyWithSQLAheadOfPatroni(t)
+	candidates := []string{"A", "B", "C"}
+	policy.observeSQL(candidates, SQLHealthCheckOutcome{
+		StartedAt: started.Add(2 * time.Second),
+		Results: []SQLHealthCheckResult{
+			{IP: "A", InRecovery: true},
+			{IP: "B"},
+			{IP: "C", Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		},
+		PrimaryIPs: []string{"B"},
+	}, started.Add(3*time.Second))
+
+	patroni := policy.observePatroni(map[string]bool{"C": true}, started.Add(4*time.Second))
+	require.False(t, patroni.publish, "banned C cannot replace SQL leader B")
+
+	// This SQL poll began before Patroni changed to C, but C is not an eligible
+	// alternative. Its newer Patroni timestamp must not force fallback to no route.
+	decision := policy.observeSQL(candidates, SQLHealthCheckOutcome{
+		StartedAt: started.Add(3 * time.Second),
+		Results: []SQLHealthCheckResult{
+			{IP: "A", InRecovery: true},
+			{IP: "B"},
+			{IP: "C", Err: context.DeadlineExceeded},
+		},
+		PrimaryIPs: []string{"B"},
+	}, started.Add(5*time.Second))
+	assert.Equal(t, SQLRoutingResultConclusive, decision.routingResult)
+	assert.Equal(t, []string{"B"}, healthyIPs(decision.health))
+	assert.Contains(t, decision.routingBannedIPs, "C")
 }
