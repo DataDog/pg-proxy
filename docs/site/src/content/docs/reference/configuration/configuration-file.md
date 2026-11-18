@@ -19,7 +19,7 @@ This page covers the binary. Applications that embed the Go library decode the s
 databases:
   - name: primary
     host: 127.0.0.1
-    port: 5432
+    port: 15432
     dbname: postgres
     username: postgres
     password: postgres
@@ -31,6 +31,8 @@ logical_databases:
   local_db:
     cluster: local
 ```
+
+This matches [Local development](../../../how-to/local-development/): PostgreSQL listens on `127.0.0.1:15432`, and the proxy uses its default address, `127.0.0.1:5432`. If your PostgreSQL server uses `127.0.0.1:5432`, set `proxy.listener_address` to a free port.
 
 `databases`, `clusters`, and `logical_databases` are required and must not be empty. `proxy` is optional. `users` is allowed only with password authentication.
 

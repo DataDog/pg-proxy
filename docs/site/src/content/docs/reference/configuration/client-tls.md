@@ -17,7 +17,7 @@ Add these settings to the `proxy` section of your configuration:
 
 ```yaml
 proxy:
-  listener_address: '127.0.0.1:15432'
+  listener_address: '127.0.0.1:5432'
   tls_cert_file: /path/to/server.crt
   tls_key_file: /path/to/server.key
   tls_required: true
@@ -54,7 +54,7 @@ Point the proxy settings above at these files, restart the proxy, then connect
 with certificate and hostname verification:
 
 ```sh
-psql "host=127.0.0.1 port=15432 dbname=local_db user=postgres sslmode=verify-full sslrootcert=$PWD/server.crt" -c 'select 1'
+psql "host=127.0.0.1 port=5432 dbname=local_db user=postgres sslmode=verify-full sslrootcert=$PWD/server.crt" -c 'select 1'
 ```
 
 For a CA-issued server certificate, use that CA's root bundle as `sslrootcert`.
