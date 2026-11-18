@@ -1,10 +1,12 @@
-# PostgreSQL 14 regression tests that pg-proxy skips or is expected to fail.
-#   skip <test>  # <cause>  Left out of the schedule: pg-proxy cannot pass it by design.
-#   fail <test>  # <cause>  Runs and is expected to fail; listing a test that passes fails the run.
-#                           A by-design failure that later tests depend on is a fail entry, so it
-#                           still creates their objects.
+# PostgreSQL 14 regression tests that pg-proxy skips, isolates, or expects to fail.
+#   skip <test>     # <cause>  Left out of the schedule: pg-proxy cannot pass it by design.
+#   isolate <test>  # <cause>  Left out of the schedule because its failure would break later
+#                              tests. Not established as by design; re-check as pg-proxy improves.
+#   fail <test>     # <cause>  Runs and is expected to fail; listing a test that passes fails the run.
+#                              A by-design failure that later tests depend on is a fail entry, so it
+#                              still creates their objects.
 # Any other failing test fails TestInstallcheckThroughProxy. PG_PROXY_REGRESS_UPDATE=1
-# rewrites the fail entries from a run, keeping skip entries and reasons.
+# rewrites the fail entries from a run, keeping skip and isolate entries and reasons.
 #
 # Causes:
 #   session-reset        SET, SET ROLE and SET SESSION AUTHORIZATION are undone after every
@@ -17,100 +19,100 @@
 #                        functions, are not supported.
 #   login-trigger        Login event triggers fire when the proxy opens a backend connection,
 #                        not when a client connects.
-#   depends-on-skipped   Uses objects that a skipped test creates.
+#   depends-on-skipped   Uses objects that a skipped or isolated test creates.
 #   statement-names      pg-proxy renames named prepared statements on backend connections,
 #                        which pg_prepared_statements and some error messages show.
-skip aggregates                   # backend-reuse: relation "t1" already exists
-skip alter_generic                # backend-reuse: function alt_func2(integer) already exists in schema "public"
-skip alter_table                  # backend-reuse: relation "foo" already exists
-skip arrays                       # session-reset: output differs
-skip box                          # session-reset: output differs
-skip brin                         # session-reset: output differs
-skip brin_multi                   # session-reset: output differs
-skip btree_index                  # session-reset: output differs
-skip circle                       # session-reset: output differs
-skip collate                      # session-reset: permission denied for database regression
-skip copy2                        # backend-reuse: cannot perform COPY FREEZE because of prior transaction activity
-skip create_am                    # session-reset: output differs
-skip create_function_3            # session-reset: role "regress_unpriv_user" cannot be dropped because some objects depe
-skip create_index_spgist          # session-reset: output differs
-skip create_view                  # session-reset: relation "base_table" does not exist
-skip date                         # session-reset: date/time field value out of range: "99-Jan-08"
-skip equivclass                   # session-reset: output differs
-skip event_trigger                # session-reset: output differs
-skip explain                      # session-reset: output differs
-skip expressions                  # session-reset: output differs
-skip fast_default                 # backend-reuse: relation "t2" already exists
 skip foreign_data                 # session-reset: SET SESSION AUTHORIZATION and \c
-skip foreign_key                  # backend-reuse: relation "t1" already exists
-skip generated                    # session-reset: output differs
-skip geometry                     # session-reset: output differs
-skip gin                          # session-reset: output differs
-skip gist                         # session-reset: output differs
-skip groupingsets                 # session-reset: output differs
-skip guc                          # session-reset: function func_with_bad_set() does not exist
-skip horology                     # session-reset: date/time field value out of range: "27/12/2001 04:05:06.789-08"
-skip incremental_sort             # session-reset: output differs
-skip index_including              # session-reset: output differs
-skip index_including_gist         # session-reset: output differs
-skip indexing                     # backend-reuse: relation "pk" already exists
-skip inet                         # session-reset: output differs
-skip inherit                      # backend-reuse: relation "foo" already exists
-skip init_privs                   # session-reset: no privileges were granted for "pg_proc"
-skip interval                     # session-reset: output differs
-skip join                         # session-reset: invalid input syntax for type numeric: "bb"
-skip json                         # session-reset: invalid input syntax for type json
-skip jsonb                        # session-reset: invalid input syntax for type json
-skip jsonb_jsonpath               # session-reset: output differs
 skip largeobject                  # fastpath: large-object functions use FunctionCall
-skip maintain_every               # session-reset: skipping "pg_statistic" --- only superuser or database owner can analy
-skip matview                      # session-reset: permission denied for database regression
-skip memoize                      # session-reset: output differs
-skip namespace                    # session-reset: output differs
-skip object_address               # session-reset: wal_level is insufficient to publish logical changes
-skip partition_aggregate          # session-reset: output differs
-skip partition_join               # session-reset: output differs
-skip partition_prune              # backend-reuse: relation "tbl1" already exists
-skip password                     # session-reset: output differs
-skip plancache                    # backend-reuse: relation "t1" already exists
-skip plpgsql                      # backend-reuse: relation "users" already exists
-skip point                        # session-reset: output differs
-skip polygon                      # session-reset: output differs
-skip prepare                      # session-reset: output differs
 skip privileges                   # session-reset: SET SESSION AUTHORIZATION and \c -
-skip psql                         # backend-reuse: prepared statement "q" already exists
-skip publication                  # session-reset: wal_level is insufficient to publish logical changes
-skip rangefuncs                   # backend-reuse: function "dup" already exists with same argument types
-skip returning                    # backend-reuse: relation "foo" already exists
-skip rowsecurity                  # backend-reuse: relation "t1" already exists
-skip rowtypes                     # backend-reuse: temporary table tt1 left by an earlier session
-skip rules                        # session-reset: output differs
-skip sanity_check                 # session-reset: output differs
-skip security_label               # session-reset: permission denied to drop role
-skip select                       # session-reset: output differs
-skip select_distinct              # session-reset: column "two" does not exist
-skip select_distinct_on           # session-reset: column "string4" does not exist
-skip select_parallel              # session-reset: output differs
-skip select_views                 # backend-reuse: function "f_leak" already exists with same argument types
-skip stats                        # session-reset: output differs
-skip stats_ext                    # backend-reuse: operator <<< already exists
-skip strings                      # session-reset: invalid Unicode escape
-skip subselect                    # backend-reuse: relation "foo" already exists
-skip sysviews                     # session-reset: output differs
-skip tablespace                   # backend-reuse: relation "part_1" already exists
-skip temp                         # backend-reuse: temporary schema created by an earlier session
-skip tidrangescan                 # session-reset: output differs
-skip tidscan                      # session-reset: output differs
-skip timestamp                    # session-reset: invalid input syntax for type timestamp: "97FEB10 5:32:01PM UTC"
-skip timestamptz                  # session-reset: invalid input syntax for type timestamp with time zone: "97FEB10 5:32:
-skip triggers                     # backend-reuse: relation "table1" already exists
-skip tsearch                      # session-reset: output differs
-skip tsrf                         # session-reset: output differs
-skip tstypes                      # session-reset: output differs
-skip union                        # backend-reuse: relation "t1" already exists
-skip updatable_views              # backend-reuse: relation "t1" already exists
-skip vacuum_parallel              # session-reset: output differs
-skip xid                          # backend-reuse: relation "snapshot_test" already exists
+isolate aggregates                   # backend-reuse: relation "t1" already exists
+isolate alter_generic                # backend-reuse: function alt_func2(integer) already exists in schema "public"
+isolate alter_table                  # backend-reuse: relation "foo" already exists
+isolate arrays                       # session-reset: output differs
+isolate box                          # session-reset: output differs
+isolate brin                         # session-reset: output differs
+isolate brin_multi                   # session-reset: output differs
+isolate btree_index                  # session-reset: output differs
+isolate circle                       # session-reset: output differs
+isolate collate                      # session-reset: permission denied for database regression
+isolate copy2                        # backend-reuse: cannot perform COPY FREEZE because of prior transaction activity
+isolate create_am                    # session-reset: output differs
+isolate create_function_3            # session-reset: role "regress_unpriv_user" cannot be dropped because some objects depe
+isolate create_index_spgist          # session-reset: output differs
+isolate create_view                  # session-reset: relation "base_table" does not exist
+isolate date                         # session-reset: date/time field value out of range: "99-Jan-08"
+isolate equivclass                   # session-reset: output differs
+isolate event_trigger                # session-reset: output differs
+isolate explain                      # session-reset: output differs
+isolate expressions                  # session-reset: output differs
+isolate fast_default                 # backend-reuse: relation "t2" already exists
+isolate foreign_key                  # backend-reuse: relation "t1" already exists
+isolate generated                    # session-reset: output differs
+isolate geometry                     # session-reset: output differs
+isolate gin                          # session-reset: output differs
+isolate gist                         # session-reset: output differs
+isolate groupingsets                 # session-reset: output differs
+isolate guc                          # session-reset: function func_with_bad_set() does not exist
+isolate horology                     # session-reset: date/time field value out of range: "27/12/2001 04:05:06.789-08"
+isolate incremental_sort             # session-reset: output differs
+isolate index_including              # session-reset: output differs
+isolate index_including_gist         # session-reset: output differs
+isolate indexing                     # backend-reuse: relation "pk" already exists
+isolate inet                         # session-reset: output differs
+isolate inherit                      # backend-reuse: relation "foo" already exists
+isolate init_privs                   # session-reset: no privileges were granted for "pg_proc"
+isolate interval                     # session-reset: output differs
+isolate join                         # session-reset: invalid input syntax for type numeric: "bb"
+isolate json                         # session-reset: invalid input syntax for type json
+isolate jsonb                        # session-reset: invalid input syntax for type json
+isolate jsonb_jsonpath               # session-reset: output differs
+isolate maintain_every               # session-reset: skipping "pg_statistic" --- only superuser or database owner can analy
+isolate matview                      # session-reset: permission denied for database regression
+isolate memoize                      # session-reset: output differs
+isolate namespace                    # session-reset: output differs
+isolate object_address               # session-reset: wal_level is insufficient to publish logical changes
+isolate partition_aggregate          # session-reset: output differs
+isolate partition_join               # session-reset: output differs
+isolate partition_prune              # backend-reuse: relation "tbl1" already exists
+isolate password                     # session-reset: output differs
+isolate plancache                    # backend-reuse: relation "t1" already exists
+isolate plpgsql                      # backend-reuse: relation "users" already exists
+isolate point                        # session-reset: output differs
+isolate polygon                      # session-reset: output differs
+isolate prepare                      # session-reset: output differs
+isolate psql                         # backend-reuse: prepared statement "q" already exists
+isolate publication                  # session-reset: wal_level is insufficient to publish logical changes
+isolate rangefuncs                   # backend-reuse: function "dup" already exists with same argument types
+isolate returning                    # backend-reuse: relation "foo" already exists
+isolate rowsecurity                  # backend-reuse: relation "t1" already exists
+isolate rowtypes                     # backend-reuse: temporary table tt1 left by an earlier session
+isolate rules                        # session-reset: output differs
+isolate sanity_check                 # session-reset: output differs
+isolate security_label               # session-reset: permission denied to drop role
+isolate select                       # session-reset: output differs
+isolate select_distinct              # session-reset: column "two" does not exist
+isolate select_distinct_on           # session-reset: column "string4" does not exist
+isolate select_parallel              # session-reset: output differs
+isolate select_views                 # backend-reuse: function "f_leak" already exists with same argument types
+isolate stats                        # session-reset: output differs
+isolate stats_ext                    # backend-reuse: operator <<< already exists
+isolate strings                      # session-reset: invalid Unicode escape
+isolate subselect                    # backend-reuse: relation "foo" already exists
+isolate sysviews                     # session-reset: output differs
+isolate tablespace                   # backend-reuse: relation "part_1" already exists
+isolate temp                         # backend-reuse: temporary schema created by an earlier session
+isolate tidrangescan                 # session-reset: output differs
+isolate tidscan                      # session-reset: output differs
+isolate timestamp                    # session-reset: invalid input syntax for type timestamp: "97FEB10 5:32:01PM UTC"
+isolate timestamptz                  # session-reset: invalid input syntax for type timestamp with time zone: "97FEB10 5:32:
+isolate triggers                     # backend-reuse: relation "table1" already exists
+isolate tsearch                      # session-reset: output differs
+isolate tsrf                         # session-reset: output differs
+isolate tstypes                      # session-reset: output differs
+isolate union                        # backend-reuse: relation "t1" already exists
+isolate updatable_views              # backend-reuse: relation "t1" already exists
+isolate vacuum_parallel              # session-reset: output differs
+isolate xid                          # backend-reuse: relation "snapshot_test" already exists
 fail amutils                      # depends-on-skipped: indexes from skipped tests are missing
 fail create_index                 # session-reset: column b.relkind does not exist (runs: later tests use its objects)
 fail float8                       # session-reset: output differs (runs: later tests use its objects)

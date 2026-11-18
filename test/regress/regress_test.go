@@ -140,22 +140,24 @@ func TestInstallcheckDirect(t *testing.T) {
 }
 
 // TestInstallcheckThroughProxy runs the suite through pg-proxy, without the
-// tests the baseline skips, and compares the failures with the baseline.
+// tests the baseline skips or isolates, and compares the failures with the
+// baseline.
 func TestInstallcheckThroughProxy(t *testing.T) {
 	for _, v := range versions {
 		t.Run(v.Major, func(t *testing.T) {
 			path := "baseline/pg" + v.Major + ".txt"
 			baseline := readBaseline(t, path)
 			backend, volume := startBackend(t, v)
-			schedule, scheduled := readSchedule(t, backend, baseline.skipped)
+			excluded := baseline.excluded()
+			schedule, scheduled := readSchedule(t, backend, excluded)
 			var stale []string
-			for name := range baseline.skipped {
+			for name := range excluded {
 				if !scheduled[name] {
 					stale = append(stale, name)
 				}
 			}
 			slices.Sort(stale)
-			require.Empty(t, stale, "%s skips tests that PostgreSQL %s does not have", path, v.Version)
+			require.Empty(t, stale, "%s skips or isolates tests that PostgreSQL %s does not have", path, v.Version)
 
 			ctx := t.Context()
 			setup, rest := splitSetup(schedule)

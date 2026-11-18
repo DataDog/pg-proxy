@@ -237,21 +237,34 @@ func truncateLines(text string, limit int) string {
 	return strings.Join(lines[:limit], "\n") + fmt.Sprintf("\n... %d more lines", len(lines)-limit)
 }
 
-// baseline is a parsed baseline/pg<major>.txt. Each entry is
-// "skip <test> # reason" for a test left out of the schedule because pg-proxy
-// cannot pass it by design, or "fail <test> # reason" for a test that runs and
-// is expected to fail. Comment lines at the top form the header.
+// baseline is a parsed baseline/pg<major>.txt. Each entry is one of:
+//   - "skip <test> # reason": left out of the schedule because pg-proxy cannot
+//     pass it by design.
+//   - "isolate <test> # reason": left out of the schedule because its failure
+//     would break later tests. Not established as by design; worth re-checking
+//     as pg-proxy improves.
+//   - "fail <test> # reason": runs and is expected to fail.
+//
+// Comment lines at the top form the header.
 type baseline struct {
-	header  string
-	skipped map[string]string
-	failing map[string]string
+	header   string
+	skipped  map[string]string
+	isolated map[string]string
+	failing  map[string]string
+}
+
+// excluded returns the tests left out of the schedule: skipped and isolated.
+func (b baseline) excluded() map[string]string {
+	excluded := maps.Clone(b.skipped)
+	maps.Copy(excluded, b.isolated)
+	return excluded
 }
 
 func readBaseline(t *testing.T, path string) baseline {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	b := baseline{skipped: map[string]string{}, failing: map[string]string{}}
+	b := baseline{skipped: map[string]string{}, isolated: map[string]string{}, failing: map[string]string{}}
 	inHeader := true
 	for number, line := range strings.Split(string(data), "\n") {
 		entry, reason, _ := strings.Cut(line, "#")
@@ -263,10 +276,17 @@ func readBaseline(t *testing.T, path string) baseline {
 			continue
 		}
 		inHeader = false
-		require.Len(t, fields, 2, "%s:%d: want \"skip|fail <test> # reason\"", path, number+1)
+		require.Len(t, fields, 2, "%s:%d: want \"skip|isolate|fail <test> # reason\"", path, number+1)
+		_, excluded := b.excluded()[fields[1]]
+		_, failing := b.failing[fields[1]]
+		if excluded || failing {
+			t.Fatalf("%s:%d: %s is listed twice", path, number+1, fields[1])
+		}
 		switch fields[0] {
 		case "skip":
 			b.skipped[fields[1]] = strings.TrimSpace(reason)
+		case "isolate":
+			b.isolated[fields[1]] = strings.TrimSpace(reason)
 		case "fail":
 			b.failing[fields[1]] = strings.TrimSpace(reason)
 		default:
@@ -279,7 +299,8 @@ func readBaseline(t *testing.T, path string) baseline {
 // checkBaseline fails t when run differs from the expected failures: a test
 // failing that is not listed, or a listed test that passes or no longer exists.
 // With PG_PROXY_REGRESS_UPDATE set it rewrites the fail entries of path from
-// run instead, keeping the header, the skip entries and existing reasons.
+// run instead, keeping the header, the skip and isolate entries and existing
+// reasons.
 func checkBaseline(t *testing.T, path string, b baseline, run installcheck) {
 	t.Helper()
 	var newFailures, newPasses, unknown []string
@@ -312,12 +333,8 @@ func checkBaseline(t *testing.T, path string, b baseline, run installcheck) {
 				fmt.Fprintf(&out, "%s %-28s # %s\n", kind, name, reason)
 			}
 		}
-		skipped := make([]string, 0, len(b.skipped))
-		for name := range b.skipped {
-			skipped = append(skipped, name)
-		}
-		slices.Sort(skipped)
-		writeEntries("skip", skipped, b.skipped)
+		writeEntries("skip", slices.Sorted(maps.Keys(b.skipped)), b.skipped)
+		writeEntries("isolate", slices.Sorted(maps.Keys(b.isolated)), b.isolated)
 		writeEntries("fail", run.results.failed(), b.failing)
 		require.NoError(t, os.WriteFile(path, []byte(out.String()), 0o644))
 		t.Logf("updated %s: %d new failures, %d new passes, %d removed", path, len(newFailures), len(newPasses), len(unknown))
