@@ -27,9 +27,6 @@ const (
 	numericNaN    = 0xC000
 	numericPosInf = 0xD000
 	numericNegInf = 0xF000
-
-	// maxArrayDims is PostgreSQL's MAXDIM.
-	maxArrayDims = 6
 )
 
 // pgEpochMicros is 2000-01-01 00:00:00 UTC, the PostgreSQL epoch, in Unix microseconds.
@@ -39,8 +36,11 @@ const pgEpochMicros = 946_684_800_000_000
 // prefix of the size bytes sent. It reports false, leaving the caller to fall
 // back to hex, when the type is unknown or v is malformed.
 func appendBinary(dst []byte, oid uint32, v []byte, size int) ([]byte, bool) {
-	if elem, ok := arrayElementOID(oid); ok {
-		return appendArray(dst, elem, v, size)
+	// Fixed-width scalars, the common case, skip the array type lookup.
+	if fixedWidth(oid) == 0 {
+		if elem, ok := arrayElementOID(oid); ok {
+			return appendArray(dst, elem, v, size)
+		}
 	}
 	if len(v) != size {
 		// Other scalars are shown whole or not at all; only text and arrays
@@ -59,56 +59,32 @@ func appendBinary(dst []byte, oid uint32, v []byte, size int) ([]byte, bool) {
 // appendScalar appends a complete binary value. quoteText quotes text values,
 // as array elements are, so that commas inside them cannot be read as separators.
 func appendScalar(dst []byte, oid uint32, v []byte, limit int, quoteText bool) ([]byte, bool) {
+	if w := fixedWidth(oid); w > 0 && len(v) != w {
+		return dst, false
+	}
 	switch oid {
 	case pgtype.BoolOID:
-		if len(v) != 1 || v[0] > 1 {
+		if v[0] > 1 {
 			return dst, false
 		}
 		return strconv.AppendBool(dst, v[0] == 1), true
 	case pgtype.Int2OID:
-		if len(v) != 2 {
-			return dst, false
-		}
 		return strconv.AppendInt(dst, int64(int16(binary.BigEndian.Uint16(v))), 10), true
 	case pgtype.Int4OID:
-		if len(v) != 4 {
-			return dst, false
-		}
 		return strconv.AppendInt(dst, int64(int32(binary.BigEndian.Uint32(v))), 10), true
 	case pgtype.Int8OID:
-		if len(v) != 8 {
-			return dst, false
-		}
 		return strconv.AppendInt(dst, int64(binary.BigEndian.Uint64(v)), 10), true
 	case pgtype.OIDOID:
-		if len(v) != 4 {
-			return dst, false
-		}
 		return strconv.AppendUint(dst, uint64(binary.BigEndian.Uint32(v)), 10), true
 	case pgtype.Float4OID:
-		if len(v) != 4 {
-			return dst, false
-		}
 		return appendFloat(dst, float64(math.Float32frombits(binary.BigEndian.Uint32(v))), 32), true
 	case pgtype.Float8OID:
-		if len(v) != 8 {
-			return dst, false
-		}
 		return appendFloat(dst, math.Float64frombits(binary.BigEndian.Uint64(v)), 64), true
 	case pgtype.UUIDOID:
-		if len(v) != 16 {
-			return dst, false
-		}
 		return appendUUID(dst, v), true
 	case pgtype.DateOID:
-		if len(v) != 4 {
-			return dst, false
-		}
 		return appendDate(dst, int32(binary.BigEndian.Uint32(v))), true
 	case pgtype.TimestampOID, pgtype.TimestamptzOID:
-		if len(v) != 8 {
-			return dst, false
-		}
 		return appendTimestamp(dst, int64(binary.BigEndian.Uint64(v)), oid == pgtype.TimestamptzOID)
 	case pgtype.NumericOID:
 		return appendNumeric(dst, v, limit)
@@ -138,58 +114,48 @@ func isTextType(oid uint32) bool {
 	return false
 }
 
-func arrayElementOID(oid uint32) (uint32, bool) {
+// fixedWidth returns the size of a fixed-width type's binary value, or 0.
+func fixedWidth(oid uint32) int {
 	switch oid {
-	case pgtype.BoolArrayOID:
-		return pgtype.BoolOID, true
-	case pgtype.Int2ArrayOID:
-		return pgtype.Int2OID, true
-	case pgtype.Int4ArrayOID:
-		return pgtype.Int4OID, true
-	case pgtype.Int8ArrayOID:
-		return pgtype.Int8OID, true
-	case pgtype.OIDArrayOID:
-		return pgtype.OIDOID, true
-	case pgtype.Float4ArrayOID:
-		return pgtype.Float4OID, true
-	case pgtype.Float8ArrayOID:
-		return pgtype.Float8OID, true
-	case pgtype.UUIDArrayOID:
-		return pgtype.UUIDOID, true
-	case pgtype.DateArrayOID:
-		return pgtype.DateOID, true
-	case pgtype.TimestampArrayOID:
-		return pgtype.TimestampOID, true
-	case pgtype.TimestamptzArrayOID:
-		return pgtype.TimestamptzOID, true
-	case pgtype.NumericArrayOID:
-		return pgtype.NumericOID, true
-	case pgtype.TextArrayOID:
-		return pgtype.TextOID, true
-	case pgtype.VarcharArrayOID:
-		return pgtype.VarcharOID, true
-	case pgtype.BPCharArrayOID:
-		return pgtype.BPCharOID, true
-	case pgtype.NameArrayOID:
-		return pgtype.NameOID, true
-	case pgtype.JSONArrayOID:
-		return pgtype.JSONOID, true
-	case pgtype.JSONBArrayOID:
-		return pgtype.JSONBOID, true
+	case pgtype.BoolOID:
+		return 1
+	case pgtype.Int2OID:
+		return 2
+	case pgtype.Int4OID, pgtype.OIDOID, pgtype.Float4OID, pgtype.DateOID:
+		return 4
+	case pgtype.Int8OID, pgtype.Float8OID, pgtype.TimestampOID, pgtype.TimestamptzOID:
+		return 8
+	case pgtype.UUIDOID:
+		return 16
+	}
+	return 0
+}
+
+// pgTypes maps array types to their element types. Lookups only read it, so
+// every session shares it.
+var pgTypes = pgtype.NewMap()
+
+func arrayElementOID(oid uint32) (uint32, bool) {
+	if t, ok := pgTypes.TypeForOID(oid); ok {
+		if array, ok := t.Codec.(*pgtype.ArrayCodec); ok {
+			return array.ElementType.OID, true
+		}
 	}
 	return 0, false
 }
 
 // appendArray appends array[len=N]{…} for a binary array whose prefix v was
-// copied. The header is trusted only if it is consistent: 0 to 6 dimensions,
-// flags 0 or 1, the expected element type and non-negative dimension lengths.
+// copied. The header is trusted only if it is consistent: flags 0 or 1, the
+// expected element type, and dimension lengths that are present, non-negative
+// and multiply to an array PostgreSQL could store. The dimension count is not
+// capped at PostgreSQL's MAXDIM, so a future larger limit still decodes.
 func appendArray(dst []byte, elem uint32, v []byte, size int) ([]byte, bool) {
 	if len(v) < 12 {
 		return dst, false
 	}
 	ndim := int32(binary.BigEndian.Uint32(v))
 	flags := int32(binary.BigEndian.Uint32(v[4:]))
-	if ndim < 0 || ndim > maxArrayDims || flags&^1 != 0 || binary.BigEndian.Uint32(v[8:]) != elem {
+	if ndim < 0 || flags&^1 != 0 || binary.BigEndian.Uint32(v[8:]) != elem {
 		return dst, false
 	}
 	rp := 12
@@ -218,7 +184,7 @@ func appendArray(dst []byte, elem uint32, v []byte, size int) ([]byte, bool) {
 	dst = append(dst, "]{"...)
 	start := len(dst)
 	shown := int64(0)
-	for ; shown < count && shown < ArrayElementLimit && len(dst)-start < ValueLimit; shown++ {
+	for ; shown < count && shown < arrayElementLimit && len(dst)-start < ValueLimit; shown++ {
 		if len(v)-rp < 4 {
 			if complete {
 				return dst, false

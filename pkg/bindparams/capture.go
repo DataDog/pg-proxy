@@ -13,7 +13,7 @@ const (
 	MaxParams = 256
 	// copyLimit bounds the bytes copied per value. It covers everything Render
 	// can show: ValueLimit bytes of text, hexLimit bytes of hex, or an array
-	// header and its first ArrayElementLimit small elements.
+	// header and its first arrayElementLimit small elements.
 	copyLimit = 512
 	// copyTotalLimit bounds the bytes copied per Bind, so a Bind with many large
 	// values costs no more to copy than TotalLimit can show. A value it cuts
@@ -31,7 +31,7 @@ type param struct {
 	oid         uint32
 	size        int32 // -1 for NULL
 	off, n, end uint32
-	binary      bool
+	format      int16
 }
 
 // Capture holds a copy of one Bind's parameters until the trace is rendered.
@@ -50,8 +50,8 @@ func (c *Capture) Recorded() bool {
 }
 
 // Record copies b's parameters, replacing any earlier capture. A value's type is
-// its non-zero OID in parseOIDs, else its OID in describedOIDs (the backend's
-// ParameterDescription), else unknown.
+// its non-zero OID in describedOIDs (the backend's ParameterDescription, which
+// resolves what Parse left unspecified), else its OID in parseOIDs, else unknown.
 func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	c.Reset()
 	c.recorded = true
@@ -78,12 +78,16 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	c.params = c.params[:len(values)]
 
 	formats := b.ParameterFormatCodes
-	allBinary := len(formats) == 1 && formats[0] == 1
 	off := 0
 	for i, v := range values {
 		p := &c.params[i]
 		*p = param{oid: typeOID(i, parseOIDs, describedOIDs), size: -1, off: uint32(off)}
-		p.binary = allBinary || len(formats) > 1 && i < len(formats) && formats[i] == 1
+		switch {
+		case len(formats) == 1:
+			p.format = formats[0]
+		case i < len(formats):
+			p.format = formats[i]
+		}
 		// pgproto3 leaves NULL values nil; an empty value is a non-nil empty slice.
 		if v == nil {
 			continue
@@ -109,7 +113,7 @@ func (c *Capture) Reset() {
 	if cap(c.data) > retainLimit {
 		c.data = nil
 	}
-	if cap(c.out) > TotalLimit+retainLimit {
+	if cap(c.out) > retainLimit {
 		c.out = nil
 	}
 	if cap(c.params) > MaxParams/4 {
@@ -122,11 +126,11 @@ func (c *Capture) Reset() {
 }
 
 func typeOID(i int, parseOIDs, describedOIDs []uint32) uint32 {
-	if i < len(parseOIDs) && parseOIDs[i] != 0 {
-		return parseOIDs[i]
-	}
-	if i < len(describedOIDs) {
+	if i < len(describedOIDs) && describedOIDs[i] != 0 {
 		return describedOIDs[i]
+	}
+	if i < len(parseOIDs) {
+		return parseOIDs[i]
 	}
 	return 0
 }

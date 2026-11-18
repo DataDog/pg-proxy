@@ -89,8 +89,8 @@ when constructing sessions directly) to `true` to enable it.
 
 With capture on, the root span carries one tag per parameter position,
 `db.parameters.0` through `db.parameters.n`, taken from the first Bind of the
-trace. Each value is decoded from its type: the non-zero type in Parse, else the
-type PostgreSQL reported for the statement in a ParameterDescription, else
+trace. Each value is decoded from its type: the type PostgreSQL reported for the
+statement in a ParameterDescription, else the non-zero type in Parse, else
 unknown.
 
 | Value | Tag value |
@@ -100,7 +100,7 @@ unknown.
 | Binary `bool`, `int2`, `int4`, `int8`, `oid`, `float4`, `float8`, `numeric`, `uuid`, `date`, `timestamp`, `timestamptz` | PostgreSQL's text form; timestamps are shown in UTC |
 | Binary `text`, `varchar`, `bpchar`, `name`, `json`, `jsonb`, `xml` | As text |
 | Binary arrays of those types | `array[len=N]{…}` with the first 10 elements; text elements are double-quoted |
-| Any other or malformed binary value | `\x` and the hex of the first 128 bytes, then `(+N bytes)` |
+| Any other type, malformed binary value, or format code other than text or binary | `\x` and the hex of the first 128 bytes, then `(+N bytes)` |
 
 The tags total at most about 4 KB and 256 positions. When a limit drops
 positions, the root also gets `db.parameters.truncated=true`. Invalid UTF-8 is

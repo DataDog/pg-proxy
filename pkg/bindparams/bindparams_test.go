@@ -8,7 +8,6 @@ package bindparams
 import (
 	"encoding/binary"
 	"math"
-	"math/big"
 	"strings"
 	"testing"
 	"time"
@@ -25,14 +24,14 @@ func render(t *testing.T, b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) m
 	var c Capture
 	c.Record(b, parseOIDs, describedOIDs)
 	tags := map[string]any{}
-	c.Render(TagFunc(func(key string, value any) {
+	c.Render(func(key string, value any) {
 		_, dup := tags[key]
 		require.False(t, dup, "tag %s set twice", key)
 		if s, ok := value.(string); ok {
 			require.True(t, utf8.ValidString(s), "tag %s is not valid UTF-8: %q", key, s)
 		}
 		tags[key] = value
-	}))
+	})
 	require.False(t, c.Recorded(), "Render must reset the capture")
 	return tags
 }
@@ -104,6 +103,7 @@ func TestRenderNumericMatchesPgtype(t *testing.T) {
 	m := pgtype.NewMap()
 	for _, text := range []string{
 		"0", "1", "-1", "12345678", "1.5", "-0.0001", "0.000000012", "123456789012345678901234567890.123456789",
+		strings.Repeat("9", 100),
 		"100000000000000000000", "10000", "99990000", "3.14159", "NaN", "Infinity", "-Infinity",
 	} {
 		t.Run(text, func(t *testing.T) {
@@ -177,9 +177,10 @@ func TestRenderTypeResolution(t *testing.T) {
 		parseOIDs, describedOIDs []uint32
 		want                     string
 	}{
-		{"parse OID", []uint32{pgtype.Int4OID}, []uint32{pgtype.Float4OID}, "7"},
-		{"described when parse is zero", []uint32{0}, []uint32{pgtype.Int4OID}, "7"},
-		{"described when parse is short", nil, []uint32{pgtype.Int4OID}, "7"},
+		{"described", []uint32{pgtype.Float4OID}, []uint32{pgtype.Int4OID}, "7"},
+		// PostgreSQL resolves a declared unknown, so the description wins.
+		{"described over declared unknown", []uint32{pgtype.UnknownOID}, []uint32{pgtype.Int4OID}, "7"},
+		{"parse when not described", []uint32{pgtype.Int4OID}, []uint32{0}, "7"},
 		{"unknown", nil, nil, `\x00000007`},
 	}
 	for _, tc := range cases {
@@ -192,9 +193,10 @@ func TestRenderTypeResolution(t *testing.T) {
 
 func TestRenderFormatCodes(t *testing.T) {
 	four := encode(t, pgtype.Int4OID, int32(7))
-	oids := []uint32{pgtype.Int4OID, pgtype.Int4OID}
-	b := &pgproto3.Bind{ParameterFormatCodes: []int16{0, 1}, Parameters: [][]byte{[]byte("7"), four}}
-	assert.Equal(t, map[string]any{"db.parameters.0": "7", "db.parameters.1": "7"}, render(t, b, oids, nil))
+	oids := []uint32{pgtype.Int4OID, pgtype.Int4OID, pgtype.Int4OID}
+	b := &pgproto3.Bind{ParameterFormatCodes: []int16{0, 1, 2}, Parameters: [][]byte{[]byte("7"), four, four}}
+	assert.Equal(t, map[string]any{"db.parameters.0": "7", "db.parameters.1": "7", "db.parameters.2": `\x00000007`},
+		render(t, b, oids, nil), "a format other than text or binary is shown as hex")
 }
 
 func TestRenderHexFallback(t *testing.T) {
@@ -266,11 +268,11 @@ func FuzzRender(f *testing.F) {
 		}
 		var c Capture
 		c.Record(&pgproto3.Bind{ParameterFormatCodes: []int16{format}, Parameters: [][]byte{v}}, []uint32{oid}, nil)
-		c.Render(TagFunc(func(key string, value any) {
+		c.Render(func(key string, value any) {
 			if s, ok := value.(string); ok && !utf8.ValidString(s) {
 				t.Fatalf("%s is not valid UTF-8: %q", key, s)
 			}
-		}))
+		})
 	})
 }
 
@@ -317,7 +319,7 @@ func TestRecordBoundsTheCopy(t *testing.T) {
 	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
 	assert.LessOrEqual(t, len(c.data), copyTotalLimit)
 	tags := map[string]any{}
-	c.Render(TagFunc(func(key string, value any) { tags[key] = value }))
+	c.Render(func(key string, value any) { tags[key] = value })
 	assert.Equal(t, strings.Repeat("\x00", ValueLimit)+"(+1048320 bytes)", tags["db.parameters.0"])
 	assert.LessOrEqual(t, cap(c.data), retainLimit, "large buffers are not kept")
 }
@@ -329,13 +331,13 @@ func TestRecordCopiesValues(t *testing.T) {
 	c.Record(&pgproto3.Bind{Parameters: [][]byte{buf}}, nil, nil)
 	copy(buf, "after!")
 	var got any
-	c.Render(TagFunc(func(_ string, value any) { got = value }))
+	c.Render(func(_ string, value any) { got = value })
 	assert.Equal(t, "before", got)
 }
 
 func TestRenderWithoutRecordDoesNothing(t *testing.T) {
 	var c Capture
-	c.Render(TagFunc(func(string, any) { t.Fatal("no tags expected") }))
+	c.Render(func(string, any) { t.Fatal("no tags expected") })
 }
 
 func TestRenderTruncatedArrayCopy(t *testing.T) {
@@ -347,13 +349,6 @@ func TestRenderTruncatedArrayCopy(t *testing.T) {
 	got := render(t, binaryBind(encode(t, pgtype.TextArrayOID, words)), []uint32{pgtype.TextArrayOID}, nil)["db.parameters.0"].(string)
 	assert.True(t, strings.HasPrefix(got, `array[len=50]{"wwww`), got)
 	assert.True(t, strings.HasSuffix(got, "…}"), got)
-}
-
-func TestNumericLargeIntegerAgainstBigInt(t *testing.T) {
-	n := new(big.Int)
-	n.SetString(strings.Repeat("9", 100), 10)
-	v := encode(t, pgtype.NumericOID, pgtype.Numeric{Int: n, Valid: true})
-	assert.Equal(t, strings.Repeat("9", 100), render(t, binaryBind(v), []uint32{pgtype.NumericOID}, nil)["db.parameters.0"])
 }
 
 // arrayOf builds a one-dimensional binary array of elem from raw element values.

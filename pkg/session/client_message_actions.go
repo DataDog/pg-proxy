@@ -30,12 +30,10 @@ const (
 // DecideClientMessageAction returns the set of actions to take to handle a message received
 // from a client to their Session. (See ClientMessageAction docs for the set of actions.)
 func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (ClientMessageAction, error) {
-	// Bind values are copied only for traces the tracer keeps.
-	sampled := s.enableTraceParameters && s.obsVals.traceState.Sampled()
 	return actions.DecideClientMessageAction(msg, s.actionState(), actions.Hooks{
 		MessageObserved: func(msg pgproto3.FrontendMessage) {
 			s.obsVals.traceState.AddMessage(msg)
-			if s.enableTraceParameters && observesClientMessage(msg, sampled) {
+			if s.enableTraceParameters && observesClientMessage(msg) {
 				s.observeClientMessage(msg)
 			}
 			if s.hooks.FrontendMessage != nil {

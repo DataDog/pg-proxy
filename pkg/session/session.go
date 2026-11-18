@@ -1409,7 +1409,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		if err != nil {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
 		}
-		if s.enableTraceParameters {
+		if len(s.paramTypes.describing) > 0 {
 			s.observeBackendMessage(msg)
 		}
 

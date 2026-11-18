@@ -11,7 +11,6 @@ import (
 	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"unicode/utf8"
 
@@ -92,19 +91,26 @@ func rootTags(tracer mocktracer.Tracer) []map[string]any {
 	return roots
 }
 
-func startMockTracer(t *testing.T) mocktracer.Tracer {
+func startMockTracer(t testing.TB) mocktracer.Tracer {
 	tracer := mocktracer.Start()
 	t.Cleanup(tracer.Stop)
 	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxydatadog.Tracer{}}))
 	return tracer
 }
 
-func TestBindParametersUseParseTypes(t *testing.T) {
-	tracer := startMockTracer(t)
-	_, client, postgres, _, closeSession := newRunningTestSessionWithBackend(t, func(cfg *Config) {
+// captureSession runs a session with parameter capture under a mock tracer.
+// Call closeSession before reading spans: it joins the session.
+func captureSession(t *testing.T) (tracer mocktracer.Tracer, client *pgproto3.Frontend, postgres *pgproto3.Backend, closeSession func()) {
+	tracer = startMockTracer(t)
+	_, client, postgres, _, closeSession = newRunningTestSessionWithBackend(t, func(cfg *Config) {
 		cfg.EnableTraceParameters = true
 	})
-	defer closeSession()
+	t.Cleanup(closeSession)
+	return tracer, client, postgres, closeSession
+}
+
+func TestBindParametersUseParseTypes(t *testing.T) {
+	tracer, client, postgres, closeSession := captureSession(t)
 	exchange(t, client, postgres, nil,
 		&pgproto3.Parse{Query: parameterQuery + " AND $2", ParameterOIDs: []uint32{pgtype.Int8OID, 0}},
 		&pgproto3.Bind{ParameterFormatCodes: []int16{1, 0}, Parameters: [][]byte{int8Param(-42), nil}},
@@ -124,11 +130,7 @@ func TestBindParametersUseParseTypes(t *testing.T) {
 // (Named statements take the same path, but need a pooled connection the test
 // backend does not have.)
 func TestBindParametersUseDescribedTypes(t *testing.T) {
-	tracer := startMockTracer(t)
-	_, client, postgres, _, closeSession := newRunningTestSessionWithBackend(t, func(cfg *Config) {
-		cfg.EnableTraceParameters = true
-	})
-	defer closeSession()
+	tracer, client, postgres, closeSession := captureSession(t)
 	described := []uint32{pgtype.Int8OID, pgtype.BoolOID}
 	exchange(t, client, postgres, described,
 		&pgproto3.Parse{Query: parameterQuery + " AND $2"},
@@ -148,11 +150,7 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 }
 
 func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
-	tracer := startMockTracer(t)
-	_, client, postgres, _, closeSession := newRunningTestSessionWithBackend(t, func(cfg *Config) {
-		cfg.EnableTraceParameters = true
-	})
-	defer closeSession()
+	tracer, client, postgres, closeSession := captureSession(t)
 	exchange(t, client, postgres, nil,
 		&pgproto3.Parse{Query: parameterQuery},
 		&pgproto3.Bind{Parameters: [][]byte{[]byte("first")}},
@@ -167,22 +165,6 @@ func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 	assert.Equal(t, "first", roots[0]["db.parameters.0"])
 }
 
-func TestBindParametersOnlyOnSampledRoots(t *testing.T) {
-	for _, tc := range parameterCaptureCases {
-		t.Run(tc.name, func(t *testing.T) {
-			tracer := startMockTracer(t)
-			runParameterQuery(t, tc.sql, tc.enable)
-			roots := rootTags(tracer)
-			require.Len(t, roots, 1)
-			if tc.wantParameters {
-				assert.Equal(t, privateParameter, roots[0]["db.parameters.0"])
-			} else {
-				assert.NotContains(t, roots[0], "db.parameters.0")
-			}
-		})
-	}
-}
-
 func TestDescribeTrackingIsBounded(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
 	for range maxPendingDescribes + 10 {
@@ -193,7 +175,7 @@ func TestDescribeTrackingIsBounded(t *testing.T) {
 	assert.Empty(t, s.paramTypes.describing, "unanswered describes are dropped at the end of the cycle")
 
 	for i := range maxDescribedStmts + 10 {
-		s.paramTypes.describing = append(s.paramTypes.describing, pendingDescribe{stmt: describedStmt{key: strconv.Itoa(i)}})
+		s.paramTypes.describing = append(s.paramTypes.describing, describedStmt{key: strconv.Itoa(i)})
 		s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int4OID}})
 		s.observeBackendMessage(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	}
@@ -203,7 +185,7 @@ func TestDescribeTrackingIsBounded(t *testing.T) {
 
 func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
-	s.paramTypes.describing = []pendingDescribe{{stmt: describedStmt{key: "a"}}, {stmt: describedStmt{key: "b"}}}
+	s.paramTypes.describing = []describedStmt{{key: "a"}, {key: "b"}}
 	reused := []uint32{pgtype.Int4OID}
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: reused})
 	reused[0] = pgtype.TextOID // pgproto3 reuses the slice for the next message
@@ -213,106 +195,50 @@ func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 		"a reply with no Describe left is ignored")
 }
 
-func TestDescribedTypesSkipFullyDeclaredStatements(t *testing.T) {
+// The unnamed statement's types last only as long as it does. Every unnamed
+// Parse, Close or simple Query replaces it, and in a pipeline a reply can
+// describe a statement that was already replaced.
+func TestUnnamedStatementTypesFollowTheStatement(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
-	s.paramTypes.describing = []pendingDescribe{{stmt: describedStmt{key: "a"}, declared: declaredPrefix([]uint32{pgtype.Int8OID})}}
-	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
-	assert.Empty(t, s.paramTypes.described, "Parse already declared every type")
-}
-
-func TestUnnamedStatementTypesAreForgottenWhenReplaced(t *testing.T) {
-	s := New(Config{EnableTraceParameters: true})
-	describe := func(oids ...uint32) {
-		s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
-		s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: oids})
+	describe := func() { s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}) }
+	reply := func() {
+		s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
 	}
-	s.observeClientMessage(&pgproto3.Parse{})
-	describe(pgtype.Int4OID)
-	assert.Equal(t, []uint32{pgtype.Int4OID}, s.paramTypes.unnamedDescribed)
+	current := func() []uint32 {
+		stmt, _, ok := s.findStmt("")
+		require.True(t, ok)
+		return s.describedOIDs(stmt)
+	}
 
-	s.observeClientMessage(&pgproto3.Parse{})
-	assert.Empty(t, s.paramTypes.unnamedDescribed)
+	describe()
+	reply()
+	assert.Equal(t, []uint32{pgtype.Int8OID}, current())
 
-	s.observeClientMessage(&pgproto3.Parse{ParameterOIDs: []uint32{pgtype.Int4OID}})
-	s.observeClientMessage(&pgproto3.Query{String: "SELECT 1"})
-	assert.Empty(t, s.paramTypes.unnamed, "a simple query destroys the unnamed statement")
-}
+	s.invalidateUnnamedStmt() // what an unnamed Parse, Close or Query does
+	assert.Nil(t, current())
 
-// In a pipeline, a reply can describe an unnamed statement that a later Parse
-// has already replaced; its types must not be taken for the new statement.
-func TestLateDescriptionOfReplacedUnnamedStatementIsDropped(t *testing.T) {
-	s := New(Config{EnableTraceParameters: true})
-	s.observeClientMessage(&pgproto3.Parse{Query: "SELECT $1"})
-	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
-	s.observeClientMessage(&pgproto3.Parse{Query: "SELECT $1::text"})
-	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
-	assert.Empty(t, s.paramTypes.unnamedDescribed)
-	stmt, _, ok := s.findStmt("")
-	require.True(t, ok)
-	assert.Nil(t, s.paramTypes.describedOIDs(stmt))
+	describe()
+	s.invalidateUnnamedStmt()
+	reply()
+	assert.Nil(t, current(), "a late reply for a replaced statement is dropped")
 }
 
 // A Bind naming a statement the proxy does not know must not borrow another
 // statement's types.
 func TestBindOfUnknownStatementHasNoTypes(t *testing.T) {
+	tracer := startMockTracer(t)
 	traceState := &query.TraceState{}
 	s := New(Config{EnableTraceParameters: true, TraceState: traceState})
-	s.observeClientMessage(&pgproto3.Parse{})
 	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
 
-	tracer := &recordingTracer{}
-	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: tracer}))
 	traceState.StartRootTrace(&pgproto3.Parse{Query: "SELECT 1"})
 	s.observeClientMessage(&pgproto3.Bind{PreparedStatement: "missing", ParameterFormatCodes: []int16{1}, Parameters: [][]byte{int8Param(7)}})
 	traceState.FinishRootTrace()
-	assert.Equal(t, `\x0000000000000007`, tracer.rootTags(0)["db.parameters.0"], "unknown type, so hex")
+	roots := rootTags(tracer)
+	require.Len(t, roots, 1)
+	assert.Equal(t, `\x0000000000000007`, roots[0]["db.parameters.0"], "unknown type, so hex")
 }
-
-// recordingTracer keeps the tags set on each root span, in start order. The
-// session sets root tags after replying to the client, so access is locked.
-type recordingTracer struct {
-	mu    sync.Mutex
-	roots []map[string]any
-}
-
-func (t *recordingTracer) StartRoot(string, string) (pgproxy.Span, bool) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.roots = append(t.roots, map[string]any{})
-	return recordingSpan{tracer: t, root: len(t.roots) - 1}, false
-}
-func (*recordingTracer) HasQueryContext(string) bool                       { return false }
-func (*recordingTracer) WarnNamedPreparedStatement(string, string, string) {}
-
-// rootTags returns the tags of the i-th root span, or nil.
-func (t *recordingTracer) rootTags(i int) map[string]any {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	if i >= len(t.roots) {
-		return nil
-	}
-	return t.roots[i]
-}
-
-// recordingSpan records tags on its root; children (root < 0) drop them.
-type recordingSpan struct {
-	tracer *recordingTracer
-	root   int
-}
-
-func (s recordingSpan) StartChild(string) pgproxy.Span {
-	return recordingSpan{tracer: s.tracer, root: -1}
-}
-func (s recordingSpan) SetTag(key string, value any) {
-	if s.root < 0 {
-		return
-	}
-	s.tracer.mu.Lock()
-	defer s.tracer.mu.Unlock()
-	s.tracer.roots[s.root][key] = value
-}
-func (recordingSpan) Finish(error) {}
 
 // fuzzOIDs are the types the fuzzer picks from: every type the renderer
 // decodes, arrays of them, types it does not, and no type at all.
@@ -371,9 +297,9 @@ func FuzzBindParameterCapture(f *testing.F) {
 	f.Add([]byte{8}, bytes.Repeat([]byte{0xFF}, 300), []byte{0}, false)                                // past MaxParams
 	f.Add([]byte{13}, bytes.Repeat(append(bytes.Repeat([]byte("x"), 300), 0xFF), 20), []byte{0}, true) // past the render cap
 
+	tracer := startMockTracer(f)
 	f.Fuzz(func(t *testing.T, types, values, formats []byte, describe bool) {
-		tracer := &recordingTracer{}
-		t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: tracer}))
+		tracer.Reset()
 		var oids []uint32
 		for _, b := range types {
 			oids = append(oids, fuzzOIDs[int(b)%len(fuzzOIDs)])
@@ -402,8 +328,9 @@ func FuzzBindParameterCapture(f *testing.F) {
 		}
 		forwarded := exchange(t, client, postgres, oids, sends...)
 		closeSession() // joins the session, so the Bind cycle's root has finished
-		tags := tracer.rootTags(bindRoot)
-		require.NotNil(t, tags, "the Bind cycle has a root span")
+		roots := rootTags(tracer)
+		require.Greater(t, len(roots), bindRoot, "the Bind cycle has a root span")
+		tags := roots[bindRoot]
 
 		require.NotNil(t, forwarded)
 		require.Equal(t, bind.Parameters, forwarded.Parameters, "values reach Postgres unchanged")

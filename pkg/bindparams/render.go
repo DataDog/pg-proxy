@@ -15,8 +15,8 @@ const (
 
 	// ValueLimit is the number of bytes of a value shown before "(+N bytes)".
 	ValueLimit = 256
-	// ArrayElementLimit is the number of array elements shown.
-	ArrayElementLimit = 10
+	// arrayElementLimit is the number of array elements shown.
+	arrayElementLimit = 10
 	// TotalLimit bounds the rendered bytes across all positions of a Bind.
 	TotalLimit = 4 << 10
 
@@ -33,26 +33,16 @@ var tagKeys = func() (keys [MaxParams]string) {
 	return keys
 }()
 
-// Tagger receives the rendered tags. pgproxy.Span implements it.
-type Tagger interface {
-	SetTag(key string, value any)
-}
-
-// TagFunc adapts a function to Tagger.
-type TagFunc func(key string, value any)
-
-// SetTag calls f.
-func (f TagFunc) SetTag(key string, value any) { f(key, value) }
-
-// Render sets one tag per captured position on tags, then resets the capture.
-// It does nothing if nothing was recorded.
-func (c *Capture) Render(tags Tagger) {
+// Render passes one tag per captured position to setTag, then resets the
+// capture. It does nothing if nothing was recorded.
+func (c *Capture) Render(setTag func(key string, value any)) {
 	if !c.recorded {
 		return
 	}
 	truncated := c.truncated
 	// Render every value into one buffer and convert it to a string once; each
-	// tag value is a substring of it, so the tags cost one allocation in all.
+	// tag value is a substring of it, so the values cost one allocation, plus
+	// one per tag to pass it as an interface.
 	out := c.out[:0]
 	rendered := 0
 	for i := range c.params {
@@ -72,11 +62,11 @@ func (c *Capture) Render(tags Tagger) {
 	start := 0
 	for i := range rendered {
 		end := int(c.params[i].end)
-		tags.SetTag(tagKeys[i], values[start:end])
+		setTag(tagKeys[i], values[start:end])
 		start = end
 	}
 	if truncated {
-		tags.SetTag(TruncatedTag, true)
+		setTag(TruncatedTag, true)
 	}
 	c.Reset()
 }
@@ -86,12 +76,15 @@ func appendParam(dst []byte, p *param, v []byte) []byte {
 		return append(dst, "null"...)
 	}
 	size := int(p.size)
-	if !p.binary {
+	switch p.format {
+	case 0:
 		return appendText(dst, v, size, ValueLimit)
+	case 1:
+		if out, ok := appendBinary(dst, p.oid, v, size); ok {
+			return out
+		}
 	}
-	mark := len(dst)
-	if out, ok := appendBinary(dst, p.oid, v, size); ok {
-		return out
-	}
-	return appendHex(dst[:mark], v, size)
+	// Malformed or unknown binary values, and any future format. dst still
+	// ends where it did, so this overwrites what a failed decode appended.
+	return appendHex(dst, v, size)
 }

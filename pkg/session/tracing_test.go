@@ -11,9 +11,7 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/DataDog/dd-trace-go/v2/ddtrace/mocktracer"
 	pgproxy "github.com/DataDog/pg-proxy"
-	proxydatadog "github.com/DataDog/pg-proxy/pkg/datadog"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
 	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -52,29 +50,9 @@ func runParameterQuery(t *testing.T, sql string, enable bool) {
 		cfg.EnableTraceParameters = enable
 	})
 	defer closeSession()
-	client.Send(&pgproto3.Parse{Query: sql})
-	client.Send(&pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}})
-	client.Send(&pgproto3.Execute{})
-	client.Send(&pgproto3.Sync{})
-	require.NoError(t, client.Flush())
-	for i := range 4 {
-		msg, err := postgres.Receive()
-		require.NoError(t, err)
-		if i == 1 {
-			bind, ok := msg.(*pgproto3.Bind)
-			require.True(t, ok)
-			require.Equal(t, [][]byte{[]byte(privateParameter)}, bind.Parameters)
-		}
-	}
-	responses := []pgproto3.BackendMessage{&pgproto3.ParseComplete{}, &pgproto3.BindComplete{}, &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")}, &pgproto3.ReadyForQuery{TxStatus: 'I'}}
-	for _, response := range responses {
-		postgres.Send(response)
-	}
-	require.NoError(t, postgres.Flush())
-	for range responses {
-		_, err := client.Receive()
-		require.NoError(t, err)
-	}
+	bind := &pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}}
+	forwarded := exchange(t, client, postgres, nil, &pgproto3.Parse{Query: sql}, bind, &pgproto3.Execute{}, &pgproto3.Sync{})
+	require.Equal(t, bind.Parameters, forwarded.Parameters)
 	closeSession() // Join the session before reading its finished spans.
 }
 
@@ -119,9 +97,7 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
 	for _, tc := range parameterCaptureCases {
 		t.Run(tc.name, func(t *testing.T) {
-			tracer := mocktracer.Start()
-			t.Cleanup(tracer.Stop)
-			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxydatadog.Tracer{}}))
+			tracer := startMockTracer(t)
 			runParameterQuery(t, tc.sql, tc.enable)
 			foundRoot, foundParameters := false, false
 			for _, span := range tracer.FinishedSpans() {
