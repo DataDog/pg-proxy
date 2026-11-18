@@ -8,7 +8,6 @@
 package regress
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -36,29 +35,9 @@ const regressDir = "/usr/local/pgsql/regress"
 const scheduleFile = "/tmp/pg-proxy-schedule"
 
 var (
-	// tapResult matches a TAP result line (PostgreSQL 16 and later), such as
-	// "not ok 12    + int8    25 ms".
-	tapResult = regexp.MustCompile(`^(ok|not ok)\s+\d+\s+[-+]\s+(\S+)`)
-	// plainResult matches an older result line, such as
-	// "test int8    ... FAILED   25 ms" or "     int8    ... ok   25 ms".
-	plainResult = regexp.MustCompile(`^(?:test\s+|\s+)(\S+)\s+\.\.\.\s+(ok|FAILED|failed \(ignored\))`)
 	// diffHeader starts the section of regression.diffs for one test.
 	diffHeader = regexp.MustCompile(`^diff .* \S*/results/(\S+)\.out$`)
 )
-
-// results maps each test name to whether it passed.
-type results map[string]bool
-
-func (r results) failed() []string {
-	var names []string
-	for name, passed := range r {
-		if !passed {
-			names = append(names, name)
-		}
-	}
-	slices.Sort(names)
-	return names
-}
 
 // installcheck is the outcome of one pg_regress run.
 type installcheck struct {
@@ -152,10 +131,12 @@ func runInstallcheck(t *testing.T, v *pgVersion, port uint16, volume, schedule, 
 	})
 	testcontainers.CleanupContainer(t, runner)
 	require.NoError(t, err, "start pg_regress")
+	var exitCode int
 	for {
 		state, err := runner.State(ctx)
 		require.NoError(t, err, "pg_regress did not finish")
 		if !state.Running {
+			exitCode = state.ExitCode
 			break
 		}
 		time.Sleep(time.Second)
@@ -166,18 +147,18 @@ func runInstallcheck(t *testing.T, v *pgVersion, port uint16, volume, schedule, 
 	output := saveContainerFile(t, runner, "", filepath.Join(dir, "output.txt"))
 	diffs := saveContainerFile(t, runner, regressDir+"/regression.diffs", filepath.Join(dir, "regression.diffs"))
 
-	parsed := results{}
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		if match := tapResult.FindStringSubmatch(scanner.Text()); match != nil {
-			parsed[match[2]] = match[1] == "ok"
-		} else if match := plainResult.FindStringSubmatch(scanner.Text()); match != nil {
-			parsed[match[1]] = match[2] != "FAILED"
-		}
-	}
+	parsed := parseResults(output)
 	t.Logf("PostgreSQL %s: %d tests, %d failed; output and diffs in %s", v.Version, len(parsed), len(parsed.failed()), dir)
-	if len(parsed) == 0 {
-		t.Fatalf("pg_regress reported no tests:\n%s", output)
+	// pg_regress exits 0 when every test passes, 1 when some fail, and 2 on errors
+	// such as a lost server connection. A run that stops early or prints a result
+	// line the parsers do not recognize must not count its missing tests as
+	// passing, nor let PG_PROXY_REGRESS_UPDATE drop their fail entries.
+	if exitCode != 0 && exitCode != 1 {
+		t.Fatalf("pg_regress exited with code %d; output in %s:\n%s", exitCode, dir, truncateLines(output, 40))
+	}
+	if missing := missingResults(schedule, parsed); len(missing) > 0 {
+		t.Fatalf("pg_regress reported no result for %d scheduled tests: %s; output in %s",
+			len(missing), strings.Join(missing, ", "), dir)
 	}
 	return installcheck{results: parsed, diffs: diffSections(diffs)}
 }
