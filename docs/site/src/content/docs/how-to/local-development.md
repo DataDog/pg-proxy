@@ -94,7 +94,11 @@ Without password authentication, `pg-proxy` trusts any client on the local machi
 In another terminal:
 
 ```sh
-psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' -At -c 'select 1'
+psql \
+  --dbname 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' \
+  --no-align \
+  --tuples-only \
+  --command 'select 1'
 ```
 
 The result is `1`.
