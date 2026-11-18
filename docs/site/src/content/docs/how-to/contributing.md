@@ -105,14 +105,14 @@ By default only the newest version runs. Set `PG_PROXY_REGRESS_PG_MAJORS=14,17`,
 
 - `skip`: left out of the schedule because PG Proxy cannot pass it by design, such as large-object functions or `SET ROLE` across transactions.
 - `isolate`: left out of the schedule because its failure would break later tests. These are not established as by design and are worth re-checking as PG Proxy improves.
-- `fail`: runs and is expected to fail.
+- `fail`: runs and is expected to fail. Its `diff=<lines>` field records how many lines of its output differ from PostgreSQL's expected output.
 
-The run fails when a test fails without a `fail` entry, when a `fail` entry passes, or when a scheduled test reports no result. Update the baseline in the same change that fixes or breaks compatibility. `PG_PROXY_REGRESS_UPDATE=1` rewrites the `fail` entries from a run and keeps the other entries and their reasons.
+The run fails when a test fails without a `fail` entry, when a `fail` entry passes, when a scheduled test reports no result, or when a `fail` entry's diff size changes. A larger diff means the test got worse; a smaller one means it improved, and its count should be lowered so a later regression is caught. Update the baseline in the same change that fixes or breaks compatibility. `PG_PROXY_REGRESS_UPDATE=1` rewrites the `fail` entries and their counts from a run and keeps the other entries and their reasons.
 
 | Variable | Effect |
 | --- | --- |
 | `PG_PROXY_REGRESS_PG_MAJORS` | Comma-separated major versions from `versions.json`, or `all` (default: the newest) |
-| `PG_PROXY_REGRESS_UPDATE` | Rewrite the `fail` entries of each baseline from this run |
+| `PG_PROXY_REGRESS_UPDATE` | Rewrite the `fail` entries of each baseline and their diff counts from this run |
 | `PG_PROXY_REGRESS_ARTIFACTS` | Directory for `pg_regress` output and `regression.diffs` (default: a new temporary directory, logged) |
 | `PG_PROXY_REGRESS_BUILD_LOG` | Print the image build log |
 | `PG_PROXY_REGRESS_PREBUILT` | `true` uses an image already built under `pg-proxy.localhost/regress:<version>` instead of building it; CI builds it beforehand with a layer cache |
