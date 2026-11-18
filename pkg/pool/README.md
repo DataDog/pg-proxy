@@ -222,8 +222,7 @@ leader we already replaced. There is no general age limit on kept SQL leaders or
 cached credential results. The start-time check protects a **Patroni recovery**;
 it does not run against every ordinary Patroni leader change. Repeated polls
 rejected for missing IP coverage also keep the old route rather than automatically
-falling back. Probe timeouts do not cover these cases. Banlist integration must
-also check the retained-SQL and Patroni-recovery paths.
+falling back. Probe timeouts do not cover these cases.
 
 See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 [health_worker_test.go](health_worker_test.go) for scheduling and publication tests.
@@ -233,5 +232,5 @@ See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed
 SQL and Patroni snapshots for a replacement primary. It reports signed speedup,
 without downtime durations or percentages, using the completed-snapshot mismatch
-aggregate. See [SQL snapshot timing](../../docs/sql-potential-timing.md) for the
+aggregate. See [SQL snapshot timing](sql-potential-timing.md) for the
 snapshot boundary, lifecycle rules, and how to compare it with hybrid timing.

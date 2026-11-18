@@ -81,7 +81,7 @@ These names use the prefix `datadog.pg_proxy.` and are emitted through the proce
 
 A high waiting count together with an acquired count near the pool maximum suggests pool pressure. Low PostgreSQL CPU alone does not rule it out: open transactions can retain connections between statements.
 
-In the app integration, backend pool metrics use `database` for the configured backend name and `database_cluster` for the cluster key. Session metrics describe the client-facing logical database. Account for proxy instances and `direct_pool` when aggregating pool gauges.
+Backend pool metrics use `database` for the configured backend name and `database_cluster` for the cluster key. Session metrics describe the client-facing logical database. Account for proxy instances and `direct_pool` when aggregating pool gauges.
 
 ## Traffic mirroring
 
@@ -104,7 +104,7 @@ Use `-telemetry datadog` for native DogStatsD export. The public StatsD client
 implements `MetricsClient` directly, preserving distributions, timing units,
 and sampling. `pkg/datadog.Start` can create it or reuse a supplied client.
 
-Set `OTEL_METRICS_EXPORTER=otlp` to enable OTLP/HTTP metric export in the OSS
+Set `OTEL_METRICS_EXPORTER=otlp` to enable OTLP/HTTP metric export in the `pg-proxy`
 binary. `OTEL_METRIC_EXPORT_INTERVAL` controls the interval in milliseconds
 (default `60000`); `1000` is useful for local verification. The provider also
 flushes on shutdown. Use a receiver with a metrics pipeline, then run queries

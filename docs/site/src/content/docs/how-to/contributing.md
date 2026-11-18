@@ -19,7 +19,7 @@ Include as much information as possible.
 
 To help us pinpoint the issue, please include:
 
-- **PG Proxy version:** the release tag or commit SHA you built from. For a built binary, `go version -m ./pg-proxy` prints the module version.
+- **PG Proxy version:** the commit SHA you built from (`git rev-parse HEAD` in your checkout).
 - **PostgreSQL version** of the backend (`SELECT version();`).
 - **Machine:** operating system, architecture, and Go version (`go version`).
 - **Client:** the driver or tool and its version (for example pgx, psql, JDBC).
@@ -43,7 +43,7 @@ You need:
 - A C toolchain: CI builds with `CGO_ENABLED=1`.
 - Docker, for the integration tests. They start PostgreSQL in a container.
 
-This repository does not use Bazel or generated `BUILD` files; the standard Go tooling is all you need. To build and run the proxy against your own PostgreSQL, follow [Local development](../local-development/).
+The standard Go tooling is all you need. To build and run the proxy against your own PostgreSQL, follow [Local development](../local-development/).
 
 ## Before you open a pull request
 
@@ -61,7 +61,7 @@ go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
 
 If you changed the documentation site, follow [Contribute to the documentation](../documentation-contributing/) and run its static build, which checks links.
 
-The `test/integration` suite runs the standalone binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status.
+The `test/integration` suite runs the `pg-proxy` binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status.
 
 Detecting a client that disconnects while waiting for a backend connection relies on Linux `POLLRDHUP`, so that test is skipped on other platforms. From macOS, run the full suite in a Linux container that uses the host's Docker:
 
@@ -69,12 +69,34 @@ Detecting a client that disconnects while waiting for a backend connection relie
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
 ```
 
+### Run the PostgreSQL-backed tests against your own database
+
+The `cmd/pg-proxy` test uses the shared `internal/itest` PostgreSQL container fixture.
+GitHub Actions runs authentication, TLS, cancellation, and the other integration
+tests together with race detection. It uses public Docker Hub images by default:
+
+```sh
+go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+```
+
+Alternatively, set `PG_PROXY_TEST_DATABASE_URL` to use an external disposable
+PostgreSQL instance with superuser access. The suite creates databases and
+fixture roles, so never use a shared or production database:
+
+```sh
+PG_PROXY_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' \
+  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+```
+
+The `integration` build tag is required in both cases. The normal unit-test
+command does not execute these PostgreSQL-backed tests.
+
 ## Guidelines
 
 - **Tests:** include tests with every change. Bug fixes should include a test that fails without the fix. Changes that reach PostgreSQL should be covered by an integration test.
 - **License headers:** every Go file, including tests, needs the header in [.licenserc.yaml](https://github.com/DataDog/pg-proxy/blob/main/.licenserc.yaml). Run the `license-eye` command above with `header fix` to add missing headers.
 - **Dependencies:** PG Proxy uses public dependencies only. Datadog imports are limited to publicly released modules. Optional public Datadog SDK integrations live in `pkg/datadog`; integrations with private services belong in the embedding application. If you add or update a dependency, update [LICENSE-3rdparty.csv](https://github.com/DataDog/pg-proxy/blob/main/LICENSE-3rdparty.csv) and make sure its license is compatible with Apache-2.0.
-- **Configuration:** for new settings, follow [Extending PG Proxy configuration](https://github.com/DataDog/pg-proxy/blob/main/docs/extending-configuration.md).
+- **Configuration:** for new settings, follow [Adapting configuration](../../reference/configuration/adapting-configuration/).
 - **Documentation:** update the README or the documentation site when you change behavior, configuration, or metric names.
 - **Scope:** keep pull requests focused. Several small pull requests are easier to review than one large one.
 

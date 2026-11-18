@@ -35,8 +35,6 @@ That also means load shedding does not reclaim connections held by long-running 
 
 ## Workload priority
 
-Priority support for the OSS release is still under review. This draft describes the current library interfaces; the client option is omitted from the published reference for now.
-
 Clients can supply `pg_proxy.priority` through their connection's startup options. Priorities range from `0` (highest) to `5` (lowest), with `3` as the default. PG Proxy passes that priority to the backend load-shedding policy.
 
 A policy could use this to reject background work before interactive requests. The priority value alone does not reserve capacity, change PostgreSQL query scheduling, or guarantee that a request will be accepted. Its effect depends on the policy supplied by the application.
@@ -49,7 +47,7 @@ Retrying immediately can keep the system overloaded. Applications should bound t
 
 ## Where the policy comes from
 
-The older memory-derived session cap is being deprecated. It should not be the basis of a new integration. Explicit session caps and load-shedding policy are separate controls; retiring that cap does not automatically enable load shedding.
+Session caps and load-shedding policy are separate controls; setting a session cap does not enable load shedding.
 
 The library supplies the checks and protocol behavior. The embedding application supplies the policy that decides when to admit or reject work. It might use resource usage, the time spent waiting for backend connections, or a concurrency budget.
 

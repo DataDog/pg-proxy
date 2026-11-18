@@ -7,13 +7,13 @@ title: "Run in production"
 description: "Deploy the PG Proxy binary with TLS, password authentication, sizing, telemetry, and safe restarts."
 ---
 
-This guide takes the OSS binary from the [local development](../local-development/) setup to a shared or production environment. It covers client TLS and authentication, backend connections, sizing, telemetry, health checks, and restarts.
+This guide takes the `pg-proxy` binary from the [local development](../local-development/) setup to a shared or production environment. It covers client TLS and authentication, backend connections, sizing, telemetry, health checks, and restarts.
 
 If you need features the binary does not configure, such as discovered replicas with health checks, traffic mirroring, or your own authentication, embed the library instead. See [Go library configuration](../../reference/configuration/library/).
 
 ## 1. Build the binary
 
-Build from a tagged commit or a known `main` commit with Go 1.26 or newer and CGO enabled:
+There are no releases yet. Build from a known `main` commit, and record it, with Go 1.26 or newer and CGO enabled:
 
 ```sh
 git clone https://github.com/DataDog/pg-proxy.git
@@ -32,7 +32,7 @@ Outside loopback, the binary requires password authentication, and password auth
 - TLS 1.2 and 1.3 are supported.
 - The binary loads the pair once at startup, so a renewed certificate needs a restart. Plan renewals with the [restart process](#7-restart-and-roll-out-changes) below.
 
-See [client TLS](https://github.com/DataDog/pg-proxy/blob/main/docs/client-connections.md#standalone-tls) for the full set of TLS settings.
+See [client TLS](../../reference/configuration/client-tls/#pg-proxy-binary) for the full set of TLS settings.
 
 ## 3. Write the configuration
 
@@ -80,17 +80,17 @@ users:
 
 **Backends.** Use `sslmode: verify-full` so the proxy checks the backend's certificate. Every client of a logical database shares that database's backend account, so its PostgreSQL permissions apply to all of them. Use separate backend accounts and routes when clients need different permissions. Set server-side limits such as `statement_timeout` in `connection_options`; see [Timeouts](../../reference/configuration/timeouts/).
 
-**Client users.** Each user lists the logical databases it can reach. Unknown users and unlisted databases are denied. Prefer `scram_sha_256` verifiers over plaintext `password` values, so the file never holds a client's actual password. The [client authentication guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credentials) shows how to generate a verifier.
+**Client users.** Each user lists the logical databases it can reach. Unknown users and unlisted databases are denied. Prefer `scram_sha_256` verifiers over plaintext `password` values, so the file never holds a client's actual password. The [client authentication guide](../../reference/configuration/client-authentication/#credentials) shows how to generate a verifier.
 
-**Keep secrets out of the file.** The example reads the backend password from `password_file`. Credentials can also come from environment variables; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). Make secret files readable only by the user that runs the proxy, for example `chmod 600`. If you keep any credentials inline, protect the configuration file the same way and keep it out of version control.
+**Keep secrets out of the file.** The example reads the backend password from `password_file`. Credentials can also come from environment variables; see [credential references](../../reference/configuration/client-authentication/#credential-references). Make secret files readable only by the user that runs the proxy, for example `chmod 600`. If you keep any credentials inline, protect the configuration file the same way and keep it out of version control.
 
 **Replicas.** To send eligible reads to replicas, list them under `clusters[].replicas` and add `read_clusters` to the logical database. The binary's replicas are static: each must accept a connection at startup, and there are no replica health checks. If a replica checkout fails, the read falls back to the primary. See [Read routing](../../explanation/read-routing/) for an example and its consistency limits.
 
-Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../local-development/#settings) lists the other options.
+Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../../reference/configuration/configuration-file/) lists the other options.
 
 ## 4. Size pools and sessions
 
-Three limits are involved:
+Four limits are involved:
 
 | Limit | Where it is set | What it caps |
 | --- | --- | --- |

@@ -1,11 +1,11 @@
-<!--
-Unless explicitly stated otherwise all files in this repository are licensed
-under the Apache-2.0 License.
-This product includes software developed at Datadog (https://www.datadoghq.com/)
-Copyright 2026-Present Datadog, Inc.
--->
-
-# Adapting configuration to your application
+---
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+title: "Adapting configuration"
+description: "Change or replace parts of the PG Proxy configuration schema in a Go application that embeds the library."
+---
 
 You can change an existing field; you do not have to add another section. If you
 just want a different value, set it on the decoded config before building the
@@ -13,7 +13,7 @@ proxy. For example, `cfg.Databases[0].MaxConns = 20` changes that database's poo
 limit. Changing the struct after creating a pool does not reconfigure the pool.
 
 Changing a field's type or its meaning in a config file takes a little more
-work. The library's [`Config`](../pkg/config/config.go) has concrete Go types,
+work. The library's [`Config`](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/config.go) has concrete Go types,
 so your application needs its own type for the part that differs, then a small
 conversion into the library's config. The rest can use the library types as-is.
 
@@ -39,7 +39,7 @@ The library accepts a password directly. Your application instead reads
 The connection and pool fields still mean the same thing.
 
 In your application, define the database type you want to read. In these snippets,
-`pgconfig` is this library's [`pkg/config`](../pkg/config) package:
+`pgconfig` is this library's [`pkg/config`](https://github.com/DataDog/pg-proxy/tree/main/pkg/config) package:
 
 ```go
 type Database struct {
@@ -70,7 +70,7 @@ type AppConfig pgconfig.ConfigSections[
 
 This defines a new type with the shared fields, so `cfg.Databases` and
 `AppConfig{Databases: ...}` still work directly. Your type can have its own methods;
-it does not inherit the standalone config's credential validation. Here, only the
+it does not inherit `Config.ValidateCredentials`. Here, only the
 database type differs. The other sections keep their library types.
 
 Embedding `pgconfig.Database` would also accept an inline `password`, which this
@@ -117,7 +117,7 @@ func (c AppConfig) LibraryConfig() (pgconfig.Config, error) {
 ```
 
 The resulting databases can go straight to
-[`pool.PGXConfig`](../pkg/pool/config.go). The pool code receives a username and
+[`pool.PGXConfig`](https://github.com/DataDog/pg-proxy/blob/main/pkg/pool/config.go). The pool code receives a username and
 password; it does not need to know where the password came from. This conversion
 reuses the maps and slices in the unchanged sections, so treat the input as
 immutable once you hand the result to the proxy.
@@ -126,7 +126,7 @@ immutable once you hand the result to the proxy.
 
 Use your own reader to decode into `AppConfig`. The library's `ReadJSON` and
 `ReadYAML` read the library type and will reject `password_env`. Keep the same
-checks as the [library readers](../pkg/config/json.go): use
+checks as the [library readers](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/json.go): use
 `DisallowUnknownFields()` for JSON or `KnownFields(true)` for YAML, and reject
 anything after the first document. Return fixed decode errors, since parser
 errors can include input values that contain a misplaced password. After decoding,
@@ -144,8 +144,8 @@ you just resolved. Convert again when you reload the file or refresh credentials
 changing an environment variable alone does not update an existing pool.
 
 This custom format belongs to your application. The
-[OSS binary](../README.md#oss-binary) uses the same pattern for its own
-[credential references](client-authentication.md#credential-references):
+[`pg-proxy` binary](../../../how-to/local-development/) uses the same pattern for its own
+[credential references](../client-authentication/#credential-references):
 it reads `password_env` and similar fields next to `password`, not in a
 `credentials` section, so it will not read the format in this example. See
 `cmd/pg-proxy/credentials.go` for a complete reader.
@@ -153,7 +153,7 @@ it reads `password_env` and similar fields next to `password`, not in a
 ## When the library itself should change
 
 If the new field or behavior would be useful to other proxy applications, add it
-to the relevant struct in [`config.go`](../pkg/config/config.go) and connect it
+to the relevant struct in [`config.go`](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/config.go) and connect it
 to the code that uses it. Keep existing names and defaults so old files keep
 working. Decide what omitted and zero values mean; `ReadCluster.Weight` uses a
 pointer because those cases have different meanings.

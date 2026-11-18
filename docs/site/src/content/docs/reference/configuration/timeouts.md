@@ -18,7 +18,7 @@ Connection setup, waiting for a pooled connection, and executing SQL are separat
 
 ## Backend pool setting
 
-In the OSS binary's configuration file, add `connection_options` to the relevant `databases` entry:
+In the `pg-proxy` configuration file, add `connection_options` to the relevant `databases` entry:
 
 ```yaml
 databases:
@@ -33,7 +33,7 @@ databases:
       statement_timeout: "5s"
 ```
 
-This is a database-section example; retain the file's `clusters`, `logical_databases`, and `proxy` settings. See [OSS binary settings](../../../how-to/local-development/#settings). The options are supplied when opening backend connections. A unitless statement timeout is measured in milliseconds; `0` disables it. Specify a unit to make the intended duration clear.
+This is a database-section example; retain the file's `clusters`, `logical_databases`, and `proxy` settings. See [Configuration file](../../../reference/configuration/configuration-file/). The options are supplied when opening backend connections. A unitless statement timeout is measured in milliseconds; `0` disables it. Specify a unit to make the intended duration clear.
 
 These backend options are separate from the `pg_proxy.*` options in a client's connection string. The portable server composition does not forward arbitrary client startup settings to the backend.
 
@@ -63,6 +63,20 @@ PostgreSQL documents the exact [statement timeout semantics](https://www.postgre
 
 ## Shutdown grace period
 
-The OSS binary's `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) bounds session and pool cleanup after `SIGINT` or `SIGTERM`. It accepts a positive Go duration string, such as `30s` or `2m`. Omitted or empty values use `30s`; zero, negative, invalid, and overflowing durations fail at startup.
+In the `pg-proxy` binary, `proxy.shutdown_grace_period` (JSON: `shutdownGracePeriod`) bounds session and pool cleanup after `SIGINT` or `SIGTERM`. It accepts a positive Go duration string, such as `30s` or `2m`. Omitted or empty values use `30s`; zero, negative, invalid, and overflowing durations fail at startup.
 
 This limit starts when shutdown begins, not when a transaction starts. It does not change statement or connection timeouts. Give the service manager a longer stop timeout so it does not kill the process before cleanup and telemetry flushing finish. See [Run in production](../../../how-to/run-in-production/#7-restart-and-roll-out-changes).
+
+## Fixed limits in the binary
+
+These limits are built into the `pg-proxy` binary and cannot be configured.
+
+| Limit | Value | Behavior |
+| --- | --- | --- |
+| Connection startup | 10 seconds | TLS, startup, and authentication must finish within this time, or the connection is closed. The limit ends once the session starts; it does not limit queries or session length. |
+| Pending connections | 100 | At most 100 connections can be in startup at once. More connections are closed at once. Established sessions do not count. |
+| Authentication message size | 16 KiB | Larger messages during authentication fail the connection. Messages after authentication have no size limit. |
+| Connection reset on release | 5 seconds | If the reset that runs when a backend connection goes back to the pool takes longer, the connection is closed. See [Transaction pooling](../../../explanation/pooling/#session-state-belongs-to-the-backend). |
+| Telemetry flush on shutdown | 5 seconds | OpenTelemetry providers have this long to send buffered data after sessions close. |
+
+Applications that embed the library set the first three with `server.Config.StartupTimeout`, `MaxPendingConnections`, and `AuthenticationMessageLimit`. Each defaults to `0`, which means no limit. See [Go library configuration](../library/).

@@ -13,15 +13,19 @@ Graceful shutdown gives active transactions an opportunity to finish before the 
 
 The application stops accepting new connections and signals existing sessions to drain. A session that has no active backend work can close promptly. A busy session continues processing until it reaches an idle state that is safe to release.
 
-At that point, the proxy sends an administrative-shutdown error and closes the client connection. The client or its connection pool must establish a new connection to an available proxy. Sessions and open transactions are not transferred to another process.
+At that point, the proxy sends this error and closes the client connection:
 
-This describes the current PG Proxy library's drain implementation. Requiring reconnection on shutdown is not a rule of transaction pooling or the PostgreSQL protocol; other implementations can support connection handoff during a restart.
+```text
+FATAL 57P01: Pg-proxy session has been terminated. Reconnect to continue.
+```
+
+SQLSTATE `57P01` is `admin_shutdown`, the same code PostgreSQL sends when its server shuts down. Most drivers and connection pools already treat it as a reason to reconnect. Because the proxy waits until the session is idle, no transaction is lost: the client can reconnect and run its next transaction on another proxy. Sessions are not handed off to another process.
 
 ## Deadlines still apply
 
 The application controls how long it waits for sessions and pools to close. An unfinished transaction, including a client idle inside a transaction, can prevent draining from completing within that time. Forced termination, network failures, and shutdown deadlines can still interrupt work.
 
-The local reference binary handles `SIGINT` and `SIGTERM`, stops acceptance, and allows up to `proxy.shutdown_grace_period` for cleanup (30 seconds by default). Set a positive duration such as `30s` or `2m` in YAML, or `shutdownGracePeriod` in JSON. If cleanup exceeds that deadline, it reports an error and exits unsuccessfully. This is the example's policy, not a fixed library-wide grace period.
+The `pg-proxy` binary handles `SIGINT` and `SIGTERM`, stops acceptance, and allows up to `proxy.shutdown_grace_period` for cleanup (30 seconds by default). Set a positive duration such as `30s` or `2m` in YAML, or `shutdownGracePeriod` in JSON. If cleanup exceeds that deadline, it reports an error and exits unsuccessfully. This is the binary's policy, not a fixed library-wide grace period.
 
 ## Client behavior matters
 

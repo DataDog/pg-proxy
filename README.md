@@ -78,7 +78,7 @@ Check the configuration without starting the proxy:
 
 This runs local startup checks, including credential references and TLS files,
 but does not check database connectivity or listener availability. See the
-[validation guide](docs/site/src/content/docs/how-to/local-development.md#settings)
+[local development guide](docs/site/src/content/docs/how-to/local-development.md#3-configure-and-start-the-proxy)
 for details.
 
 Run it:
@@ -102,7 +102,7 @@ the backend username. To deploy it, follow
 The full docs live in [`docs/site`](docs/site/src/content/docs/index.md):
 
 - [Features](docs/site/src/content/docs/features.md) and [limitations](docs/site/src/content/docs/reference/limitations.md)
-- [Configuration settings](docs/site/src/content/docs/how-to/local-development.md#settings) and the [config schema](pkg/config/README.md)
+- [Configuration file](docs/site/src/content/docs/reference/configuration/configuration-file.md) and [flags](docs/site/src/content/docs/reference/configuration/command-line.md)
 - [Telemetry](docs/site/src/content/docs/reference/observability/index.md): OpenTelemetry and Datadog
 - [Transaction-pooling compatibility](docs/site/src/content/docs/reference/compatibility.md)
 - [Using the Go library](docs/site/src/content/docs/reference/configuration/library.md) and [package overview](docs/site/src/content/docs/reference/packages.md)
@@ -120,3 +120,8 @@ To report a security issue, email security@datadoghq.com. Do not open a public i
 
 [Apache-2.0](LICENSE). Third-party licenses are listed in
 [LICENSE-3rdparty.csv](LICENSE-3rdparty.csv).
+
+
+
+
+

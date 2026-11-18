@@ -4,16 +4,14 @@
 # This product includes software developed at Datadog (https://www.datadoghq.com/)
 # Copyright 2026-Present Datadog, Inc.
 title: "Local development"
-description: "Build, run, and test the OSS binary from its repository."
+description: "Build the pg-proxy binary and run it against a local PostgreSQL database."
 ---
 
-The OSS binary and shared library live in [DataDog/pg-proxy](https://github.com/DataDog/pg-proxy). Build and test them from that repository.
+This guide builds `pg-proxy` from source and runs it in front of a disposable local PostgreSQL database.
 
-You need Go 1.26 or newer, a C compiler with CGO enabled, and `psql` on your PATH. The examples use a disposable PostgreSQL database at `127.0.0.1:5432`, with database, username, and password all set to `postgres`. Port `15432` must be free. Adapt the backend settings to your local database.
+You need Go 1.26 or newer, a C compiler with CGO enabled (the SQL parser uses `libpg_query`), Docker or another way to run PostgreSQL, and `psql`. Ports `5432` and `15432` must be free.
 
-## 1. Build the local executable
-
-Build the OSS binary from `main`:
+## 1. Build the binary
 
 ```sh
 git clone https://github.com/DataDog/pg-proxy.git
@@ -21,9 +19,20 @@ cd pg-proxy
 go build -o bin/pg-proxy ./cmd/pg-proxy
 ```
 
-## 2. Run against a development database
+## 2. Start PostgreSQL
 
-With your disposable PostgreSQL database running, save this as `proxy.yaml` in your `pg-proxy` checkout:
+Start a disposable PostgreSQL server. The examples use `postgres` as the database, user, and password:
+
+```sh
+docker run -d --rm --name pg-proxy-dev -p 127.0.0.1:5432:5432 \
+  -e POSTGRES_PASSWORD=postgres postgres:18
+```
+
+To use a database you already run, change the backend settings in the next step.
+
+## 3. Configure and start the proxy
+
+Save this as `proxy.yaml` in your `pg-proxy` checkout:
 
 ```yaml
 databases:
@@ -41,109 +50,53 @@ clusters:
 logical_databases:
   local_db:
     cluster: local
-proxy:
-  listener_address: '127.0.0.1:15432'
-  postgres_msg_buffer_size: 10240
 ```
 
-Validate the file before starting the proxy:
+Check the file:
 
 ```sh
 ./bin/pg-proxy -config proxy.yaml -validate-config
 ```
 
-This checks syntax, field types, required settings, routing references, pool bounds,
-authentication policy, local TLS files, and selected telemetry protocols and
-exporter conflicts. It exits with status 0 on success or 1
-on a configuration error. Errors include field paths and source locations when
-available. Independent issues are reported together, one per line, including
-errors in different databases, routes, credential references, and listener
-settings. Syntax or field-type errors must be fixed before the decoded settings
-can be checked reliably. Validation does not connect to PostgreSQL, open a listener, or start
-telemetry, so database access and port availability still need a runtime check.
+This reports every configuration error it finds, with the field path and line, then exits: status `0` if the file is valid, `1` if not. It does not connect to PostgreSQL or open the listener, so a valid file can still fail to start if the database is unreachable or the port is in use.
 
-Start the OSS binary:
+Start `pg-proxy`:
 
 ```sh
-./bin/pg-proxy \
-  -config proxy.yaml -telemetry none
+./bin/pg-proxy -config proxy.yaml -telemetry none
 ```
 
-Wait for `local proxy ready; clients are trusted`. The executable listens on loopback and trusts the configured username without client TLS. The [settings table](#settings) below lists its options and defaults.
+Wait for the `proxy ready` log line. The proxy listens on `127.0.0.1:15432`.
 
-### Connect a client
+:::caution
+Without password authentication, `pg-proxy` trusts any client on the local machine that connects with the backend user name, and runs its queries as that backend user. Use this mode only with disposable databases. To require passwords, see [Client authentication](../../reference/configuration/client-authentication/).
+:::
 
-In another terminal, connect to the proxy's address and logical database:
+## 4. Connect a client
+
+In another terminal:
 
 ```sh
-psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' \
-  -At -v ON_ERROR_STOP=1 -c 'select 1'
+psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' -At -c 'select 1'
 ```
 
-The result should be `1`. The client username must match the backend username. Use a name from `logical_databases` for the client connection (`local_db` here), even if the backend `dbname` names a different physical database.
+The result is `1`.
 
-See [Client connection options](../../reference/configuration/client-connections/) for the `pg_proxy.*` session options and connection examples.
+- The database name in the connection string is the **logical database** (`local_db`), not the backend `dbname`.
+- In this mode, the client user must be the same as the backend `username` (`postgres`).
 
-## 3. Format Go changes
+If the connection fails, the client usually sees only `could not establish connection`. The proxy log has the reason; see [Troubleshooting](../../reference/troubleshooting/).
 
-Format changed Go files with `gofmt -w`.
+## 5. Stop the proxy
 
-## 4. Run the checks
+Close your clients and press `Ctrl+C` in the proxy terminal. The proxy waits up to `proxy.shutdown_grace_period` (default `30s`) for sessions and pools to close. An open transaction can use up that time; then the proxy exits with status `1`.
 
-From the `pg-proxy` repository root:
+Stop PostgreSQL with `docker stop pg-proxy-dev`.
 
-```sh
-go build ./...
-go vet ./...
-go test -race -count=1 ./...
-```
+## Next steps
 
-These commands build the code and run the unit tests. Docker-backed integration tests need the `integration` build tag and a running Docker daemon; they pull public PostgreSQL images pinned by digest:
-
-```sh
-go test -race -tags=integration -count=1 ./...
-```
-
-## 5. Stop the local proxy
-
-Close test clients and press `Ctrl+C` in the proxy terminal. SIGINT and SIGTERM stop acceptance and allow up to `proxy.shutdown_grace_period` for sessions and pools to close (30 seconds by default). An unfinished transaction can exhaust that deadline and cause a nonzero exit. Startup or runtime errors also cause a nonzero exit. Query cancellation is supported.
-
-For Datadog and OTel configuration, see [Telemetry configuration](../../reference/observability/).
-
-For website changes, follow [Contribute to the documentation](../documentation-contributing/).
-
-## Settings
-
-The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file. File changes require a restart. The file uses the portable [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md); the OSS binary reads the subset described here.
-
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
-| `proxy.max_sessions` | `100000` | Maximum established client sessions across all users in this proxy process. |
-| `proxy.default_max_user_sessions` | `10000` | Default established-session cap for each client user. |
-| `users[].max_sessions` | Inherit the per-user default | Override for one authenticated user across logical databases. |
-| `proxy.shutdown_grace_period` | `30s` | Maximum session and pool cleanup time after SIGINT or SIGTERM; a positive duration such as `30s` or `2m`. |
-| `proxy.postgres_msg_buffer_size` | `10240` | PostgreSQL message buffer size in bytes. |
-| `databases[].max_conns` | pgx default when zero or omitted | Maximum connections in a backend pool; distinct from the client-session cap. |
-| `clusters[].replicas` | None | Database names used as replica pools for the cluster. Each must be a configured database other than the cluster primary. Replica databases default to `max_conn_lifetime: 15m` and `max_conn_lifetime_jitter: 5m`. See [Read routing](../../explanation/read-routing/). |
-| `logical_databases` | Required | Maps client database names to clusters; each cluster selects a primary database. |
-| `-validate-config` | `false` | Run local configuration checks and exit without starting the proxy. |
-| `logical_databases[].read_clusters` | None | Maps configured cluster names to a `weight` from 0 to 255 (default `1`). Any entry, including weight `0`, enables read routing for the logical database. |
-| `-telemetry` | Independent `OTEL_*_EXPORTER` selection | `datadog`, `otel`, or `none`; see [Telemetry configuration](../../reference/observability/). |
-| `-tracing` | `OTEL_TRACES_EXPORTER` selection | `otel` or `none`; overrides the trace exporter selector and cannot be combined with `-telemetry`. |
-| `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in sampled traces. SQL text is recorded regardless. |
-| `-log-level` | `INFO` | Minimum severity for proxy logs on stderr and through OTLP. Use `DEBUG` for local diagnostics. |
-
-Omitted or zero session limits use the defaults above; negative limits are rejected. Session limits do not change backend pool sizes. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
-
-### Backend connection settings
-
-Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. Cluster `replicas` and logical-database `read_clusters` configure [read routing](../../explanation/read-routing/). The OSS binary rejects discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
-
-### Client authentication
-
-By default, the local executable uses local trust without client TLS. It accepts only loopback listen addresses and clients whose username matches the backend username. All queries run as the backend user.
-
-Any local process using that username can access the backend with its configured privileges. Use this default only with disposable local development databases.
-
-Opt-in password/SCRAM authentication requires client TLS and allows non-loopback listeners with explicit per-user database access. See the [client authentication guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md). Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS, and `proxy.tls_required: true` to reject plaintext startup; see the [client TLS guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-connections.md#standalone-tls).
+- [Configuration file](../../reference/configuration/configuration-file/): every setting and its default.
+- [Flags and environment variables](../../reference/configuration/command-line/).
+- [Set connection and session limits](../set-pool-limits/).
+- [Run in production](../run-in-production/): TLS, password authentication, sizing, and telemetry.
+- [Contribute](../contributing/): formatting, tests, and the checks CI runs.

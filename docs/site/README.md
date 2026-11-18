@@ -134,4 +134,4 @@ Consult the relevant [Astro documentation](https://docs.astro.build) before work
 - [Adding styles or using Tailwind](https://docs.astro.build/en/guides/styling/)
 - [Supporting multiple languages](https://docs.astro.build/en/guides/internationalization/)
 
-Use **PG Proxy** in prose; preserve exact command, package, path, and option names in code.
+Use **PG Proxy** in prose; preserve exact command, package, path, and option names in code. Call the executable "the `pg-proxy` binary" (or just `pg-proxy`), never "OSS binary", "standalone command", or "local executable".

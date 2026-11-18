@@ -13,7 +13,7 @@ If you use `-telemetry datadog`, the proxy already sends metrics through DogStat
 
 ## Prerequisites
 
-- `pg-proxy` on your PATH and a working [database configuration](../local-development/#2-run-against-a-development-database).
+- `bin/pg-proxy` built and a working `proxy.yaml`, from [Local development](../local-development/).
 - [OpenTelemetry Collector Contrib 0.163.2](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.163.2), the version validated with this configuration.
 - A Datadog API key and your Datadog site.
 
@@ -92,7 +92,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
 export OTEL_EXPORTER_OTLP_METRICS_TEMPORALITY_PREFERENCE=delta
 export OTEL_METRIC_EXPORT_INTERVAL=1000
 
-pg-proxy -config proxy.yaml
+./bin/pg-proxy -config proxy.yaml
 ```
 
 Omit `-telemetry` so these per-signal settings take effect. The one-second export interval is for local feedback; the SDK default is 60 seconds. Add trace and log pipelines to the Collector before enabling those exporters.
@@ -101,6 +101,6 @@ Omit `-telemetry` so these per-signal settings take effect. The one-second expor
 
 Run queries through the proxy and look for `datadog.pg_proxy.messages.queries` in Datadog. The counter should be reported as a rate. SQL text and bind parameters are not part of this metric.
 
-Local validation of this configuration decoded the Datadog export payload: 100 events over 10 seconds produced a `RATE` value of `10` with a 10-second interval. Control metrics retained their existing mapping.
+For example, 100 queries over 10 seconds show as a rate of `10`.
 
-That check does not establish compatibility with every existing dashboard or monitor. Before a rollout that sends the same metric names through both OTLP and DogStatsD, verify their combined values and queries in Datadog, including after process restarts. The proxy's native DogStatsD path is unchanged.
+If you send the same metric names through both OTLP and DogStatsD, check the combined values in your dashboards and monitors before rollout, including after process restarts.

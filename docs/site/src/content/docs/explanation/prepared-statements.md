@@ -31,13 +31,15 @@ The client does not receive extra preparation replies for this internal work. It
 
 ## Unnamed statements
 
-Some drivers use an unnamed statement across separate transactions. PG Proxy provides a client startup option to give these statements proxy-generated names and use the same tracking mechanism:
+Some drivers send `Parse` for the unnamed statement in one transaction and `Bind` or `Describe` for it later. PG Proxy remembers the client's last unnamed statement and, if a later transaction runs on a different backend connection, parses it again there before the `Bind` or `Describe`. As in PostgreSQL, a simple `Query` or a `Close` of the unnamed statement discards it.
+
+This re-parses the statement on every new backend connection. To cache unnamed statements per backend connection instead, set this client startup option. It gives each unnamed statement a proxy-generated name and tracks it like a named statement:
 
 ```text
 options='-c pg_proxy.auto_cached_prepared_statements=true'
 ```
 
-This option is defined by PG Proxy's listener and passed to its session runtime. It is not a built-in PostgreSQL setting or a YAML configuration field. Named protocol statements already use the tracking mechanism without this option.
+This option is defined by PG Proxy's listener and passed to its session runtime. It is not a built-in PostgreSQL setting or a configuration file field. Named statements use the tracking mechanism without this option. Statements cached this way are not classified for [read routing](../read-routing/).
 
 This option defaults to `false`. It applies to extended-protocol statements; it is not a cache of query results or of arbitrary SQL sent through the simple-query protocol. See [Client connection options](../../reference/configuration/client-connections/) for the exact syntax.
 

@@ -9,7 +9,7 @@ description: "Go types and callbacks for configuring PG Proxy in your applicatio
 
 When building your own Go application with the PG Proxy library, use the types and callbacks below to configure its listener, authentication, routing, and telemetry.
 
-If you are running the supplied executable, see [local development settings](../../../how-to/local-development/#settings) for the options it exposes.
+If you run the `pg-proxy` binary, see [configuration file reference](../../../reference/configuration/configuration-file/) for the options it exposes.
 
 ## Process dependencies
 
@@ -34,6 +34,9 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `TLSConfig`, `RequireTLS` | Client-side TLS configuration and requirement. |
 | `Admission` | Session admission policy. |
 | `Authenticate` | Authentication callback supplied by the application. |
+| `AuthenticationMessageLimit` | Maximum message body size during authentication, in bytes. `0` means no limit. The binary uses 16 KiB. |
+| `StartupTimeout` | Time allowed for TLS, startup, and authentication. `0` means no limit. The binary uses 10 seconds. |
+| `MaxPendingConnections` | Maximum connections in startup at once; more are closed. `0` means no limit. The binary uses 100. |
 | `LoadShedder` | Load-shedding integration. |
 | `Sessions` | Required session registry for lookup and lifecycle management. |
 | `Runtime` | Routing inventory and session integrations. |
@@ -53,7 +56,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `Metrics` | Optional session metric implementation; otherwise sessions use the global metric client. |
 | `EnableTraceParameters` | Set to `true` to capture raw bind values in sampled Datadog and OTel query traces. Defaults to `false`; SQL text is unaffected. Also available in `session.Config`. |
 
-`topology.DefaultPostgresMessageBufferSize` is `10_240`. The local executable supplies it explicitly.
+`topology.DefaultPostgresMessageBufferSize` is `10_240`. The `pg-proxy` binary sets it explicitly.
 
 `PostgresMessageBufferSize` controls when buffered replies are flushed to the client. It does not cap incoming message sizes; see [Client-message size limitations](../../limitations/#client-messages-have-no-configured-size-limit).
 
@@ -107,4 +110,4 @@ See [Telemetry configuration](../../observability/) for backend settings, [Metri
 
 The server runtime creates a shared byte budget for its sessions. Its default computation uses 5% of the container memory hard limit, with a minimum and fallback of 64 MiB. Small control messages can exceed the budget temporarily so flush and release boundaries are preserved.
 
-The local reference binary does not supply these callbacks. See [Traffic mirroring](../../../explanation/traffic-mirroring/) for replay semantics and failure behavior.
+The `pg-proxy` binary does not support mirroring and fails at startup if the configuration has a `mirroring` section. See [Traffic mirroring](../../../explanation/traffic-mirroring/) for replay semantics and failure behavior.

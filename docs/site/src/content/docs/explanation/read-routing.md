@@ -21,7 +21,7 @@ Routing starts with the database name in the client's connection string:
 
 A cluster's `primary` is the default backend for that configured group. A cluster dedicated to reads can point its `primary` at a physical replica.
 
-See the [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md) for the file format. For example, this OSS binary configuration sends eligible reads for `app` to the `main` cluster, which has one replica:
+See the [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md) for the file format. For example, this `pg-proxy` configuration sends eligible reads for `app` to the `main` cluster, which has one replica:
 
 ```yaml
 databases:
@@ -48,7 +48,7 @@ logical_databases:
         weight: 1
 ```
 
-The OSS binary validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica, or the primary of a read cluster, uses a different `dbname` or username than the main primary. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
+`pg-proxy` validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica, or the primary of a read cluster, uses a different `dbname` or username than the main primary. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.
 
 Replica databases default to a `max_conn_lifetime` of 15 minutes with 5 minutes of `max_conn_lifetime_jitter`, matching the library's replica pools. The defaults apply only when `max_conn_lifetime` is unset; an explicit `max_conn_lifetime_jitter` is kept.
 
@@ -75,7 +75,10 @@ The SQL classifier identifies work eligible for read routing. These examples des
 | `SELECT * FROM items FOR UPDATE` | No |
 | `SELECT * INTO copy_of_items FROM items` | No |
 | `BEGIN` | No |
+| `START TRANSACTION READ ONLY` | No |
 | `INSERT`, `UPDATE`, `DELETE`, or `EXPLAIN` | No |
+
+The route is chosen when a transaction starts, from its first statement. A transaction that opens with plain `BEGIN`, as most ORMs do, runs entirely on the main cluster, even if every statement in it is a read. Open read-only transactions with `BEGIN READ ONLY` to make them eligible.
 
 A string containing multiple statements must have every statement classified as read-only. The classifier also examines common-table expressions and checks function calls against the list below. Classification is a routing heuristic, not a substitute for PostgreSQL permissions or read-only enforcement.
 
@@ -105,9 +108,9 @@ The current check examines the first direct function call in the `SELECT` list. 
 
 **Choosing a read cluster.** With `read_clusters`, eligible work selects a cluster according to its weight. Weights of `1` and `3` give approximately one quarter and three quarters of selections over time. A zero weight excludes that cluster from weighted selection. When all weights are zero, selection falls back to the logical database's main backend.
 
-Any `read_clusters` entry turns on read routing, including an entry with weight `0`. With routing on, the main backend still sends eligible reads to its own replicas, as described next. To keep all reads on a primary, remove `read_clusters` and do not configure replicas for that cluster. The OSS binary logs a warning when all weights are zero.
+Any `read_clusters` entry turns on read routing, including an entry with weight `0`. With routing on, the main backend still sends eligible reads to its own replicas, as described next. To keep all reads on a primary, remove `read_clusters` and do not configure replicas for that cluster. `pg-proxy` logs a warning when all weights are zero.
 
-**Choosing a pool within a cluster.** The current backend runtime sends roughly 90% of eligible replica-routed acquisitions to replica pools and retains 10% on that cluster's primary pool. Replica selection uses round robin. If replica acquisition fails, fallback to the primary is rate limited and can itself fail.
+**Choosing a pool within a cluster.** The current backend runtime sends roughly 90% of eligible replica-routed acquisitions to replica pools and retains 10% on that cluster's primary pool. Replica selection uses round robin. If no replica connection is available within 50 ms, because the replica pool is busy or the replica is down, the proxy uses the primary instead. These fallbacks are limited to 100 per second for each cluster (burst 100). Over that limit, the client gets the error `primary database fallback rate limit exceeded for cluster:<name>`. The `pg_proxy.replica_acquire_fallback` metric counts fallbacks, tagged `outcome:allowed` or `outcome:rate_limited`.
 
 The 90/10 policy describes this second decision. It does not mean every configuration sends exactly 90% of all queries to physical replicas.
 
