@@ -11,7 +11,7 @@ RUN test -n "${PG_VERSION}" && test -n "${PG_SHA256}"
 RUN apt-get update \
  && apt-get install -y --no-install-recommends bison bzip2 ca-certificates curl flex gcc libc6-dev make perl \
  && rm -rf /var/lib/apt/lists/*
-RUN curl -fsSLo /tmp/postgresql.tar.bz2 "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" \
+RUN curl -fsSL --retry 5 --retry-all-errors -o /tmp/postgresql.tar.bz2 "https://ftp.postgresql.org/pub/source/v${PG_VERSION}/postgresql-${PG_VERSION}.tar.bz2" \
  && echo "${PG_SHA256}  /tmp/postgresql.tar.bz2" | sha256sum -c - \
  && mkdir /src && tar -xjf /tmp/postgresql.tar.bz2 -C /src --strip-components=1 && rm /tmp/postgresql.tar.bz2
 WORKDIR /src
