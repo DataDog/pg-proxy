@@ -217,5 +217,5 @@ See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 The optional `HealthWorkerHooks.SQLPotentialCompared` callback compares completed
 SQL and Patroni snapshots for a replacement primary. It reports signed speedup,
 without downtime durations or percentages, using the completed-snapshot mismatch
-aggregate. See [SQL snapshot timing](../../docs/sql-potential-timing.md) for the
+aggregate. See [SQL snapshot timing](sql-potential-timing.md) for the
 snapshot boundary, lifecycle rules, and how to compare it with hybrid timing.

@@ -42,6 +42,8 @@ export default defineConfig({
         { label: 'Configuration', items: [
           { slug: 'reference/configuration/timeouts' },
           { slug: 'reference/configuration/client-connections' },
+          { slug: 'reference/configuration/client-tls' },
+          { slug: 'reference/configuration/client-authentication' },
         ] },
         { label: 'Observability', items: [
           { slug: 'reference/observability' },
@@ -51,6 +53,7 @@ export default defineConfig({
         { slug: 'reference/compatibility' },
         { label: 'Go library', items: [
           { slug: 'reference/configuration/library' },
+          { slug: 'reference/configuration/adapting-configuration' },
           { slug: 'reference/packages' },
         ] },
       ] },

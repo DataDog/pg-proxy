@@ -1,17 +1,13 @@
-<!--
-Unless explicitly stated otherwise all files in this repository are licensed
-under the Apache-2.0 License.
-This product includes software developed at Datadog (https://www.datadoghq.com/)
-Copyright 2026-Present Datadog, Inc.
--->
+---
+title: "Client TLS"
+description: "Configure TLS between clients and PG Proxy, in the pg-proxy binary and the Go library."
+---
 
-# Client connections
-
-Both the [`pg-proxy` binary](../README.md#quick-start) and Go library support
+Both the [`pg-proxy` binary](../../../how-to/local-development/) and Go library support
 client TLS using PostgreSQL's `SSLRequest` negotiation. Backend TLS is configured
 separately through each database's `sslmode` and connection settings.
 
-## Standalone TLS
+## `pg-proxy` binary
 
 Add these settings to the `proxy` section of your configuration:
 
@@ -38,7 +34,7 @@ The certificate file may include intermediate certificates after the server
 certificate. Missing, unreadable, malformed, or mismatched files fail startup
 before backend pools open or the listener binds. TLS 1.2 and 1.3 are supported.
 Relative paths use the process's working directory. Changes to settings or
-certificate files require a restart; the command loads the pair once at startup.
+certificate files require a restart; `pg-proxy` loads the pair once at startup.
 
 For a local test, create a one-day self-signed certificate with an IP subject
 alternative name matching the listener:
@@ -61,20 +57,20 @@ For a CA-issued server certificate, use that CA's root bundle as `sslrootcert`.
 Client `sslmode=require` requests encryption without guaranteeing hostname
 verification; prefer `verify-full` when verifying the proxy's identity.
 
-The command defaults to loopback trust using the configured backend username.
-Opt-in [password/SCRAM authentication](client-authentication.md) allows non-loopback
+`pg-proxy` defaults to loopback trust using the configured backend username.
+Opt-in [password/SCRAM authentication](../client-authentication/) allows non-loopback
 listeners with required TLS and explicit database grants. TLS encrypts connections
 and lets clients verify the proxy's identity. Client certificate authentication
-(mTLS) and JWT authentication remain unsupported by the command.
+(mTLS) and JWT authentication are not supported by `pg-proxy`.
 
-### Other poolers
+### Equivalent settings in other poolers
 
-| Setting | PG Proxy command | PgBouncer | PgDog |
+| Setting | `pg-proxy` | PgBouncer | PgDog |
 | --- | --- | --- | --- |
 | Server certificate/key | `tls_cert_file` / `tls_key_file` | `client_tls_cert_file` / `client_tls_key_file` | `tls_certificate` / `tls_private_key` |
 | Optional TLS | Pair with `tls_required: false` | `client_tls_sslmode=allow` or `prefer` | Pair with `tls_client_required=false` |
 | Required TLS | Pair with `tls_required: true` | `client_tls_sslmode=require` | Pair with `tls_client_required=true` |
-| Client certificate verification | Not configured by the command | `verify-ca` / `verify-full` plus `client_tls_ca_file` | `tls_client_ca_certificate` |
+| Client certificate verification | Not supported | `verify-ca` / `verify-full` plus `client_tls_ca_file` | `tls_client_ca_certificate` |
 
 PgBouncer defaults to client TLS disabled. PgDog disables client TLS without
 a certificate/key pair and defaults `tls_client_required` to false. Both keep
@@ -82,7 +78,7 @@ client-facing and backend TLS settings separate. See
 [PgBouncer's TLS settings](https://www.pgbouncer.org/config.html#client_tls_sslmode)
 and [PgDog's TLS settings](https://docs.pgdog.dev/configuration/pgdog.toml/general/#tls).
 
-## Library TLS
+## Go library
 
 When `listener.Config.RequireTLS` or `server.Config.RequireTLS` is true,
 a non-nil `TLSConfig` is required before the listener binds. Normal startup
@@ -98,8 +94,8 @@ With `RequireTLS=false`, optional TLS and plaintext startup are supported.
 is required, for compatibility with PostgreSQL clients. Cancellation still
 requires the session's PID and secret key. Cancellation over TLS also works.
 
-See [listener configuration](../pkg/listener/listener.go) and
-[server configuration](../pkg/server/server.go).
+See [listener configuration](https://github.com/DataDog/pg-proxy/blob/main/pkg/listener/listener.go) and
+[server configuration](https://github.com/DataDog/pg-proxy/blob/main/pkg/server/server.go).
 
 Certificate sourcing stays with the application. An embedder can supply and
-rotate its own `tls.Config` instead of using the command's PEM file loader.
+rotate its own `tls.Config` instead of using the binary's PEM file loader.

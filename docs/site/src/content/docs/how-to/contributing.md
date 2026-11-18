@@ -65,12 +65,34 @@ Detecting a client that disconnects while waiting for a backend connection relie
 docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v "$PWD":/src:ro -w /src -e TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock golang:1.26-bookworm go test -tags=integration -race ./test/integration
 ```
 
+### Run the PostgreSQL-backed tests against your own database
+
+The `cmd/pg-proxy` test uses the shared `internal/itest` PostgreSQL container fixture.
+GitHub Actions runs authentication, TLS, cancellation, and the other integration
+tests together with race detection. It uses public Docker Hub images by default:
+
+```sh
+go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+```
+
+Alternatively, set `PG_PROXY_TEST_DATABASE_URL` to use an external disposable
+PostgreSQL instance with superuser access. The suite creates databases and
+fixture roles, so never use a shared or production database:
+
+```sh
+PG_PROXY_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' \
+  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
+```
+
+The `integration` build tag is required in both cases. The normal unit-test
+command does not execute these PostgreSQL-backed tests.
+
 ## Guidelines
 
 - **Tests:** include tests with every change. Bug fixes should include a test that fails without the fix. Changes that reach PostgreSQL should be covered by an integration test.
 - **License headers:** every Go file, including tests, needs the header in [.licenserc.yaml](https://github.com/DataDog/pg-proxy/blob/main/.licenserc.yaml). Run the `license-eye` command above with `header fix` to add missing headers.
 - **Dependencies:** PG Proxy uses public dependencies only. Datadog imports are limited to publicly released modules. Optional public Datadog SDK integrations live in `pkg/datadog`; integrations with private services belong in the embedding application. If you add or update a dependency, update [LICENSE-3rdparty.csv](https://github.com/DataDog/pg-proxy/blob/main/LICENSE-3rdparty.csv) and make sure its license is compatible with Apache-2.0.
-- **Configuration:** for new settings, follow [Extending PG Proxy configuration](https://github.com/DataDog/pg-proxy/blob/main/docs/extending-configuration.md).
+- **Configuration:** for new settings, follow [Adapting configuration](../../reference/configuration/adapting-configuration/).
 - **Documentation:** update the README or the documentation site when you change behavior, configuration, or metric names.
 - **Scope:** keep pull requests focused. Several small pull requests are easier to review than one large one.
 

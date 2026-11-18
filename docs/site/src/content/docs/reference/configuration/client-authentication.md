@@ -1,15 +1,11 @@
-<!--
-Unless explicitly stated otherwise all files in this repository are licensed
-under the Apache-2.0 License.
-This product includes software developed at Datadog (https://www.datadoghq.com/)
-Copyright 2026-Present Datadog, Inc.
--->
-
-# Client authentication
+---
+title: "Client authentication"
+description: "Password and SCRAM-SHA-256 client authentication in the pg-proxy binary, and credential references."
+---
 
 The `pg-proxy` binary supports opt-in password/SCRAM authentication. Start with
-the complete [YAML](../examples/password-auth.yaml) or
-[JSON](../examples/password-auth.json) example. Replace the hosts, credential sources,
+the complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) or
+[JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) example. Replace the hosts, credential sources,
 and certificate paths before starting.
 
 Set `proxy.password_auth_enabled: true` and `proxy.tls_required: true`, with a
@@ -143,7 +139,7 @@ output directly to a `scram_sha_256_file`.
 This is a feature of the `pg-proxy` binary only. `pkg/config` and its
 `ReadJSON`/`ReadYAML` readers accept inline credentials only; embedding
 applications resolve their own references. See
-[adapting configuration](extending-configuration.md).
+[adapting configuration](../adapting-configuration/).
 
 ## Connecting
 
@@ -154,7 +150,7 @@ psql "host=proxy.example.com port=15432 dbname=orders user=alice sslmode=verify-
 ```
 
 Enter Alice's client password when prompted. Bob uses `user=bob` and his client
-password. Neither client needs a backend password. See [client TLS](client-connections.md)
+password. Neither client needs a backend password. See [client TLS](../client-tls/)
 for certificate setup. SCRAM-SHA-256-PLUS/channel binding is not implemented.
 
 ## Defaults and failures
@@ -186,25 +182,3 @@ to override one user's limit across all allowed logical databases. Omitted or
 zero values use the applicable default; negative values fail at startup. JSON
 uses `maxSessions` and `defaultMaxUserSessions`. These caps are independent of
 backend pool sizes and the 100 pending-startup slots.
-
-## Integration tests
-
-The standalone test uses the shared `internal/itest` PostgreSQL container fixture.
-GitHub Actions runs authentication, TLS, cancellation, and the other integration
-tests together with race detection. It uses public Docker Hub images by default:
-
-```sh
-go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
-```
-
-Alternatively, set `PG_PROXY_TEST_DATABASE_URL` to use an external disposable
-PostgreSQL instance with superuser access. The suite creates databases and
-fixture roles, so never use a shared or production database:
-
-```sh
-PG_PROXY_TEST_DATABASE_URL='postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable' \
-  go test -tags=integration -race -run '^TestProxyAgainstPostgres$' -count=1 ./cmd/pg-proxy
-```
-
-The `integration` build tag is required in both cases. The normal unit-test
-command does not execute these PostgreSQL-backed tests.

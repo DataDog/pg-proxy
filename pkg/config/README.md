@@ -57,16 +57,16 @@ The `pg-proxy` binary uses `-config` for direct backend credentials, connection
 and pool settings, primary, replica, and logical routes, read clusters, and
 loopback listener settings,
 including optional or required client TLS through `tls_cert_file`, `tls_key_file`,
-and `tls_required`. See [client TLS](../../docs/client-connections.md#standalone-tls).
+and `tls_required`. See [client TLS](../../docs/site/src/content/docs/reference/configuration/client-tls.md#pg-proxy-binary).
 Set `password_auth_enabled: true` (JSON: `passwordAuthEnabled`) with required TLS
 to enable static users and non-loopback listeners. Each user needs an explicit
 logical-database list. Proxy usernames are independent of backend accounts.
-See [client authentication](../../docs/client-authentication.md).
+See [client authentication](../../docs/site/src/content/docs/reference/configuration/client-authentication.md).
 It rejects JWT, mirroring, and other unsupported options with explicit startup errors.
 The library schema remains broader than this command. The command also reads
 its own `*_file` and `*_env` credential references and resolves them into these
 types before validation; see
-[credential references](../../docs/client-authentication.md#credential-references).
+[credential references](../../docs/site/src/content/docs/reference/configuration/client-authentication.md#credential-references).
 `ReadJSON` and `ReadYAML` do not accept those fields.
 
 [`pool.PGXConfig`](../pool/config.go) consumes a `Database` and returns a pgx pool
@@ -88,7 +88,7 @@ to connection code in memory. Shared JSON decoding is unchanged.
 
 ## Extending the schema
 
-Follow the [configuration extension guide](../../docs/extending-configuration.md)
+Follow the [configuration extension guide](../../docs/site/src/content/docs/reference/configuration/adapting-configuration.md)
 to change a nested field for your application, add settings, or contribute a
 shared library field. The guide follows an application that supplies database
 passwords through environment variables and converts them for the library.
