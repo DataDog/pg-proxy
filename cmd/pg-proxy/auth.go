@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
 	"strings"
 
@@ -23,30 +24,51 @@ type authenticationHook = func(context.Context, listener.StartupRequest, listene
 
 func passwordAuthentication(shared pgconfig.Config) (authenticationHook, error) {
 	users := make([]auth.StaticUser, 0, len(shared.Users))
-	for _, user := range shared.Users {
+	var issues []error
+	seen := make(map[string]bool)
+	for i, user := range shared.Users {
+		var userIssues []error
 		if user.Email != "" || user.Group != "" || len(user.PGRoles) != 0 {
-			return nil, errors.New("password authentication supports only static_credentials, databases, and max_sessions in each user")
+			userIssues = append(userIssues, errors.New("password authentication supports only static_credentials, databases, and max_sessions in each user"))
 		}
 		credentials := user.StaticCredentials
-		if credentials.Username == "" || len(credentials.Username) > 256 || strings.ContainsRune(credentials.Username, 0) || (credentials.Password == "") == (credentials.SCRAMSHA256 == "") {
-			return nil, errors.New("each proxy user requires a username and exactly one password or SCRAM verifier")
+		validCredentials := credentials.Username != "" && len(credentials.Username) <= 256 && !strings.ContainsRune(credentials.Username, 0) && (credentials.Password == "") != (credentials.SCRAMSHA256 == "")
+		if !validCredentials {
+			userIssues = append(userIssues, errors.New("each proxy user requires a username and exactly one password or SCRAM verifier"))
 		}
-		for _, database := range user.Databases {
+		if seen[credentials.Username] && credentials.Username != "" {
+			userIssues = append(userIssues, errors.New("proxy usernames must be unique"))
+		}
+		seen[credentials.Username] = true
+		if len(user.Databases) == 0 {
+			userIssues = append(userIssues, errors.New("each proxy user requires allowed databases"))
+		}
+		for j, database := range user.Databases {
 			if _, exists := shared.LogicalDatabases[database]; !exists {
-				return nil, errors.New("allowed databases must refer to configured logical databases")
+				userIssues = append(userIssues, fmt.Errorf("databases[%d]: allowed databases must refer to configured logical databases", j))
+			}
+			if database == "" {
+				userIssues = append(userIssues, errors.New("allowed database names must not be empty"))
 			}
 		}
 		var verifier *scram.Verifier
-		var err error
-		if credentials.Password != "" {
-			verifier, err = scram.NewVerifier(string(credentials.Password))
-		} else {
-			verifier, err = scram.ParseVerifier(string(credentials.SCRAMSHA256))
+		if validCredentials {
+			var err error
+			if credentials.Password != "" {
+				verifier, err = scram.NewVerifier(string(credentials.Password))
+			} else {
+				verifier, err = scram.ParseVerifier(string(credentials.SCRAMSHA256))
+			}
+			userIssues = append(userIssues, err)
 		}
-		if err != nil {
-			return nil, err
+		if err := errors.Join(userIssues...); err != nil {
+			issues = append(issues, configurationContext(fmt.Sprintf("users[%d]", i), err))
+			continue
 		}
 		users = append(users, auth.StaticUser{Username: credentials.Username, Verifier: verifier, Databases: user.Databases})
+	}
+	if err := errors.Join(issues...); err != nil {
+		return nil, err
 	}
 	static, err := auth.NewStatic(users)
 	if err != nil {
@@ -66,6 +88,19 @@ func passwordAuthentication(shared pgconfig.Config) (authenticationHook, error) 
 // Only a successfully constructed authentication method may enable remote
 // listeners. TLS by itself never enables remote trust.
 func (c config) validateListener(authenticated bool) error {
+	var issues []error
+	issues = append(issues, c.validateListenerAddress(authenticated))
+	if authenticated {
+		if !c.requireTLS || c.tlsConfig == nil {
+			issues = append(issues, errors.New("client authentication requires proxy.tls_required and a TLS certificate/key pair"))
+		}
+	} else if c.requireTLS && c.tlsConfig == nil {
+		issues = append(issues, errors.New("proxy.tls_required requires tls_cert_file and tls_key_file"))
+	}
+	return errors.Join(issues...)
+}
+
+func (c config) validateListenerAddress(authenticated bool) error {
 	address, err := netip.ParseAddrPort(c.listenAddress)
 	if err != nil {
 		if !authenticated {
@@ -73,15 +108,8 @@ func (c config) validateListener(authenticated bool) error {
 		}
 		return errors.New("proxy.listener_address must be an IP address and port")
 	}
-	if authenticated {
-		if !c.requireTLS || c.tlsConfig == nil {
-			return errors.New("client authentication requires proxy.tls_required and a TLS certificate/key pair")
-		}
-	} else if !address.Addr().IsLoopback() {
+	if !authenticated && !address.Addr().IsLoopback() {
 		return errors.New("proxy.listener_address must use a loopback IP unless client authentication is enabled")
-	}
-	if c.requireTLS && c.tlsConfig == nil {
-		return errors.New("proxy.tls_required requires tls_cert_file and tls_key_file")
 	}
 	return nil
 }

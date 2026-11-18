@@ -25,15 +25,27 @@ See the [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg
 
 ```yaml
 databases:
-  - {name: main-primary, host: 10.0.0.10, dbname: app, username: app, password: example}
-  - {name: main-replica, host: 10.0.0.11, dbname: app, username: app, password: example}
+  - name: main-primary
+    host: 10.0.0.10
+    dbname: app
+    username: app
+    password: example
+  - name: main-replica
+    host: 10.0.0.11
+    dbname: app
+    username: app
+    password: example
 clusters:
-  main: {primary: main-primary, replicas: [main-replica]}
+  main:
+    primary: main-primary
+    replicas:
+      - main-replica
 logical_databases:
   app:
     cluster: main
     read_clusters:
-      main: {weight: 1}
+      main:
+        weight: 1
 ```
 
 `pg-proxy` validates that each replica is a configured database other than the cluster primary, and that each read cluster is a configured cluster. It logs a warning at startup when a replica, or the primary of a read cluster, uses a different `dbname` or username than the main primary. That setup can be intentional, but it can also send reads to the wrong database or role. It also warns when `read_clusters` cannot send any read away from the main primary, or when all weights are `0`.

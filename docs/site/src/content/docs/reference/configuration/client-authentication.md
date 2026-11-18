@@ -118,7 +118,8 @@ users:
   - static_credentials:
       username: bob
       scram_sha_256_env: BOB_SCRAM_VERIFIER
-    databases: [orders]
+    databases:
+      - orders
 ```
 
 Rules:

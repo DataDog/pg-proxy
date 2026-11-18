@@ -8,7 +8,7 @@ description: "Command-line flags and environment variables of the pg-proxy binar
 ---
 
 ```sh
-pg-proxy -config proxy.yaml [-telemetry datadog|otel|none] [-log-level LEVEL] [-trace-parameters]
+pg-proxy -config proxy.yaml [-validate-config] [-telemetry datadog|otel|none] [-log-level LEVEL] [-trace-parameters]
 ```
 
 Database, listener, session, and authentication settings are in the [configuration file](../configuration-file/). Telemetry is set only with flags and environment variables.
@@ -21,6 +21,7 @@ Database, listener, session, and authentication settings are in the [configurati
 | `-telemetry` | Unset | Telemetry preset for traces, metrics, and logs: `datadog`, `otel`, or `none`. When unset, each signal follows its `OTEL_*_EXPORTER` variable. See [Telemetry configuration](../../observability/). |
 | `-tracing` | Unset | `otel` or `none`. Overrides `OTEL_TRACES_EXPORTER` for traces only. Cannot be combined with `-telemetry`. Prefer `-telemetry` or `OTEL_TRACES_EXPORTER`. |
 | `-trace-parameters` | `false` | Record raw bind parameter values as `db.parameters` on sampled traces. SQL text is recorded either way. See [Query parameters](../../observability/#query-parameters). |
+| `-validate-config` | `false` | Check the configuration file and local TLS files, print every error found, and exit without starting the proxy. Exits `0` if the file is valid, `1` if not. Does not connect to PostgreSQL or open the listener. |
 | `-log-level` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARN`, or `ERROR`. Applies to stderr and OTLP logs. |
 
 The binary does not accept positional arguments.

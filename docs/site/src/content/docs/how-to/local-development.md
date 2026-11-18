@@ -45,10 +45,20 @@ databases:
     sslmode: disable
     max_conns: 10
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 ```
+
+Check the file:
+
+```sh
+./bin/pg-proxy -config proxy.yaml -validate-config
+```
+
+This reports every configuration error it finds, with the field path and line, then exits: status `0` if the file is valid, `1` if not. It does not connect to PostgreSQL or open the listener, so a valid file can still fail to start if the database is unreachable or the port is in use.
 
 Start `pg-proxy`:
 

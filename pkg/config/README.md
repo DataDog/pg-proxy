@@ -41,11 +41,13 @@ users:
 - static_credentials:
     username: alice
     password: replace-with-client-password
-  databases: [orders]
+  databases:
+    - orders
 - static_credentials:
     username: bob
     scram_sha_256: 'SCRAM-SHA-256$4096:<base64-salt>$<base64-stored-key>:<base64-server-key>'
-  databases: [orders]
+  databases:
+    - orders
 ```
 
 The verifier above shows the format, not a usable value. Supply a PostgreSQL
@@ -92,6 +94,23 @@ Follow the [configuration extension guide](../../docs/site/src/content/docs/refe
 to change a nested field for your application, add settings, or contribute a
 shared library field. The guide follows an application that supplies database
 passwords through environment variables and converts them for the library.
+
+## Reading and validating files
+
+Reader errors include field paths and source locations when available. Unknown
+fields list the allowed names for that section. Readers collect independent
+field errors in one result. Decoder values are not included
+in errors, so a misplaced password does not appear in the message.
+
+Applications with their own `ConfigSections` types can use `ReadJSONAs[T]` or
+`ReadYAMLAs[T]` for the same strict decoding and diagnostics. These readers leave
+credential resolution and semantic checks to the caller.
+
+For the standalone binary, use `pg-proxy -config proxy.yaml -validate-config`
+to run local startup checks and exit before opening listeners or backend pools.
+Validation reports independent local issues together, one per line. Syntax and
+field-type errors must be fixed before semantic checks can run. Successful
+validation does not prove database connectivity or port availability.
 
 ## Standalone shutdown
 

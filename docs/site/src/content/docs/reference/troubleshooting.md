@@ -19,23 +19,25 @@ level=ERROR msg="failed to open connection from 127.0.0.1:36676: logical databas
 
 ## The proxy does not start
 
-Configuration errors are logged as `invalid configuration` and the process exits with status `1` before it opens any pool or the listener.
+Run `pg-proxy -config proxy.yaml -validate-config` first. It reports every configuration error it can find, one per line, with the field path and the line in the file, and exits with status `1` if there are any. It does not connect to PostgreSQL.
+
+At startup, the same errors are printed after `invalid configuration:` and the process exits with status `1` before it opens any pool or the listener.
 
 | Error | Fix |
 | --- | --- |
 | `-config is required` | Pass `-config path/to/proxy.yaml`. |
-| `could not open configuration file` | Check the path and file permissions. Relative paths are resolved from the working directory. |
+| `could not open configuration file "…": …` | Check the path and file permissions. Relative paths are resolved from the working directory. |
 | `configuration file must use .json, .yaml, or .yml` | Rename the file. The extension selects the format. |
-| `invalid configuration JSON or unknown field`, `invalid configuration YAML or unknown field` | Check for typos in key names and for JSON durations written as strings. In JSON, `maxConnLifetime` is in nanoseconds. See [Configuration file](../configuration/configuration-file/). |
-| `databases, clusters, and logical_databases must not be empty` | All three sections are required. |
+| `configuration YAML at line N, column M (path): …` or `configuration JSON at …` | The value at that field has the wrong type, or the key is misspelled. In JSON, `maxConnLifetime` and `maxConnLifetimeJitter` are integers in nanoseconds, not strings like `"15m"`. See [Configuration file](../configuration/configuration-file/). |
+| `databases must not be empty` (or `clusters`, `logical_databases`) | All three sections are required. |
 | `each database must be used by a cluster` | Remove the unused database entry, or add it to a cluster. |
-| `database host, dbname, and username are required` | Set all three on every database. |
+| `databases[0]: database host is required` (or `dbname`, `username`) | Set all three on every database. |
 | `proxy.listener_address must use a loopback IP unless client authentication is enabled` | Use `127.0.0.1` or `[::1]`, or turn on [password authentication](../configuration/client-authentication/). |
 | `proxy.listener_address must use a loopback IP and port in trust mode` | Use an IP address, not a host name such as `localhost`. |
 | `client authentication requires proxy.tls_required and a TLS certificate/key pair` | Password authentication needs `tls_required: true`, `tls_cert_file`, and `tls_key_file`. See [Client TLS](../configuration/client-tls/). |
 | `configured users require proxy.password_auth_enabled` | Set `proxy.password_auth_enabled: true`, or remove `users`. |
 | `direct pools do not support postgres_host, route_through_envoy, or load_balanced_servers` | Remove these keys. The binary connects directly to `host`. |
-| `mirroring configuration is not implemented…` / `JWT authentication is not implemented…` | These features are available only in the Go library. Remove the `mirroring` section or `jwt_auth_enabled`. |
+| `mirroring configuration is not implemented…`, `JWT authentication is not implemented…` | These features are available only in the Go library. Remove the `mirroring` section or `jwt_auth_enabled`. |
 
 After the configuration is valid, the proxy opens a connection to every backend. If one cannot be reached, it logs `pg-proxy stopped` with the connection error and exits with status `1`. Check that PostgreSQL is running and that `host`, `port`, `username`, password, and `sslmode` are right.
 

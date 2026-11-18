@@ -25,9 +25,11 @@ databases:
     password: postgres
     sslmode: disable
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 ```
 
 `databases`, `clusters`, and `logical_databases` are required and must not be empty. `proxy` is optional. `users` is allowed only with password authentication.

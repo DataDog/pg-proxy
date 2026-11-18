@@ -61,12 +61,25 @@ databases:
     sslmode: disable
     max_conns: 10
 clusters:
-  local: {primary: primary}
+  local:
+    primary: primary
 logical_databases:
-  local_db: {cluster: local}
+  local_db:
+    cluster: local
 proxy:
   listener_address: 127.0.0.1:15432
 ```
+
+Check the configuration without starting the proxy:
+
+```sh
+./bin/pg-proxy -config proxy.yaml -validate-config
+```
+
+This runs local startup checks, including credential references and TLS files,
+but does not check database connectivity or listener availability. See the
+[local development guide](docs/site/src/content/docs/how-to/local-development.md#3-configure-and-start-the-proxy)
+for details.
 
 Run it:
 
