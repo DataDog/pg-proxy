@@ -3,7 +3,7 @@ title: "Features"
 description: "What PG Proxy provides and where to learn more."
 ---
 
-PG Proxy combines PostgreSQL protocol handling, transaction pooling, and query observability in a library that applications can embed. Its API is still evolving as it is extracted from Datadog's existing proxy.
+PG Proxy combines PostgreSQL protocol handling, transaction pooling, and query observability in the `pg-proxy` binary and a Go library that applications can embed.
 
 For a comparison with PgBouncer, Pgpool-II, Odyssey, and PgDog, see [Compare poolers](../explanation/pooler-comparison/).
 
@@ -35,9 +35,9 @@ Start with [Observability](../reference/observability/), then use the [metrics](
 
 ## Configurable databases and pools
 
-Map client-facing database names to backend clusters, set pool limits, and supply PostgreSQL startup settings such as statement timeouts. The OSS binary reads a YAML or JSON configuration file; applications embedding the library supply configuration through Go interfaces.
+Map client-facing database names to backend clusters, set pool limits, and supply PostgreSQL startup settings such as statement timeouts. The `pg-proxy` binary reads a YAML or JSON configuration file; applications embedding the library supply configuration through Go interfaces.
 
-See [OSS binary settings](../how-to/local-development/#settings), [Timeouts](../reference/configuration/timeouts/), and [Go library configuration](../reference/configuration/library/).
+See [`pg-proxy` binary settings](../how-to/local-development/#settings), [Timeouts](../reference/configuration/timeouts/), and [Go library configuration](../reference/configuration/library/).
 
 ## Authentication and TLS integration
 
@@ -45,7 +45,7 @@ The listener supports client TLS and application-supplied authentication. The SC
 
 SCRAM authentication and TLS serve different purposes: TLS protects the connection's traffic. The current SCRAM package does not implement `SCRAM-SHA-256-PLUS` channel binding.
 
-See [Authentication and TLS](../explanation/authentication/) for authentication helpers, transport security, and channel binding. The local example uses trust-based authentication on loopback and is intended for development.
+See [Authentication and TLS](../explanation/authentication/) for authentication helpers, transport security, and channel binding. The `pg-proxy` binary also supports static password/SCRAM users over TLS.
 
 ## Routing for database migrations
 
@@ -55,7 +55,7 @@ PG Proxy handles routing; copying data, keeping databases in sync, and deciding 
 
 ## Session limits and load shedding
 
-Control client-session admission separately from backend pool capacity, with global and per-service caps. The local example uses an explicit session limit.
+Control client-session admission separately from backend pool capacity, with global and per-user caps.
 
 Applications can supply a load-shedding policy to reject new connections or backend work under load.
 
@@ -71,7 +71,7 @@ Read [Traffic mirroring](../explanation/traffic-mirroring/) for replay behavior,
 
 Drain sessions at safe transaction boundaries during a planned stop. Active work can finish within the application's shutdown deadline, after which clients reconnect through their configured endpoint. Open sessions are not transferred between proxies.
 
-Read [Graceful shutdown](../explanation/graceful-shutdown/) for client behavior and the local example's deadline.
+Read [Graceful shutdown](../explanation/graceful-shutdown/) for client behavior and the shutdown deadline.
 
 ## PostgreSQL client protocol
 

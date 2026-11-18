@@ -3,7 +3,7 @@ title: "Run in production"
 description: "Deploy the PG Proxy binary with TLS, password authentication, sizing, telemetry, and safe restarts."
 ---
 
-This guide takes the OSS binary from the [local development](../local-development/) setup to a shared or production environment. It covers client TLS and authentication, backend connections, sizing, telemetry, health checks, and restarts.
+This guide takes the `pg-proxy` binary from the [local development](../local-development/) setup to a shared or production environment. It covers client TLS and authentication, backend connections, sizing, telemetry, health checks, and restarts.
 
 If you need features the binary does not configure, such as discovered replicas with health checks, traffic mirroring, or your own authentication, embed the library instead. See [Go library configuration](../../reference/configuration/library/).
 
@@ -82,7 +82,7 @@ Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-
 
 ## 4. Size pools and sessions
 
-Three limits are involved:
+Four limits are involved:
 
 | Limit | Where it is set | What it caps |
 | --- | --- | --- |

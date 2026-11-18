@@ -7,7 +7,7 @@ Copyright 2026-Present Datadog, Inc.
 
 # Client connections
 
-Both the [standalone command](../README.md#oss-binary) and Go library support
+Both the [`pg-proxy` binary](../README.md#quick-start) and Go library support
 client TLS using PostgreSQL's `SSLRequest` negotiation. Backend TLS is configured
 separately through each database's `sslmode` and connection settings.
 

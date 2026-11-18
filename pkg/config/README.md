@@ -12,7 +12,7 @@ The six sections are `databases`, `clusters`, `logical_databases`, `proxy`,
 `users`, and `mirroring`. YAML uses snake_case; JSON uses the camelCase names in
 the struct tags. Serialization includes empty sections, except that nil mirroring
 is omitted. Readers still accept documents with missing sections. This package defines the model. The
-[OSS binary](../../README.md#oss-binary) reads a limited subset
+[`pg-proxy` binary](../../README.md#quick-start) reads a limited subset
 for direct backends, including replicas and read clusters; embedding
 applications can support other sections.
 
@@ -53,7 +53,7 @@ SCRAM-SHA-256 stored verifier with 1–1,000,000 iterations, a 1–1024-byte bas
 two 32-byte keys. JSON calls the field `scramSHA256`.
 A user may supply either a password or a verifier, never both.
 
-The OSS binary uses `-config` for direct backend credentials, connection
+The `pg-proxy` binary uses `-config` for direct backend credentials, connection
 and pool settings, primary, replica, and logical routes, read clusters, and
 loopback listener settings,
 including optional or required client TLS through `tls_cert_file`, `tls_key_file`,

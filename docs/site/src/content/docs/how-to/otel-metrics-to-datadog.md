@@ -93,6 +93,6 @@ Omit `-telemetry` so these per-signal settings take effect. The one-second expor
 
 Run queries through the proxy and look for `datadog.pg_proxy.messages.queries` in Datadog. The counter should be reported as a rate. SQL text and bind parameters are not part of this metric.
 
-Local validation of this configuration decoded the Datadog export payload: 100 events over 10 seconds produced a `RATE` value of `10` with a 10-second interval. Control metrics retained their existing mapping.
+For example, 100 queries over 10 seconds show as a rate of `10`.
 
-That check does not establish compatibility with every existing dashboard or monitor. Before a rollout that sends the same metric names through both OTLP and DogStatsD, verify their combined values and queries in Datadog, including after process restarts. The proxy's native DogStatsD path is unchanged.
+If you send the same metric names through both OTLP and DogStatsD, check the combined values in your dashboards and monitors before rollout, including after process restarts.

@@ -39,7 +39,7 @@ You need:
 - A C toolchain: CI builds with `CGO_ENABLED=1`.
 - Docker, for the integration tests. They start PostgreSQL in a container.
 
-This repository does not use Bazel or generated `BUILD` files; the standard Go tooling is all you need. To build and run the proxy against your own PostgreSQL, follow [Local development](../local-development/).
+The standard Go tooling is all you need. To build and run the proxy against your own PostgreSQL, follow [Local development](../local-development/).
 
 ## Before you open a pull request
 
@@ -57,7 +57,7 @@ go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
 
 If you changed the documentation site, follow [Contribute to the documentation](../documentation-contributing/) and run its static build, which checks links.
 
-The `test/integration` suite runs the standalone binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status.
+The `test/integration` suite runs the `pg-proxy` binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status.
 
 Detecting a client that disconnects while waiting for a backend connection relies on Linux `POLLRDHUP`, so that test is skipped on other platforms. From macOS, run the full suite in a Linux container that uses the host's Docker:
 

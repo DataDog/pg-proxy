@@ -7,10 +7,10 @@ Copyright 2026-Present Datadog, Inc.
 
 # Client authentication
 
-The standalone command supports opt-in password/SCRAM authentication. Start with
+The `pg-proxy` binary supports opt-in password/SCRAM authentication. Start with
 the complete [YAML](../examples/password-auth.yaml) or
 [JSON](../examples/password-auth.json) example. Replace the hosts, credential sources,
-certificate paths, and every `<...>` placeholder before starting.
+and certificate paths before starting.
 
 Set `proxy.password_auth_enabled: true` and `proxy.tls_required: true`, with a
 valid TLS certificate/key pair. JSON calls these `passwordAuthEnabled` and
@@ -96,7 +96,7 @@ redacts credentials; `Verifier.Encode` explicitly returns the stored value.
 
 ### Credential references
 
-The standalone command can read a credential from a file or an environment
+The `pg-proxy` binary can read a credential from a file or an environment
 variable instead of the configuration file. This lets you keep the
 configuration file free of secrets, for example in version control, and supply
 the values from Kubernetes Secrets, systemd credentials, or similar.
@@ -140,7 +140,7 @@ Rules:
 The verifier helper above prints a trailing newline, so you can redirect its
 output directly to a `scram_sha_256_file`.
 
-This is a feature of the standalone command only. `pkg/config` and its
+This is a feature of the `pg-proxy` binary only. `pkg/config` and its
 `ReadJSON`/`ReadYAML` readers accept inline credentials only; embedding
 applications resolve their own references. See
 [adapting configuration](extending-configuration.md).

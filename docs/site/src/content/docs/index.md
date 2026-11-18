@@ -1,15 +1,15 @@
 ---
 title: "Introduction"
-description: "How-to guides, reference, and explanation for PG Proxy."
+description: "A PostgreSQL wire-protocol proxy with transaction-level connection pooling."
 ---
 
 PG Proxy sits between PostgreSQL clients and their databases. The Go library handles the PostgreSQL wire protocol, client sessions, routing, and transaction-level connection pooling.
 
-**Early development.** The library is being extracted from Datadog's proxy, and its API is still evolving. These docs describe the library in the current checkout.
+**Early development.** Configuration and Go APIs may change between releases.
 
-There are two ways to use PG Proxy: run the supplied application or use the Go library to build your own.
+There are two ways to use PG Proxy: run the `pg-proxy` binary, or use the Go library to build your own proxy.
 
-**Run the PG Proxy application:** Configure it with YAML. Start with [Local development](how-to/local-development/), then follow [Run in production](how-to/run-in-production/) to deploy it with TLS and password authentication.
+**Run the `pg-proxy` binary:** Configure it with a YAML or JSON file. Start with [Local development](how-to/local-development/), then follow [Run in production](how-to/run-in-production/) to deploy it with TLS and password authentication.
 
 **Build your own application with the Go library:** Supply your own configuration, authentication, routing, and telemetry integrations. See [Go library configuration](reference/configuration/library/) and [Packages](reference/packages/).
 
@@ -17,7 +17,7 @@ There are two ways to use PG Proxy: run the supplied application or use the Go l
 
 We're Datadog's PostgreSQL Platform team. We started building PG Proxy in 2023 after running into limitations with existing tools, including PgBouncer. We needed a pooler and proxy that we could adapt to how we run PostgreSQL at Datadog, so we built our own.
 
-Since then, we've spent a lot of time running it, fixing it, and learning what works in production. In 2026, we're preparing to open source it. We think that work could be useful outside Datadog too.
+Since then, we've run it in production, fixed it, and learned what works. We think that work is useful outside Datadog too.
 
 ## Overview
 
@@ -29,7 +29,7 @@ Since then, we've spent a lot of time running it, fixing it, and learning what w
 
 Complete a specific task once you know the basics.
 
-- [Local development](how-to/local-development/): Build, run, and test the OSS binary.
+- [Local development](how-to/local-development/): Build, run, and test the `pg-proxy` binary.
 - [Run in production](how-to/run-in-production/): Deploy the binary with TLS, authentication, sizing, telemetry, and safe restarts.
 - [Send OTel metrics to Datadog](how-to/otel-metrics-to-datadog/): Configure the Collector to export event counters as rates.
 - [Contribute to PG Proxy](how-to/contributing/): Report bugs, propose changes, and prepare a pull request.
@@ -42,7 +42,7 @@ The technical details.
 
 ### Configuration
 
-- [OSS binary settings](how-to/local-development/#settings): The supplied application's configuration file, flags, and defaults.
+- [`pg-proxy` binary settings](how-to/local-development/#settings): The configuration file, flags, and defaults.
 - [Client connection options](reference/configuration/client-connections/): PG Proxy session options, defaults, and connection examples.
 - [Timeouts](reference/configuration/timeouts/): Backend statement limits and transaction overrides.
 

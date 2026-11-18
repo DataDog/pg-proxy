@@ -50,10 +50,10 @@ The parser expects the literal `-c pg_proxy.` form with a space after `-c`. Use 
 
 ## Client settings versus backend settings
 
-The client connects to a logical database on the proxy. The OSS binary's configuration file chooses the physical PostgreSQL database and pool settings. Set `databases[].max_conns` there, not in the client connection string.
+The client connects to a logical database on the proxy. The `pg-proxy` configuration file chooses the physical PostgreSQL database and pool settings. Set `databases[].max_conns` there, not in the client connection string.
 
 The built-in server composition consumes the user, logical database, and recognized proxy session options. It does not forward every client startup parameter to the backend. For example, sending `application_name` or an arbitrary `-c` setting does not by itself configure the backend session through this composition.
 
 See [Prepared statements](../../../explanation/prepared-statements/) and [Read routing](../../../explanation/read-routing/) for how the corresponding session options affect queries.
 
-See [OSS binary settings](../../../how-to/local-development/#settings) for backend and routing settings, or [Go library configuration](../library/) when constructing the library directly.
+See [`pg-proxy` binary settings](../../../how-to/local-development/#settings) for backend and routing settings, or [Go library configuration](../library/) when constructing the library directly.

@@ -1,15 +1,15 @@
 # SQL snapshot timing versus hybrid routing timing
 
 `HealthWorkerHooks.SQLPotentialCompared` reports signed speedup between completed
-SQL and Patroni snapshots. Keep this alongside the hybrid timing callbacks in PR9:
+SQL and Patroni snapshots. Keep this alongside the hybrid timing callbacks:
 the snapshot signal describes when SQL reports a replacement primary, while the
 hybrid signal describes when the conservative policy can select it.
 
 | Measurement | SQL event | Purpose |
 | --- | --- | --- |
 | SQL snapshot speedup (this callback) | A completed comparison snapshot reports the replacement IP as primary | Compare SQL observation timing with Patroni |
-| Conclusive SQL detection (PR9) | Complete aggregated evidence satisfies the hybrid policy | Measure when there is sufficient evidence for the policy |
-| Hybrid selection (PR9) | Policy selects the replacement via SQL or cached Patroni | Measure the proposed routing policy's improvement |
+| Conclusive SQL detection | Complete aggregated evidence satisfies the hybrid policy | Measure when there is sufficient evidence for the policy |
+| Hybrid selection | Policy selects the replacement via SQL or cached Patroni | Measure the proposed routing policy's improvement |
 
 ## Snapshot boundary
 
@@ -89,4 +89,4 @@ shared timestamp helper or hybrid routing timing policy.
 
 This callback contains only signed speedup and the IP/timestamps needed to
 identify the event. It defines no outage start and emits no downtime durations
-or reduction percentages. PR9 retains its own downtime measurements.
+or reduction percentages. The hybrid timing callbacks keep their own downtime measurements.

@@ -3,7 +3,7 @@ title: "Set connection and session limits"
 description: "Set backend pool limits and configure global and per-user client-session caps."
 ---
 
-Use this guide to change a backend pool limit in the OSS binary. It assumes you have a working `proxy.yaml` and can connect through the proxy using the [local development guide](../local-development/).
+Use this guide to set backend pool limits and client-session caps in the `pg-proxy` binary. It assumes you have a working `proxy.yaml` and can connect through the proxy using the [local development guide](../local-development/).
 
 ## 1. Stop the current proxy
 
@@ -36,7 +36,7 @@ From your `pg-proxy` checkout, run the previously built executable:
   -config proxy.yaml -telemetry none
 ```
 
-Wait for `local proxy ready; clients are trusted`. In another terminal:
+Wait for the `proxy ready` log line. In another terminal:
 
 ```sh
 psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable' \
@@ -59,6 +59,6 @@ Keep the rest of the configuration. These are also the defaults when either fiel
 
 The global limit applies to the whole proxy process. A user's limit covers all its logical databases. In loopback trust mode, the per-user default applies to the configured backend username. A limit rejects the next established session with SQLSTATE `53300`; it does not disconnect existing sessions. Failed authentication does not consume a session slot, and a disconnect releases it.
 
-Changing `max_conns` does not change these caps. The defaults allow 100,000 total client sessions and 10,000 per user, rather than the previous fixed 100. Choose lower limits when the proxy's memory budget or workload needs them. Restart after editing the file. Embedders can supply their own admission limiter; see [Go library configuration](../../reference/configuration/library/).
+Changing `max_conns` does not change these caps. The defaults allow 100,000 total client sessions and 10,000 per user. Choose lower limits when the proxy's memory budget or workload needs them. Restart after editing the file. Embedders can supply their own admission limiter; see [Go library configuration](../../reference/configuration/library/).
 
 See [Transaction pooling](../../explanation/pooling/) for why these limits are separate.

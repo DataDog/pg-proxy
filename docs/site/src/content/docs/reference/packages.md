@@ -3,7 +3,7 @@ title: "Packages"
 description: "The current public package inventory."
 ---
 
-The public API lives under `pkg/` (short for packages); the reference executable lives under `cmd/pg-proxy`. These interfaces are still evolving.
+The public Go API lives under `pkg/`; the `pg-proxy` binary lives under `cmd/pg-proxy`. The API may change between releases.
 
 | Package | Role |
 | --- | --- |

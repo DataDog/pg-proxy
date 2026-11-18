@@ -114,8 +114,8 @@ policy first checks whether it can keep the previous SQL leader; otherwise it
 uses Patroni, with the old-leader protections below.
 
 Retries happen before the policy sees a result. The library makes one attempt
-unless the application supplies `RunWithRetry`. The [dd-source adapter](https://github.com/ddoghq/dd-source/blob/main/domains/orgstore/apps/pg-proxy/pools/sql_health_check.go) currently
-allows two attempts total, but does not retry `57P02`, `57P03`, or `28P01`.
+unless the application supplies `RunWithRetry`. For example, an application
+can allow two attempts total and not retry `57P02`, `57P03`, or `28P01`.
 Not retrying an error does not make it proof of instance failure: `28P01` only
 says those credentials were rejected.
 
@@ -207,8 +207,7 @@ leader we already replaced. There is no general age limit on kept SQL leaders or
 cached credential results. The start-time check protects a **Patroni recovery**;
 it does not run against every ordinary Patroni leader change. Repeated polls
 rejected for missing IP coverage also keep the old route rather than automatically
-falling back. Probe timeouts do not cover these cases. Banlist integration must
-also check the retained-SQL and Patroni-recovery paths.
+falling back. Probe timeouts do not cover these cases.
 
 See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 [health_worker_test.go](health_worker_test.go) for scheduling and publication tests.

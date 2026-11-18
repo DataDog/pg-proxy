@@ -1,15 +1,15 @@
 ---
 title: "Local development"
-description: "Build, run, and test the OSS binary from its repository."
+description: "Build, run, and test the pg-proxy binary from its repository."
 ---
 
-The OSS binary and shared library live in [DataDog/pg-proxy](https://github.com/DataDog/pg-proxy). Build and test them from that repository.
+The `pg-proxy` binary and Go library live in [DataDog/pg-proxy](https://github.com/DataDog/pg-proxy). Build and test them from that repository.
 
 You need Go 1.26 or newer, a C compiler with CGO enabled, and `psql` on your PATH. The examples use a disposable PostgreSQL database at `127.0.0.1:5432`, with database, username, and password all set to `postgres`. Port `15432` must be free. Adapt the backend settings to your local database.
 
-## 1. Build the local executable
+## 1. Build the binary
 
-Build the OSS binary from `main`:
+Build `pg-proxy` from `main`:
 
 ```sh
 git clone https://github.com/DataDog/pg-proxy.git
@@ -40,14 +40,14 @@ proxy:
   postgres_msg_buffer_size: 10240
 ```
 
-Start the OSS binary:
+Start `pg-proxy`:
 
 ```sh
 ./bin/pg-proxy \
   -config proxy.yaml -telemetry none
 ```
 
-Wait for `local proxy ready; clients are trusted`. The executable listens on loopback and trusts the configured username without client TLS. The [settings table](#settings) below lists its options and defaults.
+Wait for the `proxy ready` log line. `pg-proxy` listens on loopback and trusts the configured username without client TLS. The [settings table](#settings) below lists its options and defaults.
 
 ### Connect a client
 
@@ -92,11 +92,11 @@ For website changes, follow [Contribute to the documentation](../documentation-c
 
 ## Settings
 
-The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file. File changes require a restart. The file uses the portable [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md); the OSS binary reads the subset described here.
+`pg-proxy` requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file. File changes require a restart. The file uses the portable [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md); `pg-proxy` reads the subset described here.
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `proxy.listener_address` | `127.0.0.1:15432` | Loopback IP address and port. Non-loopback addresses and hostnames are rejected. |
+| `proxy.listener_address` | `127.0.0.1:15432` | IP address and port. Without password authentication, only loopback addresses are accepted. Hostnames are always rejected. |
 | `proxy.max_sessions` | `100000` | Maximum established client sessions across all users in this proxy process. |
 | `proxy.default_max_user_sessions` | `10000` | Default established-session cap for each client user. |
 | `users[].max_sessions` | Inherit the per-user default | Override for one authenticated user across logical databases. |
@@ -111,16 +111,16 @@ The OSS binary requires `-config` pointing to a `.yaml`, `.yml`, or `.json` file
 | `-trace-parameters` | `false` | Set to `true` to capture raw bind parameter values in sampled traces. SQL text is recorded regardless. |
 | `-log-level` | `INFO` | Minimum severity for proxy logs on stderr and through OTLP. Use `DEBUG` for local diagnostics. |
 
-Omitted or zero session limits use the defaults above; negative limits are rejected. Session limits do not change backend pool sizes. There are no separate backend URL, listener, logical-database, or session-limit flags. `PG_PROXY_BACKEND_URL` is not read.
+Omitted or zero session limits use the defaults above; negative limits are rejected. Session limits do not change backend pool sizes. Backends, listener, logical databases, and session limits are set only in the file; there are no flags for them.
 
 ### Backend connection settings
 
-Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. Cluster `replicas` and logical-database `read_clusters` configure [read routing](../../explanation/read-routing/). The OSS binary rejects discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond this command.
+Use direct database settings in the file. Backend passwords can be inline or come from a file or environment variable with `password_file` or `password_env`; see [credential references](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md#credential-references). `sslmode` configures backend TLS; pool sizing and lifetime fields configure pgx pools; `connection_options` sets backend startup parameters such as `statement_timeout`. Cluster `replicas` and logical-database `read_clusters` configure [read routing](../../explanation/read-routing/). `pg-proxy` rejects discovery settings, JWT authentication, and mirroring with explicit startup errors. See [Go library configuration](../../reference/configuration/library/) for embedding capabilities beyond the binary.
 
 ### Client authentication
 
-By default, the local executable uses local trust without client TLS. It accepts only loopback listen addresses and clients whose username matches the backend username. All queries run as the backend user.
+By default, `pg-proxy` uses local trust without client TLS. It accepts only loopback listen addresses and clients whose username matches the backend username. All queries run as the backend user.
 
 Any local process using that username can access the backend with its configured privileges. Use this default only with disposable local development databases.
 
-Opt-in password/SCRAM authentication requires client TLS and allows non-loopback listeners with explicit per-user database access. See the [client authentication guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md). Set `proxy.tls_cert_file` and `proxy.tls_key_file` to enable client TLS, and `proxy.tls_required: true` to reject plaintext startup; see the [client TLS guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-connections.md#standalone-tls).
+Opt-in password/SCRAM authentication requires client TLS and allows non-loopback listeners with explicit per-user database access. See the [client authentication guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-authentication.md). Password authentication requires `proxy.tls_cert_file`, `proxy.tls_key_file`, and `proxy.tls_required: true`. Without password authentication, the certificate and key enable optional client TLS; see the [client TLS guide](https://github.com/DataDog/pg-proxy/blob/main/docs/client-connections.md#standalone-tls).
