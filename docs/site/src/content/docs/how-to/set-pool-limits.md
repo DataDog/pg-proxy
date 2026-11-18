@@ -33,11 +33,10 @@ Keep the rest of your configuration, including `clusters`, `logical_databases`, 
 
 ## 3. Restart and check connectivity
 
-From your `pg-proxy` checkout, run the previously built executable:
+From your `pg-proxy` checkout, start the proxy again:
 
 ```sh
-./bin/pg-proxy \
-  -config proxy.yaml -telemetry none
+go run ./cmd/pg-proxy -config proxy.yaml -telemetry none
 ```
 
 Wait for the `proxy ready` log line. In another terminal:
