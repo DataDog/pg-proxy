@@ -11,8 +11,8 @@ import "strings"
 type Flags uint8
 
 const (
-	// MayChangeSession reports that the text may change state that the release
-	// reset restores: a setting, the role, or a held cursor.
+	// MayChangeSession reports that the text may change session state that
+	// outlives the checkout: a setting, the role, or a held cursor.
 	MayChangeSession Flags = 1 << iota
 	// MayReadSequenceState reports that the text may call currval or lastval,
 	// which read the session's sequence state.

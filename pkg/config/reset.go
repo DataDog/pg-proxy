@@ -23,13 +23,15 @@ const (
 	ResetDefault ResetMode = ""
 	// ResetAlways runs the reset on every release.
 	ResetAlways ResetMode = "always"
-	// ResetAudit runs the reset on every release, and on each release that
-	// ResetDynamic would skip it also reports the settings the reset changed:
-	// the settings ResetDynamic would have leaked.
+	// ResetAudit runs the same reset as ResetAlways on every release, so clients
+	// see no difference. On each release that ResetDynamic would skip, it also
+	// reports the settings the checkout left changed, which ResetDynamic would
+	// have leaked: a fixed list of settings on every such release, and every
+	// setting on a sample of them.
 	ResetAudit ResetMode = "audit"
 	// ResetDynamic runs the reset only when something in the checkout may have
 	// changed session state. It does not see changes made inside functions or
-	// triggers that the client's SQL does not name, or sequence state.
+	// triggers that the client's SQL does not name, including a change of role.
 	ResetDynamic ResetMode = "dynamic"
 	// ResetOff never sends a reset. A client's SET carries over to the next
 	// client of the connection.

@@ -145,14 +145,22 @@ func lastBackendQuery(t *testing.T, ctx context.Context) string {
 }
 
 // TestResetModeReleaseQuery checks what each mode sends when a clean checkout
-// releases its backend: dynamic and off skip the round trip entirely.
+// releases its backend: dynamic and off skip the round trip entirely, and audit
+// adds its check to the same reset that always sends.
 func TestResetModeReleaseQuery(t *testing.T) {
 	const clean = "SELECT 1 AS itest_clean_checkout"
-	for mode, wantPrefix := range map[pgconfig.ResetMode]string{
-		pgconfig.ResetAlways:  "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL",
-		pgconfig.ResetAudit:   "SELECT pg_catalog.current_setting('search_path', true)",
-		pgconfig.ResetDynamic: clean,
-		pgconfig.ResetOff:     clean,
+	const reset = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+	for mode, want := range map[pgconfig.ResetMode]func(string) bool{
+		pgconfig.ResetAlways: func(query string) bool { return strings.HasPrefix(query, reset) },
+		pgconfig.ResetAudit: func(query string) bool {
+			// pg_stat_activity cuts the query at track_activity_query_size (1 kB),
+			// before the reset, so only the check that starts it shows. A sampled
+			// release starts with the full check instead.
+			return strings.HasPrefix(query, "SELECT pg_catalog.current_setting('search_path', true)") ||
+				strings.HasPrefix(query, "SELECT pg_catalog.string_agg(name")
+		},
+		pgconfig.ResetDynamic: func(query string) bool { return strings.HasPrefix(query, clean) },
+		pgconfig.ResetOff:     func(query string) bool { return strings.HasPrefix(query, clean) },
 	} {
 		t.Run(string(mode), func(t *testing.T) {
 			proxy := startResetModeProxy(t, mode)
@@ -162,19 +170,23 @@ func TestResetModeReleaseQuery(t *testing.T) {
 				_, err := conn.Exec(ctx, clean)
 				require.NoError(t, err)
 			})
-			require.True(t, strings.HasPrefix(lastBackendQuery(t, ctx), wantPrefix), "last query: %s", lastBackendQuery(t, ctx))
+			query := lastBackendQuery(t, ctx)
+			require.True(t, want(query), "last query: %s", query)
 			require.NotContains(t, proxy.Logs(), "reset_would_leak", "a clean checkout leaks nothing")
 		})
 	}
 }
 
-// TestResetModeServerSideGap pins the documented gap of dynamic: a setting that a
-// function changes without naming it in the client's SQL, and that Postgres does
-// not report, survives a skipped reset. Audit reports the same release.
+// TestResetModeServerSideGap pins the documented gap of dynamic: settings that a
+// function changes without naming them in the client's SQL, and that Postgres does
+// not report, survive a skipped reset. Audit reports the same release.
 func TestResetModeServerSideGap(t *testing.T) {
 	require.NoError(t, backend.Exec(t.Context(),
 		`CREATE OR REPLACE FUNCTION itest_reset_timeout() RETURNS void LANGUAGE plpgsql AS
-		 $$ BEGIN PERFORM pg_catalog.set_config('statement_timeout', '4321', false); END $$`,
+		 $$ BEGIN
+		   PERFORM pg_catalog.set_config('statement_timeout', '4321', false);
+		   PERFORM pg_catalog.set_config('synchronous_commit', 'off', false);
+		 END $$`,
 	))
 	t.Cleanup(func() { _ = backend.Exec(context.Background(), "DROP FUNCTION IF EXISTS itest_reset_timeout()") })
 	for mode, wantLeak := range map[pgconfig.ResetMode]bool{pgconfig.ResetAudit: false, pgconfig.ResetDynamic: true} {
@@ -188,25 +200,27 @@ func TestResetModeServerSideGap(t *testing.T) {
 			})
 			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
 				require.Equal(t, wantLeak, showSetting(t, ctx, conn, "statement_timeout") == "4321ms")
+				require.Equal(t, wantLeak, showSetting(t, ctx, conn, "synchronous_commit") == "off")
 			})
 			if mode == pgconfig.ResetAudit {
 				require.Eventually(t, func() bool {
 					logs := proxy.Logs()
-					return strings.Contains(logs, "reset_would_leak") && strings.Contains(logs, "statement_timeout")
-				}, 5*time.Second, 50*time.Millisecond, "audit must report the setting dynamic would leak")
+					return strings.Contains(logs, "reset_would_leak") &&
+						strings.Contains(logs, "statement_timeout") && strings.Contains(logs, "synchronous_commit")
+				}, 5*time.Second, 50*time.Millisecond, "audit must report the settings dynamic would leak")
 			}
 		})
 	}
 }
 
-// TestResetModeHeldCursorsAndSequences checks the state that audit and dynamic
-// resets clear beyond settings. A held cursor is named in the client's SQL, so
-// dynamic resets too. Sequence state changes on any nextval, including implicit
-// ones, so dynamic leaves it: the documented gap.
-func TestResetModeHeldCursorsAndSequences(t *testing.T) {
+// TestResetModesLeaveCursorsAndSequencesAsAlways checks that audit and dynamic
+// treat held cursors and sequence state exactly as always does: none of them
+// closes or discards them yet. Fixing that (OSQQUERY-823, -826) changes every mode
+// at once, and this test with it.
+func TestResetModesLeaveCursorsAndSequencesAsAlways(t *testing.T) {
 	require.NoError(t, backend.Exec(t.Context(), "CREATE SEQUENCE IF NOT EXISTS itest_reset_seq"))
 	t.Cleanup(func() { _ = backend.Exec(context.Background(), "DROP SEQUENCE IF EXISTS itest_reset_seq") })
-	for _, mode := range []pgconfig.ResetMode{pgconfig.ResetAudit, pgconfig.ResetDynamic} {
+	for _, mode := range resettingModes {
 		t.Run(string(mode), func(t *testing.T) {
 			proxy := startResetModeProxy(t, mode)
 			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
@@ -217,8 +231,11 @@ func TestResetModeHeldCursorsAndSequences(t *testing.T) {
 				require.NoError(t, err)
 			})
 			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
-				_, err := conn.Exec(ctx, "FETCH ALL FROM itest_held")
-				requirePgErrorCode(t, err, "34000") // invalid_cursor_name
+				var row string
+				require.NoError(t, conn.QueryRow(ctx, "FETCH NEXT FROM itest_held").Scan(&row))
+				require.Equal(t, "row of client 1", row)
+				_, err := conn.Exec(ctx, "CLOSE itest_held")
+				require.NoError(t, err)
 			})
 
 			var issued int64
@@ -227,13 +244,8 @@ func TestResetModeHeldCursorsAndSequences(t *testing.T) {
 			})
 			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
 				var last int64
-				err := conn.QueryRow(ctx, "SELECT lastval()").Scan(&last)
-				if mode == pgconfig.ResetAudit {
-					requirePgErrorCode(t, err, "55000")
-					return
-				}
-				require.NoError(t, err)
-				require.Equal(t, issued, last, "dynamic does not discard sequence state")
+				require.NoError(t, conn.QueryRow(ctx, "SELECT lastval()").Scan(&last))
+				require.Equal(t, issued, last)
 			})
 		})
 	}

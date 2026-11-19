@@ -7,6 +7,7 @@ package link
 
 import (
 	"fmt"
+	"math/rand/v2"
 	"slices"
 	"strings"
 
@@ -16,6 +17,7 @@ import (
 const (
 	metricReset             = "pg_proxy.sessions.connections.reset"
 	metricResetWouldLeak    = "pg_proxy.sessions.connections.reset.would_leak"
+	metricResetFullCheck    = "pg_proxy.sessions.connections.reset.full_check"
 	metricCrossCheckoutRead = "pg_proxy.sessions.sequence_state.cross_checkout_read"
 	// sqlstateNotInPrerequisiteState is object_not_in_prerequisite_state, which
 	// currval and lastval raise when the session has no value yet.
@@ -47,34 +49,69 @@ const (
 // links. The zero value resets on every release.
 type ResetPolicy struct {
 	mode config.ResetMode
-	// auditSQL reads the settings in auditColumns, in order. It runs before and
-	// after the reset on releases that ResetDynamic would skip.
+	// auditSQL reads the settings in auditColumns, in order. ResetAudit runs it
+	// before the reset on releases that ResetDynamic would skip.
 	auditSQL     string
 	auditColumns []string
+	// fullCheckRate is the share of audited releases that also run fullCheckSQL.
+	fullCheckRate float64
 }
 
-// auditedSettings are settings that Postgres does not report with
-// ParameterStatus and whose leak changes another client's results, access or
-// errors. A reported setting cannot change without marking the checkout. The
-// version-specific ones use missing_ok, which reads NULL where they don't
-// exist.
+// auditedSettings are the settings ResetAudit compares on every audited release:
+// those that Postgres does not report with ParameterStatus and whose leak changes
+// another client's results, errors, messages, timeouts or durability. A reported
+// setting cannot change without marking the checkout. A setting that a version
+// lacks reads as NULL (missing_ok). The sampled full check finds the settings
+// this list misses.
 var auditedSettings = []string{
+	// Query results and meaning.
 	"search_path", // reported only from PostgreSQL 18
+	"row_security",
+	"session_replication_role",
+	"transform_null_equals",
+	"default_text_search_config",
+	"lc_monetary",
+	"lc_numeric",
+	"lc_time",
+	"bytea_output",
+	"extra_float_digits",
+	"xmlbinary",
+	"xmloption",
+	"array_nulls",
+	"backslash_quote",
+	"quote_all_identifiers",
+	"gin_fuzzy_search_limit",
+	// Transactions and DDL.
+	"default_transaction_isolation",
+	"default_transaction_deferrable",
+	"check_function_bodies",
+	"default_tablespace",
+	"temp_tablespaces",
+	// What the client sees.
+	"client_min_messages",
+	"lc_messages",
+	// Timeouts.
 	"statement_timeout",
 	"lock_timeout",
 	"idle_in_transaction_session_timeout",
-	"default_transaction_isolation",
-	"row_security",
-	"session_replication_role",
-	"bytea_output",
-	"extra_float_digits",
+	"idle_session_timeout",
 	"transaction_timeout", // PostgreSQL 17 and later
+	// Durability.
+	"synchronous_commit",
 }
 
-const (
-	auditColumnRole       = "current_user"
-	auditColumnHeldCursor = "held_cursor"
-)
+const auditColumnRole = "current_user"
+
+// fullCheckSQL names every setting the checkout left different from its reset
+// value. Reading pg_settings costs about 1 ms of backend time, against about
+// 0.1 ms for auditSQL, so it runs only on a sample of audited releases. It does
+// not see custom settings, which pg_settings does not list, or the role; the
+// audit columns cover both.
+const fullCheckSQL = "SELECT pg_catalog.string_agg(name, ',' ORDER BY name) FROM pg_catalog.pg_settings " +
+	"WHERE source = 'session' AND setting IS DISTINCT FROM reset_val"
+
+// defaultFullCheckRate is the share of audited releases that run fullCheckSQL.
+const defaultFullCheckRate = 0.01
 
 // NewResetPolicy validates mode and the custom auditSettings, and for
 // ResetAudit builds the audit query once.
@@ -97,7 +134,6 @@ func NewResetPolicy(mode config.ResetMode, auditSettings []string) (ResetPolicy,
 	// pg_catalog. keeps a leaked search_path from redirecting the check itself.
 	// current_user is a keyword, not a function.
 	add(auditColumnRole, "current_user")
-	add(auditColumnHeldCursor, "(SELECT pg_catalog.count(*) FROM pg_catalog.pg_cursors WHERE is_holdable)")
 	for _, name := range auditSettings {
 		if slices.Contains(columns, name) {
 			continue
@@ -107,14 +143,21 @@ func NewResetPolicy(mode config.ResetMode, auditSettings []string) (ResetPolicy,
 	}
 	policy.auditSQL = "SELECT " + strings.Join(exprs, ", ")
 	policy.auditColumns = columns
+	policy.fullCheckRate = defaultFullCheckRate
 	return policy, nil
 }
 
 // Mode returns the resolved mode: never config.ResetDefault.
 func (p ResetPolicy) Mode() config.ResetMode { return p.mode.Resolve() }
 
-// resetSQL returns the reset statement for this policy. roleManaged says an
-// embedder RoleSession has already reset the role.
+// sampleFullCheck reports whether this audited release also runs fullCheckSQL.
+// The draw is random, so a periodic workload cannot fall between samples.
+func (p ResetPolicy) sampleFullCheck() bool {
+	return p.fullCheckRate > 0 && rand.Float64() < p.fullCheckRate
+}
+
+// resetSQL returns the reset statement. roleManaged says an embedder RoleSession
+// has already reset the role.
 //
 // RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). Without a
 // RoleSession, the same simple query resets identity first: any user may run
@@ -122,20 +165,15 @@ func (p ResetPolicy) Mode() config.ResetMode { return p.mode.Resolve() }
 // (ALTER ROLE ... SET role, or a startup option), which Postgres releases before
 // the CVE-2024-10978 fix drop.
 //
-// ResetAudit and ResetDynamic also close held cursors and discard sequence
-// state, which ResetAlways does not do yet. CLOSE ALL and DISCARD SEQUENCES,
-// unlike DISCARD ALL, can run in the implicit transaction of a multi-statement
-// query.
-func (p ResetPolicy) resetSQL(roleManaged bool) string {
-	sql := "RESET ALL"
-	if !roleManaged {
-		sql = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+// Every mode sends the same statement, so ResetAudit changes nothing a client
+// sees and ResetDynamic differs from ResetAlways only in whether it is sent.
+// Closing held cursors and discarding sequence state (OSQQUERY-823, -826) would
+// change every mode at once.
+func resetSQL(roleManaged bool) string {
+	if roleManaged {
+		return "RESET ALL"
 	}
-	switch p.Mode() {
-	case config.ResetAudit, config.ResetDynamic:
-		sql += "; CLOSE ALL; DISCARD SEQUENCES"
-	}
-	return sql
+	return "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
 }
 
 // Reset reasons, the reason tag of the reset metric.
@@ -170,8 +208,19 @@ func (p ResetPolicy) resetDecision(marks SessionMarks) (send bool, reason string
 	}
 }
 
+// auditBaselineKey keys a connection's auditBaseline in pgconn's CustomData,
+// which lives as long as the backend connection.
+const auditBaselineKey = "github.com/DataDog/pg-proxy/pkg/link.auditBaseline"
+
+// auditBaseline is the audit row a connection reads right after a reset: what
+// every audited setting reads at the connection's baseline.
+type auditBaseline struct {
+	sql    string // the audit query the values answer
+	values [][]byte
+}
+
 // changedColumns returns the audited columns whose values differ between the
-// rows read before and after the reset.
+// row read before the reset and the baseline.
 func (p ResetPolicy) changedColumns(before, after [][]byte) []string {
 	var changed []string
 	for i, name := range p.auditColumns {

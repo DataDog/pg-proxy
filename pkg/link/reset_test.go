@@ -6,6 +6,8 @@
 package link
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -53,19 +55,9 @@ func TestResetDecision(t *testing.T) {
 	assert.Equal(t, "always", reason)
 }
 
-func TestResetSQLByMode(t *testing.T) {
-	const identity = "RESET SESSION AUTHORIZATION; RESET ROLE; "
-	const extra = "; CLOSE ALL; DISCARD SEQUENCES"
-	for mode, want := range map[config.ResetMode]string{
-		config.ResetDefault: "RESET ALL",
-		config.ResetAlways:  "RESET ALL",
-		config.ResetAudit:   "RESET ALL" + extra,
-		config.ResetDynamic: "RESET ALL" + extra,
-	} {
-		policy := mustResetPolicy(t, mode)
-		assert.Equal(t, want, policy.resetSQL(true), "mode %q with a RoleSession", mode)
-		assert.Equal(t, identity+want, policy.resetSQL(false), "mode %q without a RoleSession", mode)
-	}
+func TestResetSQL(t *testing.T) {
+	assert.Equal(t, "RESET ALL", resetSQL(true), "with a RoleSession")
+	assert.Equal(t, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL", resetSQL(false), "without a RoleSession")
 }
 
 func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
@@ -73,13 +65,17 @@ func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
 	assert.Equal(t, config.ResetAudit, policy.Mode())
 	assert.True(t, strings.HasPrefix(policy.auditSQL, "SELECT pg_catalog.current_setting('search_path', true), "))
 	assert.Contains(t, policy.auditSQL, "pg_catalog.current_setting('transaction_timeout', true)")
+	assert.Contains(t, policy.auditSQL, "pg_catalog.current_setting('synchronous_commit', true)")
 	assert.Contains(t, policy.auditSQL, ", current_user, ")
-	assert.Contains(t, policy.auditSQL, "FROM pg_catalog.pg_cursors WHERE is_holdable")
 	assert.True(t, strings.HasSuffix(policy.auditSQL, ", pg_catalog.current_setting('app.tenant_id', true)"))
 	assert.Equal(t, 1, strings.Count(policy.auditSQL, "app.tenant_id"), "duplicate names are checked once")
-	assert.Len(t, policy.auditColumns, len(auditedSettings)+3)
+	assert.Len(t, policy.auditColumns, len(auditedSettings)+2)
+	assert.Len(t, auditedSettings, 29)
+	assert.Equal(t, defaultFullCheckRate, policy.fullCheckRate)
 
-	assert.Empty(t, mustResetPolicy(t, config.ResetDynamic).auditSQL, "only audit runs the check")
+	dynamic := mustResetPolicy(t, config.ResetDynamic)
+	assert.Empty(t, dynamic.auditSQL, "only audit runs the check")
+	assert.False(t, dynamic.sampleFullCheck())
 
 	_, err := NewResetPolicy("sometimes", nil)
 	assert.ErrorContains(t, err, `reset_mode: unknown mode "sometimes"`)
@@ -88,10 +84,10 @@ func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
 }
 
 func TestChangedColumns(t *testing.T) {
-	policy := ResetPolicy{auditColumns: []string{"search_path", "transaction_timeout", "held_cursor"}}
-	before := [][]byte{[]byte("app"), nil, []byte("1")}
-	after := [][]byte{[]byte(`"$user", public`), nil, []byte("0")}
-	assert.Equal(t, []string{"search_path", "held_cursor"}, policy.changedColumns(before, after))
+	policy := ResetPolicy{auditColumns: []string{"search_path", "transaction_timeout", "synchronous_commit"}}
+	before := [][]byte{[]byte("app"), nil, []byte("off")}
+	after := [][]byte{[]byte(`"$user", public`), nil, []byte("on")}
+	assert.Equal(t, []string{"search_path", "synchronous_commit"}, policy.changedColumns(before, after))
 	assert.Empty(t, policy.changedColumns(after, after))
 	assert.Equal(t, []string{"transaction_timeout"}, policy.changedColumns(
 		[][]byte{nil, []byte(""), nil}, [][]byte{nil, nil, nil}), "NULL and an empty string differ")
@@ -138,7 +134,7 @@ func TestReleaseByMode(t *testing.T) {
 	}{
 		{config.ResetAlways, 0, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL", "always"},
 		{config.ResetDynamic, 0, "", "clean"},
-		{config.ResetDynamic, MarkClientSQL, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL; CLOSE ALL; DISCARD SEQUENCES", "client_sql"},
+		{config.ResetDynamic, MarkClientSQL, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL", "client_sql"},
 		{config.ResetOff, MarkClientSQL, "", "off"},
 	}
 	for _, test := range tests {
@@ -173,48 +169,141 @@ func TestReleaseByMode(t *testing.T) {
 	}
 }
 
-func TestReleaseAuditCountsWouldLeak(t *testing.T) {
+// auditRows returns two audit rows for policy, both "baseline" except for the
+// columns in changed, which the first row holds instead.
+func auditRows(policy ResetPolicy, changed map[string][]byte) (before, baseline [][]byte) {
+	before = make([][]byte, len(policy.auditColumns))
+	baseline = make([][]byte, len(policy.auditColumns))
+	for i, column := range policy.auditColumns {
+		before[i], baseline[i] = []byte("baseline"), []byte("baseline")
+		if value, ok := changed[column]; ok {
+			before[i] = value
+		}
+	}
+	return before, baseline
+}
+
+const testReset = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+
+func wouldLeak(metrics *recordingMetrics, setting, check string) []int64 {
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.would_leak",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit", "setting:" + setting, "check:" + check})
+	return counts
+}
+
+func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 	metrics := newRecordingMetrics()
 	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
 	policy := mustResetPolicy(t, config.ResetAudit, "app.tenant_id")
+	policy.fullCheckRate = 0
 
-	// Before the reset a client's search_path and held cursor are still there, and
-	// a function set app.tenant_id; the reset restores all three.
-	before := make([][]byte, len(policy.auditColumns))
-	after := make([][]byte, len(policy.auditColumns))
-	for i, column := range policy.auditColumns {
-		before[i], after[i] = []byte("baseline"), []byte("baseline")
-		switch column {
-		case "search_path":
-			before[i] = []byte("leaked")
-		case "held_cursor":
-			before[i], after[i] = []byte("1"), []byte("0")
-		case "app.tenant_id":
-			before[i], after[i] = []byte("t1"), nil
-		}
-	}
+	// A function changed search_path and app.tenant_id; the reset restores both.
+	before, after := auditRows(policy, map[string][]byte{"search_path": []byte("leaked"), "app.tenant_id": []byte("t1")})
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, before, after))
-	tags := []string{"database_cluster:test-cluster"}
-	link, err := New(conn, Options{MetricTags: tags, Reset: policy})
+	pgConn := conn.Conn().PgConn()
+	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 
 	require.NoError(t, link.Release())
 
-	msg := <-received
-	reset := "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL; CLOSE ALL; DISCARD SEQUENCES"
-	require.Equal(t, &pgproto3.Query{String: policy.auditSQL + "; " + reset + "; " + policy.auditSQL}, msg,
-		"the check and the reset share one round trip")
-	modeTags := append(append([]string(nil), tags...), "reset_mode:audit")
-	for _, setting := range []string{"search_path", "held_cursor", "app.tenant_id"} {
-		counts, emitted := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.would_leak", append(modeTags, "setting:"+setting))
-		assert.True(t, emitted, setting)
-		assert.Equal(t, []int64{1}, counts, setting)
+	require.Equal(t, &pgproto3.Query{String: policy.auditSQL + "; " + testReset + "; " + policy.auditSQL}, <-received,
+		"a connection without a baseline reads the settings after the reset too, in the same round trip")
+	for _, setting := range []string{"search_path", "app.tenant_id"} {
+		assert.Equal(t, []int64{1}, wouldLeak(metrics, setting, "list"), setting)
 	}
-	_, emitted := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.would_leak", append(modeTags, "setting:statement_timeout"))
-	assert.False(t, emitted, "unchanged settings are not counted")
-	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset", append(modeTags, "outcome:reset", "reason:audit"))
+	assert.Empty(t, wouldLeak(metrics, "statement_timeout", "list"), "unchanged settings are not counted")
+	assert.Equal(t, auditBaseline{sql: policy.auditSQL, values: after}, pgConn.CustomData()[auditBaselineKey],
+		"the row read after the reset becomes the connection's baseline")
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit"})
 	assert.Equal(t, []int64{1}, counts)
+}
+
+func TestReleaseAuditComparesWithBaseline(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		changed      map[string][]byte
+		keepBaseline bool
+	}{
+		{"clean", nil, true},
+		{"leaked", map[string][]byte{"synchronous_commit": []byte("off")}, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			metrics := newRecordingMetrics()
+			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+			policy := mustResetPolicy(t, config.ResetAudit)
+			policy.fullCheckRate = 0
+			before, baseline := auditRows(policy, test.changed)
+			received := make(chan pgproto3.FrontendMessage, 1)
+			conn := newSessionLinkTestPoolConnServing(t, serveReset(received, before))
+			pgConn := conn.Conn().PgConn()
+			pgConn.CustomData()[auditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+			link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
+			require.NoError(t, err)
+
+			require.NoError(t, link.Release())
+
+			require.Equal(t, &pgproto3.Query{String: policy.auditSQL + "; " + testReset}, <-received,
+				"with a baseline the settings are read only before the reset")
+			for setting := range test.changed {
+				assert.Equal(t, []int64{1}, wouldLeak(metrics, setting, "list"), setting)
+			}
+			_, kept := pgConn.CustomData()[auditBaselineKey]
+			assert.Equal(t, test.keepBaseline, kept, "a change drops the baseline, so the next check reads it again")
+		})
+	}
+}
+
+func TestReleaseAuditSampledFullCheck(t *testing.T) {
+	metrics := newRecordingMetrics()
+	var logs bytes.Buffer
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics, LogHandler: slog.NewTextHandler(&logs, nil)}))
+	policy := mustResetPolicy(t, config.ResetAudit)
+	policy.fullCheckRate = 1
+	before, baseline := auditRows(policy, map[string][]byte{"synchronous_commit": []byte("off")})
+	full := [][]byte{[]byte("synchronous_commit,work_mem")}
+	received := make(chan pgproto3.FrontendMessage, 1)
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, full, before))
+	conn.Conn().PgConn().CustomData()[auditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
+	require.NoError(t, err)
+
+	require.NoError(t, link.Release())
+
+	require.Equal(t, &pgproto3.Query{String: fullCheckSQL + "; " + policy.auditSQL + "; " + testReset}, <-received,
+		"the full check runs first, in the same round trip, while the checkout's settings are still in place")
+	assert.Equal(t, []int64{1}, wouldLeak(metrics, "synchronous_commit", "list"))
+	assert.Equal(t, []int64{1}, wouldLeak(metrics, "synchronous_commit", "full"))
+	assert.Equal(t, []int64{1}, wouldLeak(metrics, "work_mem", "full"))
+	assert.Empty(t, wouldLeak(metrics, "work_mem", "list"), "work_mem is not on the list")
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.full_check",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit"})
+	assert.Equal(t, []int64{1}, counts)
+	assert.Contains(t, logs.String(), "settings=[synchronous_commit] unlisted_settings=[work_mem]")
+	assert.NotContains(t, logs.String(), "off", "values are never logged")
+}
+
+func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
+	metrics := newRecordingMetrics()
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+	policy := mustResetPolicy(t, config.ResetAudit)
+	policy.fullCheckRate = 1
+	before, baseline := auditRows(policy, nil)
+	received := make(chan pgproto3.FrontendMessage, 1)
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, [][]byte{nil}, before))
+	conn.Conn().PgConn().CustomData()[auditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
+	require.NoError(t, err)
+
+	require.NoError(t, link.Release())
+
+	<-received
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.full_check",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit"})
+	assert.Equal(t, []int64{1}, counts)
+	_, emitted := metrics.counts["datadog.pg_proxy.sessions.connections.reset.would_leak"]
+	assert.False(t, emitted, "a NULL full check names no setting")
 }
 
 func TestReleaseAuditCheckFailureClosesConnection(t *testing.T) {

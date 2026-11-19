@@ -48,7 +48,8 @@ type DatabaseSettings struct {
 	// the pool. Empty selects the library default, ResetAlways. See ResetMode.
 	ResetMode ResetMode `mapstructure:"reset_mode" json:"resetMode,omitempty" yaml:"reset_mode,omitempty"`
 	// ResetAuditSettings adds custom settings, each named prefix.name, to the
-	// settings that ResetAudit compares before and after the reset.
+	// settings that ResetAudit checks on every audited release. pg_settings does
+	// not list custom settings, so its sampled full check cannot find them.
 	ResetAuditSettings []string `mapstructure:"reset_audit_settings" json:"resetAuditSettings,omitempty" yaml:"reset_audit_settings,omitempty"`
 }
 
