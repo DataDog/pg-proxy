@@ -5,13 +5,22 @@
 
 package bindparams
 
-import "strconv"
+import (
+	"strconv"
+	"strings"
+)
 
 const (
-	// TagPrefix starts each position's tag key: db.parameters.0, db.parameters.1, …
-	TagPrefix = "db.parameters."
+	// TagPrefix starts each position's value tag: db.query.parameter.0, …
+	// Only numbered keys live under it, so redaction can drop the subtree.
+	TagPrefix = "db.query.parameter."
+	// TypeTagPrefix starts each rendered position's type tag:
+	// pgproxy.bind.type.0, … It uses the same index as TagPrefix.
+	TypeTagPrefix = "pgproxy.bind.type."
 	// TruncatedTag is set to true when a limit dropped positions.
-	TruncatedTag = "db.parameters.truncated"
+	TruncatedTag = "pgproxy.bind.truncated"
+	// RenderedTag is set with TruncatedTag to the number of positions emitted.
+	RenderedTag = "pgproxy.bind.rendered"
 
 	// ValueLimit is the number of bytes of a value shown before "(+N bytes)".
 	ValueLimit = 256
@@ -26,15 +35,45 @@ const (
 	elementLimit = 64
 )
 
-var tagKeys = func() (keys [MaxParams]string) {
-	for i := range keys {
-		keys[i] = TagPrefix + strconv.Itoa(i)
+var valueKeys, typeKeys = func() (values, types [MaxParams]string) {
+	for i := range values {
+		values[i] = TagPrefix + strconv.Itoa(i)
+		types[i] = TypeTagPrefix + strconv.Itoa(i)
 	}
-	return keys
+	return values, types
 }()
 
-// Render passes one tag per captured position to setTag, then resets the
-// capture. It does nothing if nothing was recorded.
+// typeNames maps the OIDs pgtype knows to PostgreSQL's names for them, with
+// arrays written as int4[] rather than _int4. Built-in types all have OIDs
+// below FirstNormalObjectId (16384). Names are stored as interfaces so passing
+// one to setTag does not allocate.
+var typeNames = func() map[uint32]any {
+	names := make(map[uint32]any)
+	for oid := range uint32(16384) {
+		if t, ok := pgTypes.TypeForOID(oid); ok {
+			name := t.Name
+			if elem, ok := strings.CutPrefix(name, "_"); ok {
+				if _, isArray := arrayElementOID(oid); isArray {
+					name = elem + "[]"
+				}
+			}
+			names[oid] = name
+		}
+	}
+	return names
+}()
+
+var unknownType any = "unknown"
+
+func typeName(oid uint32) any {
+	if name, ok := typeNames[oid]; ok {
+		return name
+	}
+	return unknownType
+}
+
+// Render passes a value tag and a type tag per captured position to setTag,
+// then resets the capture. It does nothing if nothing was recorded.
 func (c *Capture) Render(setTag func(key string, value any)) {
 	if !c.recorded {
 		return
@@ -62,11 +101,13 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	start := 0
 	for i := range rendered {
 		end := int(c.params[i].end)
-		setTag(tagKeys[i], values[start:end])
+		setTag(valueKeys[i], values[start:end])
+		setTag(typeKeys[i], typeName(c.params[i].oid))
 		start = end
 	}
 	if truncated {
 		setTag(TruncatedTag, true)
+		setTag(RenderedTag, rendered)
 	}
 	c.Reset()
 }

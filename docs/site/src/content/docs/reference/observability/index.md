@@ -153,7 +153,7 @@ The Datadog SDK also reads `OTEL_TRACES_EXPORTER`. Unsetting it, as in the examp
 
 ## Query parameters
 
-Bind parameter capture is **off by default** in both Datadog and OTel modes. To include raw values as `db.parameters.0` … `db.parameters.n` on the root span, add `-trace-parameters=true` to a command that enables tracing:
+Bind parameter capture is **off by default** in both Datadog and OTel modes. To include raw values as `db.query.parameter.0` … `db.query.parameter.n` on the root span, add `-trace-parameters=true` to a command that enables tracing:
 
 ```bash
 pg-proxy \

@@ -5,11 +5,14 @@
 
 package bindparams
 
-import "github.com/jackc/pgx/v5/pgproto3"
+import (
+	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgtype"
+)
 
 const (
 	// MaxParams is the number of positions rendered; later positions are dropped
-	// and db.parameters.truncated is set.
+	// and pgproxy.bind.truncated is set.
 	MaxParams = 256
 	// copyLimit bounds the bytes copied per value. It covers everything Render
 	// can show: ValueLimit bytes of text, hexLimit bytes of hex, or an array
@@ -50,8 +53,9 @@ func (c *Capture) Recorded() bool {
 }
 
 // Record copies b's parameters, replacing any earlier capture. A value's type is
-// its non-zero OID in describedOIDs (the backend's ParameterDescription, which
-// resolves what Parse left unspecified), else its OID in parseOIDs, else unknown.
+// its OID in parseOIDs, else its OID in describedOIDs (the backend's
+// ParameterDescription, which resolves what Parse left unspecified), else
+// unknown. PostgreSQL treats a declared 0 or unknown as unspecified.
 func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	c.Reset()
 	c.recorded = true
@@ -126,11 +130,11 @@ func (c *Capture) Reset() {
 }
 
 func typeOID(i int, parseOIDs, describedOIDs []uint32) uint32 {
-	if i < len(describedOIDs) && describedOIDs[i] != 0 {
-		return describedOIDs[i]
-	}
-	if i < len(parseOIDs) {
+	if i < len(parseOIDs) && parseOIDs[i] != 0 && parseOIDs[i] != pgtype.UnknownOID {
 		return parseOIDs[i]
+	}
+	if i < len(describedOIDs) {
+		return describedOIDs[i]
 	}
 	return 0
 }

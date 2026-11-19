@@ -120,9 +120,12 @@ func TestBindParametersUseParseTypes(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "-42", roots[0]["db.parameters.0"])
-	assert.Equal(t, "null", roots[0]["db.parameters.1"])
-	assert.NotContains(t, roots[0], "db.parameters.truncated")
+	assert.Equal(t, "-42", roots[0]["db.query.parameter.0"])
+	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
+	assert.Equal(t, "null", roots[0]["db.query.parameter.1"])
+	assert.Equal(t, "unknown", roots[0]["pgproxy.bind.type.1"])
+	assert.NotContains(t, roots[0], "pgproxy.bind.truncated")
+	assert.NotContains(t, roots[0], "pgproxy.bind.rendered")
 }
 
 // pgx's describe-exec mode parses a statement without types, learns them from
@@ -144,9 +147,11 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 2)
-	assert.NotContains(t, roots[0], "db.parameters.0", "the describe cycle has no Bind")
-	assert.Equal(t, "7", roots[1]["db.parameters.0"])
-	assert.Equal(t, "true", roots[1]["db.parameters.1"])
+	assert.NotContains(t, roots[0], "db.query.parameter.0", "the describe cycle has no Bind")
+	assert.Equal(t, "7", roots[1]["db.query.parameter.0"])
+	assert.Equal(t, "int8", roots[1]["pgproxy.bind.type.0"])
+	assert.Equal(t, "true", roots[1]["db.query.parameter.1"])
+	assert.Equal(t, "bool", roots[1]["pgproxy.bind.type.1"])
 }
 
 func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
@@ -162,7 +167,7 @@ func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "first", roots[0]["db.parameters.0"])
+	assert.Equal(t, "first", roots[0]["db.query.parameter.0"])
 }
 
 func TestDescribeTrackingIsBounded(t *testing.T) {
@@ -237,7 +242,7 @@ func TestBindOfUnknownStatementHasNoTypes(t *testing.T) {
 	traceState.FinishRootTrace()
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, `\x0000000000000007`, roots[0]["db.parameters.0"], "unknown type, so hex")
+	assert.Equal(t, `\x0000000000000007`, roots[0]["db.query.parameter.0"], "unknown type, so hex")
 }
 
 // fuzzOIDs are the types the fuzzer picks from: every type the renderer
@@ -338,7 +343,7 @@ func FuzzBindParameterCapture(f *testing.F) {
 
 		positions, total := 0, 0
 		for key, value := range tags {
-			if key == bindparams.TruncatedTag || !strings.HasPrefix(key, bindparams.TagPrefix) {
+			if !strings.HasPrefix(key, bindparams.TagPrefix) {
 				continue
 			}
 			positions++
@@ -350,6 +355,7 @@ func FuzzBindParameterCapture(f *testing.F) {
 		for i := range positions {
 			value, ok := tags[bindparams.TagPrefix+strconv.Itoa(i)]
 			require.True(t, ok, "positions are contiguous from 0, missing %d of %d", i, positions)
+			require.IsType(t, "", tags[bindparams.TypeTagPrefix+strconv.Itoa(i)], "position %d has a type", i)
 			v := bind.Parameters[i]
 			binary := len(bind.ParameterFormatCodes) == 1 && bind.ParameterFormatCodes[0] == 1 ||
 				len(bind.ParameterFormatCodes) > 1 && bind.ParameterFormatCodes[i] == 1
@@ -364,5 +370,10 @@ func FuzzBindParameterCapture(f *testing.F) {
 		require.LessOrEqual(t, positions, bindparams.MaxParams)
 		_, truncated := tags[bindparams.TruncatedTag]
 		require.Equal(t, positions < len(bind.Parameters), truncated, "truncated is set exactly when positions are dropped")
+		if truncated {
+			require.EqualValues(t, positions, tags[bindparams.RenderedTag], "the Datadog tracer stores numbers as float64")
+		} else {
+			require.NotContains(t, tags, bindparams.RenderedTag)
+		}
 	})
 }

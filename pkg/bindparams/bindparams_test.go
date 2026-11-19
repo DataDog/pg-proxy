@@ -33,6 +33,22 @@ func render(t *testing.T, b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) m
 		tags[key] = value
 	})
 	require.False(t, c.Recorded(), "Render must reset the capture")
+	// Every value has a type tag at the same index. Tests of values ignore them;
+	// TestRenderTypeNames checks them.
+	types := 0
+	for key := range tags {
+		if i, ok := strings.CutPrefix(key, TypeTagPrefix); ok {
+			require.Contains(t, tags, TagPrefix+i)
+			delete(tags, key)
+			types++
+		}
+	}
+	for key := range tags {
+		if strings.HasPrefix(key, TagPrefix) {
+			types--
+		}
+	}
+	require.Zero(t, types, "one type tag per value tag")
 	return tags
 }
 
@@ -94,7 +110,7 @@ func TestRenderBinaryTypes(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tags := render(t, binaryBind(encode(t, tc.oid, tc.value)), []uint32{tc.oid}, nil)
-			assert.Equal(t, map[string]any{"db.parameters.0": tc.want}, tags)
+			assert.Equal(t, map[string]any{"db.query.parameter.0": tc.want}, tags)
 		})
 	}
 }
@@ -112,7 +128,7 @@ func TestRenderNumericMatchesPgtype(t *testing.T) {
 			want, err := m.Encode(pgtype.NumericOID, pgtype.TextFormatCode, n, nil)
 			require.NoError(t, err)
 			tags := render(t, binaryBind(encode(t, pgtype.NumericOID, n)), []uint32{pgtype.NumericOID}, nil)
-			assert.Equal(t, string(want), tags["db.parameters.0"])
+			assert.Equal(t, string(want), tags["db.query.parameter.0"])
 		})
 	}
 }
@@ -134,8 +150,8 @@ func TestRenderNumericScale(t *testing.T) {
 	// 1.50 keeps its display scale; 0.00 has no digits at all.
 	tags := render(t, binaryBind(numeric(0, numericPos, 2, 1, 5000), numeric(0, numericPos, 2)),
 		[]uint32{pgtype.NumericOID, pgtype.NumericOID}, nil)
-	assert.Equal(t, "1.50", tags["db.parameters.0"])
-	assert.Equal(t, "0.00", tags["db.parameters.1"])
+	assert.Equal(t, "1.50", tags["db.query.parameter.0"])
+	assert.Equal(t, "0.00", tags["db.query.parameter.1"])
 }
 
 func TestRenderNumericHugeExponentIsBounded(t *testing.T) {
@@ -147,7 +163,7 @@ func TestRenderNumericHugeExponentIsBounded(t *testing.T) {
 	for name, v := range cases {
 		t.Run(name, func(t *testing.T) {
 			start := time.Now()
-			got := render(t, binaryBind(v), []uint32{pgtype.NumericOID}, nil)["db.parameters.0"].(string)
+			got := render(t, binaryBind(v), []uint32{pgtype.NumericOID}, nil)["db.query.parameter.0"].(string)
 			assert.Less(t, time.Since(start), 50*time.Millisecond)
 			assert.LessOrEqual(t, len(got), ValueLimit+8)
 			assert.True(t, strings.HasSuffix(got, "…"), got)
@@ -158,7 +174,7 @@ func TestRenderNumericHugeExponentIsBounded(t *testing.T) {
 func TestRenderNull(t *testing.T) {
 	b := &pgproto3.Bind{Parameters: [][]byte{nil, {}, []byte("x")}}
 	tags := render(t, b, nil, nil)
-	assert.Equal(t, map[string]any{"db.parameters.0": "null", "db.parameters.1": "", "db.parameters.2": "x"}, tags)
+	assert.Equal(t, map[string]any{"db.query.parameter.0": "null", "db.query.parameter.1": "", "db.query.parameter.2": "x"}, tags)
 }
 
 func TestRenderTextTruncation(t *testing.T) {
@@ -166,8 +182,8 @@ func TestRenderTextTruncation(t *testing.T) {
 	// é is two bytes; the cut must not split it.
 	split := strings.Repeat("a", ValueLimit-1) + "é" + "tail"
 	tags := render(t, &pgproto3.Bind{Parameters: [][]byte{[]byte(long), []byte(split)}}, nil, nil)
-	assert.Equal(t, strings.Repeat("a", ValueLimit)+"(+744 bytes)", tags["db.parameters.0"])
-	assert.Equal(t, strings.Repeat("a", ValueLimit-1)+"(+6 bytes)", tags["db.parameters.1"])
+	assert.Equal(t, strings.Repeat("a", ValueLimit)+"(+744 bytes)", tags["db.query.parameter.0"])
+	assert.Equal(t, strings.Repeat("a", ValueLimit-1)+"(+6 bytes)", tags["db.query.parameter.1"])
 }
 
 func TestRenderTypeResolution(t *testing.T) {
@@ -177,7 +193,8 @@ func TestRenderTypeResolution(t *testing.T) {
 		parseOIDs, describedOIDs []uint32
 		want                     string
 	}{
-		{"described", []uint32{pgtype.Float4OID}, []uint32{pgtype.Int4OID}, "7"},
+		{"parse", []uint32{pgtype.Int4OID}, []uint32{pgtype.Float4OID}, "7"},
+		{"described when parse is unspecified", []uint32{0}, []uint32{pgtype.Int4OID}, "7"},
 		// PostgreSQL resolves a declared unknown, so the description wins.
 		{"described over declared unknown", []uint32{pgtype.UnknownOID}, []uint32{pgtype.Int4OID}, "7"},
 		{"parse when not described", []uint32{pgtype.Int4OID}, []uint32{0}, "7"},
@@ -186,24 +203,43 @@ func TestRenderTypeResolution(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tags := render(t, binaryBind(four), tc.parseOIDs, tc.describedOIDs)
-			assert.Equal(t, tc.want, tags["db.parameters.0"])
+			assert.Equal(t, tc.want, tags["db.query.parameter.0"])
 		})
 	}
+}
+
+func TestRenderTypeNames(t *testing.T) {
+	oids := []uint32{pgtype.Int8OID, pgtype.TimestamptzOID, pgtype.Int4ArrayOID, 0, 999_999}
+	var c Capture
+	c.Record(&pgproto3.Bind{Parameters: make([][]byte, len(oids))}, oids, nil)
+	types := map[string]any{}
+	c.Render(func(key string, value any) {
+		if strings.HasPrefix(key, TypeTagPrefix) {
+			types[key] = value
+		}
+	})
+	assert.Equal(t, map[string]any{
+		TypeTagPrefix + "0": "int8",
+		TypeTagPrefix + "1": "timestamptz",
+		TypeTagPrefix + "2": "int4[]",
+		TypeTagPrefix + "3": "unknown",
+		TypeTagPrefix + "4": "unknown",
+	}, types)
 }
 
 func TestRenderFormatCodes(t *testing.T) {
 	four := encode(t, pgtype.Int4OID, int32(7))
 	oids := []uint32{pgtype.Int4OID, pgtype.Int4OID, pgtype.Int4OID}
 	b := &pgproto3.Bind{ParameterFormatCodes: []int16{0, 1, 2}, Parameters: [][]byte{[]byte("7"), four, four}}
-	assert.Equal(t, map[string]any{"db.parameters.0": "7", "db.parameters.1": "7", "db.parameters.2": `\x00000007`},
+	assert.Equal(t, map[string]any{"db.query.parameter.0": "7", "db.query.parameter.1": "7", "db.query.parameter.2": `\x00000007`},
 		render(t, b, oids, nil), "a format other than text or binary is shown as hex")
 }
 
 func TestRenderHexFallback(t *testing.T) {
 	long := make([]byte, 300)
 	tags := render(t, binaryBind([]byte{1, 2}, long), nil, nil)
-	assert.Equal(t, `\x0102`, tags["db.parameters.0"])
-	assert.Equal(t, `\x`+strings.Repeat("00", hexLimit)+"(+172 bytes)", tags["db.parameters.1"])
+	assert.Equal(t, `\x0102`, tags["db.query.parameter.0"])
+	assert.Equal(t, `\x`+strings.Repeat("00", hexLimit)+"(+172 bytes)", tags["db.query.parameter.1"])
 }
 
 func TestRenderMalformedBinaryFallsBackToHex(t *testing.T) {
@@ -248,7 +284,7 @@ func TestRenderMalformedBinaryFallsBackToHex(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			tags := render(t, binaryBind(tc.v), []uint32{tc.oid}, nil)
-			got := tags["db.parameters.0"].(string)
+			got := tags["db.query.parameter.0"].(string)
 			assert.True(t, strings.HasPrefix(got, `\x`), "want a hex fallback, got %q", got)
 		})
 	}
@@ -278,10 +314,10 @@ func FuzzRender(f *testing.F) {
 
 func TestRenderInvalidUTF8(t *testing.T) {
 	b := &pgproto3.Bind{Parameters: [][]byte{[]byte("ok\xffend")}}
-	assert.Equal(t, `ok\xffend`, render(t, b, nil, nil)["db.parameters.0"])
+	assert.Equal(t, `ok\xffend`, render(t, b, nil, nil)["db.query.parameter.0"])
 
 	quoted := encode(t, pgtype.TextArrayOID, []string{"a\xffb"})
-	assert.Equal(t, `array[len=1]{"a\xffb"}`, render(t, binaryBind(quoted), []uint32{pgtype.TextArrayOID}, nil)["db.parameters.0"])
+	assert.Equal(t, `array[len=1]{"a\xffb"}`, render(t, binaryBind(quoted), []uint32{pgtype.TextArrayOID}, nil)["db.query.parameter.0"])
 }
 
 func TestRenderTotalCap(t *testing.T) {
@@ -294,22 +330,24 @@ func TestRenderTotalCap(t *testing.T) {
 	total := 0
 	positions := 0
 	for key, value := range tags {
-		if key != TruncatedTag {
+		if strings.HasPrefix(key, TagPrefix) {
 			total += len(value.(string))
 			positions++
 		}
 	}
 	assert.LessOrEqual(t, total, TotalLimit)
 	assert.Equal(t, TotalLimit/200, positions, "positions are kept in order until the cap")
-	assert.Contains(t, tags, "db.parameters.19")
-	assert.NotContains(t, tags, "db.parameters.20")
+	assert.Equal(t, positions, tags[RenderedTag])
+	assert.Contains(t, tags, "db.query.parameter.19")
+	assert.NotContains(t, tags, "db.query.parameter.20")
 }
 
 func TestRenderPositionCap(t *testing.T) {
 	values := make([][]byte, MaxParams+10)
 	tags := render(t, &pgproto3.Bind{Parameters: values}, nil, nil)
-	assert.Len(t, tags, MaxParams+1)
+	assert.Len(t, tags, MaxParams+2)
 	assert.Equal(t, true, tags[TruncatedTag])
+	assert.Equal(t, MaxParams, tags[RenderedTag])
 }
 
 func TestRecordBoundsTheCopy(t *testing.T) {
@@ -320,7 +358,7 @@ func TestRecordBoundsTheCopy(t *testing.T) {
 	assert.LessOrEqual(t, len(c.data), copyTotalLimit)
 	tags := map[string]any{}
 	c.Render(func(key string, value any) { tags[key] = value })
-	assert.Equal(t, strings.Repeat("\x00", ValueLimit)+"(+1048320 bytes)", tags["db.parameters.0"])
+	assert.Equal(t, strings.Repeat("\x00", ValueLimit)+"(+1048320 bytes)", tags["db.query.parameter.0"])
 	assert.LessOrEqual(t, cap(c.data), retainLimit, "large buffers are not kept")
 }
 
@@ -330,9 +368,9 @@ func TestRecordCopiesValues(t *testing.T) {
 	var c Capture
 	c.Record(&pgproto3.Bind{Parameters: [][]byte{buf}}, nil, nil)
 	copy(buf, "after!")
-	var got any
-	c.Render(func(_ string, value any) { got = value })
-	assert.Equal(t, "before", got)
+	tags := map[string]any{}
+	c.Render(func(key string, value any) { tags[key] = value })
+	assert.Equal(t, "before", tags[TagPrefix+"0"])
 }
 
 func TestRenderWithoutRecordDoesNothing(t *testing.T) {
@@ -346,7 +384,7 @@ func TestRenderTruncatedArrayCopy(t *testing.T) {
 	for i := range words {
 		words[i] = strings.Repeat("w", 40)
 	}
-	got := render(t, binaryBind(encode(t, pgtype.TextArrayOID, words)), []uint32{pgtype.TextArrayOID}, nil)["db.parameters.0"].(string)
+	got := render(t, binaryBind(encode(t, pgtype.TextArrayOID, words)), []uint32{pgtype.TextArrayOID}, nil)["db.query.parameter.0"].(string)
 	assert.True(t, strings.HasPrefix(got, `array[len=50]{"wwww`), got)
 	assert.True(t, strings.HasSuffix(got, "…}"), got)
 }
@@ -371,13 +409,13 @@ func TestRenderPartlyCopiedTextElementIsMarked(t *testing.T) {
 	v := arrayOf(pgtype.TextOID, []byte(strings.Repeat("a", 430)), []byte(strings.Repeat("b", 2000)))
 	copied := copyLimit - 20 - (4 + 430) - 4 // header, first element, second length
 	require.Less(t, copied, elementLimit)
-	got := render(t, binaryBind(v), []uint32{pgtype.TextArrayOID}, nil)["db.parameters.0"]
+	got := render(t, binaryBind(v), []uint32{pgtype.TextArrayOID}, nil)["db.query.parameter.0"]
 	assert.Equal(t, `array[len=2]{"`+strings.Repeat("a", elementLimit)+`"…,"`+strings.Repeat("b", copied)+`"…}`, got)
 }
 
 func TestRenderPartlyCopiedFirstElementKeepsBrace(t *testing.T) {
 	v := arrayOf(pgtype.NumericOID, make([]byte, 600))
-	got := render(t, binaryBind(v), []uint32{pgtype.NumericArrayOID}, nil)["db.parameters.0"]
+	got := render(t, binaryBind(v), []uint32{pgtype.NumericArrayOID}, nil)["db.query.parameter.0"]
 	assert.Equal(t, "array[len=1]{…}", got)
 }
 

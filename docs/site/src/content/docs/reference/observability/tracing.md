@@ -88,10 +88,15 @@ set `server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTrace
 when constructing sessions directly) to `true` to enable it.
 
 With capture on, the root span carries one tag per parameter position,
-`db.parameters.0` through `db.parameters.n`, taken from the first Bind of the
-trace. Each value is decoded from its type: the type PostgreSQL reported for the
-statement in a ParameterDescription, else the non-zero type in Parse, else
-unknown.
+`db.query.parameter.0` through `db.query.parameter.n`, taken from the first Bind of the
+trace. `$1` is `db.query.parameter.0`. Each position also gets its type name as
+`pgproxy.bind.type.N`, for example `int8`, `timestamptz`, `int4[]` or `unknown`.
+The type is the one declared in Parse, else the one PostgreSQL reported for the
+statement in a ParameterDescription, else unknown. A type declared as 0 or
+`unknown` counts as not declared.
+
+Values are strings, including numbers, so values above 2^53 keep their
+precision. Use `pgproxy.bind.type.N` to tell how to read a position.
 
 | Value | Tag value |
 | --- | --- |
@@ -103,7 +108,8 @@ unknown.
 | Any other type, malformed binary value, or format code other than text or binary | `\x` and the hex of the first 128 bytes, then `(+N bytes)` |
 
 The tags total at most about 4 KB and 256 positions. When a limit drops
-positions, the root also gets `db.parameters.truncated=true`. Invalid UTF-8 is
+positions, the root also gets `pgproxy.bind.truncated=true` and
+`pgproxy.bind.rendered` with the number of positions emitted. Invalid UTF-8 is
 escaped as `\xNN` for both tracers.
 
 Values are recorded only when the root span's head sampling decision keeps the

@@ -275,7 +275,7 @@ func (t *TraceState) WantsBindParameters() bool {
 	return t.Sampled() && (t.bindParams == nil || !t.bindParams.Recorded())
 }
 
-// RecordBindParameters copies b's values to render as db.parameters.N tags on
+// RecordBindParameters copies b's values to render as db.query.parameter.N tags on
 // the root span when it finishes. Callers check WantsBindParameters first.
 func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	if t.bindParams == nil {
