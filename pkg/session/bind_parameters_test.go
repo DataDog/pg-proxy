@@ -188,6 +188,18 @@ func TestDescribeTrackingIsBounded(t *testing.T) {
 	assert.Contains(t, s.paramTypes.described, strconv.Itoa(maxDescribedStmts+9), "the newest statement is kept")
 }
 
+// A statement can declare up to 65,535 parameters, but capture reads only the
+// first bindparams.MaxParams types, so the cache keeps no more than that.
+func TestDescribedTypesAreBoundedPerStatement(t *testing.T) {
+	s := New(Config{EnableTraceParameters: true})
+	oids := slices.Repeat([]uint32{pgtype.Int4OID}, 65535)
+	s.paramTypes.describing = []describedStmt{{key: "named"}, {unnamed: true, gen: s.unnamedGen}}
+	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: oids})
+	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: oids})
+	assert.Len(t, s.paramTypes.described["named"], bindparams.MaxParams)
+	assert.Len(t, s.paramTypes.unnamed, bindparams.MaxParams)
+}
+
 func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
 	s.paramTypes.describing = []describedStmt{{key: "a"}, {key: "b"}}

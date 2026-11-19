@@ -10,14 +10,16 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 )
 
 const (
 	// maxDescribedStmts bounds the named statements whose described types a
-	// session remembers, about 20 KB at most. When it is full an arbitrary entry
-	// is evicted; that statement renders as unknown types until it is described
-	// again.
+	// session remembers. Each keeps at most bindparams.MaxParams types, so the
+	// cache holds at most 256 KiB of them, and a few KB for typical statements.
+	// When it is full an arbitrary entry is evicted; that statement renders as
+	// unknown types until it is described again.
 	maxDescribedStmts = 256
 	// maxPendingDescribes bounds the Describe messages awaiting a reply in one
 	// cycle; replies beyond it are not recorded.
@@ -122,9 +124,11 @@ func (s *Session) describedOIDs(stmt describedStmt) []uint32 {
 // remember records the types a ParameterDescription reports for a statement.
 // Clients describe the same statements over and over, so an unchanged
 // description keeps the copy already held. pgproto3 reuses the message's
-// slice, so a new description is copied.
+// slice, so a new description is copied. Capture reads only the first
+// bindparams.MaxParams types, so only those are kept.
 func (s *Session) remember(stmt describedStmt, oids []uint32) {
 	t := &s.paramTypes
+	oids = oids[:min(len(oids), bindparams.MaxParams)]
 	if stmt.unnamed {
 		// A reply can describe an unnamed statement that a later Parse has
 		// already replaced; it must not be taken for the new one.
