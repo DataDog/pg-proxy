@@ -8,6 +8,7 @@ package session
 import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/DataDog/pg-proxy/pkg/actions"
 	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 )
@@ -65,15 +66,23 @@ func observesClientMessage(msg pgproto3.FrontendMessage) bool {
 
 // observeClientMessage queues statement Describes for their replies and copies
 // the values of a sampled trace's first Bind. It runs before the actions layer
-// renames statements, so statement names are the client's.
-func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
-	t := &s.paramTypes
+// renames statements, so statement names are the client's; state is the one
+// the actions layer decides with.
+func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage, state actions.State) {
 	switch m := msg.(type) {
 	case *pgproto3.Describe:
-		if m.ObjectType != 'S' || len(t.describing) >= maxPendingDescribes {
+		if m.ObjectType != 'S' {
 			return
 		}
-		if stmt, _, ok := s.findStmt(m.Name); ok {
+		// Sessions that never describe a statement carry no type state.
+		if s.paramTypes == nil {
+			s.paramTypes = &bindParamTypes{}
+		}
+		t := s.paramTypes
+		if len(t.describing) >= maxPendingDescribes {
+			return
+		}
+		if stmt, _, ok := s.findStmt(m.Name, state); ok {
 			t.describing = append(t.describing, stmt)
 		}
 	case *pgproto3.Bind:
@@ -86,7 +95,7 @@ func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
 		// zero value, which has no types.
 		var parseOIDs, describedOIDs []uint32
 		if bindparams.NeedsTypes(m) {
-			stmt, oids, _ := s.findStmt(m.PreparedStatement)
+			stmt, oids, _ := s.findStmt(m.PreparedStatement, state)
 			parseOIDs, describedOIDs = oids, s.describedOIDs(stmt)
 		}
 		traceState.RecordBindParameters(m, parseOIDs, describedOIDs)
@@ -96,7 +105,7 @@ func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
 // observeBackendMessage pairs ParameterDescription replies with the Describe
 // messages that asked for them. Callers skip it while none is queued.
 func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
-	t := &s.paramTypes
+	t := s.paramTypes
 	switch m := msg.(type) {
 	case *pgproto3.ParameterDescription:
 		if t.answered < len(t.describing) {
@@ -113,7 +122,10 @@ func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
 // describedOIDs returns the described types of a statement findStmt just
 // returned, so an unnamed one is the current statement.
 func (s *Session) describedOIDs(stmt describedStmt) []uint32 {
-	t := &s.paramTypes
+	t := s.paramTypes
+	if t == nil {
+		return nil
+	}
 	if stmt.unnamed {
 		return t.unnamed
 	}
@@ -125,7 +137,7 @@ func (s *Session) describedOIDs(stmt describedStmt) []uint32 {
 // already held if there is one: readers copy them out. Capture reads only the
 // first bindparams.MaxParams types, so only those are kept.
 func (s *Session) remember(stmt describedStmt, oids []uint32) {
-	t := &s.paramTypes
+	t := s.paramTypes
 	oids = oids[:min(len(oids), bindparams.MaxParams)]
 	if stmt.unnamed {
 		// A reply can describe an unnamed statement that a later Parse has
@@ -149,15 +161,12 @@ func (s *Session) remember(stmt describedStmt, oids []uint32) {
 }
 
 // findStmt returns where the described types of the statement a client Bind or
-// Describe names are kept, and its declared types. The unnamed statement's
-// latest Parse is pending until Postgres confirms it, then s.unnamedStmt.
-func (s *Session) findStmt(clientName string) (describedStmt, []uint32, bool) {
-	hasProxyName := prepared.IsNamedPreparedStmt(clientName) || s.autoPreparedStatementsEnabled()
-	stmt := s.pStmtState.FindPendingNamedStmtFromClientName(clientName)
-	if stmt == nil && hasProxyName {
-		stmt = s.pStmtState.FindConfirmedNamedStmtFromClientName(clientName)
-	}
-	if !hasProxyName {
+// Describe names are kept, and its declared types, resolving names as the
+// actions layer does with state. The unnamed statement's latest Parse is
+// pending until Postgres confirms it, then s.unnamedStmt.
+func (s *Session) findStmt(clientName string, state actions.State) (describedStmt, []uint32, bool) {
+	if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+		stmt := state.PreparedStatements.FindPendingNamedStmtFromClientName(clientName)
 		if stmt == nil {
 			stmt = s.unnamedStmt
 		}
@@ -167,6 +176,7 @@ func (s *Session) findStmt(clientName string) (describedStmt, []uint32, bool) {
 		}
 		return describedStmt{unnamed: true, gen: s.unnamedGen}, parseOIDs, true
 	}
+	stmt, _ := actions.LookupPreparedStatement(clientName, state.PreparedStatements)
 	if stmt == nil {
 		return describedStmt{}, nil, false
 	}

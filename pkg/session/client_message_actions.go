@@ -30,11 +30,14 @@ const (
 // DecideClientMessageAction returns the set of actions to take to handle a message received
 // from a client to their Session. (See ClientMessageAction docs for the set of actions.)
 func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (ClientMessageAction, error) {
-	return actions.DecideClientMessageAction(msg, s.actionState(), actions.Hooks{
+	// The parameter observer resolves statements from the same state the
+	// decision uses, so both agree on how a name maps to a statement.
+	state := s.actionState()
+	return actions.DecideClientMessageAction(msg, state, actions.Hooks{
 		MessageObserved: func(msg pgproto3.FrontendMessage) {
 			s.obsVals.traceState.AddMessage(msg)
 			if s.enableTraceParameters && observesClientMessage(msg) {
-				s.observeClientMessage(msg)
+				s.observeClientMessage(msg, state)
 			}
 			if s.hooks.FrontendMessage != nil {
 				s.hooks.FrontendMessage(msg)

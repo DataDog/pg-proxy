@@ -6,6 +6,7 @@
 package actions
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -96,7 +97,10 @@ type Hooks struct {
 	QueryClassificationFailed func(string, PGQueryProtocolType, error)
 	QueryParseFinished        func(string, PGQueryProtocolType, time.Duration)
 	NamedPreparedStmtObserved func(string, string)
-	ErrorActionCreated        func(*pgproto3.ErrorResponse, error)
+	// Deprecated: never called. Sessions record Bind values as db.parameters.N
+	// root-span tags instead.
+	BindParametersObserved func(string)
+	ErrorActionCreated     func(*pgproto3.ErrorResponse, error)
 }
 
 // DecideClientMessageAction returns the set of actions to take to handle a message received
@@ -331,12 +335,32 @@ func CreateProxyPreparedStmt(clientName, sql string, parameterOIDs []uint32, aut
 // CreateProxyPreparedStmtName returns the stable proxy name for a SQL/OID pair.
 func CreateProxyPreparedStmtName(sql string, parameterOIDs []uint32) string {
 	var oids strings.Builder
-	for _, oid := range parameterOIDs {
-		oids.WriteString(strconv.FormatUint(uint64(oid), 10))
+	if len(parameterOIDs) > 0 {
+		// SQL cannot contain NUL, and each OID ends with a comma, so different
+		// SQL/OID pairs cannot write the same bytes. Statements without
+		// declared types keep their earlier names.
+		oids.WriteByte(0)
+		for _, oid := range parameterOIDs {
+			oids.WriteString(strconv.FormatUint(uint64(oid), 10))
+			oids.WriteByte(',')
+		}
 	}
 	// create hash of query + oids to have pseudo-unique name
 	sum := sha256.Sum256([]byte(sql + oids.String()))
 	return hex.EncodeToString(sum[:])
+}
+
+// LookupPreparedStatement returns the statement a client name denotes: its
+// latest pending Parse, else its confirmed statement, else nil. confirmed
+// reports which one it is.
+func LookupPreparedStatement(clientName string, state prepared.PreparedStatementState) (stmt prepared.PreparedStatement, confirmed bool) {
+	if stmt := state.FindPendingNamedStmtFromClientName(clientName); stmt != nil {
+		return stmt, false
+	}
+	if stmt := state.FindConfirmedNamedStmtFromClientName(clientName); stmt != nil {
+		return stmt, true
+	}
+	return nil, false
 }
 
 // FindPotentiallyExistingPreparedStatement checks if a prepared statement with the given client name
@@ -344,16 +368,25 @@ func CreateProxyPreparedStmtName(sql string, parameterOIDs []uint32) string {
 // It returns the proxy name and the prepared statement if it was confirmed already.
 // It returns a non-nil error action if the prepared statement does not exist.
 func FindPotentiallyExistingPreparedStatement(clientName string, state prepared.PreparedStatementState) (string, prepared.PreparedStatement, *ClientMessageAction) {
-	if stmt := state.FindPendingNamedStmtFromClientName(clientName); stmt != nil {
-		return stmt.GetProxyName(), nil, nil
+	stmt, confirmed := LookupPreparedStatement(clientName, state)
+	if stmt == nil {
+		action := NewFlushErrorAction(BuildPreparedStatementDoesNotExistErrorResponse(clientName))
+		return "", nil, &action
 	}
-	if stmt := state.FindConfirmedNamedStmtFromClientName(clientName); stmt != nil {
+	if !confirmed {
 		// we only want to check if the stmt is confirmed
 		// since if its pending we already checked that the underlying connection does not have the prepared statement
-		return stmt.GetProxyName(), stmt, nil
+		return stmt.GetProxyName(), nil, nil
 	}
-	action := NewFlushErrorAction(BuildPreparedStatementDoesNotExistErrorResponse(clientName))
-	return "", nil, &action
+	return stmt.GetProxyName(), stmt, nil
+}
+
+// GetParameterString formats Bind parameters for optional diagnostics.
+//
+// Deprecated: sessions record Bind values as db.parameters.N root-span tags
+// instead; nothing in this module calls it.
+func GetParameterString(msg *pgproto3.Bind) string {
+	return string(bytes.Join(msg.Parameters, []byte(",")))
 }
 
 // NewFlushErrorAction returns a ClientMessageAction that ensures PostgreSQL flushes pending messages

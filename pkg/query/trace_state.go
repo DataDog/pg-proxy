@@ -276,8 +276,12 @@ func (t *TraceState) WantsBindParameters() bool {
 }
 
 // RecordBindParameters copies b's values to render as db.parameters.N tags on
-// the root span when it finishes. Callers check WantsBindParameters first.
+// the root span when it finishes. Callers check WantsBindParameters first;
+// without a root span there is nowhere to render, so b is ignored.
 func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
+	if t.rootTrace == nil {
+		return
+	}
 	if t.bindParams == nil {
 		t.bindParams = &bindparams.Capture{}
 	}
@@ -294,7 +298,8 @@ func (t *TraceState) FinishTrace(errs ...error) {
 
 func (t *TraceState) FinishRootTrace(errs ...error) {
 	t.FinishTrace(errs...) // Ensure trace is cleaned up first
-	// A Bind is recorded only under a root, so a recorded capture has one.
+	// RecordBindParameters keeps a Bind only under a root, so a recorded
+	// capture has one.
 	if t.bindParams != nil && t.bindParams.Recorded() {
 		t.bindParams.Render(t.rootTrace.SetTag)
 	}

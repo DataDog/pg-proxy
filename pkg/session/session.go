@@ -172,7 +172,7 @@ type Session struct {
 	hooks                 Hooks
 	decorateLink          bool
 	enableTraceParameters bool
-	paramTypes            bindParamTypes
+	paramTypes            *bindParamTypes // allocated on the first statement Describe
 
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
@@ -1285,7 +1285,9 @@ func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 // restore them.
 func (s *Session) invalidateUnnamedStmt() {
 	s.unnamedStmt = nil
-	s.paramTypes.unnamed = s.paramTypes.unnamed[:0]
+	if s.paramTypes != nil {
+		s.paramTypes.unnamed = s.paramTypes.unnamed[:0]
+	}
 	s.unnamedGen++
 }
 
@@ -1411,7 +1413,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		if err != nil {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
 		}
-		if len(s.paramTypes.describing) > 0 {
+		if s.paramTypes != nil && len(s.paramTypes.describing) > 0 {
 			s.observeBackendMessage(msg)
 		}
 

@@ -651,6 +651,12 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	var value string
 	require.NoError(t, client.QueryRow(ctx, sql, pgx.QueryExecModeExec, "otel actual parameter").Scan(&value))
 	require.Equal(t, "otel actual parameter", value)
+	// pgx's default mode prepares a named statement without types, learns them
+	// from the Describe, and binds int8 in binary, so capture decodes it only
+	// through the named-statement path of the described-types cache.
+	var cached int64
+	require.NoError(t, client.QueryRow(ctx, "select $1::int8", int64(42)).Scan(&cached))
+	require.Equal(t, int64(42), cached)
 	// Send binary Bind parameters and request binary results so the PostgreSQL
 	// round trip checks byte-for-byte preservation with capture enabled or disabled.
 	for _, tc := range []struct {
@@ -676,13 +682,14 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	require.NoError(t, shutdown())
 	receiver.mu.Lock()
 	defer receiver.mu.Unlock()
-	var statement, parameters, binaryInt, binaryBytes, queryMetric, listening bool
+	var statement, parameters, describedInt, binaryInt, binaryBytes, queryMetric, listening bool
 	for _, resource := range receiver.traces {
 		requireResource(t, resource.Resource.Attributes)
 		for _, scope := range resource.ScopeSpans {
 			for _, span := range scope.Spans {
 				// ExecParams declares no types and describes only the portal, so
 				// the values' types are unknown and they render as hex.
+				describedInt = describedInt || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == "42"
 				binaryInt = binaryInt || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == `\xffffffff`
 				binaryBytes = binaryBytes || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == `\x00ff8001`
 				if !capture {
@@ -727,6 +734,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	}
 	require.True(t, statement, "query SQL and W3C parent must reach the OTLP receiver")
 	require.Equal(t, capture, parameters, "bind value export must follow the parameter-capture setting")
+	require.Equal(t, capture, describedInt, "binary int8 parameters of a described named statement must be decoded only when enabled")
 	require.Equal(t, capture, binaryInt, "binary int4 parameters must be safely exported only when enabled")
 	require.Equal(t, capture, binaryBytes, "binary bytea parameters must be safely exported only when enabled")
 	require.True(t, queryMetric, "query counts must reach the OTLP receiver")

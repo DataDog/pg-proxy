@@ -371,6 +371,17 @@ func TestSyncAfterLoadSheddingDiscard(t *testing.T) {
 	assert.False(messageObserved, "no observation hook should run for the Sync fast-path")
 }
 
+// Different SQL/OID pairs must not share a proxy name, or the proxy would
+// reuse one statement for another.
+func TestCreateProxyPreparedStmtNameKeepsPairsApart(t *testing.T) {
+	assert.NotEqual(t, CreateProxyPreparedStmtName("SELECT $1, $2", []uint32{16, 38400}),
+		CreateProxyPreparedStmtName("SELECT $1, $2", []uint32{16384, 0}))
+	assert.NotEqual(t, CreateProxyPreparedStmtName("SELECT 1", []uint32{23}),
+		CreateProxyPreparedStmtName("SELECT 12", []uint32{3}))
+	assert.NotEqual(t, CreateProxyPreparedStmtName("SELECT $1", nil),
+		CreateProxyPreparedStmtName("SELECT $1", []uint32{0}), "a declared unspecified type is still declared")
+}
+
 func TestFindPotentiallyExistingPreparedStatement(t *testing.T) {
 	tests := []struct {
 		testName             string

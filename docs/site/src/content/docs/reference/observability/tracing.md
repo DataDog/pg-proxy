@@ -100,11 +100,14 @@ precision.
 | Value | Tag value |
 | --- | --- |
 | NULL | `null` |
-| Text format | The first 256 bytes, then `(+N bytes)` for the rest |
+| Text format | Up to the first 256 bytes, cut at the start of a UTF-8 character, then `(+N bytes)` for the rest |
 | Binary `bool`, `int2`, `int4`, `int8`, `oid`, `float4`, `float8`, `numeric`, `uuid`, `date`, `timestamp`, `timestamptz` | PostgreSQL's text form; timestamps are shown in UTC |
 | Binary `text`, `varchar`, `bpchar`, `name`, `json`, `jsonb`, `xml` | As text |
 | Binary arrays of those types | `array[len=N]{…}` with the first 10 elements; text elements are double-quoted |
 | Any other type, malformed binary value, or format code other than text or binary | `\x` and the hex of the first 128 bytes, then `(+N bytes)` |
+
+Tag values are not quoted, so NULL and the text `null` render alike, and a text
+value that itself ends in `(+N bytes)` looks truncated.
 
 The tags total at most about 4 KB and 32 positions. When a limit drops
 positions, the root also gets `pgproxy.bind.truncated=true` and

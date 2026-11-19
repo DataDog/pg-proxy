@@ -129,7 +129,8 @@ func TestBindParametersUseParseTypes(t *testing.T) {
 // pgx's describe-exec mode parses a statement without types, learns them from
 // the backend's ParameterDescription, and binds binary values in a later cycle.
 // (Named statements take the same path, but need a pooled connection the test
-// backend does not have.)
+// backend does not have; TestProxyAgainstPostgres covers them with pgx's
+// default mode.)
 func TestBindParametersUseDescribedTypes(t *testing.T) {
 	tracer, client, postgres, closeSession := captureSession(t)
 	described := []uint32{pgtype.Int8OID, pgtype.BoolOID}
@@ -169,7 +170,7 @@ func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 func TestDescribeTrackingIsBounded(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
 	for range maxPendingDescribes + 10 {
-		s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
+		s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}, s.actionState())
 	}
 	assert.Len(t, s.paramTypes.describing, maxPendingDescribes)
 	s.observeBackendMessage(&pgproto3.ReadyForQuery{TxStatus: 'I'})
@@ -189,7 +190,7 @@ func TestDescribeTrackingIsBounded(t *testing.T) {
 func TestDescribedTypesAreBoundedPerStatement(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
 	oids := slices.Repeat([]uint32{pgtype.Int4OID}, 65535)
-	s.paramTypes.describing = []describedStmt{{key: "named"}, {unnamed: true, gen: s.unnamedGen}}
+	s.paramTypes = &bindParamTypes{describing: []describedStmt{{key: "named"}, {unnamed: true, gen: s.unnamedGen}}}
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: oids})
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: oids})
 	assert.Len(t, s.paramTypes.described["named"], bindparams.MaxParams)
@@ -198,7 +199,7 @@ func TestDescribedTypesAreBoundedPerStatement(t *testing.T) {
 
 func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
-	s.paramTypes.describing = []describedStmt{{key: "a"}, {key: "b"}}
+	s.paramTypes = &bindParamTypes{describing: []describedStmt{{key: "a"}, {key: "b"}}}
 	reused := []uint32{pgtype.Int4OID}
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: reused})
 	reused[0] = pgtype.TextOID // pgproto3 reuses the slice for the next message
@@ -213,12 +214,12 @@ func TestParameterDescriptionsPairWithDescribesInOrder(t *testing.T) {
 // describe a statement that was already replaced.
 func TestUnnamedStatementTypesFollowTheStatement(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
-	describe := func() { s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}) }
+	describe := func() { s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}, s.actionState()) }
 	reply := func() {
 		s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
 	}
 	current := func() []uint32 {
-		stmt, _, ok := s.findStmt("")
+		stmt, _, ok := s.findStmt("", s.actionState())
 		require.True(t, ok)
 		return s.describedOIDs(stmt)
 	}
@@ -242,11 +243,11 @@ func TestBindOfUnknownStatementHasNoTypes(t *testing.T) {
 	tracer := startMockTracer(t)
 	traceState := &query.TraceState{}
 	s := New(Config{EnableTraceParameters: true, TraceState: traceState})
-	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'})
+	s.observeClientMessage(&pgproto3.Describe{ObjectType: 'S'}, s.actionState())
 	s.observeBackendMessage(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{pgtype.Int8OID}})
 
 	traceState.StartRootTrace(&pgproto3.Parse{Query: "SELECT 1"})
-	s.observeClientMessage(&pgproto3.Bind{PreparedStatement: "missing", ParameterFormatCodes: []int16{1}, Parameters: [][]byte{int8Param(7)}})
+	s.observeClientMessage(&pgproto3.Bind{PreparedStatement: "missing", ParameterFormatCodes: []int16{1}, Parameters: [][]byte{int8Param(7)}}, s.actionState())
 	traceState.FinishRootTrace()
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
