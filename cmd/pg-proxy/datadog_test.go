@@ -89,8 +89,10 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	root, propagated := pgproxy.Tracing().StartRoot("Proxy forwarding", sql)
 	require.True(t, propagated)
 	child := root.StartChild("Handling messages")
-	child.SetTag("db.query.parameter.0", "42,alice")
 	child.Finish(nil)
+	// Bind parameters go on the root span, one tag per position.
+	root.SetTag("db.query.parameter.0", "42")
+	root.SetTag("db.query.parameter.1", "alice")
 	root.Finish(nil)
 	require.NoError(t, pgproxy.Metrics().Count("pg_proxy.query", 3, []string{"database:orders"}, 1))
 	require.NoError(t, pgproxy.Metrics().Distribution("pg_proxy.size", 12, nil, 1))
@@ -119,7 +121,8 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	require.Equal(t, uint64(11), rootSpan.ParentID)
 	require.Equal(t, rootSpan.SpanID, childSpan.ParentID)
 	require.Equal(t, sql, rootSpan.Meta["db.statement"])
-	require.Equal(t, "42,alice", childSpan.Meta["db.query.parameter.0"])
+	require.Equal(t, "42", rootSpan.Meta["db.query.parameter.0"])
+	require.Equal(t, "alice", rootSpan.Meta["db.query.parameter.1"])
 	require.NoError(t, udp.SetReadDeadline(time.Now().Add(3*time.Second)))
 	var packets strings.Builder
 	for !strings.Contains(packets.String(), "datadog.pg_proxy.query:3|c") ||
@@ -140,7 +143,7 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 	for key, value := range map[string]string{"message": "ready", "status": "WARN", "service": "proxy-test", "env": "test", "version": "1.2.3", "database": "orders"} {
 		require.Equal(t, value, record[key])
 	}
-	t.Logf("Datadog trace: service=%s trace_id=%d parent_id=%d db.query.parameter.0=%q", rootSpan.Service, rootSpan.TraceID, rootSpan.ParentID, childSpan.Meta["db.query.parameter.0"])
+	t.Logf("Datadog trace: service=%s trace_id=%d parent_id=%d db.query.parameter.0=%q", rootSpan.Service, rootSpan.TraceID, rootSpan.ParentID, rootSpan.Meta["db.query.parameter.0"])
 	for _, packet := range strings.Split(packets.String(), "\n") {
 		if strings.HasPrefix(packet, "datadog.pg_proxy.") {
 			t.Logf("DogStatsD received: %s", packet)
