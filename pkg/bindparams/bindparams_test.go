@@ -208,6 +208,21 @@ func TestRenderTypeResolution(t *testing.T) {
 	}
 }
 
+func TestFillTypesSetsOnlyUnknownTypes(t *testing.T) {
+	var c Capture
+	c.FillTypes([]uint32{pgtype.Int4OID}) // nothing recorded yet
+	assert.False(t, c.Recorded())
+
+	four := encode(t, pgtype.Int4OID, int32(7))
+	c.Record(binaryBind(four, four, four), []uint32{0, pgtype.Float4OID}, nil)
+	c.FillTypes([]uint32{pgtype.Int4OID, pgtype.Int4OID})
+	tags := map[string]any{}
+	c.Render(func(key string, value any) { tags[key] = value })
+	assert.Equal(t, "int4", tags[TypeTagPrefix+"0"], "an unknown type is filled")
+	assert.Equal(t, "float4", tags[TypeTagPrefix+"1"], "a known type is kept")
+	assert.Equal(t, "unknown", tags[TypeTagPrefix+"2"], "positions past the description stay unknown")
+}
+
 func TestRenderTypeNames(t *testing.T) {
 	oids := []uint32{pgtype.Int8OID, pgtype.TimestamptzOID, pgtype.Int4ArrayOID, 0, 999_999}
 	var c Capture

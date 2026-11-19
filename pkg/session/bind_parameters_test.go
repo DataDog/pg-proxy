@@ -154,6 +154,26 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 	assert.Equal(t, "bool", roots[1]["pgproxy.bind.type.1"])
 }
 
+// A pipelining client can Parse without types, Describe and Bind in binary in
+// one flush. The ParameterDescription then arrives after the Bind was captured,
+// but before the root finishes.
+func TestBindParametersUseDescribedTypesFromTheSameFlush(t *testing.T) {
+	tracer, client, postgres, closeSession := captureSession(t)
+	exchange(t, client, postgres, []uint32{pgtype.Int8OID, pgtype.BoolOID},
+		&pgproto3.Parse{Query: parameterQuery + " AND $2", ParameterOIDs: []uint32{0, pgtype.TextOID}},
+		&pgproto3.Describe{ObjectType: 'S'},
+		&pgproto3.Bind{ParameterFormatCodes: []int16{1, 0}, Parameters: [][]byte{int8Param(7), []byte("x")}},
+		&pgproto3.Execute{},
+		&pgproto3.Sync{})
+	closeSession()
+
+	roots := rootTags(tracer)
+	require.Len(t, roots, 1)
+	assert.Equal(t, "7", roots[0]["db.query.parameter.0"])
+	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
+	assert.Equal(t, "text", roots[0]["pgproxy.bind.type.1"], "a declared type is kept")
+}
+
 func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 	tracer, client, postgres, closeSession := captureSession(t)
 	exchange(t, client, postgres, nil,
