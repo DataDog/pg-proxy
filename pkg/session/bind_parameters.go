@@ -17,7 +17,7 @@ import (
 const (
 	// maxDescribedStmts bounds the named statements whose described types a
 	// session remembers. Each keeps at most bindparams.MaxParams types, so the
-	// cache holds at most 256 KiB of them, and a few KB for typical statements.
+	// cache holds at most 32 KiB of them, and a few KB for typical statements.
 	// When it is full an arbitrary entry is evicted; that statement renders as
 	// unknown types until it is described again.
 	maxDescribedStmts = 256

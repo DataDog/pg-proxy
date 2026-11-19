@@ -24,28 +24,9 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	pgproxy "github.com/DataDog/pg-proxy"
-	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	proxydatadog "github.com/DataDog/pg-proxy/pkg/datadog"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
 )
-
-// spanAttributeCountLimit leaves room on a root span for a value tag and a type
-// tag per Bind position, plus its other tags. The SDK's default of 128 would
-// drop every position past about the sixtieth.
-const spanAttributeCountLimit = 2*bindparams.MaxParams + 64
-
-// spanLimits are the SDK's limits, read from the OTEL_* variables, with room
-// for Bind parameter tags unless OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT or
-// OTEL_ATTRIBUTE_COUNT_LIMIT, which the SDK falls back to, is set.
-func spanLimits() sdktrace.SpanLimits {
-	limits := sdktrace.NewSpanLimits()
-	_, spanLimitSet := os.LookupEnv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT")
-	_, genericLimitSet := os.LookupEnv("OTEL_ATTRIBUTE_COUNT_LIMIT")
-	if !spanLimitSet && !genericLimitSet {
-		limits.AttributeCountLimit = spanAttributeCountLimit
-	}
-	return limits
-}
 
 // runWithTelemetry owns provider lifetime and error reporting, including failed
 // proxy startup. Runtime failures must be logged before the exporters flush.
@@ -124,7 +105,7 @@ func setupTelemetry(ctx context.Context, cfg telemetryConfig) (deps pgproxy.Depe
 		if err != nil {
 			return deps, shutdown, errors.New("could not initialize OpenTelemetry trace exporter")
 		}
-		provider := sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(exporter), sdktrace.WithRawSpanLimits(spanLimits()))
+		provider := sdktrace.NewTracerProvider(sdktrace.WithResource(res), sdktrace.WithBatcher(exporter))
 		stops = append(stops, provider.Shutdown)
 		deps.Tracer = proxyotel.NewTracer(provider.Tracer("pg-proxy"))
 	}

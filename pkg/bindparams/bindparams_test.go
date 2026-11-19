@@ -381,7 +381,7 @@ func TestRecordBoundsTheCopy(t *testing.T) {
 	values := [][]byte{big, big, big, big, big, big, big, big, big, big}
 	var c Capture
 	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
-	assert.LessOrEqual(t, len(c.data), copyTotalLimit)
+	assert.LessOrEqual(t, len(c.data), MaxParams*copyLimit)
 	tags := map[string]any{}
 	c.Render(func(key string, value any) { tags[key] = value })
 	assert.Equal(t, strings.Repeat("\x00", ValueLimit)+"(+1048320 bytes)", tags["db.query.parameter.0"])
@@ -443,19 +443,4 @@ func TestRenderPartlyCopiedFirstElementKeepsBrace(t *testing.T) {
 	v := arrayOf(pgtype.NumericOID, make([]byte, 600))
 	got := render(t, binaryBind(v), []uint32{pgtype.NumericArrayOID}, nil)["db.query.parameter.0"]
 	assert.Equal(t, "array[len=1]{…}", got)
-}
-
-func TestRecordDropsPositionsPastTheCopyBudget(t *testing.T) {
-	values := make([][]byte, 40)
-	for i := range values {
-		values[i] = make([]byte, 500)
-	}
-	var c Capture
-	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
-	require.Len(t, c.params, 33, "32 whole values, then one cut short")
-	assert.Equal(t, uint32(copyTotalLimit-32*500), c.params[32].n)
-	assert.True(t, c.truncated)
-
-	c.Record(&pgproto3.Bind{Parameters: values[:32]}, nil, nil)
-	assert.False(t, c.truncated, "shortening values alone drops no position")
 }

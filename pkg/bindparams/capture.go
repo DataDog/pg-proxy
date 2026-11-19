@@ -12,16 +12,15 @@ import (
 
 const (
 	// MaxParams is the number of positions rendered; later positions are dropped
-	// and pgproxy.bind.truncated is set.
-	MaxParams = 256
+	// and pgproxy.bind.truncated is set. Each position adds a value and a type
+	// tag, which tracers store and encode one by one, so a full Bind stays within
+	// the OpenTelemetry SDK's default of 128 attributes per span.
+	MaxParams = 32
 	// copyLimit bounds the bytes copied per value. It covers everything Render
 	// can show: ValueLimit bytes of text, hexLimit bytes of hex, or an array
-	// header and its first arrayElementLimit small elements.
+	// header and its first arrayElementLimit small elements. With MaxParams
+	// positions, a Bind copies at most 16 KiB.
 	copyLimit = 512
-	// copyTotalLimit bounds the bytes copied per Bind, so a Bind with many large
-	// values costs no more to copy than TotalLimit can show. A value it cuts
-	// short renders its prefix and "(+N bytes)"; positions after it are dropped.
-	copyTotalLimit = 4 * TotalLimit
 	// retainLimit is the largest buffer a Capture keeps between traces, so idle
 	// sessions do not each hold the largest Bind they once saw.
 	retainLimit = 2 << 10
@@ -44,7 +43,7 @@ type Capture struct {
 	data      []byte
 	out       []byte
 	recorded  bool
-	truncated bool // positions were dropped while copying
+	truncated bool // positions past MaxParams were dropped
 }
 
 // Recorded reports whether Record has run since the last Reset.
@@ -71,7 +70,6 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	for _, v := range values {
 		need += min(len(v), copyLimit)
 	}
-	need = min(need, copyTotalLimit)
 	if cap(c.data) < need {
 		c.data = make([]byte, need)
 	}
@@ -96,15 +94,7 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 		if v == nil {
 			continue
 		}
-		rest := need - off
-		if rest == 0 && len(v) > 0 {
-			// The copy budget is spent: drop this and later positions, as the
-			// render cap would, rather than tag them with no value.
-			c.params = c.params[:i]
-			c.truncated = true
-			break
-		}
-		take := min(len(v), copyLimit, rest)
+		take := min(len(v), copyLimit)
 		p.size = int32(len(v))
 		p.n = uint32(copy(data[off:], v[:take]))
 		off += take
@@ -126,16 +116,14 @@ func (c *Capture) FillTypes(oids []uint32) {
 	}
 }
 
-// Reset discards the capture, keeping small buffers for reuse.
+// Reset discards the capture, keeping small buffers for reuse. params never
+// grows past MaxParams entries, so it is always kept.
 func (c *Capture) Reset() {
 	if cap(c.data) > retainLimit {
 		c.data = nil
 	}
 	if cap(c.out) > retainLimit {
 		c.out = nil
-	}
-	if cap(c.params) > MaxParams/4 {
-		c.params = nil
 	}
 	c.params = c.params[:0]
 	c.data = c.data[:0]

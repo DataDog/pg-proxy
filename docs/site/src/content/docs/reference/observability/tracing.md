@@ -107,19 +107,17 @@ precision. Use `pgproxy.bind.type.N` to tell how to read a position.
 | Binary arrays of those types | `array[len=N]{…}` with the first 10 elements; text elements are double-quoted |
 | Any other type, malformed binary value, or format code other than text or binary | `\x` and the hex of the first 128 bytes, then `(+N bytes)` |
 
-The tags total at most about 4 KB and 256 positions. When a limit drops
+The tags total at most about 4 KB and 32 positions. When a limit drops
 positions, the root also gets `pgproxy.bind.truncated=true` and
 `pgproxy.bind.rendered` with the number of positions emitted. Invalid UTF-8 is
 escaped as `\xNN` for both tracers.
 
-Each position adds two attributes, a value and a type. The OpenTelemetry SDK
-keeps 128 attributes per span by default, so the `pg-proxy` command raises the
-limit to 576 unless `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` or
-`OTEL_ATTRIBUTE_COUNT_LIMIT` is set. Embedders that build their own tracer
-provider should do the same. With a lower limit, the SDK drops the positions
-that do not fit and counts them in the span's dropped-attribute count;
-`pgproxy.bind.truncated` and `pgproxy.bind.rendered` describe only the proxy's
-own limits. They are set before the positions, so the SDK keeps them.
+Each position adds two attributes, a value and a type, so a full Bind adds at
+most 66, within the OpenTelemetry SDK's default of 128 per span. With a lower
+`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, the SDK drops the positions that do not fit
+and counts them in the span's dropped-attribute count; `pgproxy.bind.truncated`
+and `pgproxy.bind.rendered` describe only the proxy's own limits. They are set
+before the positions, so the SDK keeps them.
 
 Values are recorded only when the root span's head sampling decision keeps the
 trace: a Datadog sampling priority above zero, or an OTel span that is recording

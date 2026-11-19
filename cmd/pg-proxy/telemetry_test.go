@@ -253,8 +253,8 @@ func TestTelemetryOTLPBinaryParameters(t *testing.T) {
 	}
 }
 
-// The SDK keeps 128 attributes per span by default, fewer than a Bind with
-// every position rendered needs.
+// The SDK keeps 128 attributes per span by default; a Bind with every position
+// rendered must fit.
 func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
 	receiver := newOTLPReceiver(t)
 	deps, shutdown, err := setupTelemetry(t.Context(), telemetryConfig{Traces: traceOTel})
@@ -278,19 +278,6 @@ func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
 	require.True(t, keys[bindparams.TagPrefix+last], "the last rendered position is kept")
 	require.True(t, keys[bindparams.TypeTagPrefix+last])
 	require.Zero(t, spans[0].DroppedAttributesCount)
-}
-
-func TestSpanLimitsHonorTheEnvironment(t *testing.T) {
-	require.Equal(t, spanAttributeCountLimit, spanLimits().AttributeCountLimit)
-	t.Run("generic limit", func(t *testing.T) {
-		t.Setenv("OTEL_ATTRIBUTE_COUNT_LIMIT", "0")
-		require.Equal(t, 0, spanLimits().AttributeCountLimit)
-	})
-	t.Run("span limit", func(t *testing.T) {
-		t.Setenv("OTEL_ATTRIBUTE_COUNT_LIMIT", "0")
-		t.Setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10")
-		require.Equal(t, 10, spanLimits().AttributeCountLimit)
-	})
 }
 
 func TestTelemetryOTLPSQLText(t *testing.T) {
