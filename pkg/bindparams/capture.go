@@ -39,11 +39,11 @@ type param struct {
 // Capture holds a copy of one Bind's parameters until the trace is rendered.
 // The zero value is ready to use. A Capture is not safe for concurrent use.
 type Capture struct {
-	params    []param
-	data      []byte
-	out       []byte
-	recorded  bool
-	truncated bool // positions past MaxParams were dropped
+	params   []param
+	data     []byte
+	out      []byte
+	recorded bool
+	sent     int // positions the client sent; Render reports any it does not emit
 }
 
 // Recorded reports whether Record has run since the last Reset.
@@ -59,10 +59,8 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	c.Reset()
 	c.recorded = true
 	values := b.Parameters
-	if len(values) > MaxParams {
-		values = values[:MaxParams]
-		c.truncated = true
-	}
+	c.sent = len(values)
+	values = values[:min(len(values), MaxParams)]
 
 	// Size the buffers once and fill them by index, so a capture costs at most
 	// one allocation each and none once a session's buffers have grown.
@@ -73,9 +71,9 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	if cap(c.data) < need {
 		c.data = make([]byte, need)
 	}
-	data := c.data[:need]
+	c.data = c.data[:need]
 	if cap(c.params) < len(values) {
-		c.params = make([]param, len(values))
+		c.params = make([]param, len(values), MaxParams)
 	}
 	c.params = c.params[:len(values)]
 
@@ -96,10 +94,9 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 		}
 		take := min(len(v), copyLimit)
 		p.size = int32(len(v))
-		p.n = uint32(copy(data[off:], v[:take]))
+		p.n = uint32(copy(c.data[off:], v[:take]))
 		off += take
 	}
-	c.data = data[:off]
 }
 
 // FillTypes sets the type of each position Record left unknown from oids, the
@@ -128,7 +125,7 @@ func (c *Capture) Reset() {
 	c.params = c.params[:0]
 	c.data = c.data[:0]
 	c.recorded = false
-	c.truncated = false
+	c.sent = 0
 }
 
 func typeOID(i int, parseOIDs, describedOIDs []uint32) uint32 {

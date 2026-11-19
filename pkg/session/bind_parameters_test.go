@@ -331,7 +331,7 @@ func FuzzBindParameterCapture(f *testing.F) {
 	f.Add([]byte{18}, array, []byte{1}, true)                                                          // binary text[]
 	f.Add([]byte{13, 13}, []byte("plain\xFFtext\xc3"), []byte{}, false)                                // text, invalid UTF-8
 	f.Add([]byte{0, 3}, []byte{0xFE, 0xFF, 1, 2, 3}, []byte{1}, false)                                 // NULL, malformed int4
-	f.Add([]byte{8}, bytes.Repeat([]byte{0xFF}, 300), []byte{0}, false)                                // past MaxParams
+	f.Add([]byte{8}, bytes.Repeat([]byte{0xFF}, bindparams.MaxParams+1), []byte{0}, false)             // past MaxParams
 	f.Add([]byte{13}, bytes.Repeat(append(bytes.Repeat([]byte("x"), 300), 0xFF), 20), []byte{0}, true) // past the render cap
 
 	tracer := startMockTracer(f)
@@ -342,8 +342,8 @@ func FuzzBindParameterCapture(f *testing.F) {
 			oids = append(oids, fuzzOIDs[int(b)%len(fuzzOIDs)])
 		}
 		bind := fuzzBind(values, formats)
-		// The test pipes carry at most 8 KiB per flush; the copy budget and
-		// larger Binds are covered by the bindparams tests.
+		// The test pipes carry at most 8 KiB per flush; the per-value copy
+		// limit and larger Binds are covered by the bindparams tests.
 		if len(values)+4*len(bind.Parameters)+2*len(bind.ParameterFormatCodes)+4*len(oids) > 7<<10 {
 			t.Skip("too large for the test pipe")
 		}

@@ -113,8 +113,8 @@ positions, the root also gets `pgproxy.bind.truncated=true` and
 escaped as `\xNN` for both tracers.
 
 Each position adds two attributes, a value and a type, so a full Bind adds at
-most 66, within the OpenTelemetry SDK's default of 128 per span. With a lower
-`OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT`, the SDK drops the positions that do not fit
+most 66, within the OpenTelemetry SDK's default of 128 per span. If the SDK's
+attribute limit is lowered below that, it drops the positions that do not fit
 and counts them in the span's dropped-attribute count; `pgproxy.bind.truncated`
 and `pgproxy.bind.rendered` describe only the proxy's own limits. They are set
 before the positions, so the SDK keeps them.

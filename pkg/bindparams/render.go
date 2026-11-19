@@ -80,7 +80,6 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	if !c.recorded {
 		return
 	}
-	truncated := c.truncated
 	// Render every value into one buffer and convert it to a string once; each
 	// tag value is a substring of it, so the values cost one allocation, plus
 	// one per tag to pass it as an interface.
@@ -92,14 +91,14 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 		out = appendParam(out, p, c.data[p.off:p.off+p.n])
 		if len(out) > TotalLimit {
 			out = out[:start]
-			truncated = true
 			break
 		}
 		p.end = uint32(len(out))
 		rendered++
 	}
 	c.out = out
-	if truncated {
+	// Positions past MaxParams or TotalLimit were not emitted.
+	if rendered < c.sent {
 		setTag(TruncatedTag, true)
 		setTag(RenderedTag, rendered)
 	}

@@ -144,7 +144,8 @@ func (s *Session) remember(stmt describedStmt, oids []uint32) {
 		// A reply can describe an unnamed statement that a later Parse has
 		// already replaced; it must not be taken for the new one.
 		if stmt.gen == s.unnamedGen && (t.unnamedGen != stmt.gen || !slices.Equal(t.unnamed, oids)) {
-			t.unnamed, t.unnamedGen = slices.Clone(oids), stmt.gen
+			// Readers copy the types out, so the previous slice can be reused.
+			t.unnamed, t.unnamedGen = append(t.unnamed[:0], oids...), stmt.gen
 		}
 		return
 	}

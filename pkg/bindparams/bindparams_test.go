@@ -336,7 +336,7 @@ func TestRenderInvalidUTF8(t *testing.T) {
 }
 
 func TestRenderTotalCap(t *testing.T) {
-	values := make([][]byte, 40)
+	values := make([][]byte, MaxParams) // 200 bytes each reach TotalLimit first
 	for i := range values {
 		values[i] = []byte(strings.Repeat("x", 200))
 	}
@@ -357,31 +357,32 @@ func TestRenderTotalCap(t *testing.T) {
 	assert.NotContains(t, tags, "db.query.parameter.20")
 }
 
+// Tracers that cap a span's attributes keep the earliest, so the truncation
+// tags must come before the positions.
 func TestRenderPositionCap(t *testing.T) {
-	values := make([][]byte, MaxParams+10)
-	tags := render(t, &pgproto3.Bind{Parameters: values}, nil, nil)
-	assert.Len(t, tags, MaxParams+2)
+	var c Capture
+	c.Record(&pgproto3.Bind{Parameters: make([][]byte, MaxParams+1)}, nil, nil)
+	var keys []string
+	tags := map[string]any{}
+	c.Render(func(key string, value any) {
+		keys = append(keys, key)
+		tags[key] = value
+	})
+	require.Len(t, keys, 2+2*MaxParams, "the truncation tags, then a value and a type tag per position")
+	assert.Equal(t, []string{TruncatedTag, RenderedTag}, keys[:2])
 	assert.Equal(t, true, tags[TruncatedTag])
 	assert.Equal(t, MaxParams, tags[RenderedTag])
 }
 
-// Tracers that cap a span's attributes keep the earliest, so the truncation
-// tags must come before the positions.
-func TestRenderTruncationTagsComeFirst(t *testing.T) {
-	var c Capture
-	c.Record(&pgproto3.Bind{Parameters: make([][]byte, MaxParams+1)}, nil, nil)
-	var keys []string
-	c.Render(func(key string, _ any) { keys = append(keys, key) })
-	require.GreaterOrEqual(t, len(keys), 2)
-	assert.Equal(t, []string{TruncatedTag, RenderedTag}, keys[:2])
-}
-
 func TestRecordBoundsTheCopy(t *testing.T) {
 	big := make([]byte, 1<<20)
-	values := [][]byte{big, big, big, big, big, big, big, big, big, big}
+	values := make([][]byte, MaxParams+1)
+	for i := range values {
+		values[i] = big
+	}
 	var c Capture
 	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
-	assert.LessOrEqual(t, len(c.data), MaxParams*copyLimit)
+	assert.Len(t, c.data, MaxParams*copyLimit, "copyLimit bytes from each of the first MaxParams values")
 	tags := map[string]any{}
 	c.Render(func(key string, value any) { tags[key] = value })
 	assert.Equal(t, strings.Repeat("\x00", ValueLimit)+"(+1048320 bytes)", tags["db.query.parameter.0"])

@@ -262,7 +262,7 @@ func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
 	t.Cleanup(func() { _ = shutdown() })
 	root, _ := deps.Tracer.StartRoot("parameterized query", "select $1")
 	var capture bindparams.Capture
-	capture.Record(&pgproto3.Bind{Parameters: make([][]byte, bindparams.MaxParams+10)}, nil, nil)
+	capture.Record(&pgproto3.Bind{Parameters: make([][]byte, bindparams.MaxParams+1)}, nil, nil)
 	capture.Render(root.SetTag)
 	root.Finish(nil)
 	require.NoError(t, shutdown())
