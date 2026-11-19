@@ -116,8 +116,10 @@ Each position adds two attributes, a value and a type. The OpenTelemetry SDK
 keeps 128 attributes per span by default, so the `pg-proxy` command raises the
 limit to 576 unless `OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT` or
 `OTEL_ATTRIBUTE_COUNT_LIMIT` is set. Embedders that build their own tracer
-provider should do the same. The truncation tags are set before the
-positions, so a lower limit drops positions, not the marker.
+provider should do the same. With a lower limit, the SDK drops the positions
+that do not fit and counts them in the span's dropped-attribute count;
+`pgproxy.bind.truncated` and `pgproxy.bind.rendered` describe only the proxy's
+own limits. They are set before the positions, so the SDK keeps them.
 
 Values are recorded only when the root span's head sampling decision keeps the
 trace: a Datadog sampling priority above zero, or an OTel span that is recording
