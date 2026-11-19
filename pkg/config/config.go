@@ -44,6 +44,12 @@ type DatabaseSettings struct {
 	// ConnectionOptions is a map of connection options to be passed to the Postgres driver
 	// as libpq options (-c key=value). Nil inherits PGOPTIONS; an empty map clears it.
 	ConnectionOptions map[string]string `mapstructure:"connection_options" json:"connectionOptions" yaml:"connection_options"`
+	// ResetMode selects how a backend connection is reset when it returns to
+	// the pool. Empty selects the library default, ResetAlways. See ResetMode.
+	ResetMode ResetMode `mapstructure:"reset_mode" json:"resetMode,omitempty" yaml:"reset_mode,omitempty"`
+	// ResetAuditSettings adds custom settings, each named prefix.name, to the
+	// settings that ResetAudit compares before and after the reset.
+	ResetAuditSettings []string `mapstructure:"reset_audit_settings" json:"resetAuditSettings,omitempty" yaml:"reset_audit_settings,omitempty"`
 }
 
 // PoolConfig contains additional standalone pool tuning options.
