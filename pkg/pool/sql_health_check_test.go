@@ -165,25 +165,33 @@ func TestSQLHealthCheckerRetriesAndEventuallySucceeds(t *testing.T) {
 }
 
 func TestSQLHealthCheckerStopsAfterConclusivePostgresError(t *testing.T) {
-	prober := &fakeSQLHealthProber{
-		responses: map[string][]fakeSQLHealthProbeResponse{
-			"conn-10.0.0.1": {{err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}}},
-		},
-		calls: make(map[string]int),
-	}
-	checker := newTestSQLHealthChecker(t, prober, 3, SQLHealthCheckHooks{})
-	outcome := checker.Check(
-		context.Background(),
-		[]string{"10.0.0.1"},
-		func(ip string) string { return "conn-" + ip },
-		nil,
-		nil,
-		nil,
-	)
+	for _, code := range []string{"57P01", sqlHealthCheckCrashShutdown} {
+		t.Run(code, func(t *testing.T) {
+			shutdown := &sqlHealthProbeError{
+				stage: SQLHealthCheckAcquireStage,
+				err:   &pgconn.PgError{Code: code},
+			}
+			prober := &fakeSQLHealthProber{
+				responses: map[string][]fakeSQLHealthProbeResponse{
+					"conn-10.0.0.1": {{err: shutdown}, {err: context.DeadlineExceeded}},
+				},
+				calls: make(map[string]int),
+			}
+			checker := newTestSQLHealthChecker(t, prober, 3, SQLHealthCheckHooks{})
+			outcome := checker.Check(
+				context.Background(),
+				[]string{"10.0.0.1"},
+				func(ip string) string { return "conn-" + ip },
+				nil,
+				nil,
+				nil,
+			)
 
-	require.Len(t, outcome.Results, 1)
-	assert.Error(t, outcome.Results[0].Err)
-	assert.Equal(t, 1, prober.callCount("conn-10.0.0.1"))
+			require.Len(t, outcome.Results, 1)
+			assert.ErrorIs(t, outcome.Results[0].Err, shutdown, "a later timeout must not replace shutdown evidence")
+			assert.Equal(t, 1, prober.callCount("conn-10.0.0.1"))
+		})
+	}
 }
 
 func TestSQLHealthCheckerReportsMultiplePrimaries(t *testing.T) {
@@ -235,6 +243,7 @@ func TestRegistrySQLHealthProberReportsPoolLookupFailure(t *testing.T) {
 
 func TestIsSQLHealthCheckRetriable(t *testing.T) {
 	assert.True(t, IsSQLHealthCheckRetriable(errors.New("temporary")))
+	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: "57P01"}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCrashShutdown}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckInvalidPassword}))
