@@ -94,17 +94,6 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	}
 }
 
-// FillTypes sets the type of each position Record left unknown from oids, the
-// backend's ParameterDescription for the same statement, when that reply
-// arrives after the Bind was recorded. It does nothing if nothing was recorded.
-func (c *Capture) FillTypes(oids []uint32) {
-	for i := range c.params[:min(len(c.params), len(oids))] {
-		if c.params[i].oid == 0 {
-			c.params[i].oid = oids[i]
-		}
-	}
-}
-
 // Reset discards the capture, keeping small buffers for reuse. params never
 // grows past MaxParams entries, so it is always kept.
 func (c *Capture) Reset() {

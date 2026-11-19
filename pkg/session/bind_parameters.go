@@ -42,11 +42,6 @@ type bindParamTypes struct {
 	// first answered of them have had their ParameterDescription.
 	describing []describedStmt
 	answered   int
-	// recorded is the statement of the Bind the trace captured, or the zero
-	// value, which no Describe has, if it is unknown. A client can Parse without
-	// types, Describe and Bind in one flush, so a ParameterDescription for it in
-	// the same cycle fills in the types the capture lacked.
-	recorded describedStmt
 }
 
 // describedStmt names where a statement's described types are kept: the
@@ -89,14 +84,12 @@ func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
 		// Only binary values are decoded by type, so a Bind of text values, the
 		// common case, skips the statement lookup. An unknown statement is the
 		// zero value, which has no types.
-		var stmt describedStmt
 		var parseOIDs, describedOIDs []uint32
 		if bindparams.NeedsTypes(m) {
-			stmt, parseOIDs, _ = s.findStmt(m.PreparedStatement)
-			describedOIDs = s.describedOIDs(stmt)
+			stmt, oids, _ := s.findStmt(m.PreparedStatement)
+			parseOIDs, describedOIDs = oids, s.describedOIDs(stmt)
 		}
 		traceState.RecordBindParameters(m, parseOIDs, describedOIDs)
-		t.recorded = stmt
 	}
 }
 
@@ -108,17 +101,12 @@ func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
 	case *pgproto3.ParameterDescription:
 		if t.answered < len(t.describing) {
 			t.answered++
-			stmt := t.describing[t.answered-1]
-			s.remember(stmt, m.ParameterOIDs)
-			if stmt == t.recorded {
-				s.obsVals.traceState.FillBindParameterTypes(m.ParameterOIDs)
-			}
+			s.remember(t.describing[t.answered-1], m.ParameterOIDs)
 		}
 	case *pgproto3.ReadyForQuery:
 		// Describes that failed get no reply; forget them at the end of the cycle.
 		t.describing = t.describing[:0]
 		t.answered = 0
-		t.recorded = describedStmt{}
 	}
 }
 

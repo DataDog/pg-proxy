@@ -233,20 +233,6 @@ func TestNeedsTypes(t *testing.T) {
 		"positions past MaxParams are not rendered")
 }
 
-func TestFillTypesSetsOnlyUnknownTypes(t *testing.T) {
-	var c Capture
-	c.FillTypes([]uint32{pgtype.Int4OID}) // nothing recorded yet
-	assert.False(t, c.Recorded())
-
-	four := encode(t, pgtype.Int4OID, int32(7))
-	c.Record(binaryBind(four, four, four), []uint32{0, pgtype.Int4OID}, nil)
-	c.FillTypes([]uint32{pgtype.Int4OID, pgtype.Float4OID})
-	tags := collect(t, &c)
-	assert.Equal(t, "7", tags[valueKeys[0]], "an unknown type is filled")
-	assert.Equal(t, "7", tags[valueKeys[1]], "a known type is kept, not read as float4")
-	assert.Equal(t, `\x00000007`, tags[valueKeys[2]], "positions past the description stay unknown")
-}
-
 func TestRenderFormatCodes(t *testing.T) {
 	four := encode(t, pgtype.Int4OID, int32(7))
 	oids := []uint32{pgtype.Int4OID, pgtype.Int4OID, pgtype.Int4OID}
