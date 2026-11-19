@@ -19,37 +19,23 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// render records b and returns the value and truncation tags it renders.
+// render records b and returns the tags it renders.
 func render(t *testing.T, b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) map[string]any {
 	t.Helper()
 	var c Capture
 	c.Record(b, parseOIDs, describedOIDs)
-	tags := collect(t, &c)
-	// Every value has a type tag at the same index. Tests of values ignore them;
-	// TestRenderTypeNames checks them.
-	values, types := 0, 0
-	for key := range tags {
-		if i, ok := strings.CutPrefix(key, TypeTagPrefix); ok {
-			require.Contains(t, tags, TagPrefix+i)
-			delete(tags, key)
-			types++
-		}
-	}
-	for key := range tags {
-		if strings.HasPrefix(key, TagPrefix) {
-			values++
-		}
-	}
-	require.Equal(t, values, types, "one type tag per value tag")
-	return tags
+	return collect(t, &c)
 }
 
-// collect renders c and returns every tag, checking that none is set twice or
-// is invalid UTF-8.
+// collect renders c and returns every tag, checking that each is a value or
+// truncation tag, set once, and valid UTF-8.
 func collect(t *testing.T, c *Capture) map[string]any {
 	t.Helper()
 	tags := map[string]any{}
 	c.Render(func(key string, value any) {
+		if key != TruncatedTag && key != RenderedTag {
+			require.True(t, strings.HasPrefix(key, TagPrefix), "unexpected tag %s", key)
+		}
 		_, dup := tags[key]
 		require.False(t, dup, "tag %s set twice", key)
 		if s, ok := value.(string); ok {
@@ -78,7 +64,6 @@ func arrayHeader(ndim, flags int32, elem uint32, dims ...int32) []byte {
 func TestTagKeys(t *testing.T) {
 	assert.Equal(t, "db.parameters.0", valueKeys[0])
 	assert.Equal(t, "db.parameters.31", valueKeys[MaxParams-1])
-	assert.Equal(t, "pgproxy.bind.type.0", typeKeys[0])
 }
 
 // encode encodes value in PostgreSQL's binary format with pgtype, the codec
@@ -243,22 +228,12 @@ func TestFillTypesSetsOnlyUnknownTypes(t *testing.T) {
 	assert.False(t, c.Recorded())
 
 	four := encode(t, pgtype.Int4OID, int32(7))
-	c.Record(binaryBind(four, four, four), []uint32{0, pgtype.Float4OID}, nil)
-	c.FillTypes([]uint32{pgtype.Int4OID, pgtype.Int4OID})
+	c.Record(binaryBind(four, four, four), []uint32{0, pgtype.Int4OID}, nil)
+	c.FillTypes([]uint32{pgtype.Int4OID, pgtype.Float4OID})
 	tags := collect(t, &c)
-	assert.Equal(t, "int4", tags[typeKeys[0]], "an unknown type is filled")
-	assert.Equal(t, "float4", tags[typeKeys[1]], "a known type is kept")
-	assert.Equal(t, "unknown", tags[typeKeys[2]], "positions past the description stay unknown")
-}
-
-func TestRenderTypeNames(t *testing.T) {
-	oids := []uint32{pgtype.Int8OID, pgtype.TimestamptzOID, pgtype.Int4ArrayOID, 0, 999_999}
-	var c Capture
-	c.Record(&pgproto3.Bind{Parameters: make([][]byte, len(oids))}, oids, nil)
-	tags := collect(t, &c)
-	for i, want := range []string{"int8", "timestamptz", "int4[]", "unknown", "unknown"} {
-		assert.Equal(t, want, tags[typeKeys[i]], "position %d", i)
-	}
+	assert.Equal(t, "7", tags[valueKeys[0]], "an unknown type is filled")
+	assert.Equal(t, "7", tags[valueKeys[1]], "a known type is kept, not read as float4")
+	assert.Equal(t, `\x00000007`, tags[valueKeys[2]], "positions past the description stay unknown")
 }
 
 func TestRenderFormatCodes(t *testing.T) {
@@ -376,7 +351,7 @@ func TestRenderPositionCap(t *testing.T) {
 		keys = append(keys, key)
 		tags[key] = value
 	})
-	require.Len(t, keys, 2+2*MaxParams, "the truncation tags, then a value and a type tag per position")
+	require.Len(t, keys, 2+MaxParams, "the truncation tags, then a value tag per position")
 	assert.Equal(t, []string{TruncatedTag, RenderedTag}, keys[:2])
 	assert.Equal(t, true, tags[TruncatedTag])
 	assert.Equal(t, MaxParams, tags[RenderedTag])

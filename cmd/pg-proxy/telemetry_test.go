@@ -278,7 +278,6 @@ func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
 	last := strconv.Itoa(bindparams.MaxParams - 1)
 	require.True(t, keys[bindparams.TruncatedTag])
 	require.True(t, keys[bindparams.TagPrefix+last], "the last rendered position is kept")
-	require.True(t, keys[bindparams.TypeTagPrefix+last])
 	require.Zero(t, spans[0].DroppedAttributesCount)
 }
 
@@ -702,7 +701,6 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 				}
 				if span.Name == query.TransactionOpName && stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == "otel actual parameter" {
 					parameters = true
-					require.NotEmpty(t, stringAttribute(span.Attributes, bindparams.TypeTagPrefix+"0"))
 				}
 			}
 		}

@@ -5,10 +5,7 @@
 
 package bindparams
 
-import (
-	"strconv"
-	"strings"
-)
+import "strconv"
 
 const (
 	// TagPrefix starts each position's value tag: db.parameters.0, …
@@ -16,9 +13,6 @@ const (
 	// It is not OTel's db.query.parameter: Datadog's intake moves db.query.*
 	// under db.statement, which replaces the SQL text.
 	TagPrefix = "db.parameters."
-	// TypeTagPrefix starts each rendered position's type tag:
-	// pgproxy.bind.type.0, … It uses the same index as TagPrefix.
-	TypeTagPrefix = "pgproxy.bind.type."
 	// TruncatedTag is set to true when a limit dropped positions.
 	TruncatedTag = "pgproxy.bind.truncated"
 	// RenderedTag is set with TruncatedTag to the number of positions emitted.
@@ -37,47 +31,19 @@ const (
 	elementLimit = 64
 )
 
-var valueKeys, typeKeys = func() (values, types [MaxParams]string) {
-	for i := range values {
-		values[i] = TagPrefix + strconv.Itoa(i)
-		types[i] = TypeTagPrefix + strconv.Itoa(i)
+var valueKeys = func() (keys [MaxParams]string) {
+	for i := range keys {
+		keys[i] = TagPrefix + strconv.Itoa(i)
 	}
-	return values, types
+	return keys
 }()
 
-// typeNames maps the OIDs pgtype knows to PostgreSQL's names for them, with
-// arrays written as int4[] rather than _int4. Built-in types all have OIDs
-// below FirstNormalObjectId (16384). Names are stored as interfaces so passing
-// one to setTag does not allocate.
-var typeNames = func() map[uint32]any {
-	names := make(map[uint32]any)
-	for oid := range uint32(16384) {
-		if t, ok := pgTypes.TypeForOID(oid); ok {
-			name := t.Name
-			if elem, ok := strings.CutPrefix(name, "_"); ok {
-				if _, isArray := arrayElementOID(oid); isArray {
-					name = elem + "[]"
-				}
-			}
-			names[oid] = name
-		}
-	}
-	return names
-}()
-
-var unknownType any = "unknown"
-
-func typeName(oid uint32) any {
-	if name, ok := typeNames[oid]; ok {
-		return name
-	}
-	return unknownType
-}
-
-// Render passes a value tag and a type tag per captured position to setTag,
-// then resets the capture. It does nothing if nothing was recorded. The
-// truncation tags come first: tracers that cap a span's attributes, such as the
-// OpenTelemetry SDK, keep the earliest ones and drop the rest.
+// Render passes a value tag per captured position to setTag, then resets the
+// capture. Types only decode the values; they are not tagged, since clients
+// such as pgx's exec mode declare none and describe only the portal. Render
+// does nothing if nothing was recorded. The truncation tags come first: tracers
+// that cap a span's attributes, such as the OpenTelemetry SDK, keep the
+// earliest ones and drop the rest.
 func (c *Capture) Render(setTag func(key string, value any)) {
 	if !c.recorded {
 		return
@@ -111,7 +77,6 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	start := 0
 	for i := range rendered {
 		setTag(valueKeys[i], values[start:ends[i]])
-		setTag(typeKeys[i], typeName(c.params[i].oid))
 		start = ends[i]
 	}
 	c.Reset()

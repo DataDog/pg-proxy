@@ -3,14 +3,13 @@
 // This product includes software developed at Datadog (https://www.datadoghq.com/)
 // Copyright 2026-Present Datadog, Inc.
 
-// Package bindparams copies Bind parameter values and renders them as typed,
+// Package bindparams copies Bind parameter values and renders them as decoded,
 // truncated, per-position trace tags.
 //
 // Capture.Record runs on the Bind path of sampled traces only. It copies a
 // bounded prefix of each value into buffers the Capture reuses, because
 // pgproto3 reuses its read buffers. Capture.Render runs when the root trace
-// finishes and emits db.parameters.0 … db.parameters.n with their
-// types as pgproxy.bind.type.0 … pgproxy.bind.type.n, plus
+// finishes and emits db.parameters.0 … db.parameters.n, plus
 // pgproxy.bind.truncated and pgproxy.bind.rendered when a limit drops values.
 //
 // Values are decoded from the type OID: NULL as null, text by its first

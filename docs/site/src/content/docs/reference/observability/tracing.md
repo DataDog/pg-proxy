@@ -89,14 +89,14 @@ when constructing sessions directly) to `true` to enable it.
 
 With capture on, the root span carries one tag per parameter position,
 `db.parameters.0` through `db.parameters.n`, taken from the first Bind of the
-trace. `$1` is `db.parameters.0`. Each position also gets its type name as
-`pgproxy.bind.type.N`, for example `int8`, `timestamptz`, `int4[]` or `unknown`.
-The type is the one declared in Parse, else the one PostgreSQL reported for the
-statement in a ParameterDescription, else unknown. A type declared as 0 or
-`unknown` counts as not declared.
+trace. `$1` is `db.parameters.0`. A binary value is decoded with the type
+declared in Parse, else the one PostgreSQL reported for the statement in a
+ParameterDescription; a type declared as 0 or `unknown` counts as not declared.
+Types are not tagged. Clients that declare no types and describe only the
+portal, such as pgx's exec mode, send text values, which need no type.
 
 Values are strings, including numbers, so values above 2^53 keep their
-precision. Use `pgproxy.bind.type.N` to tell how to read a position.
+precision.
 
 | Value | Tag value |
 | --- | --- |
@@ -112,8 +112,8 @@ positions, the root also gets `pgproxy.bind.truncated=true` and
 `pgproxy.bind.rendered` with the number of positions emitted. Invalid UTF-8 is
 escaped as `\xNN` for both tracers.
 
-Each position adds two attributes, a value and a type, so a full Bind adds at
-most 66, within the OpenTelemetry SDK's default of 128 per span. If the SDK's
+Each position adds one attribute, so a full Bind adds at most 34, within the
+OpenTelemetry SDK's default of 128 per span. If the SDK's
 attribute limit is lowered below that, it drops the positions that do not fit
 and counts them in the span's dropped-attribute count; `pgproxy.bind.truncated`
 and `pgproxy.bind.rendered` describe only the proxy's own limits. They are set

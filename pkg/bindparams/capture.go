@@ -14,9 +14,9 @@ import (
 
 const (
 	// MaxParams is the number of positions rendered; later positions are dropped
-	// and pgproxy.bind.truncated is set. Each position adds a value and a type
-	// tag, which tracers store and encode one by one, so a full Bind stays within
-	// the OpenTelemetry SDK's default of 128 attributes per span.
+	// and pgproxy.bind.truncated is set. Tracers store and encode tags one by
+	// one, so each position adds cost; a full Bind adds at most 34 attributes,
+	// within the OpenTelemetry SDK's default of 128 per span.
 	MaxParams = 32
 	// copyLimit bounds the bytes copied per binary value. It covers everything
 	// Render can show: ValueLimit bytes of text, hexLimit bytes of hex, or an

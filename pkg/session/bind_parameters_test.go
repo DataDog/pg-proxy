@@ -121,9 +121,7 @@ func TestBindParametersUseParseTypes(t *testing.T) {
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
 	assert.Equal(t, "-42", roots[0][bindparams.TagPrefix+"0"])
-	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
 	assert.Equal(t, "null", roots[0][bindparams.TagPrefix+"1"])
-	assert.Equal(t, "unknown", roots[0]["pgproxy.bind.type.1"])
 	assert.NotContains(t, roots[0], "pgproxy.bind.truncated")
 	assert.NotContains(t, roots[0], "pgproxy.bind.rendered")
 }
@@ -149,9 +147,7 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 	require.Len(t, roots, 2)
 	assert.NotContains(t, roots[0], bindparams.TagPrefix+"0", "the describe cycle has no Bind")
 	assert.Equal(t, "7", roots[1][bindparams.TagPrefix+"0"])
-	assert.Equal(t, "int8", roots[1]["pgproxy.bind.type.0"])
 	assert.Equal(t, "true", roots[1][bindparams.TagPrefix+"1"])
-	assert.Equal(t, "bool", roots[1]["pgproxy.bind.type.1"])
 }
 
 // A pipelining client can Parse without types, Describe and Bind in binary in
@@ -162,7 +158,7 @@ func TestBindParametersUseDescribedTypesFromTheSameFlush(t *testing.T) {
 	exchange(t, client, postgres, []uint32{pgtype.Int8OID, pgtype.BoolOID},
 		&pgproto3.Parse{Query: parameterQuery + " AND $2", ParameterOIDs: []uint32{0, pgtype.TextOID}},
 		&pgproto3.Describe{ObjectType: 'S'},
-		&pgproto3.Bind{ParameterFormatCodes: []int16{1, 0}, Parameters: [][]byte{int8Param(7), []byte("x")}},
+		&pgproto3.Bind{ParameterFormatCodes: []int16{1, 1}, Parameters: [][]byte{int8Param(7), []byte("x")}},
 		&pgproto3.Execute{},
 		&pgproto3.Sync{})
 	closeSession()
@@ -170,8 +166,7 @@ func TestBindParametersUseDescribedTypesFromTheSameFlush(t *testing.T) {
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
 	assert.Equal(t, "7", roots[0][bindparams.TagPrefix+"0"])
-	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
-	assert.Equal(t, "text", roots[0]["pgproxy.bind.type.1"], "a declared type is kept")
+	assert.Equal(t, "x", roots[0][bindparams.TagPrefix+"1"], "a declared type is kept, not read as the described bool")
 }
 
 func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
@@ -389,7 +384,6 @@ func FuzzBindParameterCapture(f *testing.F) {
 		for i := range positions {
 			value, ok := tags[bindparams.TagPrefix+strconv.Itoa(i)]
 			require.True(t, ok, "positions are contiguous from 0, missing %d of %d", i, positions)
-			require.IsType(t, "", tags[bindparams.TypeTagPrefix+strconv.Itoa(i)], "position %d has a type", i)
 			v := bind.Parameters[i]
 			binary := len(bind.ParameterFormatCodes) == 1 && bind.ParameterFormatCodes[0] == 1 ||
 				len(bind.ParameterFormatCodes) > 1 && bind.ParameterFormatCodes[i] == 1
