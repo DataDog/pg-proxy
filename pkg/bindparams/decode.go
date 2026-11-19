@@ -6,6 +6,7 @@
 package bindparams
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/hex"
 	"math"
@@ -36,18 +37,23 @@ const pgEpochMicros = 946_684_800_000_000
 // prefix of the size bytes sent. It reports false, leaving the caller to fall
 // back to hex, when the type is unknown or v is malformed.
 func appendBinary(dst []byte, oid uint32, v []byte, size int) ([]byte, bool) {
+	// A value of unknown type, sent by clients that declare no types and
+	// describe nothing, can only be shown as hex.
+	if oid == 0 {
+		return dst, false
+	}
 	// Fixed-width scalars, the common case, skip the array type lookup.
 	if fixedWidth(oid) == 0 {
 		if elem, ok := arrayElementOID(oid); ok {
 			return appendArray(dst, elem, v, size)
 		}
 	}
-	// jsonb's binary format is a version byte, then the JSON text.
 	if oid == pgtype.JSONBOID {
-		if len(v) == 0 || v[0] != 1 {
+		text, ok := jsonbText(v)
+		if !ok {
 			return dst, false
 		}
-		v, size, oid = v[1:], size-1, pgtype.TextOID
+		v, size, oid = text, size-1, pgtype.TextOID
 	}
 	// Text and arrays have meaningful prefixes; other scalars are shown whole
 	// or not at all.
@@ -58,6 +64,15 @@ func appendBinary(dst []byte, oid uint32, v []byte, size int) ([]byte, bool) {
 		return dst, false
 	}
 	return appendScalar(dst, oid, v, ValueLimit)
+}
+
+// jsonbText returns the JSON text of a binary jsonb value: a version byte, then
+// the text.
+func jsonbText(v []byte) ([]byte, bool) {
+	if len(v) == 0 || v[0] != 1 {
+		return nil, false
+	}
+	return v[1:], true
 }
 
 // appendScalar appends a complete binary array element. Text elements are
@@ -93,11 +108,10 @@ func appendScalar(dst []byte, oid uint32, v []byte, limit int) ([]byte, bool) {
 	case pgtype.NumericOID:
 		return appendNumeric(dst, v, limit)
 	case pgtype.JSONBOID:
-		// jsonb's binary format is a version byte, then the JSON text.
-		if len(v) == 0 || v[0] != 1 {
+		var ok bool
+		if v, ok = jsonbText(v); !ok {
 			return dst, false
 		}
-		v = v[1:]
 	default:
 		if !isTextType(oid) {
 			return dst, false
@@ -430,14 +444,12 @@ func appendQuoted(dst []byte, v []byte, limit int, cut bool) []byte {
 	shown := cutText(v, limit)
 	dst = append(dst, '"')
 	for len(shown) > 0 {
-		i := 0
-		for i < len(shown) && shown[i] != '"' && shown[i] != '\\' {
-			i++
-		}
-		dst = appendEscaped(dst, shown[:i])
-		if i == len(shown) {
+		i := bytes.IndexAny(shown, `"\`)
+		if i < 0 {
+			dst = appendEscaped(dst, shown)
 			break
 		}
+		dst = appendEscaped(dst, shown[:i])
 		dst = append(dst, '\\', shown[i])
 		shown = shown[i+1:]
 	}

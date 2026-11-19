@@ -39,11 +39,9 @@ var valueKeys = func() (keys [MaxParams]string) {
 }()
 
 // Render passes a value tag per captured position to setTag, then resets the
-// capture. Types only decode the values; they are not tagged, since clients
-// such as pgx's exec mode declare none and describe only the portal. Render
-// does nothing if nothing was recorded. The truncation tags come first: tracers
-// that cap a span's attributes, such as the OpenTelemetry SDK, keep the
-// earliest ones and drop the rest.
+// capture. It does nothing if nothing was recorded. The truncation tags come
+// first: tracers that cap a span's attributes, such as the OpenTelemetry SDK,
+// keep the earliest ones and drop the rest.
 func (c *Capture) Render(setTag func(key string, value any)) {
 	if !c.recorded {
 		return

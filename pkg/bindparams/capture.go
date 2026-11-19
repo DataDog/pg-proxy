@@ -55,10 +55,11 @@ func (c *Capture) Recorded() bool {
 	return c.recorded
 }
 
-// Record copies b's parameters, replacing any earlier capture. A value's type is
-// its OID in parseOIDs, else its OID in describedOIDs (the backend's
+// Record copies b's parameters, replacing any earlier capture. A binary value's
+// type is its OID in parseOIDs, else its OID in describedOIDs (the backend's
 // ParameterDescription, which resolves what Parse left unspecified), else
-// unknown. PostgreSQL treats a declared 0 or unknown as unspecified.
+// unknown. PostgreSQL treats a declared 0 or unknown as unspecified. Text
+// values need no type.
 func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	c.Reset()
 	c.recorded = true
@@ -117,6 +118,17 @@ func (c *Capture) Reset() {
 	c.data = c.data[:0]
 	c.recorded = false
 	c.sent = 0
+}
+
+// NeedsTypes reports whether Record would use types for b: only binary values
+// are decoded by type, so a Bind of text values needs none.
+func NeedsTypes(b *pgproto3.Bind) bool {
+	for i := range min(len(b.Parameters), MaxParams) {
+		if format(i, b.ParameterFormatCodes) == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // format returns position i's format code: one code applies to every position,

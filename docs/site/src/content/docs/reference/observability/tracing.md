@@ -92,8 +92,7 @@ With capture on, the root span carries one tag per parameter position,
 trace. `$1` is `db.parameters.0`. A binary value is decoded with the type
 declared in Parse, else the one PostgreSQL reported for the statement in a
 ParameterDescription; a type declared as 0 or `unknown` counts as not declared.
-Types are not tagged. Clients that declare no types and describe only the
-portal, such as pgx's exec mode, send text values, which need no type.
+A binary value whose type is neither declared nor described renders as hex.
 
 Values are strings, including numbers, so values above 2^53 keep their
 precision.

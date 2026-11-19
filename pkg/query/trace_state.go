@@ -272,7 +272,7 @@ func (t *TraceState) Sampled() bool {
 // the root trace is sampled, since the tracer would drop an unsampled trace's
 // tags, and none of its Binds was recorded yet.
 func (t *TraceState) WantsBindParameters() bool {
-	return t.Sampled() && (t.bindParams == nil || !t.bindParams.Recorded())
+	return (t.bindParams == nil || !t.bindParams.Recorded()) && t.Sampled()
 }
 
 // RecordBindParameters copies b's values to render as db.parameters.N tags on

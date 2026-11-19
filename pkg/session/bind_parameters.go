@@ -16,8 +16,8 @@ const (
 	// maxDescribedStmts bounds the named statements whose described types a
 	// session remembers. Each keeps at most bindparams.MaxParams types, so the
 	// cache holds at most 32 KiB of them, and a few KB for typical statements.
-	// When it is full an arbitrary entry is evicted; that statement renders as
-	// unknown types until it is described again.
+	// When it is full an arbitrary entry is evicted; that statement's binary
+	// values render as hex until it is described again.
 	maxDescribedStmts = 256
 	// maxPendingDescribes bounds the Describe messages awaiting a reply in one
 	// cycle; replies beyond it are not recorded.
@@ -25,7 +25,7 @@ const (
 )
 
 // bindParamTypes remembers the parameter types the backend describes, so that
-// traced Bind values can be decoded. Clients such as pgx send Parse without
+// traced binary Bind values can be decoded. Clients such as pgx send Parse without
 // types, Describe the statement in one cycle, and Bind it in binary in a later
 // one, so the backend's ParameterDescription must outlive the trace that
 // carried it.
@@ -86,9 +86,16 @@ func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
 		if !traceState.WantsBindParameters() {
 			return
 		}
-		// An unknown statement is the zero value, which has no types.
-		stmt, parseOIDs, _ := s.findStmt(m.PreparedStatement)
-		traceState.RecordBindParameters(m, parseOIDs, s.describedOIDs(stmt))
+		// Only binary values are decoded by type, so a Bind of text values, the
+		// common case, skips the statement lookup. An unknown statement is the
+		// zero value, which has no types.
+		var stmt describedStmt
+		var parseOIDs, describedOIDs []uint32
+		if bindparams.NeedsTypes(m) {
+			stmt, parseOIDs, _ = s.findStmt(m.PreparedStatement)
+			describedOIDs = s.describedOIDs(stmt)
+		}
+		traceState.RecordBindParameters(m, parseOIDs, describedOIDs)
 		t.recorded = stmt
 	}
 }

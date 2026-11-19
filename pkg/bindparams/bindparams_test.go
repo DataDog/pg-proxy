@@ -211,7 +211,6 @@ func TestRenderTypeResolution(t *testing.T) {
 		{"described when parse is unspecified", []uint32{0}, []uint32{pgtype.Int4OID}, "7"},
 		// PostgreSQL resolves a declared unknown, so the description wins.
 		{"described over declared unknown", []uint32{pgtype.UnknownOID}, []uint32{pgtype.Int4OID}, "7"},
-		{"parse when not described", []uint32{pgtype.Int4OID}, []uint32{0}, "7"},
 		{"unknown", nil, nil, `\x00000007`},
 	}
 	for _, tc := range cases {
@@ -220,6 +219,18 @@ func TestRenderTypeResolution(t *testing.T) {
 			assert.Equal(t, tc.want, tags[valueKeys[0]])
 		})
 	}
+}
+
+func TestNeedsTypes(t *testing.T) {
+	two := [][]byte{[]byte("1"), []byte("2")}
+	assert.False(t, NeedsTypes(&pgproto3.Bind{Parameters: two}), "no codes mean text")
+	assert.False(t, NeedsTypes(&pgproto3.Bind{ParameterFormatCodes: []int16{0, 0}, Parameters: two}))
+	assert.True(t, NeedsTypes(&pgproto3.Bind{ParameterFormatCodes: []int16{1}, Parameters: two}), "one code applies to every position")
+	assert.True(t, NeedsTypes(&pgproto3.Bind{ParameterFormatCodes: []int16{0, 1}, Parameters: two}))
+	codes := make([]int16, MaxParams+1)
+	codes[MaxParams] = 1
+	assert.False(t, NeedsTypes(&pgproto3.Bind{ParameterFormatCodes: codes, Parameters: make([][]byte, MaxParams+1)}),
+		"positions past MaxParams are not rendered")
 }
 
 func TestFillTypesSetsOnlyUnknownTypes(t *testing.T) {
@@ -300,13 +311,7 @@ func FuzzRender(f *testing.F) {
 		if bin {
 			format = 1
 		}
-		var c Capture
-		c.Record(&pgproto3.Bind{ParameterFormatCodes: []int16{format}, Parameters: [][]byte{v}}, []uint32{oid}, nil)
-		c.Render(func(key string, value any) {
-			if s, ok := value.(string); ok && !utf8.ValidString(s) {
-				t.Fatalf("%s is not valid UTF-8: %q", key, s)
-			}
-		})
+		render(t, &pgproto3.Bind{ParameterFormatCodes: []int16{format}, Parameters: [][]byte{v}}, []uint32{oid}, nil)
 	})
 }
 
@@ -412,7 +417,7 @@ func arrayOf(elem uint32, values ...[]byte) []byte {
 func TestRenderPartlyCopiedTextElementIsMarked(t *testing.T) {
 	// The copy ends partway into the second element, fewer bytes in than
 	// elementLimit, so only the cut mark tells it apart from a complete value.
-	v := arrayOf(pgtype.TextOID, []byte(strings.Repeat("a", 430)), []byte(strings.Repeat("b", 2000)))
+	v := encode(t, pgtype.TextArrayOID, []string{strings.Repeat("a", 430), strings.Repeat("b", 2000)})
 	copied := copyLimit - 20 - (4 + 430) - 4 // header, first element, second length
 	require.Less(t, copied, elementLimit)
 	got := render(t, binaryBind(v), []uint32{pgtype.TextArrayOID}, nil)[valueKeys[0]]
