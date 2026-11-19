@@ -58,8 +58,31 @@ jobs:
           cache-dependency-path: go.sum
       - name: Check Docker
         run: docker info
+      - name: Read PostgreSQL release
+        id: release
+        env:
+          MAJOR: ${{ matrix.major }}
+        run: |
+          jq -r --arg major "$MAJOR" '.[] | select(.major == $major) | "version=\(.version)\nsha256=\(.sha256)"' \
+            test/regress/versions.json >> "$GITHUB_OUTPUT"
+      # Building PostgreSQL from source takes most of the job, and fresh runners
+      # have no layer cache. Build it here with the Actions cache, under the tag
+      # the suite uses, so TestMain skips its own build.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build regression image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: test/regress/image
+          load: true
+          tags: pg-proxy.localhost/regress:${{ steps.release.outputs.version }}
+          build-args: |
+            PG_VERSION=${{ steps.release.outputs.version }}
+            PG_SHA256=${{ steps.release.outputs.sha256 }}
+          cache-from: type=gha,scope=regress-pg${{ matrix.major }}
+          cache-to: type=gha,scope=regress-pg${{ matrix.major }},mode=max
       - name: Regression suite
         env:
+          PG_PROXY_REGRESS_PREBUILT: 'true'
           PG_PROXY_REGRESS_PG_MAJORS: ${{ matrix.major }}
           PG_PROXY_REGRESS_ARTIFACTS: ${{ runner.temp }}/regress
         run: go test -tags=integration,regress -count=1 -timeout=55m -v ./test/regress

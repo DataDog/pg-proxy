@@ -109,9 +109,19 @@ func selectVersions(majors string) ([]*pgVersion, error) {
 // on machines with helpers for unreachable registries. The tag names a registry
 // host so that Testcontainers does not prefix it with the Docker Hub mirror; the
 // image is never pushed.
+//
+// With PG_PROXY_REGRESS_PREBUILT set, the image must already exist under that
+// tag, as CI builds it with a layer cache beforehand; a missing image is an
+// error rather than a slow rebuild.
 func buildImage(ctx context.Context, v *pgVersion) (string, error) {
 	tag := "pg-proxy.localhost/regress:" + v.Version
-	cmd := exec.CommandContext(ctx, "docker", "build", "--tag", tag, "--build-arg", "DEBIAN_IMAGE="+itest.DebianImage(),
+	if prebuilt, _ := strconv.ParseBool(os.Getenv("PG_PROXY_REGRESS_PREBUILT")); prebuilt {
+		if output, err := exec.CommandContext(ctx, "docker", "image", "inspect", "--format", "{{.Id}}", tag).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("PG_PROXY_REGRESS_PREBUILT is set, but image %s for PostgreSQL %s is missing: %w\n%s", tag, v.Version, err, output)
+		}
+		return tag, nil
+	}
+	cmd := exec.CommandContext(ctx, "docker", "build", "--tag", tag,
 		"--build-arg", "PG_VERSION="+v.Version, "--build-arg", "PG_SHA256="+v.SHA256, "image")
 	var output bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &output, &output

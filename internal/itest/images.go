@@ -13,10 +13,7 @@ import "os"
 // mirror, set Testcontainers' standard TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX. It
 // applies to every image without a registry host, including Testcontainers' own
 // images such as Ryuk, and keeps the digest. The harness never sets it.
-const (
-	defaultPostgresImage = "postgres:14-bookworm@sha256:5a05f61a534e50e679d27fb45953afec7821f2ffc2aa6c738b94515ca0891ac2"
-	defaultDebianImage   = "debian:bookworm-slim@sha256:99c0b25c46d0214d5a2091092e7908907dcaecd6a962cde0ac700acee222b6f3"
-)
+const defaultPostgresImage = "postgres:14-bookworm@sha256:5a05f61a534e50e679d27fb45953afec7821f2ffc2aa6c738b94515ca0891ac2"
 
 // PostgresImage returns the image StartPostgres runs by default:
 // PG_PROXY_TEST_POSTGRES_IMAGE if set, or else the pinned PostgreSQL 14 image.
@@ -27,11 +24,4 @@ func PostgresImage() string {
 		return override
 	}
 	return defaultPostgresImage
-}
-
-// DebianImage returns the pinned base image for images built from source with
-// the Docker CLI. Testcontainers' mirror prefix does not apply to those builds;
-// use the Docker daemon's registry mirror setting instead.
-func DebianImage() string {
-	return defaultDebianImage
 }
