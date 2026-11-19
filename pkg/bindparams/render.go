@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	// TagPrefix starts each position's value tag: db.query.parameter.0, …
+	// TagPrefix starts each position's value tag: db.parameters.0, …
 	// Only numbered keys live under it, so redaction can drop the subtree.
-	TagPrefix = "db.query.parameter."
+	// It is not OTel's db.query.parameter: Datadog's intake moves db.query.*
+	// under db.statement, which replaces the SQL text.
+	TagPrefix = "db.parameters."
 	// TypeTagPrefix starts each rendered position's type tag:
 	// pgproxy.bind.type.0, … It uses the same index as TagPrefix.
 	TypeTagPrefix = "pgproxy.bind.type."

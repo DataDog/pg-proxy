@@ -55,7 +55,7 @@ func TestQueryTraceParentageAndCapture(t *testing.T) {
 				}
 				state.StartRootTrace(msg)
 				require.Equal(t, strings.Contains(sql, "traceparent"), state.UsingFullPropagation())
-				state.SetTag("db.query.parameter.0", "[private actual value]")
+				state.SetTag("db.parameters.0", "[private actual value]")
 				state.AddMessage(&pgproto3.Bind{})
 				state.AddMessage(&pgproto3.DataRow{})
 				state.StartTrace(query.QueryExecutionAndProxying)
@@ -83,7 +83,7 @@ func TestQueryTraceParentageAndCapture(t *testing.T) {
 					require.Equal(t, root.SpanContext().TraceID(), child.SpanContext().TraceID())
 					require.False(t, child.EndTime().Before(child.StartTime()))
 				}
-				require.Equal(t, "[private actual value]", tags(spans[0])["db.query.parameter.0"])
+				require.Equal(t, "[private actual value]", tags(spans[0])["db.parameters.0"])
 				require.Equal(t, "*pgproto3.Bind", tags(spans[0])["messages"])
 				require.Nil(t, state.RootTrace())
 				require.False(t, state.UsingFullPropagation())

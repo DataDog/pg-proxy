@@ -9,7 +9,7 @@
 // Capture.Record runs on the Bind path of sampled traces only. It copies a
 // bounded prefix of each value into buffers the Capture reuses, because
 // pgproto3 reuses its read buffers. Capture.Render runs when the root trace
-// finishes and emits db.query.parameter.0 … db.query.parameter.n with their
+// finishes and emits db.parameters.0 … db.parameters.n with their
 // types as pgproxy.bind.type.0 … pgproxy.bind.type.n, plus
 // pgproxy.bind.truncated and pgproxy.bind.rendered when a limit drops values.
 //

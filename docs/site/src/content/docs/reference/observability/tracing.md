@@ -88,8 +88,8 @@ set `server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTrace
 when constructing sessions directly) to `true` to enable it.
 
 With capture on, the root span carries one tag per parameter position,
-`db.query.parameter.0` through `db.query.parameter.n`, taken from the first Bind of the
-trace. `$1` is `db.query.parameter.0`. Each position also gets its type name as
+`db.parameters.0` through `db.parameters.n`, taken from the first Bind of the
+trace. `$1` is `db.parameters.0`. Each position also gets its type name as
 `pgproxy.bind.type.N`, for example `int8`, `timestamptz`, `int4[]` or `unknown`.
 The type is the one declared in Parse, else the one PostgreSQL reported for the
 statement in a ParameterDescription, else unknown. A type declared as 0 or

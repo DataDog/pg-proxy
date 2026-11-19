@@ -120,9 +120,9 @@ func TestBindParametersUseParseTypes(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "-42", roots[0]["db.query.parameter.0"])
+	assert.Equal(t, "-42", roots[0]["db.parameters.0"])
 	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
-	assert.Equal(t, "null", roots[0]["db.query.parameter.1"])
+	assert.Equal(t, "null", roots[0]["db.parameters.1"])
 	assert.Equal(t, "unknown", roots[0]["pgproxy.bind.type.1"])
 	assert.NotContains(t, roots[0], "pgproxy.bind.truncated")
 	assert.NotContains(t, roots[0], "pgproxy.bind.rendered")
@@ -147,10 +147,10 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 2)
-	assert.NotContains(t, roots[0], "db.query.parameter.0", "the describe cycle has no Bind")
-	assert.Equal(t, "7", roots[1]["db.query.parameter.0"])
+	assert.NotContains(t, roots[0], "db.parameters.0", "the describe cycle has no Bind")
+	assert.Equal(t, "7", roots[1]["db.parameters.0"])
 	assert.Equal(t, "int8", roots[1]["pgproxy.bind.type.0"])
-	assert.Equal(t, "true", roots[1]["db.query.parameter.1"])
+	assert.Equal(t, "true", roots[1]["db.parameters.1"])
 	assert.Equal(t, "bool", roots[1]["pgproxy.bind.type.1"])
 }
 
@@ -169,7 +169,7 @@ func TestBindParametersUseDescribedTypesFromTheSameFlush(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "7", roots[0]["db.query.parameter.0"])
+	assert.Equal(t, "7", roots[0]["db.parameters.0"])
 	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
 	assert.Equal(t, "text", roots[0]["pgproxy.bind.type.1"], "a declared type is kept")
 }
@@ -187,7 +187,7 @@ func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "first", roots[0]["db.query.parameter.0"])
+	assert.Equal(t, "first", roots[0]["db.parameters.0"])
 }
 
 func TestDescribeTrackingIsBounded(t *testing.T) {
@@ -274,7 +274,7 @@ func TestBindOfUnknownStatementHasNoTypes(t *testing.T) {
 	traceState.FinishRootTrace()
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, `\x0000000000000007`, roots[0]["db.query.parameter.0"], "unknown type, so hex")
+	assert.Equal(t, `\x0000000000000007`, roots[0]["db.parameters.0"], "unknown type, so hex")
 }
 
 // fuzzOIDs are the types the fuzzer picks from: every type the renderer

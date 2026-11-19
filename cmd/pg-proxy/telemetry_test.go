@@ -239,7 +239,7 @@ func TestTelemetryOTLPBinaryParameters(t *testing.T) {
 			unrelated, _ := deps.Tracer.StartRoot("unrelated query", "select 1")
 			unrelated.Finish(nil)
 			parameterized, _ := deps.Tracer.StartRoot("parameterized query", "select $1")
-			parameterized.SetTag("db.query.parameter.0", tc.parameter)
+			parameterized.SetTag("db.parameters.0", tc.parameter)
 			parameterized.Finish(nil)
 			// Both spans share one export batch; invalid UTF-8 must not drop either.
 			require.NoError(t, shutdown())
@@ -248,7 +248,7 @@ func TestTelemetryOTLPBinaryParameters(t *testing.T) {
 			require.Equal(t, "unrelated query", spans[0].Name)
 			require.Equal(t, "select 1", stringAttribute(spans[0].Attributes, "db.statement"))
 			require.Equal(t, "parameterized query", spans[1].Name)
-			require.Equal(t, tc.want, stringAttribute(spans[1].Attributes, "db.query.parameter.0"))
+			require.Equal(t, tc.want, stringAttribute(spans[1].Attributes, "db.parameters.0"))
 		})
 	}
 }
@@ -682,11 +682,11 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 			for _, span := range scope.Spans {
 				// ExecParams declares no types and describes only the portal, so
 				// the values' types are unknown and they render as hex.
-				binaryInt = binaryInt || stringAttribute(span.Attributes, "db.query.parameter.0") == `\xffffffff`
-				binaryBytes = binaryBytes || stringAttribute(span.Attributes, "db.query.parameter.0") == `\x00ff8001`
+				binaryInt = binaryInt || stringAttribute(span.Attributes, "db.parameters.0") == `\xffffffff`
+				binaryBytes = binaryBytes || stringAttribute(span.Attributes, "db.parameters.0") == `\x00ff8001`
 				if !capture {
 					for _, attr := range span.Attributes {
-						require.False(t, strings.HasPrefix(attr.Key, "db.query.parameter"), attr.Key)
+						require.False(t, strings.HasPrefix(attr.Key, "db.parameters"), attr.Key)
 						require.False(t, strings.HasPrefix(attr.Key, "pgproxy.bind."), attr.Key)
 						require.NotContains(t, attr.Value.GetStringValue(), "otel actual parameter")
 					}
@@ -699,7 +699,7 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 					require.Equal(t, parentID, hex.EncodeToString(span.ParentSpanId))
 				}
 				// The root span, query.TransactionOpName (shadowed here by the SQL constant).
-				if span.Name == "Proxy forwarding " && stringAttribute(span.Attributes, "db.query.parameter.0") == "otel actual parameter" {
+				if span.Name == "Proxy forwarding " && stringAttribute(span.Attributes, "db.parameters.0") == "otel actual parameter" {
 					parameters = true
 					require.NotEmpty(t, stringAttribute(span.Attributes, "pgproxy.bind.type.0"))
 				}
