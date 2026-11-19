@@ -19,7 +19,7 @@ func TestImagesArePinnedPublicImages(t *testing.T) {
 	t.Setenv("PG_PROXY_TEST_POSTGRES_IMAGE", "")
 	require.NoError(t, os.Unsetenv("PG_PROXY_TEST_POSTGRES_IMAGE"))
 
-	for _, image := range []string{PostgresImage(), DebianImage()} {
+	for _, image := range []string{PostgresImage()} {
 		name, digest, pinned := strings.Cut(image, "@sha256:")
 		require.True(t, pinned, "%s must be pinned by digest", image)
 		require.Len(t, digest, 64)

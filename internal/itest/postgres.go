@@ -41,14 +41,24 @@ type PostgresOption func(*postgresOptions)
 
 type postgresOptions struct {
 	image       string
+	readyLogs   int
 	customizers []testcontainers.ContainerCustomizer
 }
 
 // WithImage starts image instead of the default. The image must run the server
 // with the official image's command line (`postgres -c ...`) and accept the
-// PostgresUser superuser over TCP.
+// PostgresUser superuser over TCP. An image whose entrypoint does not start a
+// temporary initialization server must also pass WithReadyLogs(1).
 func WithImage(image string) PostgresOption {
 	return func(o *postgresOptions) { o.image = image }
+}
+
+// WithReadyLogs sets how many "database system is ready to accept connections"
+// lines mark the real server as ready. The default, 2, matches the official
+// image, whose temporary initialization server logs the line first. Use 1 for
+// an image that initializes with initdb and then starts the server once.
+func WithReadyLogs(n int) PostgresOption {
+	return func(o *postgresOptions) { o.readyLogs = n }
 }
 
 // WithContainerOptions applies Testcontainers customizers, such as mounts, to
@@ -60,7 +70,7 @@ func WithContainerOptions(customizers ...testcontainers.ContainerCustomizer) Pos
 // StartPostgres starts a PostgreSQL container and waits until it accepts
 // connections. Callers must Terminate it.
 func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, error) {
-	options := postgresOptions{image: PostgresImage()}
+	options := postgresOptions{image: PostgresImage(), readyLogs: 2}
 	for _, opt := range opts {
 		opt(&options)
 	}
@@ -69,10 +79,10 @@ func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, erro
 		postgres.WithDatabase("postgres"), postgres.WithUsername(PostgresUser), postgres.WithPassword(PostgresPassword),
 		// The official entrypoint initializes with a temporary server that does not
 		// listen on TCP and then restarts. Both servers log "ready", so wait for the
-		// second line: matching the first lets the port check pass while the real
-		// server is still starting up (SQLSTATE 57P03).
+		// last line (see WithReadyLogs): matching the first lets the port check pass
+		// while the real server is still starting up (SQLSTATE 57P03).
 		testcontainers.WithWaitStrategy(wait.ForAll(
-			wait.ForLog("database system is ready to accept connections").WithOccurrence(2),
+			wait.ForLog("database system is ready to accept connections").WithOccurrence(options.readyLogs),
 			wait.ForListeningPort("5432/tcp"),
 		).WithDeadline(2 * time.Minute)),
 	}, options.customizers...)
