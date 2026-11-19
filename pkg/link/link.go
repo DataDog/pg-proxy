@@ -52,6 +52,10 @@ type Link interface {
 	RecordNewNamedPreparedStmt(preparedStatement prepared.PreparedStatement) error
 	RecordExistingNamedPreparedStmtUsed(preparedStatement prepared.PreparedStatement) error
 	HasExistingNamedPreparedStmt(preparedStatement prepared.PreparedStatement) bool
+	// MarkSession records what this checkout may have done to session state.
+	// Release uses the marks to decide whether to reset the connection.
+	// Wrappers must forward it, or a dynamic reset can skip a needed reset.
+	MarkSession(marks SessionMarks)
 }
 
 // RoleSession changes the Postgres role after acquire and restores it before the
@@ -70,6 +74,7 @@ type Options struct {
 	MaxPreparedStmts int
 	MetricTags       []string
 	Role             RoleSession // nil = no role management
+	Reset            ResetPolicy // zero value = reset on every release
 }
 
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
@@ -87,6 +92,7 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 		createdTime:                time.Now().Nanosecond(),
 		sessionLinkTags:            opts.MetricTags,
 		role:                       opts.Role,
+		reset:                      opts.Reset,
 	}
 	sl.exportStats()
 

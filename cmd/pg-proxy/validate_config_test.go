@@ -253,3 +253,23 @@ func TestValidationAcceptsTelemetryOverridesWithoutStartingProviders(t *testing.
 		})
 	}
 }
+
+func TestResetModeConfiguration(t *testing.T) {
+	shared := ossConfig()
+	shared.Databases[0].ResetMode = pgconfig.ResetAudit
+	shared.Databases[0].ResetAuditSettings = []string{"app.tenant_id"}
+	cfg, err := (config{}).withSharedConfig(shared)
+	require.NoError(t, err)
+	require.Equal(t, pgconfig.ResetAudit, cfg.resets[shared.Databases[0].Name].Mode())
+
+	shared = ossConfig()
+	shared.Databases[0].ResetMode = "sometimes"
+	shared.Databases[0].ResetAuditSettings = []string{"work_mem"}
+	_, err = (config{}).withSharedConfig(shared)
+	require.ErrorContains(t, err, `databases[0]: reset_mode: unknown mode "sometimes"; use one of always, audit, dynamic, off`)
+	require.ErrorContains(t, err, `databases[0]: reset_audit_settings[0]: "work_mem" is not a custom setting name`)
+
+	cfg, err = (config{}).withSharedConfig(ossConfig())
+	require.NoError(t, err)
+	require.Equal(t, pgconfig.ResetAlways, cfg.resets[shared.Databases[0].Name].Mode(), "an unset mode resets always")
+}

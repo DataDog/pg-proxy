@@ -17,8 +17,10 @@ import (
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/classifier"
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 // ClientMessageAction contains a set of actions the proxy will take to handle
@@ -65,6 +67,11 @@ type ClientMessageAction struct {
 	// This is only valid for replacing auto-cached unnamed prepared statements, as named prepared statements must be deallocated
 	// before the name can be reused.
 	UpdateAutoCachedUnnamedPreparedStmt prepared.PreparedStatement
+	// SessionMarks are recorded on the SessionLink before the message is proxied: what
+	// running a simple Query's text, or the statement a Bind names, may do to session
+	// state. The first message of a checkout is decided before a link exists, so the
+	// marks ride on the action.
+	SessionMarks link.SessionMarks
 }
 
 // PGQueryProtocolType represents the Postgres query protocol used by a client message.
@@ -85,6 +92,11 @@ type State struct {
 	DynamicRoutingEnabled    bool
 	AutoPreparedStmtsEnabled bool
 	PreparedStatements       prepared.PreparedStatementState
+	// UnnamedStmt is the client's confirmed unnamed prepared statement, if any.
+	UnnamedStmt prepared.PreparedStatement
+	// HasUnnamedStmt reports whether the client has an unnamed prepared statement,
+	// confirmed or still pending in this pipeline.
+	HasUnnamedStmt bool
 }
 
 // UsesUnnamedStmt reports whether name denotes the session's plain unnamed
@@ -137,6 +149,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		}
 		action, err := handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
 		action.InvalidateUnnamedPreparedStmt = true
+		action.SessionMarks = sessionMarks(sessionsql.ScanEither(m.String), link.MarkClientSQL)
 		return action, err
 
 	case *pgproto3.Parse:
@@ -200,6 +213,9 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			return action, nil
 		}
 		if state.UsesUnnamedStmt(clientName) {
+			if errorAction := unnamedStmtGuard(state, hooks); errorAction != nil {
+				return *errorAction, nil
+			}
 			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
@@ -236,7 +252,11 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		// handle unnamed prepared statements with no auto-caching
 		clientName := m.PreparedStatement
 		if state.UsesUnnamedStmt(clientName) {
+			if errorAction := unnamedStmtGuard(state, hooks); errorAction != nil {
+				return *errorAction, nil
+			}
 			action.EnsureUnnamedPreparedStmt = true
+			action.SessionMarks = bindSessionMarks(clientName, state.PreparedStatements, state.UnnamedStmt)
 			return action, nil
 		}
 		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
@@ -246,6 +266,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		}
 		m.PreparedStatement = proxyName
 		action.CheckExistingPreparedStmt = stmt
+		action.SessionMarks = bindSessionMarks(clientName, state.PreparedStatements, nil)
 		return action, nil
 
 	case *pgproto3.Execute:
@@ -317,6 +338,52 @@ func handleClientQuery(msg pgproto3.FrontendMessage, sql string, protocol PGQuer
 	}
 	action.HandleReadQuery = classification.ReadOnly
 	return action, nil
+}
+
+// sessionMarks converts scanner flags to the marks a link records. source is the
+// mark for a possible session change.
+func sessionMarks(flags sessionsql.Flags, source link.SessionMarks) link.SessionMarks {
+	var marks link.SessionMarks
+	if flags.Has(sessionsql.MayChangeSession) {
+		marks |= source
+	}
+	if flags.Has(sessionsql.MayReadSequenceState) {
+		marks |= link.MarkReadsSequenceState
+	}
+	return marks
+}
+
+// bindSessionMarks returns the marks for a Bind of the statement the client calls
+// clientName. The statement's flags were judged once, at Parse. A statement still
+// pending in this pipeline is the one the Bind refers to, so it wins over a
+// confirmed one. unnamed is the client's confirmed unnamed statement, when the
+// proxy keeps it outside the prepared statement state. A Bind the proxy cannot
+// match to a Parse may run anything.
+func bindSessionMarks(clientName string, state prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
+	stmt := state.FindPendingNamedStmtFromClientName(clientName)
+	if stmt == nil {
+		stmt = state.FindConfirmedNamedStmtFromClientName(clientName)
+	}
+	if stmt == nil {
+		stmt = unnamed
+	}
+	if stmt == nil {
+		return link.MarkPreparedStmt | link.MarkReadsSequenceState
+	}
+	return sessionMarks(stmt.SessionFlags(), link.MarkPreparedStmt)
+}
+
+// unnamedStmtGuard answers a Bind or Describe of the unnamed statement locally when
+// the client has none, as Postgres would. Forwarding it would reach a backend whose
+// unnamed statement, when the release skipped the reset, is the previous client's.
+// It applies in every reset mode, so there is one code path.
+func unnamedStmtGuard(state State, hooks Hooks) *ClientMessageAction {
+	if state.HasUnnamedStmt {
+		return nil
+	}
+	action := NewFlushErrorAction(BuildUnnamedStatementDoesNotExistErrorResponse())
+	observeErrorAction(&action, hooks)
+	return &action
 }
 
 // ShouldDiscardUntilSync reports whether the proxy should skip the message.
@@ -452,6 +519,16 @@ func BuildPreparedStatementDoesNotExistErrorResponse(name string) *pgproto3.Erro
 		Message:  "Named prepared statement with this name does not exist.",
 		Detail:   fmt.Sprintf("Received named prepared statement with name: `%s`", name),
 		Hint:     "Please prepare the statement name with the given name before attempting to use it.",
+	}
+}
+
+// BuildUnnamedStatementDoesNotExistErrorResponse builds the 26000 error Postgres
+// returns for a Bind or Describe of an unnamed statement that does not exist.
+func BuildUnnamedStatementDoesNotExistErrorResponse() *pgproto3.ErrorResponse {
+	return &pgproto3.ErrorResponse{
+		Severity: "ERROR",
+		Code:     "26000",
+		Message:  "unnamed prepared statement does not exist",
 	}
 }
 

@@ -53,7 +53,12 @@ type SessionLink struct {
 	sessionLinkTags            []string
 	token                      string // opaque token from RoleSession.Set when role management is enabled
 	role                       RoleSession
+	reset                      ResetPolicy
+	marks                      SessionMarks // what this checkout may have done to session state
 }
+
+// MarkSession records what this checkout may have done to session state.
+func (link *SessionLink) MarkSession(marks SessionMarks) { link.marks |= marks }
 
 // Conn returns the pooled Postgres connection associated with this link.
 func (link *SessionLink) Conn() *pgxpool.Conn {
@@ -90,9 +95,31 @@ func (link *SessionLink) Flush() error {
 	return link.pgConn.Flush()
 }
 
-// Receive blocks until the Postgres connection sends a message
+// Receive blocks until the Postgres connection sends a message. A ParameterStatus
+// marks the checkout: the backend reports a changed setting this way, including
+// one changed inside a function.
 func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
-	return link.pgConn.Receive()
+	msg, err := link.pgConn.Receive()
+	switch m := msg.(type) {
+	case *pgproto3.ParameterStatus:
+		link.marks |= MarkParameterStatus
+	case *pgproto3.ErrorResponse:
+		if m.Code == sqlstateNotInPrerequisiteState && link.marks&MarkReadsSequenceState != 0 {
+			// The client read sequence state its checkout never set. Where the
+			// reset discards sequences, this is a client that a skipped reset
+			// would have handed another checkout's value.
+			_ = pgproxy.Metrics().Count(metricCrossCheckoutRead, 1, link.resetTags(), 1)
+		}
+	}
+	return msg, err
+}
+
+// resetTags returns the link's metric tags plus its reset mode.
+func (link *SessionLink) resetTags(extra ...string) []string {
+	tags := make([]string, 0, len(link.sessionLinkTags)+1+len(extra))
+	tags = append(tags, link.sessionLinkTags...)
+	tags = append(tags, "reset_mode:"+string(link.reset.Mode()))
+	return append(tags, extra...)
 }
 
 // NextExpectation peeks at the next expectation in the queue, or NoReply if
@@ -220,31 +247,27 @@ func (link *SessionLink) Release() error {
 		}
 	}
 
-	// RESET ALL clears any session GUCs the client SET (e.g. default_transaction_read_only,
+	// The reset clears any session GUCs the client SET (e.g. default_transaction_read_only,
 	// search_path) so they don't leak to the next client to check out this conn from the pool.
 	// Startup-packet GUCs (application_name, -c options from ConnectionOptions) are preserved
 	// because RESET ALL resets to pg_settings.reset_val, which captures startup values.
 	// postgres docs on reset all: https://www.postgresql.org/docs/current/sql-reset.html
 	// pgx docs on client config startup packets: https://pkg.go.dev/github.com/jackc/pgx#ConnConfig
 	//
-	// RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). A RoleSession
-	// has already reset the role above. Without one, the same simple query (pgx sends a
-	// zero-argument Exec as one) resets identity first: any user may run RESET SESSION
-	// AUTHORIZATION, and RESET ROLE restores a connection-time role (ALTER ROLE ... SET
-	// role, or a startup option), which Postgres releases before the CVE-2024-10978 fix drop.
+	// The policy decides whether this release sends it: always, never, or only when the
+	// checkout's marks say something may have changed. ResetPolicy.resetSQL builds the
+	// statement, including the identity reset when no RoleSession ran above.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
-		resetSQL := "RESET ALL"
-		if link.role == nil {
-			resetSQL = "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+		send, reason := link.reset.resetDecision(link.marks)
+		outcome := "outcome:skipped"
+		if send {
+			outcome = "outcome:reset"
 		}
-		resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := link.conn.Exec(resetCtx, resetSQL)
-		cancel()
-		if err != nil {
-			_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
-			link.conn.Conn().Close(context.Background())
-			pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetSQL, "error", err)
-			return err
+		_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(outcome, "reason:"+reason), 1)
+		if send {
+			if err := link.runReset(reason); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -258,6 +281,60 @@ func (link *SessionLink) Release() error {
 		return err
 	}
 
+	return nil
+}
+
+// runReset sends the reset query (pgx sends a zero-argument Exec as one simple
+// query). For reason audit it wraps the reset in the audit check. A failure
+// closes the connection, so nothing it might have left behind reaches the pool.
+func (link *SessionLink) runReset(reason string) error {
+	resetSQL := link.reset.resetSQL(link.role != nil)
+	resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	start := time.Now()
+	var err error
+	if reason == resetReasonAudit {
+		err = link.runAuditedReset(resetCtx, resetSQL)
+	} else {
+		_, err = link.conn.Exec(resetCtx, resetSQL)
+	}
+	if err != nil {
+		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
+		link.conn.Conn().Close(context.Background())
+		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetSQL, "error", err)
+		return err
+	}
+	_ = pgproxy.Metrics().Distribution(pgproxy.MetricResetLatency, float64(time.Since(start).Microseconds()), link.resetTags("reason:"+reason), 1)
+	return nil
+}
+
+// runAuditedReset runs the audit check before and after the reset, in one simple
+// query, and counts each audited setting the reset changed: a setting that
+// ResetDynamic would have leaked to the next client. If either check fails, the
+// implicit transaction rolls back the reset too, and the error closes the
+// connection. Values are never logged; they can hold tenant ids.
+func (link *SessionLink) runAuditedReset(ctx context.Context, resetSQL string) error {
+	sql := link.reset.auditSQL + "; " + resetSQL + "; " + link.reset.auditSQL
+	// pgx's Exec discards rows, so read the raw results.
+	results, err := link.conn.Conn().PgConn().Exec(ctx, sql).ReadAll()
+	if err != nil {
+		return err
+	}
+	if len(results) < 2 || len(results[0].Rows) != 1 || len(results[len(results)-1].Rows) != 1 {
+		return fmt.Errorf("reset audit check returned %d results", len(results))
+	}
+	first, last := results[0], results[len(results)-1]
+	changed := link.reset.changedColumns(first.Rows[0], last.Rows[0])
+	for _, setting := range changed {
+		_ = pgproxy.Metrics().Count(metricResetWouldLeak, 1, link.resetTags("setting:"+setting), 1)
+	}
+	if len(changed) > 0 {
+		pgproxy.Logger().Warn("reset_would_leak",
+			"settings", changed,
+			"backend_pid", link.conn.Conn().PgConn().PID(),
+			"tags", link.sessionLinkTags,
+		)
+	}
 	return nil
 }
 

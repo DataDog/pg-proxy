@@ -29,9 +29,10 @@ type mirroringLink struct {
 	q    *mirrorQueue
 	tags []string
 
-	batchHasData bool // any data admitted since acquire; gates the release sentinel
-	flushHasData bool // data admitted since the last flush; gates the flush sentinel
-	poisoned     bool // a message in this batch was dropped; worker must skip it whole
+	batchHasData bool              // any data admitted since acquire; gates the release sentinel
+	flushHasData bool              // data admitted since the last flush; gates the flush sentinel
+	poisoned     bool              // a message in this batch was dropped; worker must skip it whole
+	marks        link.SessionMarks // what the batch may have done to session state; rides the release sentinel
 }
 
 func newMirroringLink(backend link.Link, q *mirrorQueue, tags []string) *mirroringLink {
@@ -123,12 +124,21 @@ func (l *mirroringLink) Flush() error {
 	return nil
 }
 
+// MarkSession forwards the marks to the source and keeps them for the batch. The
+// worker sends the shadow the same messages without deciding their actions, so it
+// would otherwise see no marks but the shadow's own ParameterStatus.
+func (l *mirroringLink) MarkSession(marks link.SessionMarks) {
+	l.Link.MarkSession(marks)
+	l.marks |= marks
+}
+
 // Release marks the batch boundary so the worker returns its shadow link at the same
-// ready-for-query point. Guaranteed (enqueueSentinel) so a full queue can't strand the
-// link, but only for a batch that admitted data (no data means no link was acquired).
+// ready-for-query point, with the batch's session marks. Guaranteed (enqueueSentinel)
+// so a full queue can't strand the link or drop the marks, but only for a batch that
+// admitted data (no data means no link was acquired).
 func (l *mirroringLink) Release() error {
 	if l.batchHasData {
-		l.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
+		l.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: l.marks})
 	}
 	return l.Link.Release()
 }

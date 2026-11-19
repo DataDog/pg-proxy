@@ -223,6 +223,9 @@ func (w *mirrorWorker) run() {
 		case mirrorRelease:
 			recorded = false
 			release() // free budget before the (possibly slow) shadow RESET
+			if link := w.getLink(); link != nil && it.marks != 0 {
+				link.MarkSession(it.marks) // the shadow replayed what the source checkout ran
+			}
 			w.releaseLink()
 			skipping = false // next batch starts clean
 		}

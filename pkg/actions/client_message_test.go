@@ -309,6 +309,10 @@ func TestClientMessageActions(t *testing.T) {
 			DynamicRoutingEnabled:    test.dynamicRoutingEnabled,
 			AutoPreparedStmtsEnabled: test.autoCachedEnabled,
 			PreparedStatements:       pStmtState,
+			// The client has a clean unnamed statement, so unnamed Binds and Describes
+			// reach Postgres. TestUnnamedStatementGuard covers the case with none.
+			UnnamedStmt:    prepared.CreatePreparedStatement("", "", "SELECT 1", nil),
+			HasUnnamedStmt: true,
 		}
 
 		action, err := DecideClientMessageAction(test.msg, state, Hooks{})

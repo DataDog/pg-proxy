@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
@@ -36,6 +37,7 @@ type fakeShadowLink struct {
 	flushes     int
 	releases    int
 	forceCloses int
+	marks       link.SessionMarks // what the worker marked before releasing
 
 	// blockUntilClose, when set, makes Receive block until ForceClose is called —
 	// used to exercise the stop() force-close path.
@@ -103,10 +105,11 @@ func (l *fakeShadowLink) DiscardUntilSync() {
 	l.expectations = l.expectations[n:]
 	l.discarding = len(l.expectations) == 0
 }
-func (l *fakeShadowLink) DiscardingUntilSync() bool { return l.discarding }
-func (l *fakeShadowLink) Idle() bool                { return len(l.expectations) == 0 }
-func (l *fakeShadowLink) Cancel() error             { return nil }
-func (l *fakeShadowLink) Release() error            { l.releases++; return nil }
+func (l *fakeShadowLink) DiscardingUntilSync() bool           { return l.discarding }
+func (l *fakeShadowLink) MarkSession(marks link.SessionMarks) { l.marks |= marks }
+func (l *fakeShadowLink) Idle() bool                          { return len(l.expectations) == 0 }
+func (l *fakeShadowLink) Cancel() error                       { return nil }
+func (l *fakeShadowLink) Release() error                      { l.releases++; return nil }
 func (l *fakeShadowLink) ForceClose() bool {
 	l.forceCloses++
 	if l.blockUntilClose != nil {
@@ -916,5 +919,30 @@ func TestMirrorWorker_PanicAfterReparseReservationReleasesBudget(t *testing.T) {
 
 	if used := b.UsedBytes(); used != 0 {
 		t.Errorf("UsedBytes = %d after a panic, want 0: the raw reservation leaked", used)
+	}
+}
+
+// TestMirrorWorker_MarksShadowLinkBeforeRelease: the shadow replays what the source
+// checkout ran, so a release that the source would reset must reset the shadow too.
+func TestMirrorWorker_MarksShadowLinkBeforeRelease(t *testing.T) {
+	q := newMirrorQueue(queueCapRoomy, nil)
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "SET search_path = app"}, expectation: query.QueryReply, size: 10})
+	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
+	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: link.MarkClientSQL})
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "SELECT 1"}, expectation: query.QueryReply, size: 10})
+	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
+	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
+
+	f := newLinkFactory(nil)
+	drainClosed(q, f.acquire)
+
+	if len(f.links) != 2 {
+		t.Fatalf("acquired %d links, want 2 (one per batch)", len(f.links))
+	}
+	if f.links[0].marks != link.MarkClientSQL || f.links[0].releases != 1 {
+		t.Errorf("first batch: marks=%b releases=%d, want the source's marks before one release", f.links[0].marks, f.links[0].releases)
+	}
+	if f.links[1].marks != 0 {
+		t.Errorf("second batch: marks=%b, want none", f.links[1].marks)
 	}
 }

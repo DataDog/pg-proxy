@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 const (
@@ -53,6 +54,10 @@ type PreparedStatement interface {
 	GetParamOIDs() []uint32
 	GetErrorTags() []string
 	GetMetricTags() []string
+	// SessionFlags reports what running the statement may do to session state,
+	// judged once from its text under either value of standard_conforming_strings,
+	// so the verdict holds on any later connection.
+	SessionFlags() sessionsql.Flags
 }
 
 func PreparedStatementEquivalent(a, b PreparedStatement) bool {
@@ -70,19 +75,25 @@ func PreparedStatementEquivalent(a, b PreparedStatement) bool {
 
 func CreatePreparedStatement(clientName string, proxyName string, sql string, paramOIDs []uint32) PreparedStatement {
 	return &proxyPreparedStmt{
-		clientName: clientName,
-		proxyName:  proxyName,
-		sql:        sql,
-		paramOIDs:  paramOIDs,
+		clientName:   clientName,
+		proxyName:    proxyName,
+		sql:          sql,
+		paramOIDs:    paramOIDs,
+		sessionFlags: sessionsql.ScanEither(sql),
 	}
 }
 
 // contains the client name and the corresponding prepared statement created between the proxy and PG
 type proxyPreparedStmt struct {
-	clientName string
-	proxyName  string
-	sql        string
-	paramOIDs  []uint32
+	clientName   string
+	proxyName    string
+	sql          string
+	paramOIDs    []uint32
+	sessionFlags sessionsql.Flags
+}
+
+func (p proxyPreparedStmt) SessionFlags() sessionsql.Flags {
+	return p.sessionFlags
 }
 
 func (p proxyPreparedStmt) IsClientNamedPreparedStmt() bool {

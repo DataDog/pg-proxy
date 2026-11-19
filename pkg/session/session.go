@@ -1215,6 +1215,9 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	}
 	s.handleEnsureUnnamedPreparedStmt(action)
 
+	if action.SessionMarks != 0 {
+		s.link.MarkSession(action.SessionMarks)
+	}
 	s.link.Send(action.ProxyMsgToPg, action.AddReplyExpectation)
 
 	if s.dynamicRoutingEnabled && !action.HandleReadQuery {
@@ -1313,9 +1316,11 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 // handleEnsureUnnamedPreparedStmt re-creates the client's unnamed prepared statement
 // on the link's connection before a Bind or Describe that refers to it. The client
 // may have parsed it on a link that has since been released (for example psql's
-// \gdesc sends Parse+Sync, then Describe+Sync). Releasing a link runs RESET ALL as a
-// simple Query, and any simple Query discards the unnamed statement. The
-// ParseComplete is not forwarded to the client.
+// \gdesc sends Parse+Sync, then Describe+Sync). The release reset is a simple Query,
+// and any simple Query discards the unnamed statement. A release that skips the
+// reset can leave another client's unnamed statement on the connection, which this
+// Parse replaces; when the client has none, actions answers the Bind or Describe
+// locally instead. The ParseComplete is not forwarded to the client.
 func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
 		return

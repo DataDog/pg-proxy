@@ -20,6 +20,7 @@ import (
 	"golang.org/x/time/rate"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/session"
@@ -461,5 +462,63 @@ func TestFallbackMetricIdentity(t *testing.T) {
 	for i, outcome := range []string{"allowed", "rate_limited"} {
 		assert.Equal(t, "datadog.pg_proxy.replica_acquire_fallback", metrics.counts[i].name)
 		assert.ElementsMatch(t, []string{"database:primary", "database_cluster:test-cluster", "outcome:" + outcome}, metrics.counts[i].tags)
+	}
+}
+
+func TestAcquireUsesSelectedPoolsResetPolicy(t *testing.T) {
+	policy := func(mode config.ResetMode) link.ResetPolicy {
+		p, err := link.NewResetPolicy(mode, nil)
+		require.NoError(t, err)
+		return p
+	}
+	tests := []struct {
+		name           string
+		replicaResets  []link.ResetPolicy
+		routeToReplica bool
+		replicaAcquire func(context.Context) (*pgxpool.Conn, error)
+		want           config.ResetMode
+	}{
+		{name: "primary", replicaResets: []link.ResetPolicy{policy(config.ResetDynamic)}, want: config.ResetAudit},
+		{
+			name: "replica", replicaResets: []link.ResetPolicy{policy(config.ResetDynamic)}, routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, nil },
+			want:           config.ResetDynamic,
+		},
+		{
+			name: "replica without a policy resets always", routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, nil },
+			want:           config.ResetAlways,
+		},
+		{
+			name: "replica failure falls back to the primary's policy", replicaResets: []link.ResetPolicy{policy(config.ResetDynamic)},
+			routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, errors.New("replica unavailable") },
+			want:           config.ResetAudit,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got link.Options
+			runtime := New(Config{
+				ClusterName:         "cluster-a",
+				PrimaryDatabaseName: "primary-a",
+				Primary:             &fakePool{},
+				Replicas:            []pool.Pool{&fakePool{acquire: test.replicaAcquire}},
+				PrimaryReset:        policy(config.ResetAudit),
+				ReplicaResets:       test.replicaResets,
+				LinkFactory: func(_ *pgxpool.Conn, options link.Options) (link.Link, error) {
+					got = options
+					return nil, nil
+				},
+			})
+			runtime.selector.randomIntFn = func(int) int { return 25 }
+
+			_, err := runtime.Acquire(context.Background(), session.LinkRequest{
+				DynamicRoutingEnabled: test.routeToReplica,
+				ForReadQuery:          test.routeToReplica,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got.Reset.Mode())
+		})
 	}
 }
