@@ -98,6 +98,19 @@ func newOTLPReceiver(t *testing.T) *otlpReceiver {
 	return receiver
 }
 
+// exportedSpans returns every span the receiver decoded, in export order.
+func exportedSpans(receiver *otlpReceiver) []*tracepb.Span {
+	receiver.mu.Lock()
+	defer receiver.mu.Unlock()
+	var spans []*tracepb.Span
+	for _, resource := range receiver.traces {
+		for _, scope := range resource.ScopeSpans {
+			spans = append(spans, scope.Spans...)
+		}
+	}
+	return spans
+}
+
 func stringAttribute(attrs []*commonpb.KeyValue, key string) string {
 	for _, attr := range attrs {
 		if attr.Key == key {
@@ -230,14 +243,7 @@ func TestTelemetryOTLPBinaryParameters(t *testing.T) {
 			parameterized.Finish(nil)
 			// Both spans share one export batch; invalid UTF-8 must not drop either.
 			require.NoError(t, shutdown())
-			receiver.mu.Lock()
-			defer receiver.mu.Unlock()
-			var spans []*tracepb.Span
-			for _, resource := range receiver.traces {
-				for _, scope := range resource.ScopeSpans {
-					spans = append(spans, scope.Spans...)
-				}
-			}
+			spans := exportedSpans(receiver)
 			require.Len(t, spans, 2)
 			require.Equal(t, "unrelated query", spans[0].Name)
 			require.Equal(t, "select 1", stringAttribute(spans[0].Attributes, "db.statement"))
@@ -261,14 +267,7 @@ func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
 	root.Finish(nil)
 	require.NoError(t, shutdown())
 
-	receiver.mu.Lock()
-	defer receiver.mu.Unlock()
-	var spans []*tracepb.Span
-	for _, resource := range receiver.traces {
-		for _, scope := range resource.ScopeSpans {
-			spans = append(spans, scope.Spans...)
-		}
-	}
+	spans := exportedSpans(receiver)
 	require.Len(t, spans, 1)
 	keys := map[string]bool{}
 	for _, attr := range spans[0].Attributes {

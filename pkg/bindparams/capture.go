@@ -113,9 +113,8 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 }
 
 // FillTypes sets the type of each position Record left unknown from oids, the
-// backend's ParameterDescription for the same statement. A client that sends
-// Parse without types, Describe and Bind in one flush gets that reply only
-// after the Bind is recorded. It does nothing if nothing was recorded.
+// backend's ParameterDescription for the same statement, when that reply
+// arrives after the Bind was recorded. It does nothing if nothing was recorded.
 func (c *Capture) FillTypes(oids []uint32) {
 	if !c.recorded {
 		return

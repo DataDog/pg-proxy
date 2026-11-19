@@ -284,9 +284,7 @@ func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, described
 	t.bindParams.Record(b, parseOIDs, describedOIDs)
 }
 
-// FillBindParameterTypes sets the types the recorded Bind lacked from oids, the
-// backend's ParameterDescription for the same statement. It does nothing if no
-// Bind was recorded.
+// FillBindParameterTypes forwards to bindparams.Capture.FillTypes.
 func (t *TraceState) FillBindParameterTypes(oids []uint32) {
 	if t == nil || t.bindParams == nil {
 		return
