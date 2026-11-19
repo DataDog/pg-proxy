@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
 	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -75,7 +76,7 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 					require.Equal(t, "000000000000000b", span.Parent().SpanID().String())
 				}
 				for _, attr := range span.Attributes() {
-					if attr.Key == "db.parameters.0" {
+					if attr.Key == bindparams.TagPrefix+"0" {
 						foundParameters = true
 						require.Equal(t, query.TransactionOpName, span.Name(), "positions are tagged on the root span")
 						require.Equal(t, privateParameter, attr.Value.AsString())
@@ -107,7 +108,7 @@ func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
 					require.Equal(t, uint64(11), span.ParentID())
 					require.Equal(t, tc.sql, span.Tag("db.statement"))
 				}
-				if value := span.Tag("db.parameters.0"); value != nil {
+				if value := span.Tag(bindparams.TagPrefix + "0"); value != nil {
 					foundParameters = true
 					require.Equal(t, query.TransactionOpName, span.OperationName())
 					require.Equal(t, privateParameter, value)
@@ -134,7 +135,7 @@ func TestDefaultParametersDoNotReachDebugLogs(t *testing.T) {
 			require.NoError(t, err)
 			require.Same(t, bind, action.ProxyMsgToPg)
 			require.NotContains(t, logs.String(), privateParameter)
-			require.NotContains(t, logs.String(), "db.parameters")
+			require.NotContains(t, logs.String(), bindparams.TagPrefix)
 		})
 	}
 }

@@ -120,9 +120,9 @@ func TestBindParametersUseParseTypes(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "-42", roots[0]["db.parameters.0"])
+	assert.Equal(t, "-42", roots[0][bindparams.TagPrefix+"0"])
 	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
-	assert.Equal(t, "null", roots[0]["db.parameters.1"])
+	assert.Equal(t, "null", roots[0][bindparams.TagPrefix+"1"])
 	assert.Equal(t, "unknown", roots[0]["pgproxy.bind.type.1"])
 	assert.NotContains(t, roots[0], "pgproxy.bind.truncated")
 	assert.NotContains(t, roots[0], "pgproxy.bind.rendered")
@@ -147,10 +147,10 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 2)
-	assert.NotContains(t, roots[0], "db.parameters.0", "the describe cycle has no Bind")
-	assert.Equal(t, "7", roots[1]["db.parameters.0"])
+	assert.NotContains(t, roots[0], bindparams.TagPrefix+"0", "the describe cycle has no Bind")
+	assert.Equal(t, "7", roots[1][bindparams.TagPrefix+"0"])
 	assert.Equal(t, "int8", roots[1]["pgproxy.bind.type.0"])
-	assert.Equal(t, "true", roots[1]["db.parameters.1"])
+	assert.Equal(t, "true", roots[1][bindparams.TagPrefix+"1"])
 	assert.Equal(t, "bool", roots[1]["pgproxy.bind.type.1"])
 }
 
@@ -169,7 +169,7 @@ func TestBindParametersUseDescribedTypesFromTheSameFlush(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "7", roots[0]["db.parameters.0"])
+	assert.Equal(t, "7", roots[0][bindparams.TagPrefix+"0"])
 	assert.Equal(t, "int8", roots[0]["pgproxy.bind.type.0"])
 	assert.Equal(t, "text", roots[0]["pgproxy.bind.type.1"], "a declared type is kept")
 }
@@ -187,7 +187,7 @@ func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, "first", roots[0]["db.parameters.0"])
+	assert.Equal(t, "first", roots[0][bindparams.TagPrefix+"0"])
 }
 
 func TestDescribeTrackingIsBounded(t *testing.T) {
@@ -252,12 +252,12 @@ func TestUnnamedStatementTypesFollowTheStatement(t *testing.T) {
 	assert.Equal(t, []uint32{pgtype.Int8OID}, current())
 
 	s.invalidateUnnamedStmt() // what an unnamed Parse, Close or Query does
-	assert.Nil(t, current())
+	assert.Empty(t, current())
 
 	describe()
 	s.invalidateUnnamedStmt()
 	reply()
-	assert.Nil(t, current(), "a late reply for a replaced statement is dropped")
+	assert.Empty(t, current(), "a late reply for a replaced statement is dropped")
 }
 
 // A Bind naming a statement the proxy does not know must not borrow another
@@ -274,7 +274,7 @@ func TestBindOfUnknownStatementHasNoTypes(t *testing.T) {
 	traceState.FinishRootTrace()
 	roots := rootTags(tracer)
 	require.Len(t, roots, 1)
-	assert.Equal(t, `\x0000000000000007`, roots[0]["db.parameters.0"], "unknown type, so hex")
+	assert.Equal(t, `\x0000000000000007`, roots[0][bindparams.TagPrefix+"0"], "unknown type, so hex")
 }
 
 // fuzzOIDs are the types the fuzzer picks from: every type the renderer
@@ -342,9 +342,12 @@ func FuzzBindParameterCapture(f *testing.F) {
 			oids = append(oids, fuzzOIDs[int(b)%len(fuzzOIDs)])
 		}
 		bind := fuzzBind(values, formats)
+		parse := &pgproto3.Parse{Query: "SELECT 1", ParameterOIDs: oids}
 		// The test pipes carry at most 8 KiB per flush; the per-value copy
 		// limit and larger Binds are covered by the bindparams tests.
-		if len(values)+4*len(bind.Parameters)+2*len(bind.ParameterFormatCodes)+4*len(oids) > 7<<10 {
+		bindSize, _ := clientMessageBodyLength(bind)
+		parseSize, _ := clientMessageBodyLength(parse)
+		if bindSize+parseSize > 7<<10 {
 			t.Skip("too large for the test pipe")
 		}
 		_, client, postgres, _, closeSession := newRunningTestSessionWithBackend(t, func(cfg *Config) {
@@ -352,7 +355,6 @@ func FuzzBindParameterCapture(f *testing.F) {
 		})
 		defer closeSession()
 
-		parse := &pgproto3.Parse{Query: "SELECT 1", ParameterOIDs: oids}
 		bindRoot := 0
 		if describe {
 			parse.ParameterOIDs = nil

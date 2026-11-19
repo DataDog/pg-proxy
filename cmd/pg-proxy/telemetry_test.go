@@ -37,6 +37,7 @@ import (
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/bindparams"
+	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
 // Decode real OTLP requests so these tests cover the exporters, not just adapters.
@@ -223,13 +224,14 @@ func TestTelemetryOTLPMetricTemporality(t *testing.T) {
 	}
 }
 
-func TestTelemetryOTLPBinaryParameters(t *testing.T) {
+// Embedders can set any tag; bindparams already escapes parameter values.
+func TestTelemetryOTLPInvalidUTF8Tags(t *testing.T) {
 	for _, tc := range []struct {
-		name, parameter, want string
+		name, value, want string
 	}{
-		{"text", "café 世界 �", "café 世界 �"},
-		{"binary int4", "\xff\xff\xff\xff", "\"\\xff\\xff\\xff\\xff\""},
-		{"binary bytea", "\x00\xff\x80\x01", "\"\\x00\\xff\\x80\\x01\""},
+		{"utf8", "café 世界 �", "café 世界 �"},
+		{"invalid", "\xff\xff\xff\xff", "\"\\xff\\xff\\xff\\xff\""},
+		{"invalid with NUL", "\x00\xff\x80\x01", "\"\\x00\\xff\\x80\\x01\""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			receiver := newOTLPReceiver(t)
@@ -238,17 +240,17 @@ func TestTelemetryOTLPBinaryParameters(t *testing.T) {
 			t.Cleanup(func() { _ = shutdown() })
 			unrelated, _ := deps.Tracer.StartRoot("unrelated query", "select 1")
 			unrelated.Finish(nil)
-			parameterized, _ := deps.Tracer.StartRoot("parameterized query", "select $1")
-			parameterized.SetTag("db.parameters.0", tc.parameter)
-			parameterized.Finish(nil)
+			tagged, _ := deps.Tracer.StartRoot("tagged query", "select $1")
+			tagged.SetTag("test.value", tc.value)
+			tagged.Finish(nil)
 			// Both spans share one export batch; invalid UTF-8 must not drop either.
 			require.NoError(t, shutdown())
 			spans := exportedSpans(receiver)
 			require.Len(t, spans, 2)
 			require.Equal(t, "unrelated query", spans[0].Name)
 			require.Equal(t, "select 1", stringAttribute(spans[0].Attributes, "db.statement"))
-			require.Equal(t, "parameterized query", spans[1].Name)
-			require.Equal(t, tc.want, stringAttribute(spans[1].Attributes, "db.parameters.0"))
+			require.Equal(t, "tagged query", spans[1].Name)
+			require.Equal(t, tc.want, stringAttribute(spans[1].Attributes, "test.value"))
 		})
 	}
 }
@@ -646,9 +648,9 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	defer client.Close(context.Background())
 	const traceID = "0123456789abcdef0123456789abcdef"
 	const parentID = "0123456789abcdef"
-	const query = "/* report query */ select $1::text /*traceparent='00-" + traceID + "-" + parentID + "-01'*/"
+	const sql = "/* report query */ select $1::text /*traceparent='00-" + traceID + "-" + parentID + "-01'*/"
 	var value string
-	require.NoError(t, client.QueryRow(ctx, query, pgx.QueryExecModeExec, "otel actual parameter").Scan(&value))
+	require.NoError(t, client.QueryRow(ctx, sql, pgx.QueryExecModeExec, "otel actual parameter").Scan(&value))
 	require.Equal(t, "otel actual parameter", value)
 	// Send binary Bind parameters and request binary results so the PostgreSQL
 	// round trip checks byte-for-byte preservation with capture enabled or disabled.
@@ -682,11 +684,11 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 			for _, span := range scope.Spans {
 				// ExecParams declares no types and describes only the portal, so
 				// the values' types are unknown and they render as hex.
-				binaryInt = binaryInt || stringAttribute(span.Attributes, "db.parameters.0") == `\xffffffff`
-				binaryBytes = binaryBytes || stringAttribute(span.Attributes, "db.parameters.0") == `\x00ff8001`
+				binaryInt = binaryInt || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == `\xffffffff`
+				binaryBytes = binaryBytes || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == `\x00ff8001`
 				if !capture {
 					for _, attr := range span.Attributes {
-						require.False(t, strings.HasPrefix(attr.Key, "db.parameters"), attr.Key)
+						require.False(t, strings.HasPrefix(attr.Key, bindparams.TagPrefix), attr.Key)
 						require.False(t, strings.HasPrefix(attr.Key, "pgproxy.bind."), attr.Key)
 						require.NotContains(t, attr.Value.GetStringValue(), "otel actual parameter")
 					}
@@ -694,14 +696,13 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 				if hex.EncodeToString(span.TraceId) != traceID {
 					continue
 				}
-				if stringAttribute(span.Attributes, "db.statement") == query {
+				if stringAttribute(span.Attributes, "db.statement") == sql {
 					statement = true
 					require.Equal(t, parentID, hex.EncodeToString(span.ParentSpanId))
 				}
-				// The root span, query.TransactionOpName (shadowed here by the SQL constant).
-				if span.Name == "Proxy forwarding " && stringAttribute(span.Attributes, "db.parameters.0") == "otel actual parameter" {
+				if span.Name == query.TransactionOpName && stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == "otel actual parameter" {
 					parameters = true
-					require.NotEmpty(t, stringAttribute(span.Attributes, "pgproxy.bind.type.0"))
+					require.NotEmpty(t, stringAttribute(span.Attributes, bindparams.TypeTagPrefix+"0"))
 				}
 			}
 		}
@@ -732,6 +733,6 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 	require.Equal(t, capture, binaryBytes, "binary bytea parameters must be safely exported only when enabled")
 	require.True(t, queryMetric, "query counts must reach the OTLP receiver")
 	require.True(t, listening, "proxy startup logs must reach the OTLP receiver")
-	t.Logf("OTLP query: trace_id=%s parent_id=%s db.statement=%q parameter_capture=%t", traceID, parentID, query, parameters)
+	t.Logf("OTLP query: trace_id=%s parent_id=%s db.statement=%q parameter_capture=%t", traceID, parentID, sql, parameters)
 	t.Logf("OTLP shutdown: query_count_received=%t startup_log_received=%t", queryMetric, listening)
 }

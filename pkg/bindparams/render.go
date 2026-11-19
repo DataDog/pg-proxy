@@ -86,16 +86,19 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	// tag value is a substring of it, so the values cost one allocation, plus
 	// one per tag to pass it as an interface.
 	out := c.out[:0]
+	data := c.data
+	var ends [MaxParams]int
 	rendered := 0
 	for i := range c.params {
 		p := &c.params[i]
 		start := len(out)
-		out = appendParam(out, p, c.data[p.off:p.off+p.n])
+		out = appendParam(out, p, data[:p.n])
+		data = data[p.n:]
 		if len(out) > TotalLimit {
 			out = out[:start]
 			break
 		}
-		p.end = uint32(len(out))
+		ends[i] = len(out)
 		rendered++
 	}
 	c.out = out
@@ -107,10 +110,9 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	values := string(out)
 	start := 0
 	for i := range rendered {
-		end := int(c.params[i].end)
-		setTag(valueKeys[i], values[start:end])
+		setTag(valueKeys[i], values[start:ends[i]])
 		setTag(typeKeys[i], typeName(c.params[i].oid))
-		start = end
+		start = ends[i]
 	}
 	c.Reset()
 }

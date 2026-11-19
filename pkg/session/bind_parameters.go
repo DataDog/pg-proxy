@@ -6,8 +6,6 @@
 package session
 
 import (
-	"slices"
-
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	"github.com/DataDog/pg-proxy/pkg/bindparams"
@@ -36,11 +34,10 @@ type bindParamTypes struct {
 	// hash of the SQL and declared types, so a key always denotes the same
 	// statement.
 	described map[string][]uint32
-	// unnamed holds the unnamed statement's types while the session's
-	// unnamedGen, which every unnamed Parse, Close or simple Query advances,
-	// still equals unnamedGen.
-	unnamed    []uint32
-	unnamedGen uint64
+	// unnamed holds the unnamed statement's types. invalidateUnnamedStmt
+	// clears them when an unnamed Parse, Close or simple Query replaces or
+	// destroys the statement.
+	unnamed []uint32
 	// describing holds this cycle's statement Describes, in send order; the
 	// first answered of them have had their ParameterDescription.
 	describing []describedStmt
@@ -89,13 +86,10 @@ func (s *Session) observeClientMessage(msg pgproto3.FrontendMessage) {
 		if !traceState.WantsBindParameters() {
 			return
 		}
-		stmt, parseOIDs, ok := s.findStmt(m.PreparedStatement)
-		var describedOIDs []uint32
-		if ok {
-			describedOIDs = s.describedOIDs(stmt)
-		}
-		traceState.RecordBindParameters(m, parseOIDs, describedOIDs)
-		t.recorded = stmt // the zero value when !ok
+		// An unknown statement is the zero value, which has no types.
+		stmt, parseOIDs, _ := s.findStmt(m.PreparedStatement)
+		traceState.RecordBindParameters(m, parseOIDs, s.describedOIDs(stmt))
+		t.recorded = stmt
 	}
 }
 
@@ -121,38 +115,32 @@ func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
 	}
 }
 
+// describedOIDs returns the described types of a statement findStmt just
+// returned, so an unnamed one is the current statement.
 func (s *Session) describedOIDs(stmt describedStmt) []uint32 {
 	t := &s.paramTypes
 	if stmt.unnamed {
-		if stmt.gen != t.unnamedGen {
-			return nil
-		}
 		return t.unnamed
 	}
 	return t.described[stmt.key]
 }
 
 // remember records the types a ParameterDescription reports for a statement.
-// Clients describe the same statements over and over, so an unchanged
-// description keeps the copy already held. pgproto3 reuses the message's
-// slice, so a new description is copied. Capture reads only the first
-// bindparams.MaxParams types, so only those are kept.
+// pgproto3 reuses the message's slice, so the types are copied, into the slice
+// already held if there is one: readers copy them out. Capture reads only the
+// first bindparams.MaxParams types, so only those are kept.
 func (s *Session) remember(stmt describedStmt, oids []uint32) {
 	t := &s.paramTypes
 	oids = oids[:min(len(oids), bindparams.MaxParams)]
 	if stmt.unnamed {
 		// A reply can describe an unnamed statement that a later Parse has
 		// already replaced; it must not be taken for the new one.
-		if stmt.gen == s.unnamedGen && (t.unnamedGen != stmt.gen || !slices.Equal(t.unnamed, oids)) {
-			// Readers copy the types out, so the previous slice can be reused.
-			t.unnamed, t.unnamedGen = append(t.unnamed[:0], oids...), stmt.gen
+		if stmt.gen == s.unnamedGen {
+			t.unnamed = append(t.unnamed[:0], oids...)
 		}
 		return
 	}
 	known, ok := t.described[stmt.key]
-	if ok && slices.Equal(known, oids) {
-		return
-	}
 	if t.described == nil {
 		t.described = make(map[string][]uint32)
 	}
@@ -162,7 +150,7 @@ func (s *Session) remember(stmt describedStmt, oids []uint32) {
 			break
 		}
 	}
-	t.described[stmt.key] = slices.Clone(oids)
+	t.described[stmt.key] = append(known[:0], oids...)
 }
 
 // findStmt returns where the described types of the statement a client Bind or

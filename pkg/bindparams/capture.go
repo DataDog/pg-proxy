@@ -6,6 +6,8 @@
 package bindparams
 
 import (
+	"slices"
+
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgtype"
 )
@@ -16,24 +18,26 @@ const (
 	// tag, which tracers store and encode one by one, so a full Bind stays within
 	// the OpenTelemetry SDK's default of 128 attributes per span.
 	MaxParams = 32
-	// copyLimit bounds the bytes copied per value. It covers everything Render
-	// can show: ValueLimit bytes of text, hexLimit bytes of hex, or an array
-	// header and its first arrayElementLimit small elements. With MaxParams
-	// positions, a Bind copies at most 16 KiB.
+	// copyLimit bounds the bytes copied per binary value. It covers everything
+	// Render can show: ValueLimit bytes of text, hexLimit bytes of hex, or an
+	// array header and its first arrayElementLimit small elements. With
+	// MaxParams positions, a Bind copies at most 16 KiB.
 	copyLimit = 512
+	// textCopyLimit bounds the bytes copied per text-format value: Render shows
+	// ValueLimit bytes and reads one more to see where a character starts.
+	textCopyLimit = ValueLimit + 1
 	// retainLimit is the largest buffer a Capture keeps between traces, so idle
 	// sessions do not each hold the largest Bind they once saw.
 	retainLimit = 2 << 10
 )
 
-// param describes one captured Bind position. Its value is data[off : off+n],
-// a prefix of the size bytes the client sent; end is where its rendering ends
-// in Capture.out.
+// param describes one captured Bind position. Its value is the next n bytes of
+// Capture.data, a prefix of the size bytes the client sent.
 type param struct {
-	oid         uint32
-	size        int32 // -1 for NULL
-	off, n, end uint32
-	format      int16
+	oid    uint32
+	size   int32 // -1 for NULL
+	n      uint32
+	format int16
 }
 
 // Capture holds a copy of one Bind's parameters until the trace is rendered.
@@ -62,40 +66,30 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	c.sent = len(values)
 	values = values[:min(len(values), MaxParams)]
 
-	// Size the buffers once and fill them by index, so a capture costs at most
-	// one allocation each and none once a session's buffers have grown.
+	// Size the buffers once, so a capture costs at most one allocation each and
+	// none once a session's buffers have grown.
+	formats := b.ParameterFormatCodes
 	need := 0
-	for _, v := range values {
-		need += min(len(v), copyLimit)
+	for i, v := range values {
+		need += min(len(v), takeLimit(format(i, formats)))
 	}
-	if cap(c.data) < need {
-		c.data = make([]byte, need)
-	}
-	c.data = c.data[:need]
+	c.data = slices.Grow(c.data, need)
 	if cap(c.params) < len(values) {
-		c.params = make([]param, len(values), MaxParams)
+		c.params = make([]param, len(values))
 	}
 	c.params = c.params[:len(values)]
 
-	formats := b.ParameterFormatCodes
-	off := 0
 	for i, v := range values {
 		p := &c.params[i]
-		*p = param{oid: typeOID(i, parseOIDs, describedOIDs), size: -1, off: uint32(off)}
-		switch {
-		case len(formats) == 1:
-			p.format = formats[0]
-		case i < len(formats):
-			p.format = formats[i]
-		}
+		*p = param{oid: typeOID(i, parseOIDs, describedOIDs), size: -1, format: format(i, formats)}
 		// pgproto3 leaves NULL values nil; an empty value is a non-nil empty slice.
 		if v == nil {
 			continue
 		}
-		take := min(len(v), copyLimit)
+		take := min(len(v), takeLimit(p.format))
 		p.size = int32(len(v))
-		p.n = uint32(copy(c.data[off:], v[:take]))
-		off += take
+		p.n = uint32(take)
+		c.data = append(c.data, v[:take]...)
 	}
 }
 
@@ -103,9 +97,6 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 // backend's ParameterDescription for the same statement, when that reply
 // arrives after the Bind was recorded. It does nothing if nothing was recorded.
 func (c *Capture) FillTypes(oids []uint32) {
-	if !c.recorded {
-		return
-	}
 	for i := range c.params[:min(len(c.params), len(oids))] {
 		if c.params[i].oid == 0 {
 			c.params[i].oid = oids[i]
@@ -126,6 +117,25 @@ func (c *Capture) Reset() {
 	c.data = c.data[:0]
 	c.recorded = false
 	c.sent = 0
+}
+
+// format returns position i's format code: one code applies to every position,
+// and no codes mean text.
+func format(i int, formats []int16) int16 {
+	switch {
+	case len(formats) == 1:
+		return formats[0]
+	case i < len(formats):
+		return formats[i]
+	}
+	return 0
+}
+
+func takeLimit(code int16) int {
+	if code == 0 {
+		return textCopyLimit
+	}
+	return copyLimit
 }
 
 func typeOID(i int, parseOIDs, describedOIDs []uint32) uint32 {

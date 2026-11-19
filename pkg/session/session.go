@@ -1280,10 +1280,12 @@ func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 }
 
 // invalidateUnnamedStmt forgets the client's unnamed prepared statement and
-// starts a new generation, so ParseComplete replies for unnamed Parses sent
-// before this point cannot restore it.
+// its described types, and starts a new generation, so ParseComplete and
+// ParameterDescription replies for messages sent before this point cannot
+// restore them.
 func (s *Session) invalidateUnnamedStmt() {
 	s.unnamedStmt = nil
+	s.paramTypes.unnamed = s.paramTypes.unnamed[:0]
 	s.unnamedGen++
 }
 

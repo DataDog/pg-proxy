@@ -77,7 +77,7 @@ For batches, use `Batch execution and proxying` rather than assuming every query
 
 The root span receives the query text as `db.statement`. The trace state tracks up to 15 protocol-message types; `DataRow` and `CopyData` messages are excluded from that list. Additional messages set `messages_truncated`.
 
-For OTel export, SQL containing invalid UTF-8 is quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. Parameter tags are always valid UTF-8, because invalid bytes in them are already escaped as `\xNN`. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
+For OTel export, SQL containing invalid UTF-8 is quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
 
 Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
 

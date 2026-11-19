@@ -42,23 +42,27 @@ func appendBinary(dst []byte, oid uint32, v []byte, size int) ([]byte, bool) {
 			return appendArray(dst, elem, v, size)
 		}
 	}
-	if len(v) != size {
-		// Other scalars are shown whole or not at all; only text and arrays
-		// have meaningful prefixes.
-		switch {
-		case isTextType(oid):
-			return appendText(dst, v, size, ValueLimit), true
-		case oid == pgtype.JSONBOID && len(v) > 0 && v[0] == 1:
-			return appendText(dst, v[1:], size-1, ValueLimit), true
+	// jsonb's binary format is a version byte, then the JSON text.
+	if oid == pgtype.JSONBOID {
+		if len(v) == 0 || v[0] != 1 {
+			return dst, false
 		}
+		v, size, oid = v[1:], size-1, pgtype.TextOID
+	}
+	// Text and arrays have meaningful prefixes; other scalars are shown whole
+	// or not at all.
+	if isTextType(oid) {
+		return appendText(dst, v, size, ValueLimit), true
+	}
+	if len(v) != size {
 		return dst, false
 	}
-	return appendScalar(dst, oid, v, ValueLimit, false)
+	return appendScalar(dst, oid, v, ValueLimit)
 }
 
-// appendScalar appends a complete binary value. quoteText quotes text values,
-// as array elements are, so that commas inside them cannot be read as separators.
-func appendScalar(dst []byte, oid uint32, v []byte, limit int, quoteText bool) ([]byte, bool) {
+// appendScalar appends a complete binary array element. Text elements are
+// quoted, so that commas inside them cannot be read as separators.
+func appendScalar(dst []byte, oid uint32, v []byte, limit int) ([]byte, bool) {
 	if w := fixedWidth(oid); w > 0 && len(v) != w {
 		return dst, false
 	}
@@ -99,10 +103,7 @@ func appendScalar(dst []byte, oid uint32, v []byte, limit int, quoteText bool) (
 			return dst, false
 		}
 	}
-	if quoteText {
-		return appendQuoted(dst, v, limit, false), true
-	}
-	return appendText(dst, v, len(v), limit), true
+	return appendQuoted(dst, v, limit, false), true
 }
 
 func isTextType(oid uint32) bool {
@@ -218,7 +219,7 @@ func appendArray(dst []byte, elem uint32, v []byte, size int) ([]byte, bool) {
 			break
 		}
 		var ok bool
-		if dst, ok = appendScalar(dst, elem, v[rp:rp+int(n)], elementLimit, true); !ok {
+		if dst, ok = appendScalar(dst, elem, v[rp:rp+int(n)], elementLimit); !ok {
 			return dst, false
 		}
 		rp += int(n)

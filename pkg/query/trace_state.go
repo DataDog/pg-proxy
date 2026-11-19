@@ -286,10 +286,9 @@ func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, described
 
 // FillBindParameterTypes forwards to bindparams.Capture.FillTypes.
 func (t *TraceState) FillBindParameterTypes(oids []uint32) {
-	if t == nil || t.bindParams == nil {
-		return
+	if t.bindParams != nil {
+		t.bindParams.FillTypes(oids)
 	}
-	t.bindParams.FillTypes(oids)
 }
 
 func (t *TraceState) FinishTrace(errs ...error) {
