@@ -447,6 +447,8 @@ func TestHybridHealthPatroniRecoversBeforeNextSQLCompletion(t *testing.T) {
 	require.NotNil(t, recovered.routingComparison)
 	assert.Equal(t, LeaderRoutingComparison{
 		NewLeaderIP: newIP, Improvement: 0, HybridSource: SQLRoutingResultPatroniRecovery,
+		HybridDowntime: 300 * time.Millisecond, PatroniDowntime: 300 * time.Millisecond,
+		HasDowntimeComparison: true,
 	}, *recovered.routingComparison)
 
 	latePatroni := policy.observePatroni(map[string]bool{oldIP: true}, started.Add(1100*time.Millisecond))

@@ -52,10 +52,17 @@ type LeaderDetectionComparison struct {
 
 // LeaderRoutingComparison compares when hybrid and Patroni-only routing select a new leader.
 // A positive Improvement means hybrid routing selected the leader first.
+// When HasDowntimeComparison is true, both durations start when hybrid routing first
+// published no healthy leader. DowntimeReductionPercent compares the actual hybrid
+// selection with Patroni, including when hybrid uses Patroni to recover.
 type LeaderRoutingComparison struct {
-	NewLeaderIP  string
-	Improvement  time.Duration
-	HybridSource string
+	NewLeaderIP              string
+	Improvement              time.Duration
+	HybridSource             string
+	HybridDowntime           time.Duration
+	PatroniDowntime          time.Duration
+	DowntimeReductionPercent float64
+	HasDowntimeComparison    bool
 }
 
 type hybridRoutingDecision struct {
@@ -72,6 +79,11 @@ type hybridRoutingDecision struct {
 
 	leaderDetection   *LeaderDetectionComparison
 	routingComparison *LeaderRoutingComparison
+}
+
+type routingTimingData struct {
+	source            string
+	downtimeStartedAt time.Time
 }
 
 type sqlDowntimeWindow struct {
@@ -112,9 +124,10 @@ type hybridHealthPolicy struct {
 	// Bound this history to current candidates; delayed Patroni B must not replace C.
 	supersededSQLLeaders map[string]struct{}
 
-	detectionTiming      leaderTiming[sqlDowntimeWindow]
-	routingTiming        leaderTiming[string]
-	sqlDowntimeStartedAt time.Time
+	detectionTiming          leaderTiming[sqlDowntimeWindow]
+	routingTiming            leaderTiming[routingTimingData]
+	sqlDowntimeStartedAt     time.Time
+	routingDowntimeStartedAt time.Time
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
@@ -142,7 +155,8 @@ func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
 	if p.routingEnabled != enabled {
 		// Comparisons cannot span periods where SQL routing evaluation was disabled. Reset both
 		// baselines so the next observations establish a fresh pair under the new flag state.
-		p.routingTiming = leaderTiming[string]{}
+		p.routingTiming = leaderTiming[routingTimingData]{}
+		p.routingDowntimeStartedAt = time.Time{}
 		// Leadership history belongs to one uninterrupted routing mode. Keep the
 		// latest Patroni snapshot for fallback, but do not carry retention,
 		// exclusions, or recovery decisions across a flag transition.
@@ -657,10 +671,50 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(source string, health map
 	default:
 		return nil
 	}
-	pairs := p.routingTiming.observe(side, health, observedAt, hybridSource, oneHealthyLeader)
+	data := routingTimingData{source: hybridSource}
+	if side == candidateLeaderSource {
+		data.downtimeStartedAt = p.recordRoutingDowntimeLocked(health, observedAt)
+	}
+	pairs := p.routingTiming.observe(side, health, observedAt, data, oneHealthyLeader)
 	if len(pairs) == 0 {
 		return nil
 	}
 	pair := pairs[0]
-	return &LeaderRoutingComparison{NewLeaderIP: pair.ip, Improvement: pair.speedup(), HybridSource: pair.candidateData}
+	comparison := &LeaderRoutingComparison{NewLeaderIP: pair.ip, Improvement: pair.speedup(), HybridSource: pair.candidateData.source}
+	startedAt := pair.candidateData.downtimeStartedAt
+	if startedAt.IsZero() {
+		return comparison
+	}
+	hybridDowntime := pair.candidateAt.Sub(startedAt)
+	patroniDowntime := pair.patroniAt.Sub(startedAt)
+	if hybridDowntime < 0 || patroniDowntime <= 0 {
+		return comparison
+	}
+	comparison.HybridDowntime = hybridDowntime
+	comparison.PatroniDowntime = patroniDowntime
+	comparison.DowntimeReductionPercent = float64(patroniDowntime-hybridDowntime) / float64(patroniDowntime) * 100
+	comparison.HasDowntimeComparison = true
+	return comparison
+}
+
+// recordRoutingDowntimeLocked starts a window only after a published route loses all
+// healthy leaders. Attach that start to a replacement leader, not a same-leader recovery.
+func (p *hybridHealthPolicy) recordRoutingDowntimeLocked(health map[string]bool, observedAt time.Time) time.Time {
+	leaders := healthyIPs(health)
+	switch len(leaders) {
+	case 0:
+		if p.routingDowntimeStartedAt.IsZero() && len(p.routingTiming.candidate.lastNonempty) > 0 {
+			p.routingDowntimeStartedAt = observedAt
+		}
+	case 1:
+		startedAt := p.routingDowntimeStartedAt
+		p.routingDowntimeStartedAt = time.Time{}
+		if !p.routingTiming.candidate.lastNonempty[leaders[0]] {
+			return startedAt
+		}
+	default:
+		// An ambiguous publication is not a measured no-leader interval.
+		p.routingDowntimeStartedAt = time.Time{}
+	}
+	return time.Time{}
 }
