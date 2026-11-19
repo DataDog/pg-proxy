@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -88,6 +87,12 @@ type State struct {
 	PreparedStatements       prepared.PreparedStatementState
 }
 
+// UsesUnnamedStmt reports whether name denotes the session's plain unnamed
+// statement, which is neither named nor auto-cached under a proxy name.
+func (s State) UsesUnnamedStmt(name string) bool {
+	return !prepared.IsNamedPreparedStmt(name) && !s.AutoPreparedStmtsEnabled
+}
+
 // Hooks keeps embedder-specific observability outside the decision engine.
 // Every callback is optional.
 type Hooks struct {
@@ -145,7 +150,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		}
 
 		// handle unnamed prepared statements (and that are not autocached)
-		if !prepared.IsNamedPreparedStmt(m.Name) && !state.AutoPreparedStmtsEnabled {
+		if state.UsesUnnamedStmt(m.Name) {
 			// TODO: track unnamed prepared statements across backend releases
 			// instead of treating them as one-off queries.
 			return handleClientQuery(m, m.Query, ExtendedQueryProtocol, action, state, hooks)
@@ -194,7 +199,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		if m.ObjectType == 'P' {
 			return action, nil
 		}
-		if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+		if state.UsesUnnamedStmt(clientName) {
 			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
@@ -210,7 +215,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 	case *pgproto3.Close:
 		// It is not an error to issue Close against a nonexistent statement or portal name, so do not need to check
 		clientName := m.Name
-		if (prepared.IsNamedPreparedStmt(clientName) || state.AutoPreparedStmtsEnabled) && m.ObjectType == 'S' { // named prepared statement
+		if !state.UsesUnnamedStmt(clientName) && m.ObjectType == 'S' { // named prepared statement
 			return ClientMessageAction{
 				ProxyMsgToPg:  &pgproto3.Flush{},
 				FlushPostgres: true,
@@ -230,7 +235,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		action := ClientMessageAction{ProxyMsgToPg: m, AddReplyExpectation: query.BindReply}
 		// handle unnamed prepared statements with no auto-caching
 		clientName := m.PreparedStatement
-		if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+		if state.UsesUnnamedStmt(clientName) {
 			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
@@ -334,19 +339,21 @@ func CreateProxyPreparedStmt(clientName, sql string, parameterOIDs []uint32, aut
 
 // CreateProxyPreparedStmtName returns the stable proxy name for a SQL/OID pair.
 func CreateProxyPreparedStmtName(sql string, parameterOIDs []uint32) string {
-	var oids strings.Builder
+	// Build the hashed bytes in one buffer, on the stack for typical SQL.
+	var stack [512]byte
+	key := append(stack[:0], sql...)
 	if len(parameterOIDs) > 0 {
 		// SQL cannot contain NUL, and each OID ends with a comma, so different
 		// SQL/OID pairs cannot write the same bytes. Statements without
 		// declared types keep their earlier names.
-		oids.WriteByte(0)
+		key = append(key, 0)
 		for _, oid := range parameterOIDs {
-			oids.WriteString(strconv.FormatUint(uint64(oid), 10))
-			oids.WriteByte(',')
+			key = strconv.AppendUint(key, uint64(oid), 10)
+			key = append(key, ',')
 		}
 	}
 	// create hash of query + oids to have pseudo-unique name
-	sum := sha256.Sum256([]byte(sql + oids.String()))
+	sum := sha256.Sum256(key)
 	return hex.EncodeToString(sum[:])
 }
 

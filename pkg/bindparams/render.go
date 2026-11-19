@@ -5,7 +5,10 @@
 
 package bindparams
 
-import "strconv"
+import (
+	"slices"
+	"strconv"
+)
 
 const (
 	// TagPrefix starts each position's value tag: db.parameters.0, …
@@ -48,8 +51,9 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	}
 	// Render every value into one buffer and convert it to a string once; each
 	// tag value is a substring of it, so the values cost one allocation, plus
-	// one per tag to pass it as an interface.
-	out := c.out[:0]
+	// one per tag to pass it as an interface. Hex doubles the copied bytes, and
+	// each position may add a "(+N bytes)" suffix.
+	out := slices.Grow(c.out[:0], min(2*len(c.data)+16*len(c.params), TotalLimit))
 	data := c.data
 	var ends [MaxParams]int
 	rendered := 0
@@ -77,7 +81,7 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 		setTag(valueKeys[i], values[start:ends[i]])
 		start = ends[i]
 	}
-	c.Reset()
+	c.reset()
 }
 
 func appendParam(dst []byte, p *param, v []byte) []byte {
@@ -87,7 +91,7 @@ func appendParam(dst []byte, p *param, v []byte) []byte {
 	size := int(p.size)
 	switch p.format {
 	case 0:
-		return appendText(dst, v, size, ValueLimit)
+		return appendText(dst, v, size)
 	case 1:
 		if out, ok := appendBinary(dst, p.oid, v, size); ok {
 			return out

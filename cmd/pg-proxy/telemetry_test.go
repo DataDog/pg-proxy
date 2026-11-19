@@ -687,11 +687,12 @@ func verifyProxyOTLPParameters(t *testing.T, backendURL string, capture bool) {
 		requireResource(t, resource.Resource.Attributes)
 		for _, scope := range resource.ScopeSpans {
 			for _, span := range scope.Spans {
+				first := stringAttribute(span.Attributes, bindparams.TagPrefix+"0")
+				describedInt = describedInt || first == "42"
 				// ExecParams declares no types and describes only the portal, so
 				// the values' types are unknown and they render as hex.
-				describedInt = describedInt || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == "42"
-				binaryInt = binaryInt || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == `\xffffffff`
-				binaryBytes = binaryBytes || stringAttribute(span.Attributes, bindparams.TagPrefix+"0") == `\x00ff8001`
+				binaryInt = binaryInt || first == `\xffffffff`
+				binaryBytes = binaryBytes || first == `\x00ff8001`
 				if !capture {
 					for _, attr := range span.Attributes {
 						require.False(t, strings.HasPrefix(attr.Key, bindparams.TagPrefix), attr.Key)

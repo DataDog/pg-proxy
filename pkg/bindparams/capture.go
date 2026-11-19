@@ -50,9 +50,10 @@ type Capture struct {
 	sent     int // positions the client sent; Render reports any it does not emit
 }
 
-// Recorded reports whether Record has run since the last Reset.
+// Recorded reports whether Record has run since the last Render. A nil Capture
+// has recorded nothing.
 func (c *Capture) Recorded() bool {
-	return c.recorded
+	return c != nil && c.recorded
 }
 
 // Record copies b's parameters, replacing any earlier capture. A binary value's
@@ -61,7 +62,7 @@ func (c *Capture) Recorded() bool {
 // unknown. PostgreSQL treats a declared 0 or unknown as unspecified. Text
 // values need no type.
 func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
-	c.Reset()
+	c.reset()
 	c.recorded = true
 	values := b.Parameters
 	c.sent = len(values)
@@ -94,9 +95,9 @@ func (c *Capture) Record(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
 	}
 }
 
-// Reset discards the capture, keeping small buffers for reuse. params never
+// reset discards the capture, keeping small buffers for reuse. params never
 // grows past MaxParams entries, so it is always kept.
-func (c *Capture) Reset() {
+func (c *Capture) reset() {
 	if cap(c.data) > retainLimit {
 		c.data = nil
 	}

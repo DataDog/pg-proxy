@@ -58,7 +58,7 @@ func appendBinary(dst []byte, oid uint32, v []byte, size int) ([]byte, bool) {
 	// Text and arrays have meaningful prefixes; other scalars are shown whole
 	// or not at all.
 	if isTextType(oid) {
-		return appendText(dst, v, size, ValueLimit), true
+		return appendText(dst, v, size), true
 	}
 	if len(v) != size {
 		return dst, false
@@ -75,8 +75,9 @@ func jsonbText(v []byte) ([]byte, bool) {
 	return v[1:], true
 }
 
-// appendScalar appends a complete binary array element. Text elements are
-// quoted, so that commas inside them cannot be read as separators.
+// appendScalar appends a complete binary scalar. Text values are quoted, as
+// array elements are, so that commas inside them cannot be read as separators;
+// appendBinary renders top-level text itself.
 func appendScalar(dst []byte, oid uint32, v []byte, limit int) ([]byte, bool) {
 	if w := fixedWidth(oid); w > 0 && len(v) != w {
 		return dst, false
@@ -459,10 +460,10 @@ func appendPadded(dst []byte, v, width int) []byte {
 	return append(dst, digits...)
 }
 
-// appendText appends at most limit bytes of v, cut on a character boundary and
-// with invalid UTF-8 escaped, then "(+N bytes)" for the size bytes not shown.
-func appendText(dst []byte, v []byte, size, limit int) []byte {
-	shown := cutText(v, limit)
+// appendText appends at most ValueLimit bytes of v, cut on a character boundary
+// and with invalid UTF-8 escaped, then "(+N bytes)" for the size bytes not shown.
+func appendText(dst []byte, v []byte, size int) []byte {
+	shown := cutText(v, ValueLimit)
 	dst = appendEscaped(dst, shown)
 	return appendRemainder(dst, size-len(shown))
 }

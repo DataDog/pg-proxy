@@ -272,14 +272,15 @@ func (t *TraceState) Sampled() bool {
 // the root trace is sampled, since the tracer would drop an unsampled trace's
 // tags, and none of its Binds was recorded yet.
 func (t *TraceState) WantsBindParameters() bool {
-	return (t.bindParams == nil || !t.bindParams.Recorded()) && t.Sampled()
+	return !t.bindParams.Recorded() && t.Sampled()
 }
 
 // RecordBindParameters copies b's values to render as db.parameters.N tags on
-// the root span when it finishes. Callers check WantsBindParameters first;
-// without a root span there is nowhere to render, so b is ignored.
+// the root span when it finishes. It ignores b unless WantsBindParameters, so
+// only a sampled root's first Bind is kept; callers may check it first to skip
+// gathering parseOIDs and describedOIDs.
 func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
-	if t.rootTrace == nil {
+	if !t.WantsBindParameters() {
 		return
 	}
 	if t.bindParams == nil {
@@ -298,9 +299,8 @@ func (t *TraceState) FinishTrace(errs ...error) {
 
 func (t *TraceState) FinishRootTrace(errs ...error) {
 	t.FinishTrace(errs...) // Ensure trace is cleaned up first
-	// RecordBindParameters keeps a Bind only under a root, so a recorded
-	// capture has one.
-	if t.bindParams != nil && t.bindParams.Recorded() {
+	// RecordBindParameters keeps a Bind only under a sampled root.
+	if t.bindParams.Recorded() {
 		t.bindParams.Render(t.rootTrace.SetTag)
 	}
 	t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)

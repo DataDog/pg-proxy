@@ -10,7 +10,6 @@ import (
 
 	"github.com/DataDog/pg-proxy/pkg/actions"
 	"github.com/DataDog/pg-proxy/pkg/bindparams"
-	"github.com/DataDog/pg-proxy/pkg/prepared"
 )
 
 const (
@@ -165,7 +164,7 @@ func (s *Session) remember(stmt describedStmt, oids []uint32) {
 // actions layer does with state. The unnamed statement's latest Parse is
 // pending until Postgres confirms it, then s.unnamedStmt.
 func (s *Session) findStmt(clientName string, state actions.State) (describedStmt, []uint32, bool) {
-	if !prepared.IsNamedPreparedStmt(clientName) && !state.AutoPreparedStmtsEnabled {
+	if state.UsesUnnamedStmt(clientName) {
 		stmt := state.PreparedStatements.FindPendingNamedStmtFromClientName(clientName)
 		if stmt == nil {
 			stmt = s.unnamedStmt

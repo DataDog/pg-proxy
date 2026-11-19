@@ -12,12 +12,11 @@
 // finishes and emits db.parameters.0 … db.parameters.n, plus
 // pgproxy.bind.truncated and pgproxy.bind.rendered when a limit drops values.
 //
-// NULL renders as null and a text value as at most its first ValueLimit
-// bytes, cut at the start of a UTF-8 character. Binary
-// values are decoded from the type OID: int, float, bool, uuid, date,
-// timestamp, numeric and one-dimensional or multi-dimensional arrays of them.
-// Binary values of unknown type, and malformed ones, fall back to a \x hex
-// prefix. Decoding reads
-// untrusted bytes, so every decoder checks lengths and bounds its work by the
-// output it may emit. Output is always valid UTF-8.
+// NULL renders as null and a text value as at most its first ValueLimit bytes,
+// cut at the start of a UTF-8 character. Binary scalars and arrays of the types
+// listed in the tracing reference are decoded from the type OID into
+// PostgreSQL's text form. Binary values of unknown type, and malformed ones,
+// fall back to a \x hex prefix. Decoding reads untrusted bytes, so every
+// decoder checks lengths and bounds its work by the output it may emit. Output
+// is always valid UTF-8.
 package bindparams

@@ -8,6 +8,7 @@ package bindparams
 import (
 	"encoding/binary"
 	"math"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,7 @@ func binaryBind(values ...[]byte) *pgproto3.Bind {
 func TestRenderBinaryTypes(t *testing.T) {
 	ts := time.Date(2026, 11, 18, 13, 11, 3, 823_000_000, time.UTC)
 	uuid := [16]byte{0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00, 0x00}
+	word := strings.Repeat("w", 40)
 	cases := []struct {
 		name  string
 		oid   uint32
@@ -130,6 +132,8 @@ func TestRenderBinaryTypes(t *testing.T) {
 		{"uuid array", pgtype.UUIDArrayOID, [][16]byte{uuid}, "array[len=1]{550e8400-e29b-41d4-a716-446655440000}"},
 		{"2-D array", pgtype.Int2ArrayOID, [][]int16{{1, 2}, {3, 4}}, "array[len=4]{1,2,3,4}"},
 		{"long array", pgtype.Int8ArrayOID, make([]int64, 5000), "array[len=5000]{0,0,0,0,0,0,0,0,0,0,…}"},
+		// Elements stop at ValueLimit, before the copy runs out.
+		{"text array past ValueLimit", pgtype.TextArrayOID, slices.Repeat([]string{word}, 50), "array[len=50]{" + strings.Repeat(`"`+word+`",`, 6) + "…}"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -283,7 +287,7 @@ func TestRenderMalformedBinaryFallsBackToHex(t *testing.T) {
 		{"array missing dims", pgtype.Int4ArrayOID, arrayHeader(2, 0, pgtype.Int4OID, 1)},
 		{"array missing element", pgtype.Int4ArrayOID, arrayHeader(1, 0, pgtype.Int4OID, 1)},
 		{"array element overrun", pgtype.Int4ArrayOID, binary.BigEndian.AppendUint32(arrayHeader(1, 0, pgtype.Int4OID, 1), 4)},
-		{"array bad element", pgtype.Int4ArrayOID, append(binary.BigEndian.AppendUint32(arrayHeader(1, 0, pgtype.Int4OID, 1), 2), 0, 0)},
+		{"array bad element", pgtype.Int4ArrayOID, arrayOf(pgtype.Int4OID, []byte{0, 0})},
 		{"array element length", pgtype.Int4ArrayOID, binary.BigEndian.AppendUint32(arrayHeader(1, 0, pgtype.Int4OID, 1), uint32(0xFFFFFFF0))},
 	}
 	for _, tc := range cases {
@@ -387,17 +391,6 @@ func TestRecordCopiesValues(t *testing.T) {
 func TestRenderWithoutRecordDoesNothing(t *testing.T) {
 	var c Capture
 	c.Render(func(string, any) { t.Fatal("no tags expected") })
-}
-
-func TestRenderTruncatedArrayCopy(t *testing.T) {
-	// An array longer than the copy keeps its count and shows the copied elements.
-	words := make([]string, 50)
-	for i := range words {
-		words[i] = strings.Repeat("w", 40)
-	}
-	got := render(t, binaryBind(encode(t, pgtype.TextArrayOID, words)), []uint32{pgtype.TextArrayOID}, nil)[valueKeys[0]].(string)
-	assert.True(t, strings.HasPrefix(got, `array[len=50]{"wwww`), got)
-	assert.True(t, strings.HasSuffix(got, "…}"), got)
 }
 
 // arrayOf builds a one-dimensional binary array of elem from raw element values.
