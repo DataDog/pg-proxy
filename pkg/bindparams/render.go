@@ -73,7 +73,9 @@ func typeName(oid uint32) any {
 }
 
 // Render passes a value tag and a type tag per captured position to setTag,
-// then resets the capture. It does nothing if nothing was recorded.
+// then resets the capture. It does nothing if nothing was recorded. The
+// truncation tags come first: tracers that cap a span's attributes, such as the
+// OpenTelemetry SDK, keep the earliest ones and drop the rest.
 func (c *Capture) Render(setTag func(key string, value any)) {
 	if !c.recorded {
 		return
@@ -97,6 +99,10 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 		rendered++
 	}
 	c.out = out
+	if truncated {
+		setTag(TruncatedTag, true)
+		setTag(RenderedTag, rendered)
+	}
 	values := string(out)
 	start := 0
 	for i := range rendered {
@@ -104,10 +110,6 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 		setTag(valueKeys[i], values[start:end])
 		setTag(typeKeys[i], typeName(c.params[i].oid))
 		start = end
-	}
-	if truncated {
-		setTag(TruncatedTag, true)
-		setTag(RenderedTag, rendered)
 	}
 	c.Reset()
 }

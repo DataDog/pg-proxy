@@ -365,6 +365,17 @@ func TestRenderPositionCap(t *testing.T) {
 	assert.Equal(t, MaxParams, tags[RenderedTag])
 }
 
+// Tracers that cap a span's attributes keep the earliest, so the truncation
+// tags must come before the positions.
+func TestRenderTruncationTagsComeFirst(t *testing.T) {
+	var c Capture
+	c.Record(&pgproto3.Bind{Parameters: make([][]byte, MaxParams+1)}, nil, nil)
+	var keys []string
+	c.Render(func(key string, _ any) { keys = append(keys, key) })
+	require.GreaterOrEqual(t, len(keys), 2)
+	assert.Equal(t, []string{TruncatedTag, RenderedTag}, keys[:2])
+}
+
 func TestRecordBoundsTheCopy(t *testing.T) {
 	big := make([]byte, 1<<20)
 	values := [][]byte{big, big, big, big, big, big, big, big, big, big}

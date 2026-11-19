@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -23,6 +24,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 	collectorlog "go.opentelemetry.io/proto/otlp/collector/logs/v1"
 	collectormetric "go.opentelemetry.io/proto/otlp/collector/metrics/v1"
@@ -34,6 +36,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 )
 
 // Decode real OTLP requests so these tests cover the exporters, not just adapters.
@@ -242,6 +245,46 @@ func TestTelemetryOTLPBinaryParameters(t *testing.T) {
 			require.Equal(t, tc.want, stringAttribute(spans[1].Attributes, "db.query.parameter.0"))
 		})
 	}
+}
+
+// The SDK keeps 128 attributes per span by default, fewer than a Bind with
+// every position rendered needs.
+func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
+	receiver := newOTLPReceiver(t)
+	deps, shutdown, err := setupTelemetry(t.Context(), telemetryConfig{Traces: traceOTel})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = shutdown() })
+	root, _ := deps.Tracer.StartRoot("parameterized query", "select $1")
+	var capture bindparams.Capture
+	capture.Record(&pgproto3.Bind{Parameters: make([][]byte, bindparams.MaxParams+10)}, nil, nil)
+	capture.Render(root.SetTag)
+	root.Finish(nil)
+	require.NoError(t, shutdown())
+
+	receiver.mu.Lock()
+	defer receiver.mu.Unlock()
+	var spans []*tracepb.Span
+	for _, resource := range receiver.traces {
+		for _, scope := range resource.ScopeSpans {
+			spans = append(spans, scope.Spans...)
+		}
+	}
+	require.Len(t, spans, 1)
+	keys := map[string]bool{}
+	for _, attr := range spans[0].Attributes {
+		keys[attr.Key] = true
+	}
+	last := strconv.Itoa(bindparams.MaxParams - 1)
+	require.True(t, keys[bindparams.TruncatedTag])
+	require.True(t, keys[bindparams.TagPrefix+last], "the last rendered position is kept")
+	require.True(t, keys[bindparams.TypeTagPrefix+last])
+	require.Zero(t, spans[0].DroppedAttributesCount)
+}
+
+func TestSpanLimitsHonorTheEnvironment(t *testing.T) {
+	require.Equal(t, spanAttributeCountLimit, spanLimits().AttributeCountLimit)
+	t.Setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10")
+	require.Equal(t, 10, spanLimits().AttributeCountLimit)
 }
 
 func TestTelemetryOTLPSQLText(t *testing.T) {
