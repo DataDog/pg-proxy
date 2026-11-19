@@ -147,7 +147,7 @@ func TestBindParametersUseDescribedTypes(t *testing.T) {
 	require.Len(t, roots, 2)
 	assert.NotContains(t, roots[0], bindparams.TagPrefix+"0", "the describe cycle has no Bind")
 	assert.Equal(t, "7", roots[1][bindparams.TagPrefix+"0"])
-	assert.Equal(t, "true", roots[1][bindparams.TagPrefix+"1"])
+	assert.Equal(t, "t", roots[1][bindparams.TagPrefix+"1"])
 }
 
 func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {

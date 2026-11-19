@@ -88,14 +88,24 @@ func TestRenderBinaryTypes(t *testing.T) {
 		value any
 		want  string
 	}{
-		{"bool true", pgtype.BoolOID, true, "true"},
-		{"bool false", pgtype.BoolOID, false, "false"},
+		{"bool true", pgtype.BoolOID, true, "t"},
+		{"bool false", pgtype.BoolOID, false, "f"},
 		{"int2", pgtype.Int2OID, int16(-32768), "-32768"},
 		{"int4", pgtype.Int4OID, int32(2147483647), "2147483647"},
 		{"int8", pgtype.Int8OID, int64(-9223372036854775808), "-9223372036854775808"},
 		{"oid", pgtype.OIDOID, uint32(4294967295), "4294967295"},
 		{"float4", pgtype.Float4OID, float32(1.5), "1.5"},
 		{"float8", pgtype.Float8OID, 0.1, "0.1"},
+		// PostgreSQL keeps float8 in fixed notation for decimal exponents in
+		// [-4, 15) and float4 for [-4, 6).
+		{"float8 fixed up to 1e15", pgtype.Float8OID, 123456789012345.6, "123456789012345.6"},
+		{"float8 millions", pgtype.Float8OID, 1234567.0, "1234567"},
+		{"float8 e notation", pgtype.Float8OID, 1e15, "1e+15"},
+		{"float8 small fixed", pgtype.Float8OID, 0.0001, "0.0001"},
+		{"float8 small e notation", pgtype.Float8OID, 0.00001, "1e-05"},
+		{"float4 fixed below 1e6", pgtype.Float4OID, float32(123456), "123456"},
+		{"float4 e notation", pgtype.Float4OID, float32(1e6), "1e+06"},
+		{"bool array", pgtype.BoolArrayOID, []bool{true, false}, "array[len=2]{t,f}"},
 		{"float8 NaN", pgtype.Float8OID, math.NaN(), "NaN"},
 		{"float8 -inf", pgtype.Float8OID, math.Inf(-1), "-Infinity"},
 		{"uuid", pgtype.UUIDOID, uuid, "550e8400-e29b-41d4-a716-446655440000"},

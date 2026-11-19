@@ -86,7 +86,11 @@ func appendScalar(dst []byte, oid uint32, v []byte, limit int) ([]byte, bool) {
 		if v[0] > 1 {
 			return dst, false
 		}
-		return strconv.AppendBool(dst, v[0] == 1), true
+		// PostgreSQL writes booleans as t and f.
+		if v[0] == 1 {
+			return append(dst, 't'), true
+		}
+		return append(dst, 'f'), true
 	case pgtype.Int2OID:
 		return strconv.AppendInt(dst, int64(int16(binary.BigEndian.Uint16(v))), 10), true
 	case pgtype.Int4OID:
@@ -334,7 +338,33 @@ func appendFloat(dst []byte, f float64, bits int) []byte {
 	case math.IsNaN(f):
 		return append(dst, "NaN"...)
 	}
-	return strconv.AppendFloat(dst, f, 'g', -1, bits)
+	// PostgreSQL writes the shortest digits in fixed notation while the decimal
+	// exponent is in [-4, 15) for float8, or [-4, 6) for float4, and in e
+	// notation otherwise. strconv's 'g' switches at 6 for both.
+	maxFixed := 15
+	if bits == 32 {
+		maxFixed = 6
+	}
+	var buf [32]byte
+	e := strconv.AppendFloat(buf[:0], f, 'e', -1, bits)
+	if exp := floatExponent(e); exp < -4 || exp >= maxFixed {
+		return append(dst, e...)
+	}
+	return strconv.AppendFloat(dst, f, 'f', -1, bits)
+}
+
+// floatExponent returns the exponent of a number strconv wrote in 'e' format,
+// such as -5 for "1.5e-05".
+func floatExponent(e []byte) int {
+	i := bytes.LastIndexByte(e, 'e')
+	exp := 0
+	for _, c := range e[i+2:] {
+		exp = exp*10 + int(c-'0')
+	}
+	if e[i+1] == '-' {
+		return -exp
+	}
+	return exp
 }
 
 func appendUUID(dst []byte, v []byte) []byte {
