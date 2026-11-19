@@ -31,10 +31,8 @@ func TestHybridRoutingDowntimeUsesSelectedSource(t *testing.T) {
 				decision := p.observePatroni(map[string]bool{"B": true}, at.Add(2*time.Second))
 				require.True(t, decision.publish)
 				comparison = decision.routingComparison
-				// SQL-only detection is slower, but does not extend the routing outage.
+				// A later SQL completion must not add another recovery sample.
 				lateSQL := p.observeSQL(ips, SQLHealthCheckOutcome{PrimaryIPs: []string{"B"}}, at.Add(4*time.Second))
-				require.NotNil(t, lateSQL.leaderDetection)
-				assert.Equal(t, float64(-200), lateSQL.leaderDetection.DowntimeReductionPercent)
 				assert.Nil(t, lateSQL.routingComparison)
 			} else {
 				p.observeSQL(ips, SQLHealthCheckOutcome{PrimaryIPs: []string{"B"}}, at.Add(2*time.Second))

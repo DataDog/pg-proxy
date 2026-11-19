@@ -235,14 +235,10 @@ without downtime durations or percentages, using the completed-snapshot mismatch
 aggregate. See [SQL snapshot timing](sql-potential-timing.md) for the
 snapshot boundary, lifecycle rules, and how to compare it with hybrid timing.
 
-### Detection and routing downtime
+### Hybrid routing downtime
 
-`LeaderDetectionCompared` measures SQL and Patroni independently. Its two durations
-start at the first conclusive SQL snapshot with no primary. SQL can finish later
-than Patroni even when hybrid routing already used Patroni's result.
-
-`LeaderRoutingCompared` also reports `HybridDowntime`, `PatroniDowntime`, and
-`DowntimeReductionPercent` when `HasDowntimeComparison` is true. These two durations
+`LeaderRoutingCompared` reports `HybridDowntime`, `PatroniDowntime`, and
+`DowntimeReductionPercent` when `HasDowntimeComparison` is true. Both durations
 start when hybrid routing first publishes no healthy leader, and end when hybrid
 and Patroni respectively select the same replacement. The percentage is:
 
@@ -250,14 +246,12 @@ and Patroni respectively select the same replacement. The percentage is:
 
 For example, hybrid routing loses primary A at 1s. Patroni reports replacement B
 at 2s and hybrid uses it immediately. SQL identifies B at 4s. Hybrid and Patroni
-both took 1s, so the hybrid reduction is 0%; the independent SQL comparison can
-still report a negative reduction. If hybrid selects B at 2s and Patroni finds B
-at 5s, the hybrid reduction is 75%.
+both took 1s, so the reduction is 0%. If hybrid selects B at 2s and Patroni finds B
+at 5s instead, their durations are 1s and 4s: a 75% reduction. A slower hybrid
+selection keeps its negative percentage.
 
 This measures the routing policy's observations, not successful client queries or
-PostgreSQL's actual promotion time. A slower hybrid selection keeps its negative
-percentage. Missing outage starts, non-positive Patroni durations, same-leader
-recoveries, and ambiguous publications do not produce downtime comparisons.
-Routing-mode changes clear unfinished routing comparisons. SQL-only detection
-and hybrid routing use their own outage starts, so compare their durations with
-that distinction in mind.
+PostgreSQL's actual promotion time. Missing outage starts, non-positive Patroni
+durations, same-leader recoveries, and ambiguous publications do not produce
+downtime comparisons. Routing-mode changes clear unfinished comparisons.
+The existing independent SQL/Patroni snapshot comparison remains separate.

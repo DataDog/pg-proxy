@@ -50,8 +50,6 @@ type leaderTimingMode uint8
 const (
 	// Compare each newly observed primary in the completed comparison snapshot.
 	everyNewLeader leaderTimingMode = iota
-	// Detection compares only one newly added primary, while retaining the full observed set.
-	oneNewLeader
 	// Routing requires exactly one healthy primary before recording a selection.
 	oneHealthyLeader
 )
@@ -96,9 +94,6 @@ func (p *leaderTiming[T]) observe(source leaderTimingSource, healthy map[string]
 		}
 	}
 	observation.comparable = maps.Clone(current)
-	if mode == oneNewLeader && len(added) != 1 {
-		return nil
-	}
 	var comparisons []leaderTimingComparison[T]
 	for _, ip := range added {
 		if p.pending == nil {
