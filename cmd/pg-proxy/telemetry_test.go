@@ -283,8 +283,15 @@ func TestTelemetryOTLPKeepsEveryBindPosition(t *testing.T) {
 
 func TestSpanLimitsHonorTheEnvironment(t *testing.T) {
 	require.Equal(t, spanAttributeCountLimit, spanLimits().AttributeCountLimit)
-	t.Setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10")
-	require.Equal(t, 10, spanLimits().AttributeCountLimit)
+	t.Run("generic limit", func(t *testing.T) {
+		t.Setenv("OTEL_ATTRIBUTE_COUNT_LIMIT", "0")
+		require.Equal(t, 0, spanLimits().AttributeCountLimit)
+	})
+	t.Run("span limit", func(t *testing.T) {
+		t.Setenv("OTEL_ATTRIBUTE_COUNT_LIMIT", "0")
+		t.Setenv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT", "10")
+		require.Equal(t, 10, spanLimits().AttributeCountLimit)
+	})
 }
 
 func TestTelemetryOTLPSQLText(t *testing.T) {

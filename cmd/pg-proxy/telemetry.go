@@ -34,11 +34,14 @@ import (
 // drop every position past about the sixtieth.
 const spanAttributeCountLimit = 2*bindparams.MaxParams + 64
 
-// spanLimits are the SDK's limits, read from the OTEL_SPAN_* variables, with
-// room for Bind parameter tags unless OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT is set.
+// spanLimits are the SDK's limits, read from the OTEL_* variables, with room
+// for Bind parameter tags unless OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT or
+// OTEL_ATTRIBUTE_COUNT_LIMIT, which the SDK falls back to, is set.
 func spanLimits() sdktrace.SpanLimits {
 	limits := sdktrace.NewSpanLimits()
-	if _, set := os.LookupEnv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT"); !set {
+	_, spanLimitSet := os.LookupEnv("OTEL_SPAN_ATTRIBUTE_COUNT_LIMIT")
+	_, genericLimitSet := os.LookupEnv("OTEL_ATTRIBUTE_COUNT_LIMIT")
+	if !spanLimitSet && !genericLimitSet {
 		limits.AttributeCountLimit = spanAttributeCountLimit
 	}
 	return limits
