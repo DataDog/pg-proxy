@@ -25,6 +25,8 @@ Do not disclose Datadog's internal infrastructure or systems. Never include:
 - Links to Jira or Linear tickets, Slack, Confluence, incidents, or internal
   documents.
 - Production configuration values, capacity figures, or traffic volumes.
+- SQL statements or query parameter values taken from internal systems, such
+  as production queries, slow-query logs, or captured traffic.
 - Customer names, organization IDs, or data.
 
 These are allowed:
@@ -37,6 +39,8 @@ These are allowed:
 Use neutral substitutes:
 
 - Hosts and databases: `localhost`, `db.example.com`, `app_db`.
+- SQL: minimal synthetic queries against example tables, such as
+  `SELECT id, name FROM users WHERE id = $1`, with made-up parameter values.
 - Scale: "a deployment with thousands of client connections", not a cluster name
   or a production figure.
 - Performance claims: numbers from benchmarks or tests in this repository.
