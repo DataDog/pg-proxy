@@ -29,7 +29,7 @@ These examples use the settings from [Local development](../../../how-to/local-d
 ### Keyword form
 
 ```sh
-psql "host=127.0.0.1 port=15432 user=postgres dbname=local_db sslmode=disable connect_timeout=5 options='-c pg_proxy.auto_cached_prepared_statements=true'" \
+psql "host=127.0.0.1 port=5432 user=postgres dbname=local_db sslmode=disable connect_timeout=5 options='-c pg_proxy.auto_cached_prepared_statements=true'" \
   -At -v ON_ERROR_STOP=1 -c 'select 1'
 ```
 
@@ -40,7 +40,7 @@ The `-c` inside `options` is part of the startup-option syntax. The final `psql 
 Percent-encode the spaces and equals signs in the `options` value:
 
 ```sh
-psql 'postgres://postgres@127.0.0.1:15432/local_db?sslmode=disable&connect_timeout=5&options=-c%20pg_proxy.auto_cached_prepared_statements%3Dtrue' \
+psql 'postgres://postgres@127.0.0.1:5432/local_db?sslmode=disable&connect_timeout=5&options=-c%20pg_proxy.auto_cached_prepared_statements%3Dtrue' \
   -At -v ON_ERROR_STOP=1 -c 'select 1'
 ```
 

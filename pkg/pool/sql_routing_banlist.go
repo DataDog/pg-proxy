@@ -86,9 +86,9 @@ func (b sqlRoutingBanlist) update(
 		}
 	}
 	for ip := range successfulResults {
-		// Credential checks for one host run concurrently, so a success and shutdown result in the
-		// same round have no reliable ordering. Keep the IP banned until a later clean round proves
-		// that it can conclusively report a PostgreSQL role again.
+		// Any shutdown evidence for this IP vetoes recovery, including another credential's
+		// cached result from an earlier round. Even a provably later success must wait until
+		// that shutdown snapshot is replaced or removed from the aggregate.
 		if _, shuttingDown := shutdownResults[ip]; shuttingDown {
 			continue
 		}

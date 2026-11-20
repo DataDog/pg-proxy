@@ -1,0 +1,95 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+
+# Called from ci.yml so the required CI gate covers these jobs; it can also run
+# on its own from the Actions tab. It has no concurrency group: a reusable
+# workflow shares the caller's, and its own would cancel the caller.
+name: PostgreSQL regression
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CGO_ENABLED: '1'
+  GOENV: 'off'
+  GOFLAGS: -mod=readonly
+  GOPROXY: https://proxy.golang.org
+  GOSUMDB: sum.golang.org
+  GOTOOLCHAIN: local
+  GOWORK: 'off'
+
+jobs:
+  versions:
+    name: Supported PostgreSQL versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      majors: ${{ steps.read.outputs.majors }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: read
+        run: echo "majors=$(jq -c '[.[].major]' test/regress/versions.json)" >> "$GITHUB_OUTPUT"
+
+  installcheck:
+    name: installcheck through pg-proxy (PostgreSQL ${{ matrix.major }})
+    needs: versions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        major: ${{ fromJSON(needs.versions.outputs.majors) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          check-latest: true
+          cache-dependency-path: go.sum
+      - name: Check Docker
+        run: docker info
+      - name: Read PostgreSQL release
+        id: release
+        env:
+          MAJOR: ${{ matrix.major }}
+        run: |
+          jq -r --arg major "$MAJOR" '.[] | select(.major == $major) | "version=\(.version)\nsha256=\(.sha256)"' \
+            test/regress/versions.json >> "$GITHUB_OUTPUT"
+      # Building PostgreSQL from source takes most of the job, and fresh runners
+      # have no layer cache. Build it here with the Actions cache, under the tag
+      # the suite uses, so TestMain skips its own build.
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build regression image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: test/regress/image
+          load: true
+          tags: pg-proxy.localhost/regress:${{ steps.release.outputs.version }}
+          build-args: |
+            PG_VERSION=${{ steps.release.outputs.version }}
+            PG_SHA256=${{ steps.release.outputs.sha256 }}
+          cache-from: type=gha,scope=regress-pg${{ matrix.major }}
+          cache-to: type=gha,scope=regress-pg${{ matrix.major }},mode=max
+      - name: Regression suite
+        env:
+          PG_PROXY_REGRESS_PREBUILT: 'true'
+          PG_PROXY_REGRESS_PG_MAJORS: ${{ matrix.major }}
+          PG_PROXY_REGRESS_ARTIFACTS: ${{ runner.temp }}/regress
+        run: go test -tags=integration,regress -count=1 -timeout=55m -v ./test/regress
+      - name: Upload pg_regress output
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: pg-regress-${{ matrix.major }}
+          path: ${{ runner.temp }}/regress
+          if-no-files-found: ignore

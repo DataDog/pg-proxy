@@ -19,7 +19,7 @@ This page covers the binary. Applications that embed the Go library decode the s
 databases:
   - name: primary
     host: 127.0.0.1
-    port: 5432
+    port: 15432
     dbname: postgres
     username: postgres
     password: postgres
@@ -31,6 +31,8 @@ logical_databases:
   local_db:
     cluster: local
 ```
+
+This matches [Local development](../../../how-to/local-development/): PostgreSQL listens on `127.0.0.1:15432`, and the proxy uses its default address, `127.0.0.1:5432`. If your PostgreSQL server uses `127.0.0.1:5432`, set `proxy.listener_address` to a free port.
 
 `databases`, `clusters`, and `logical_databases` are required and must not be empty. `proxy` is optional. `users` is allowed only with password authentication.
 
@@ -96,7 +98,7 @@ A map from the name clients connect to, to its routing.
 
 | YAML key | JSON key | Default | Description |
 | --- | --- | --- | --- |
-| `listener_address` | `listenerAddress` | `127.0.0.1:15432` | IP address and port to listen on. Without password authentication, only loopback addresses are accepted. Host names are always rejected. |
+| `listener_address` | `listenerAddress` | `127.0.0.1:5432` | IP address and port to listen on. Without password authentication, only loopback addresses are accepted. Host names are always rejected. |
 | `password_auth_enabled` | `passwordAuthEnabled` | `false` | Turn on password/SCRAM authentication for the users in `users`. Requires `tls_required: true` and a certificate and key. See [Client authentication](../client-authentication/). |
 | `tls_cert_file` | `tlsCertFile` | None | PEM server certificate for client TLS. Set together with `tls_key_file`. See [Client TLS](../client-tls/). |
 | `tls_key_file` | `tlsKeyFile` | None | Unencrypted PEM private key for `tls_cert_file`. |

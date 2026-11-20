@@ -13,7 +13,7 @@ If you use `-telemetry datadog`, the proxy already sends metrics through DogStat
 
 ## Prerequisites
 
-- `bin/pg-proxy` built and a working `proxy.yaml`, from [Local development](../local-development/).
+- A working `proxy.yaml` from [Local development](../local-development/), and the binary built in your `pg-proxy` checkout with `go build -o bin/pg-proxy ./cmd/pg-proxy`.
 - [OpenTelemetry Collector Contrib 0.163.2](https://github.com/open-telemetry/opentelemetry-collector-releases/releases/tag/v0.163.2), the version validated with this configuration.
 - A Datadog API key and your Datadog site.
 

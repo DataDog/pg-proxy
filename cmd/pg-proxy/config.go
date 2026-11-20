@@ -333,7 +333,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	}
 	cfg.listenAddress = shared.Proxy.ListenerAddress
 	if cfg.listenAddress == "" {
-		cfg.listenAddress = "127.0.0.1:15432"
+		cfg.listenAddress = "127.0.0.1:5432"
 	}
 	cfg.messageBufferSize = int(shared.Proxy.PostgresMsgBufferSize)
 	if cfg.messageBufferSize == 0 {
