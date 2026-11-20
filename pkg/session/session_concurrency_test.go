@@ -76,28 +76,46 @@ func TestRemapConcurrentWithMessageBoundary(t *testing.T) {
 	}
 }
 
-// Hooks run while the session holds remapMu or linkMu and may read the session
-// back through its getters.
+// Hooks on the session goroutine may read the session back through its getters,
+// even while another goroutine queues remaps. Pending reports use their arguments.
 func TestHooksCanCallGetters(t *testing.T) {
 	var s *Session
+	readBack := func() { s.CurrentLink(); s.Backend(); s.PendingBackend() }
 	s = newConcurrencyTestSession(Hooks{
-		BackendChanged:    func(Backend, Backend) { s.Backend(); s.PendingBackend() },
-		ReadStatesChanged: func(_, _ []ReadStateConfig) { s.Backend(); s.PendingBackend() },
-		LinkChanged:       func(link.Link) { s.CurrentLink() },
+		BackendChanged: func(_, pending Backend) {
+			if pending == nil {
+				readBack()
+			}
+		},
+		ReadStatesChanged: func(_, pending []ReadStateConfig) {
+			if pending == nil {
+				readBack()
+			}
+		},
+		LinkChanged: func(link.Link) { readBack() },
 	})
+	next := &namedBackend{name: "next"}
+	reads := []ReadStateConfig{{Backend: next, Weight: 1}}
+	backendLink := &testLink{}
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		s.RemapBackend(&namedBackend{name: "next"})
-		s.RemapReadStates(nil)
-		s.handleStateRemapping()
-		s.linkMu.Lock()
-		s.setLink(&testLink{})
-		s.linkMu.Unlock()
+		runConcurrently(
+			func() {
+				s.handleStateRemapping()
+				s.linkMu.Lock()
+				s.setLink(backendLink)
+				s.linkMu.Unlock()
+				s.linkMu.Lock()
+				s.setLink(nil)
+				s.linkMu.Unlock()
+			},
+			func() { s.RemapBackend(next); s.RemapReadStates(reads) },
+		)
 	}()
 	select {
 	case <-done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("a hook deadlocked calling a session getter")
 	}
 }

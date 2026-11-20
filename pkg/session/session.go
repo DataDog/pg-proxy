@@ -269,8 +269,9 @@ type Hooks struct {
 	BackendMessage       func(pgproto3.BackendMessage)
 	ClientFlushSucceeded func()
 	Closed               func()
-	// BackendChanged and ReadStatesChanged also run on the Remap* caller's
-	// goroutine to report the pending value, and must not call Remap* themselves.
+	// BackendChanged and ReadStatesChanged also report the pending value on the
+	// Remap* caller's goroutine while it holds remapMu. Those reports must use
+	// their arguments and must not call the session.
 	BackendChanged    func(current Backend, pending Backend)
 	ReadStatesChanged func(current []ReadStateConfig, pending []ReadStateConfig)
 	DiscardChanged    func(bool)
@@ -518,8 +519,8 @@ func (s *Session) TraceState() *query.TraceState {
 	return s.obsVals.traceState
 }
 
-// CurrentLink, Backend, and PendingBackend take no lock, so hooks can call them.
-// Call them only from the session goroutine or from a hook.
+// CurrentLink and Backend take no lock so that hooks can call them. Call them only
+// on the session goroutine, which runs every hook except the pending remap reports.
 func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
@@ -527,9 +528,13 @@ func (s *Session) ClientDisconnected() bool {
 func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 	return s.pStmtState
 }
-func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
-func (s *Session) Backend() Backend        { return s.backend }
-func (s *Session) PendingBackend() Backend { return s.remappedBackend }
+func (s *Session) DiscardUntilSync() bool { return s.discardUntilSync }
+func (s *Session) Backend() Backend       { return s.backend }
+func (s *Session) PendingBackend() Backend {
+	s.remapMu.Lock()
+	defer s.remapMu.Unlock()
+	return s.remappedBackend
+}
 func (s *Session) SetLivenessProbe(probe ClientLivenessProbe) {
 	s.livenessProbe = probe
 }
