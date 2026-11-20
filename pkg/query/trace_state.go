@@ -71,6 +71,11 @@ func (t *TraceState) AddMessage(msg interface{}) {
 	}
 }
 
+// AddRowsSize adds n encoded DataRow bytes to the trace's rowsTotalSize tag.
+func (t *TraceState) AddRowsSize(n int) {
+	t.rowsSize += n
+}
+
 func traceMessageType(msg interface{}) string {
 	switch msg.(type) {
 	case *pgproto3.AuthenticationCleartextPassword:

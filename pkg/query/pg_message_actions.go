@@ -46,9 +46,6 @@ type PgMessageAction struct {
 	// If ProxyMsgToClient is non-nil, the contained message will be proxied
 	// to the client connected to this Session.
 	ProxyMsgToClient pgproto3.BackendMessage
-	// Size of ProxyMsg in bytes, will be zero if it does not exist
-	// Used to determine the buffer size of PG messages that will be proxied to the client
-	ProxyMsgSize int
 	// If ResolveReplyExpectation is true, the next reply expectation on the
 	// SessionLink is now resolved.
 	ResolveReplyExpectation bool
@@ -75,7 +72,6 @@ type PgMessageAction struct {
 func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpectation, traceState *TraceState) (PgMessageAction, error) {
 	action := PgMessageAction{
 		ProxyMsgToClient: msg, // currently, we always transparently proxy the msg back to the client.
-		ProxyMsgSize:     getHeaderMessageByteSize(),
 	}
 	traceState.AddMessage(msg)
 
@@ -103,7 +99,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.CommandComplete:
-		action.ProxyMsgSize = getCommandCompleteByteSize(m)
 		if expectation == ExecuteReply {
 			action.ResolveReplyExpectation = true
 		} else if expectation == QueryReply {
@@ -127,7 +122,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 			traceState.FinishTrace()
 			traceState.StartTrace(DataRoundTrips)
 		}
-		action.ProxyMsgSize = getRowDescriptionByteSize(m)
 		if expectation == DescribeReply {
 			action.ResolveReplyExpectation = true
 		} else if expectation == QueryReply {
@@ -144,7 +138,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.ParameterDescription:
-		action.ProxyMsgSize = getParameterDescriptionByteSize(m)
 		if expectation == DescribeReply {
 			// don't clear expectation, this ParameterDescription is part of a larger DescribeReply
 		} else {
@@ -159,9 +152,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.DataRow:
-		msgSize := getDataRowByteSize(m)
-		action.ProxyMsgSize = msgSize
-		traceState.rowsSize += msgSize
 		traceState.rowsNumber++
 		if expectation == ExecuteReply || expectation == QueryReply {
 			// don't clear expectation, this DataRow is part of a larger ExecuteReply or QueryReply
@@ -170,7 +160,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.ReadyForQuery:
-		action.ProxyMsgSize = getReadyForQueryByteSize(m)
 		if expectation == QueryReply || expectation == SyncReply {
 			var err error
 			action.SetTxStatus, err = TxStatusFromByte(m.TxStatus)
@@ -185,23 +174,19 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 
 	case *pgproto3.NoticeResponse:
 		// A Notice can occur at any time. It is not part of any expectation. Proxy it on.
-		action.ProxyMsgSize = getNoticeResponseByteSize(m)
 
 	case *pgproto3.ParameterStatus:
 		// A ParameterStatus update can occur at any time, or as part of a side effect from a client's SET query.
 		// It is not part of any expectation. Proxy it on.
-		action.ProxyMsgSize = getParameterStatusByteSize(m)
 
 	case *pgproto3.ErrorResponse:
 		traceState.FinishTrace(fmt.Errorf("code %s: %s", m.Code, m.Message))
 		if m.Severity == "FATAL" {
 			// FATAL always closes the session; annotation happens in closeErrorResponse()
 			// to avoid double-appending the hint when the error is forwarded to the client.
-			action.ProxyMsgSize = getErrorResponseByteSize(m)
 			return PgMessageAction{}, pgconn.ErrorResponseToPgError(m)
 		}
 		annotateIfSwitchoverError(m)
-		action.ProxyMsgSize = getErrorResponseByteSize(m)
 		if expectation == ParseReply || expectation == BindReply || expectation == DescribeReply || expectation == ExecuteReply || expectation == CloseReply {
 			// This error was in response to an Extended Query Mode message. Postgres will discard all messages until a sync
 			action.DiscardUntilSync = true
@@ -214,7 +199,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.CopyData:
-		action.ProxyMsgSize = getCopyDataByteSize(m)
 		if expectation == QueryReply {
 			// don't clear expectation, this CopyData is part of a larger QueryReply
 		} else {
@@ -229,7 +213,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.CopyInResponse:
-		action.ProxyMsgSize = getCopyInResponseByteSize(m)
 		if expectation == QueryReply {
 			action.ResolveReplyExpectation = true // must flush Query, so need to resolve expectation
 		} else {
@@ -237,7 +220,6 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		}
 
 	case *pgproto3.CopyOutResponse:
-		action.ProxyMsgSize = getCopyOutResponseByteSize(m)
 		if expectation == QueryReply {
 			// don't clear expectation, this CopyOutResponse is part of a larger QueryReply
 		} else {
