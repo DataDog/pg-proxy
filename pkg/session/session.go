@@ -1436,7 +1436,7 @@ func (s *Session) flushPostgres() (bool, error) {
 				return discardedUntilSync, fmt.Errorf("error encoding message to forward to client: %w", encErr)
 			}
 			if _, ok := action.ProxyMsgToClient.(*pgproto3.DataRow); ok {
-				s.obsVals.traceState.AddRowsSize(len(encoded) - len(replyBuf))
+				s.obsVals.traceState.AddRow(len(encoded) - len(replyBuf))
 			}
 			replyBuf = encoded
 			flushClient = true

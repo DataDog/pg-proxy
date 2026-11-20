@@ -71,8 +71,10 @@ func (t *TraceState) AddMessage(msg interface{}) {
 	}
 }
 
-// AddRowsSize adds n encoded DataRow bytes to the trace's rowsTotalSize tag.
-func (t *TraceState) AddRowsSize(n int) {
+// AddRow records a DataRow of n encoded bytes forwarded to the client. The
+// trace's rowsReturned/Affected and rowsTotalSize tags count only these rows.
+func (t *TraceState) AddRow(n int) {
+	t.rowsNumber++
 	t.rowsSize += n
 }
 
