@@ -2407,7 +2407,7 @@ func TestSQLComparisonDoesNotRestoreRetiredTarget(t *testing.T) {
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}})
 	assert.Nil(t, late, "a completion after the last unsubscribe must not restore the target")
 	assert.NotContains(t, poolHealth.sqlComparisonLatest, target)
-	_, started, _ := poolHealth.reserveSQLComparisonPoll(target, now, poolHealth.currentSQLComparisonGeneration(target), true)
+	_, started, _ := poolHealth.reserveSQLComparisonPoll(target, now, poolHealth.currentSQLComparisonGeneration(target), true, 0)
 	assert.False(t, started, "a retired target cannot start another poll")
 
 	// A new subscription with the same tags has a distinct identity; the old role is gone.
@@ -2425,7 +2425,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	poolHealth := &PoolHealth{sqlHealthState: state}
 	target := &sqlHealthTarget{}
 	oldRound := time.Now()
-	generation, started, _ := poolHealth.reserveSQLComparisonPoll(target, oldRound, poolHealth.currentSQLComparisonGeneration(target), true)
+	generation, started, _ := poolHealth.reserveSQLComparisonPoll(target, oldRound, poolHealth.currentSQLComparisonGeneration(target), true, 0)
 	require.True(t, started)
 	poolHealth.recordSQLComparisonPoll(false, target, generation, oldRound, oldRound, []string{ip},
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
@@ -2438,7 +2438,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	assert.Empty(t, current.health, "disabling removes this credential's contribution to the aggregate")
 
 	// Re-enabling while the old check is busy cannot start a competing check.
-	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, oldRound.Add(time.Second), poolHealth.currentSQLComparisonGeneration(target), true)
+	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, oldRound.Add(time.Second), poolHealth.currentSQLComparisonGeneration(target), true, 0)
 	assert.False(t, started)
 	late := poolHealth.recordSQLComparisonPoll(false, target, generation, oldRound, oldRound.Add(time.Second), []string{ip},
 		SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip}}})
@@ -2447,7 +2447,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 
 	// Even a regressed wall clock is valid in the new lifecycle: no timestamp cutoff applies.
 	newRound := oldRound.Add(-time.Second)
-	freshGeneration, started, _ := poolHealth.reserveSQLComparisonPoll(target, newRound, poolHealth.currentSQLComparisonGeneration(target), true)
+	freshGeneration, started, _ := poolHealth.reserveSQLComparisonPoll(target, newRound, poolHealth.currentSQLComparisonGeneration(target), true, 0)
 	require.True(t, started)
 	require.NotEqual(t, generation, freshGeneration)
 	fresh := poolHealth.recordSQLComparisonPoll(false, target, freshGeneration, newRound, newRound, []string{ip},
@@ -2458,7 +2458,7 @@ func TestSQLComparisonRejectsPreDisableGenerationAfterReenable(t *testing.T) {
 	target.finishSQLRound(newRound)
 
 	poolHealth.retireSQLComparisonTarget(target)
-	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, newRound.Add(time.Second), freshGeneration, true)
+	_, started, _ = poolHealth.reserveSQLComparisonPoll(target, newRound.Add(time.Second), freshGeneration, true, 0)
 	assert.False(t, started, "a retired target cannot start another poll")
 }
 
@@ -2793,7 +2793,7 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 	require.False(t, health.sqlRoutingActive, "evicting every SQL candidate must restore Patroni ownership")
 	require.True(t, health.IsHealthy(standby))
 	assert.ElementsMatch(t, []string{primary, standby}, health.Snapshot().Resolved)
-	assert.False(t, health.sqlRoutingDisabled, "empty discovery must not latch the routing kill switch")
+	assert.True(t, health.hybridPolicy.isRoutingEnabled(), "empty discovery must not disable the routing mode")
 	require.Len(t, comparisons, 1, "restoring the same leader must not repeat its recovery comparison")
 	assert.Equal(t, standby, comparisons[0].NewLeaderIP)
 
@@ -2875,7 +2875,7 @@ func TestSQLRoutingDoesNotReplacePatroniDiscoveryState(t *testing.T) {
 	assert.ElementsMatch(t, []string{patroniPrimary, standby}, health.Snapshot().Resolved)
 }
 
-func TestSQLChecksDisableRoutingUntilHostStateIsRecreated(t *testing.T) {
+func TestSQLChecksCanReenableRoutingAfterFreshRound(t *testing.T) {
 	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
 	patroniProber := newMockProber(
 		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
@@ -2947,10 +2947,10 @@ func TestSQLChecksDisableRoutingUntilHostStateIsRecreated(t *testing.T) {
 	assert.True(t, health.IsHealthy(patroniPrimary), "the pre-disable round must not reactivate SQL routing")
 
 	w.RefreshSQL()
-	assert.True(t, health.IsHealthy(patroniPrimary), "re-enabling checks must not reactivate SQL routing without recreating host state")
+	assert.True(t, health.IsHealthy(sqlPrimary), "fresh checks can reactivate routing without host recreation")
 }
 
-func TestSQLRoutingFlagEvaluationFailureDoesNotLatchDisable(t *testing.T) {
+func TestSQLRoutingFlagEvaluationFailurePreservesMode(t *testing.T) {
 	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
 	patroniProber := newMockProber(
 		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
@@ -2983,8 +2983,6 @@ func TestSQLRoutingFlagEvaluationFailureDoesNotLatchDisable(t *testing.T) {
 
 	evaluation.Store(validSQLHealthFeatureFlag(true))
 	w.RefreshSQL()
-	assert.True(t, health.IsHealthy(patroniPrimary), "a poll scheduled before the mode transition must not publish")
-	w.RefreshSQL()
 	assert.False(t, health.IsHealthy(patroniPrimary), "a fresh poll may enable SQL after an earlier error")
 	assert.True(t, health.IsHealthy(sqlPrimary))
 
@@ -2998,10 +2996,10 @@ func TestSQLRoutingFlagEvaluationFailureDoesNotLatchDisable(t *testing.T) {
 
 	evaluation.Store(validSQLHealthFeatureFlag(true))
 	w.RefreshSQL()
-	assert.True(t, health.IsHealthy(patroniPrimary), "the intentional disable remains sticky until host recreation")
+	assert.True(t, health.IsHealthy(sqlPrimary), "a fresh poll can re-enable routing")
 }
 
-func TestSQLRoutingFlagDisableRejectsBlockedRoundAndStaysDisabled(t *testing.T) {
+func TestSQLRoutingFlagDisableRejectsBlockedRoundAndAllowsFreshReenable(t *testing.T) {
 	const patroniPrimary, sqlPrimary = "10.0.0.1", "10.0.0.2"
 	patroniProber := newMockProber(
 		map[string][]string{"primary.local": {patroniPrimary, sqlPrimary}},
@@ -3073,7 +3071,7 @@ func TestSQLRoutingFlagDisableRejectsBlockedRoundAndStaysDisabled(t *testing.T) 
 	assert.True(t, health.IsHealthy(patroniPrimary), "the pre-transition round must not reactivate SQL routing")
 
 	w.RefreshSQL()
-	assert.True(t, health.IsHealthy(patroniPrimary), "a fresh round cannot reactivate SQL routing until host state is recreated")
+	assert.True(t, health.IsHealthy(sqlPrimary), "a fresh round may reactivate routing after re-enable")
 }
 
 func TestRemovingLastSQLTargetRestoresPatroniRouting(t *testing.T) {
@@ -3233,7 +3231,7 @@ func TestPatroniPromotionDuringFallbackTelemetryCannotBeOverwritten(t *testing.T
 	assert.False(t, health.IsHealthy(oldIP))
 }
 
-func TestRoutingDisableSurvivesSQLTargetRecreation(t *testing.T) {
+func TestSQLTargetRecreationCanResumeFreshRouting(t *testing.T) {
 	const patroniIP, sqlIP = "10.0.0.1", "10.0.0.2"
 	w := newTestWorker(newMockProber(map[string][]string{"primary.local": {patroniIP, sqlIP}}, patroniIP))
 	w.newSQLChecker = func(context.Context) *SQLHealthChecker {
@@ -3252,8 +3250,8 @@ func TestRoutingDisableSurvivesSQLTargetRecreation(t *testing.T) {
 	replacement := w.Subscribe("primary.local", false, "db", nil, cfg)
 	t.Cleanup(func() { w.Unsubscribe(replacement); w.Unsubscribe(patroniOnly) })
 	w.RefreshSQL()
-	assert.True(t, health.IsHealthy(patroniIP), "recreating a target must not reset the host's latched disable")
-	assert.False(t, health.IsHealthy(sqlIP))
+	assert.False(t, health.IsHealthy(patroniIP))
+	assert.True(t, health.IsHealthy(sqlIP), "a replacement target may supply a fresh route")
 }
 
 func TestDisableRestoresRawPatroniFromFilteredFallback(t *testing.T) {
@@ -3294,13 +3292,13 @@ func TestDisableRestoresRawPatroniFromFilteredFallback(t *testing.T) {
 				w.Unsubscribe(sqlUpdates)
 			} else {
 				enabled.Store(false)
-				w.syncSQLRoutingKillSwitch(health)
+				w.syncSQLRoutingMode(health)
 			}
 			require.True(t, health.IsHealthy(a), "disable must restore raw Patroni without another probe")
 			assert.False(t, health.IsHealthy(b))
 			assert.False(t, health.hybridPolicy.isRoutingEnabled())
 			require.Same(t, health, receivePoolHealth(t, patroniUpdates))
-			w.syncSQLRoutingKillSwitch(health)
+			w.syncSQLRoutingMode(health)
 			select {
 			case <-patroniUpdates:
 				t.Fatal("an already-disabled policy must not republish routing")
@@ -3860,7 +3858,7 @@ func TestPartialSQLShutdownRejectsInvalidPoll(t *testing.T) {
 			case "retired":
 				health.retireSQLComparisonTarget(target)
 			case "routing mode changed":
-				health.routingChangedAt = scheduledAt.Add(time.Second)
+				health.routingGeneration++
 			}
 			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
 				RoutingBanChanged: func(SQLRoutingBanChange, []string) { t.Error("invalid poll reported a ban") },

@@ -48,13 +48,13 @@ type HealthUpdates <-chan *PoolHealth
 // SQLHealthConfig enables centralized SQL checks for one health subscription.
 type SQLHealthConfig struct {
 	ConnStringForIP func(ip string) string
-	// ChecksEnabled is evaluated before each SQL poll. A valid false also restores Patroni
-	// routing and latches SQL routing off until host recreation. Invalid evaluations use the
-	// callback's last-known value for probing. Nil preserves enabled checks.
+	// ChecksEnabled is evaluated before each SQL poll. When no target has enabled checks,
+	// Patroni supplies routing. Invalid evaluations use the callback's last-known value for
+	// probing. Nil preserves enabled checks.
 	ChecksEnabled func(context.Context) SQLHealthFeatureFlagEvaluation
 	// RoutingEnabled allows conclusive aggregated SQL snapshots to own client routing. A valid
-	// false latches routing off until host recreation (normally a restart); invalid evaluations
-	// preserve the current mode. Nil keeps Patroni authoritative.
+	// false restores Patroni immediately; a later valid true permits fresh SQL polls to take
+	// ownership again. Invalid evaluations preserve the current mode. Nil keeps Patroni authoritative.
 	RoutingEnabled func(context.Context) SQLHealthFeatureFlagEvaluation
 }
 
@@ -138,6 +138,7 @@ type HealthWorkerHooks struct {
 // SQLHealthResultsSnapshot is one credential target's raw result set for retained IPs. Errors remain wrapped
 // so observability hooks can inspect PostgreSQL SQLSTATEs and errors.Is/errors.As chains.
 type SQLHealthResultsSnapshot struct {
+	routingGeneration uint64
 	// StartedAt is the probe start time used to order evidence against Patroni recovery.
 	StartedAt    time.Time
 	ScheduledAt  time.Time
@@ -317,11 +318,16 @@ type PoolHealth struct {
 	subscriptionTargets map[HealthUpdates]*sqlHealthTarget
 	// routingMu protects the policy pointer, routing mode, Patroni cache updates, and publication.
 	// Lock order: sqlMu -> sqlComparisonMu -> routingMu; none may cover network probes or hooks.
-	routingMu          sync.Mutex
-	sqlRoutingDisabled bool // A live disable remains latched until this host is recreated.
-	sqlRoutingActive   bool // Conclusive or retained SQL owns routing; Patroni decisions can recover it.
-	routingChangedAt   time.Time
-	// The policy survives removal of SQL targets so re-subscription cannot reset the kill switch.
+	routingMu                sync.Mutex
+	sqlRoutingActive         bool // Conclusive or retained SQL owns routing; Patroni decisions can recover it.
+	routingGeneration        uint64
+	routingRequested         bool
+	sqlChecksDisabled        bool
+	routingTargetsAbsent     bool
+	routingEvaluationIssued  uint64
+	routingEvaluationApplied uint64
+	// The policy and evaluation ordering survive target removal; a late evaluation
+	// cannot reactivate routing after its last target has retired.
 	hybridPolicy     *hybridHealthPolicy
 	routingEnabledFn func(context.Context) SQLHealthFeatureFlagEvaluation
 }
@@ -367,6 +373,13 @@ func (s *PoolHealth) currentSQLComparisonGeneration(target *sqlHealthTarget) uin
 	return target.sqlComparisonGeneration
 }
 
+func (s *PoolHealth) beginSQLChecksEvaluation(target *sqlHealthTarget) (uint64, uint64) {
+	s.sqlComparisonMu.Lock()
+	defer s.sqlComparisonMu.Unlock()
+	target.sqlChecksEvaluationIssued++
+	return target.sqlComparisonGeneration, target.sqlChecksEvaluationIssued
+}
+
 // reserveSQLComparisonPoll validates the lifecycle captured before flag evaluation. Its final
 // result distinguishes a stale evaluation from a current tick that finds an active SQL round.
 // Disabling and reservation are atomic so an older enabled evaluation cannot adopt a new lifecycle.
@@ -375,17 +388,20 @@ func (s *PoolHealth) reserveSQLComparisonPoll(
 	scheduledAt time.Time,
 	expectedGeneration uint64,
 	enabled bool,
+	evaluationSequence uint64,
 ) (generation uint64, started bool, current bool) {
 	s.sqlComparisonMu.Lock()
 	defer s.sqlComparisonMu.Unlock()
-	if !target.acceptsSQLRoundLocked(expectedGeneration) {
+	if !target.acceptsSQLRoundLocked(expectedGeneration) || evaluationSequence < target.sqlChecksEvaluationApplied {
 		return 0, false, false
 	}
+	target.sqlChecksEvaluationApplied = evaluationSequence
 	if !enabled {
 		target.sqlComparisonGeneration++
 		s.resetSQLPotentialTargetLocked(target)
 		delete(s.sqlComparisonLatest, target)
 	}
+	target.sqlChecksEnabled = enabled
 	return target.sqlComparisonGeneration, target.tryStartSQLRound(scheduledAt), true
 }
 
@@ -457,12 +473,13 @@ func (s *PoolHealth) recordSQLComparisonPollLocked(
 		return !retained
 	})
 	s.sqlComparisonLatest[target] = SQLHealthResultsSnapshot{
-		StartedAt:    outcome.StartedAt,
-		ScheduledAt:  scheduledAt,
-		ObservedAt:   observedAt,
-		CandidateIPs: retainedCandidates,
-		Tags:         slices.Clone(target.tags),
-		Results:      retainedResults,
+		routingGeneration: outcome.routingGeneration,
+		StartedAt:         outcome.StartedAt,
+		ScheduledAt:       scheduledAt,
+		ObservedAt:        observedAt,
+		CandidateIPs:      retainedCandidates,
+		Tags:              slices.Clone(target.tags),
+		Results:           retainedResults,
 	}
 
 	snapshot := buildSQLHealthComparisonSnapshot(retainedIPs, s.sqlComparisonLatest)
@@ -562,8 +579,11 @@ type sqlHealthTarget struct {
 	// the target's raw result in the host-level comparison cache.
 	// Both fields are protected by PoolHealth.sqlComparisonMu. Disabling advances the generation
 	// so a pre-disable completion is rejected even after re-enable; retirement is permanent.
-	sqlComparisonRetired    bool
-	sqlComparisonGeneration uint64
+	sqlComparisonRetired       bool
+	sqlComparisonGeneration    uint64
+	sqlChecksEnabled           bool // Protected by PoolHealth.sqlComparisonMu.
+	sqlChecksEvaluationIssued  uint64
+	sqlChecksEvaluationApplied uint64
 
 	// sqlRoundMu protects the active round separately from sqlCheckMu so the scheduler can decide
 	// whether a missed tick represents unavailability while a SQL probe is still running.
@@ -668,17 +688,25 @@ func (w *HealthWorker) Subscribe(host string, isReadReplica bool, dbName string,
 		w.hosts[host] = poolHealth
 	}
 	var target *sqlHealthTarget
+	var refreshRouting bool
 	if sqlEnabled {
 		connectionStringHash := sqlConnectionStringHash(host, sql)
 		poolHealth.sqlMu.Lock()
 		poolHealth.routingMu.Lock()
 		if poolHealth.hybridPolicy == nil {
-			enabled := routingEvaluation.Valid && routingEvaluation.Enabled && !poolHealth.sqlRoutingDisabled
+			enabled := routingEvaluation.Valid && routingEvaluation.Enabled
 			poolHealth.hybridPolicy = newHybridHealthPolicy(enabled)
 			poolHealth.routingEnabledFn = sql.RoutingEnabled
-			poolHealth.sqlRoutingDisabled = poolHealth.sqlRoutingDisabled || (routingEvaluation.Valid && !routingEvaluation.Enabled)
-			poolHealth.routingChangedAt = time.Now()
+			poolHealth.routingRequested = enabled
 			poolHealth.hybridPolicy.observePatroni(poolHealth.patroniHealthState.Snapshot().Health, time.Now())
+		} else if poolHealth.routingTargetsAbsent {
+			poolHealth.routingTargetsAbsent = false
+			poolHealth.sqlChecksDisabled = false
+			poolHealth.routingEnabledFn = sql.RoutingEnabled
+			poolHealth.routingRequested = false
+			poolHealth.routingEvaluationIssued++
+			poolHealth.routingEvaluationApplied = poolHealth.routingEvaluationIssued
+			refreshRouting = true
 		}
 		poolHealth.routingMu.Unlock()
 		for _, existing := range poolHealth.subscriptionTargets {
@@ -718,6 +746,11 @@ func (w *HealthWorker) Subscribe(host string, isReadReplica bool, dbName string,
 	}
 	w.subscriptions[subscription] = &healthSubscription{poolHealth: poolHealth, sqlTarget: target}
 	w.mu.Unlock()
+	if refreshRouting {
+		// Re-evaluate after attaching the new target. The evaluation performed before
+		// Subscribe acquired the host cannot override newer observations on that host.
+		w.syncSQLRoutingMode(poolHealth)
+	}
 
 	if w.hooks.Subscriptions != nil {
 		w.hooks.Subscriptions(subscriptionCount, tags)
@@ -766,7 +799,8 @@ func (w *HealthWorker) Unsubscribe(subscription HealthUpdates) {
 	close(updates)
 	w.mu.Unlock()
 	if record.sqlTarget != nil {
-		poolHealth.removeSQLTarget(record.sqlTarget, subscription)
+		decision := poolHealth.removeSQLTarget(record.sqlTarget, subscription)
+		w.reportHybridDecision(poolHealth, decision, false)
 	}
 	if w.hooks.Subscriptions != nil {
 		w.hooks.Subscriptions(subscriptionCount, poolHealth.tags)
@@ -834,49 +868,80 @@ func (s *PoolHealth) routingPolicy() (*hybridHealthPolicy, func(context.Context)
 	return s.hybridPolicy, s.routingEnabledFn
 }
 
-// syncSQLRoutingKillSwitch calls external flag evaluation outside all state locks. A valid disable
-// wins over concurrent/stale enables. An evaluation error cannot change the last accepted mode.
-func (w *HealthWorker) syncSQLRoutingKillSwitch(s *PoolHealth) {
-	_, evaluate := s.routingPolicy()
-	if evaluate == nil {
+// syncSQLRoutingMode evaluates outside state locks. Sequence numbers order evaluations
+// by their start, so an older result cannot overwrite a newer completed evaluation.
+func (w *HealthWorker) syncSQLRoutingMode(s *PoolHealth) {
+	s.routingMu.Lock()
+	evaluate := s.routingEnabledFn
+	if s.hybridPolicy == nil || evaluate == nil {
+		s.routingMu.Unlock()
 		return
 	}
+	s.routingEvaluationIssued++
+	sequence := s.routingEvaluationIssued
+	s.routingMu.Unlock()
+
 	evaluation := evaluate(context.Background())
 	s.routingMu.Lock()
-	defer s.routingMu.Unlock()
-	if s.hybridPolicy == nil || !evaluation.Valid {
+	if sequence < s.routingEvaluationApplied {
+		s.routingMu.Unlock()
 		return
 	}
-	if !evaluation.Enabled {
-		s.disableSQLRoutingLocked()
+	s.routingEvaluationApplied = sequence
+	if !evaluation.Valid {
+		s.routingMu.Unlock()
 		return
 	}
-	if !s.sqlRoutingDisabled && !s.hybridPolicy.isRoutingEnabled() {
-		s.hybridPolicy.setRoutingEnabled(true)
-		s.routingChangedAt = time.Now()
-	}
+	s.routingRequested = evaluation.Enabled
+	decision := s.reconcileSQLRoutingModeLocked()
+	s.routingMu.Unlock()
+	w.reportHybridDecision(s, decision, false)
 }
 
-// disableSQLRoutingLocked requires routingMu; it must not wait for an in-flight SQL probe.
-func (s *PoolHealth) disableSQLRoutingLocked() {
-	routingWasEnabled := s.hybridPolicy != nil && s.hybridPolicy.isRoutingEnabled()
-	s.sqlRoutingDisabled = true
-	if routingWasEnabled {
-		s.hybridPolicy.setRoutingEnabled(false)
-		s.routingChangedAt = time.Now()
+// reconcileSQLRoutingModeLocked requires routingMu. A transition invalidates routing
+// evidence without discarding the independent DNS and raw SQL comparison state.
+func (s *PoolHealth) reconcileSQLRoutingModeLocked() hybridRoutingDecision {
+	policy := s.hybridPolicy
+	enabled := s.routingRequested && !s.sqlChecksDisabled && !s.routingTargetsAbsent
+	if policy == nil || policy.isRoutingEnabled() == enabled {
+		return hybridRoutingDecision{}
 	}
-	if s.sqlRoutingActive || routingWasEnabled {
-		s.sqlRoutingActive = false
+	changes := policy.setRoutingEnabled(enabled)
+	s.routingGeneration++
+	s.sqlRoutingActive = false
+	if !enabled {
 		snapshot := s.patroniHealthState.Snapshot()
 		s.publishRoutingSnapshot(snapshot.Health, snapshot.Resolved)
 	}
+	return hybridRoutingDecision{routingEnabled: enabled, routingBanChanges: changes, routingGeneration: s.routingGeneration}
+}
+
+// SQL-check evaluations are accepted under sqlComparisonMu. Read their current
+// values under the same lock so a slower scheduler cannot undo a newer disable.
+func (w *HealthWorker) syncSQLChecksRoutingMode(group sqlHealthGroup) uint64 {
+	s := group.poolHealth
+	s.sqlComparisonMu.Lock()
+	enabled := false
+	for _, target := range group.targets {
+		if !target.sqlComparisonRetired && target.sqlChecksEnabled {
+			enabled = true
+		}
+	}
+	s.routingMu.Lock()
+	s.sqlChecksDisabled = !enabled
+	decision := s.reconcileSQLRoutingModeLocked()
+	generation := s.routingGeneration
+	s.routingMu.Unlock()
+	s.sqlComparisonMu.Unlock()
+	w.reportHybridDecision(s, decision, false)
+	return generation
 }
 
 // applyPatroniHealth advances Patroni independently, even while SQL owns client routing. Cache
 // updates and publication share routingMu with SQL fallback selection, preventing stale fallback
 // copies from overwriting a newer Patroni observation.
 func (w *HealthWorker) applyPatroniHealth(s *PoolHealth, health map[string]bool, systemIDs map[string]string, resolved []string, observedAt time.Time) {
-	w.syncSQLRoutingKillSwitch(s)
+	w.syncSQLRoutingMode(s)
 	var evicted []string
 	var decision hybridRoutingDecision
 	s.routingMu.Lock()
@@ -897,6 +962,7 @@ func (w *HealthWorker) applyPatroniHealth(s *PoolHealth, health map[string]bool,
 			}
 		}
 	}
+	decision.routingGeneration = s.routingGeneration
 	s.routingMu.Unlock()
 	for _, ip := range evicted {
 		if w.hooks.Evicted != nil {
@@ -1064,27 +1130,22 @@ func (w *HealthWorker) runSQLHealthGroup(
 	waitForStartedChecks bool,
 ) {
 	ctx := context.Background()
-	w.syncSQLRoutingKillSwitch(group.poolHealth)
+	w.syncSQLRoutingMode(group.poolHealth)
 
 	// Reserve each idle credential target before DNS discovery. A later tick can therefore report a
 	// missed or disabled interval immediately instead of queuing behind a slow lookup.
 	startedPlans := make([]sqlHealthCheckPlan, 0, len(group.targets))
 	checksEnabled := false
 	for _, target := range group.targets {
-		generation := group.poolHealth.currentSQLComparisonGeneration(target)
+		generation, sequence := group.poolHealth.beginSQLChecksEvaluation(target)
 		evaluation := SQLHealthFeatureFlagEvaluation{Enabled: true, Valid: true}
 		if target.checksEnabled != nil {
 			evaluation = target.checksEnabled(ctx)
 		}
 		enabled := evaluation.Enabled
-		generation, started, current := group.poolHealth.reserveSQLComparisonPoll(target, scheduledAt, generation, enabled)
+		generation, started, current := group.poolHealth.reserveSQLComparisonPoll(target, scheduledAt, generation, enabled, sequence)
 		if !current {
 			continue
-		}
-		if evaluation.Valid && !enabled {
-			group.poolHealth.routingMu.Lock()
-			group.poolHealth.disableSQLRoutingLocked()
-			group.poolHealth.routingMu.Unlock()
 		}
 		plan := sqlHealthCheckPlan{target: target, enabled: enabled, generation: generation}
 		if !started {
@@ -1109,6 +1170,7 @@ func (w *HealthWorker) runSQLHealthGroup(
 		}
 		startedPlans = append(startedPlans, plan)
 	}
+	routingGeneration := w.syncSQLChecksRoutingMode(group)
 	if len(startedPlans) == 0 {
 		return
 	}
@@ -1134,6 +1196,7 @@ func (w *HealthWorker) runSQLHealthGroup(
 			defer plan.target.finishSQLRound(scheduledAt)
 			outcome, completed := w.checkSQLHealth(plan.target, toProbe, plan.enabled, scheduledAt)
 			if plan.enabled && completed {
+				outcome.routingGeneration = routingGeneration
 				w.completeSQLHealthCheck(plan.target, plan.generation, scheduledAt, toProbe, resolvedSet, outcome)
 			}
 		}(plan)
@@ -1158,7 +1221,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 	observedAt := time.Now()
 	poolHealth := target.poolHealth
 	// External flag evaluation must not run under the snapshot/invalidation lock.
-	w.syncSQLRoutingKillSwitch(poolHealth)
+	w.syncSQLRoutingMode(poolHealth)
 	var snapshot *sqlHealthComparisonSnapshot
 	var decision hybridRoutingDecision
 	applied := func() bool {
@@ -1180,28 +1243,23 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		// A delayed success can restore an IP evicted by DNS while the probe was running.
 		// Capture membership and roles only after that retention update.
 		snapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
+		poolHealth.routingMu.Lock()
+		defer poolHealth.routingMu.Unlock()
+		defer func() { decision.routingGeneration = poolHealth.routingGeneration }()
+		policy := poolHealth.hybridPolicy
+		if policy == nil || outcome.routingGeneration != poolHealth.routingGeneration {
+			return false // A poll spanning a mode transition cannot affect the new mode.
+		}
 		if len(snapshot.retainedIPs) == 0 {
-			poolHealth.routingMu.Lock()
-			if policy := poolHealth.hybridPolicy; policy != nil && !scheduledAt.Before(poolHealth.routingChangedAt) {
-				decision = policy.clearRoutingBansForEmptyDiscovery()
-			}
+			decision = policy.clearRoutingBansForEmptyDiscovery()
 			if poolHealth.sqlRoutingActive {
 				poolHealth.sqlRoutingActive = false
 				patroniHealth := poolHealth.patroniHealthState.Snapshot()
 				poolHealth.publishRoutingSnapshot(patroniHealth.Health, patroniHealth.Resolved)
-				if policy := poolHealth.hybridPolicy; policy != nil {
-					decision.routingEnabled = policy.isRoutingEnabled()
-					decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth.Health, time.Now())
-				}
+				decision.routingEnabled = policy.isRoutingEnabled()
+				decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth.Health, time.Now())
 			}
-			poolHealth.routingMu.Unlock()
 			return false
-		}
-		poolHealth.routingMu.Lock()
-		defer poolHealth.routingMu.Unlock()
-		policy := poolHealth.hybridPolicy
-		if policy == nil || scheduledAt.Before(poolHealth.routingChangedAt) {
-			return false // A poll spanning a mode transition cannot affect the new mode.
 		}
 		fresh := SQLHealthResultsSnapshot{
 			StartedAt: outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt, Results: outcome.Results,
@@ -1222,6 +1280,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		}
 		outcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
 		for _, credential := range snapshot.results {
+			if credential.routingGeneration != poolHealth.routingGeneration {
+				continue
+			}
 			var results []SQLHealthCheckResult
 			for _, result := range credential.Results {
 				if slices.Contains(snapshot.retainedIPs, result.IP) {
@@ -1329,7 +1390,12 @@ func (w *HealthWorker) reportHybridDecision(
 		}, tags)
 	}
 	if decision.routingComparison != nil && w.sqlHooks.LeaderRoutingCompared != nil {
-		w.sqlHooks.LeaderRoutingCompared(*decision.routingComparison, tags)
+		poolHealth.routingMu.Lock()
+		current := decision.routingGeneration == poolHealth.routingGeneration
+		poolHealth.routingMu.Unlock()
+		if current {
+			w.sqlHooks.LeaderRoutingCompared(*decision.routingComparison, tags)
+		}
 	}
 	if w.sqlHooks.RoutingBanChanged != nil {
 		for _, change := range decision.routingBanChanges {
@@ -1424,7 +1490,8 @@ func (w *HealthWorker) checkSQLHealth(
 	return outcome, checksEnabled && (ok || writablePublished.Load())
 }
 
-func (s *PoolHealth) removeSQLTarget(target *sqlHealthTarget, subscription HealthUpdates) {
+func (s *PoolHealth) removeSQLTarget(target *sqlHealthTarget, subscription HealthUpdates) hybridRoutingDecision {
+	var decision hybridRoutingDecision
 	s.sqlMu.Lock()
 	delete(s.subscriptionTargets, subscription)
 	if target.refcount > 0 {
@@ -1440,7 +1507,8 @@ func (s *PoolHealth) removeSQLTarget(target *sqlHealthTarget, subscription Healt
 		delete(s.sqlComparisonLatest, target)
 		if len(s.subscriptionTargets) == 0 {
 			s.routingMu.Lock()
-			s.disableSQLRoutingLocked()
+			s.routingTargetsAbsent = true
+			decision = s.reconcileSQLRoutingModeLocked()
 			s.routingMu.Unlock()
 		}
 		s.sqlComparisonMu.Unlock()
@@ -1449,6 +1517,7 @@ func (s *PoolHealth) removeSQLTarget(target *sqlHealthTarget, subscription Healt
 	if retired {
 		target.closeSQL()
 	}
+	return decision
 }
 
 func (s *PoolHealth) closeSQL() {

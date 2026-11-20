@@ -198,11 +198,40 @@ These updates can also restore routing without waiting for SQL to finish:
 | 5. Recovery is already active | Follow later filtered Patroni results, including losing the leader, until a newer-started SQL snapshot arrives. | Move the time barrier when Patroni's leader or one-leader status changes. Repeated reports of the same state do not move it. |
 | 6. None of the above | Keep SQL's route if SQL still owns routing. During fallback, continue publishing filtered Patroni updates. | An unchanged old A does not clear A's exclusion or replace SQL's B. |
 
-Changing routing mode clears this leader history and routing timing, but keeps the
-Patroni cache. Disabling SQL routing immediately restores raw Patroni results,
-even if filtered fallback had already stopped SQL ownership. The worker latches a
-disable for that `PoolHealth`; these reset rules do not mean it can dynamically
-turn SQL routing back on for that same instance.
+### Dynamic routing flags
+
+The routing flag can turn hybrid routing on and off without recreating the host.
+A valid disable immediately restores the complete, unfiltered Patroni snapshot,
+even if filtered fallback had already stopped SQL ownership. Patroni alone supplies
+routing while disabled. SQL checks and raw comparison metrics can continue in
+shadow mode; DNS retention and the live Patroni cache are preserved.
+
+Each actual mode transition clears leadership retention/exclusions, Patroni
+recovery state, routing bans, pending timing comparisons, and the open downtime
+window. Clearing a ban emits an unban with reason `routing_mode_changed`. Shadow
+checks can record new diagnostic bans while routing is off, but these cannot
+filter Patroni and are cleared again on enable.
+
+Routing-flag evaluations are ordered by when they start. An older evaluation cannot
+overwrite a newer completed evaluation; an invalid evaluation keeps the last
+accepted routing mode. Each mode change also advances a routing generation.
+Per-credential checks evaluations use their own ordering boundary, so an older
+checks disable cannot invalidate a newer enable.
+Polls capture that generation before discovery/probing. Old completions remain
+available to raw SQL comparisons, but cannot select routes or mutate bans, even
+after an off/on cycle. Routing aggregates exclude other credentials' snapshots
+from older generations too.
+
+Re-enabling preserves Patroni ownership until a fresh complete SQL decision can
+take over. No active SQL targets, or no targets with enabled checks, keeps routing
+on Patroni. Recreating a target or re-enabling its checks permits fresh routing
+again; neither can reuse pre-transition evidence.
+
+After enable, routing timing waits for fresh SQL evidence agreeing with a unique
+Patroni leader. That agreement establishes a baseline and emits no comparison.
+Subsequent failovers are timed normally, so off-mode time and the enable handoff
+cannot become a downtime or speedup sample. A queued routing comparison from an
+older generation is discarded before hook delivery.
 
 ### Examples and limits
 

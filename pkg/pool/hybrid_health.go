@@ -53,6 +53,7 @@ type LeaderRoutingComparison struct {
 }
 
 type hybridRoutingDecision struct {
+	routingGeneration uint64
 	// Capture the mode with the decision; hooks run after the policy lock is released.
 	routingEnabled bool
 	routingResult  string
@@ -109,9 +110,10 @@ type hybridHealthPolicy struct {
 	// Bound this history to current candidates; delayed Patroni B must not replace C.
 	supersededSQLLeaders map[string]struct{}
 
-	routingTiming            leaderTiming[routingTimingData]
-	routingDowntimeStartedAt time.Time
-	routingBannedIPs         sqlRoutingBanlist
+	routingTiming              leaderTiming[routingTimingData]
+	routingDowntimeStartedAt   time.Time
+	routingTimingNeedsBaseline bool
+	routingBannedIPs           sqlRoutingBanlist
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
@@ -134,14 +136,20 @@ func (p *hybridHealthPolicy) isRoutingEnabled() bool {
 	return p.routingEnabled
 }
 
-func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
+func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) []SQLRoutingBanChange {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	var changes []SQLRoutingBanChange
 	if p.routingEnabled != enabled {
+		for _, ip := range slices.Sorted(maps.Keys(p.routingBannedIPs)) {
+			changes = append(changes, SQLRoutingBanChange{IP: ip, Reason: SQLRoutingUnbanReasonRoutingModeChanged})
+		}
+		clear(p.routingBannedIPs)
 		// Comparisons cannot span periods where SQL routing evaluation was disabled. Reset both
 		// baselines so the next observations establish a fresh pair under the new flag state.
 		p.routingTiming = leaderTiming[routingTimingData]{}
 		p.routingDowntimeStartedAt = time.Time{}
+		p.routingTimingNeedsBaseline = enabled
 		// Leadership history belongs to one uninterrupted routing mode. Keep the
 		// latest Patroni snapshot for fallback, but do not carry retention,
 		// exclusions, or recovery decisions across a flag transition.
@@ -156,6 +164,7 @@ func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
 		p.patroniLeaderChangedAt = time.Time{}
 	}
 	p.routingEnabled = enabled
+	return changes
 }
 
 // observePatroni refreshes the fallback snapshot. Patroni remains authoritative in shadow mode;
@@ -346,6 +355,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		fallbackReason, timeoutType = SQLHealthFallbackStaleEvidence, SQLHealthTimeoutNone
 	}
 	p.patroniRecoveryActive = false
+	p.establishRoutingTimingBaselineLocked(routingOutcome, fallbackReason, observedAt)
 	for ip := range p.supersededSQLLeaders {
 		if !slices.Contains(candidateIPs, ip) {
 			delete(p.supersededSQLLeaders, ip)
@@ -676,6 +686,22 @@ func singleHealthyIP(health map[string]bool) (string, bool) {
 	return leader, leader != ""
 }
 
+// The first SQL/Patroni agreement after enabling is a baseline, not a failover.
+// Routing may recover before this agreement, but its warm-up is not timed.
+func (p *hybridHealthPolicy) establishRoutingTimingBaselineLocked(outcome SQLHealthCheckOutcome, fallbackReason string, observedAt time.Time) {
+	if !p.routingTimingNeedsBaseline || outcome.StartedAt.IsZero() || fallbackReason != "" || len(outcome.PrimaryIPs) != 1 {
+		return
+	}
+	leader, unique := singleHealthyIP(p.patroniHealth)
+	if !unique || outcome.PrimaryIPs[0] != leader {
+		return
+	}
+	p.routingTiming = leaderTiming[routingTimingData]{}
+	p.routingTiming.observe(referenceLeaderSource, p.patroniHealth, observedAt, routingTimingData{}, oneHealthyLeader)
+	p.routingTiming.observe(candidateLeaderSource, p.patroniHealth, observedAt, routingTimingData{}, oneHealthyLeader)
+	p.routingTimingNeedsBaseline = false
+}
+
 func (p *hybridHealthPolicy) recordRoutingLeaderLocked(source string, health map[string]bool, observedAt time.Time, hybridSource string) *LeaderRoutingComparison {
 	side := referenceLeaderSource
 	switch source {
@@ -686,6 +712,11 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(source string, health map
 		return nil
 	}
 	data := routingTimingData{source: hybridSource}
+	if p.routingTimingNeedsBaseline {
+		p.routingTiming.observe(side, health, observedAt, data, oneHealthyLeader)
+		clear(p.routingTiming.pending)
+		return nil
+	}
 	if side == candidateLeaderSource {
 		data.downtimeStartedAt = p.recordRoutingDowntimeLocked(health, observedAt)
 	}
