@@ -26,7 +26,11 @@ import (
 // sessions share backend connections, and an open transaction pins its backend
 // connection until it ends. With max_conns=1 both properties are observable.
 func TestTransactionPooling(t *testing.T) {
-	connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
+	forEachExecMode(t, testTransactionPooling)
+}
+
+func testTransactionPooling(t *testing.T, mode string) {
+	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -85,7 +89,11 @@ func TestTransactionPooling(t *testing.T) {
 // leak to the next client on the same backend connection: the proxy resets
 // session state when it releases a connection at a transaction boundary.
 func TestSessionStateIsolation(t *testing.T) {
-	connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
+	forEachExecMode(t, testSessionStateIsolation)
+}
+
+func testSessionStateIsolation(t *testing.T, mode string) {
+	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -223,43 +231,45 @@ func TestSessionIdentityIsolation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			proxy := itest.MustStartProxy(t, test.config)
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
+			forEachExecMode(t, func(t *testing.T, mode string) {
+				connStr := withExecMode(t, itest.MustStartProxy(t, test.config).URL(dbPooled, test.user), mode)
+				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+				defer cancel()
 
-			const identity = "SELECT current_user, session_user, pg_backend_pid()"
+				const identity = "SELECT current_user, session_user, pg_backend_pid()"
 
-			// Record the login identity (what a reset restores) and the backend PID.
-			baseConn, err := proxy.Connect(ctx, dbPooled, test.user)
-			require.NoError(t, err, "baseline connect")
-			var baseCurrent, baseSession string
-			var basePID uint32
-			require.NoError(t, baseConn.QueryRow(ctx, identity).Scan(&baseCurrent, &baseSession, &basePID))
-			require.Equal(t, test.wantCurrent, baseCurrent, "baseline current_user")
-			require.Equal(t, test.user, baseSession, "baseline session_user")
-			require.NoError(t, baseConn.Close(ctx))
+				// Record the login identity (what a reset restores) and the backend PID.
+				baseConn, err := pgx.Connect(ctx, connStr)
+				require.NoError(t, err, "baseline connect")
+				var baseCurrent, baseSession string
+				var basePID uint32
+				require.NoError(t, baseConn.QueryRow(ctx, identity).Scan(&baseCurrent, &baseSession, &basePID))
+				require.Equal(t, test.wantCurrent, baseCurrent, "baseline current_user")
+				require.Equal(t, test.user, baseSession, "baseline session_user")
+				require.NoError(t, baseConn.Close(ctx))
 
-			// Client A changes its identity in autocommit; the connection is released
-			// right after. One simple query keeps the check on the same backend link.
-			clientA, err := proxy.Connect(ctx, dbPooled, test.user)
-			require.NoError(t, err, "client A connect")
-			results, err := clientA.PgConn().Exec(ctx, test.statement+"; SELECT current_user").ReadAll()
-			require.NoError(t, err, "client A "+test.statement)
-			require.Len(t, results, 2)
-			require.Equal(t, leakRole, scalarResult(t, results[1]), "client A should run as the role it set")
-			require.NoError(t, clientA.Close(ctx))
+				// Client A changes its identity in autocommit; the connection is released
+				// right after. One simple query keeps the check on the same backend link.
+				clientA, err := pgx.Connect(ctx, connStr)
+				require.NoError(t, err, "client A connect")
+				results, err := clientA.PgConn().Exec(ctx, test.statement+"; SELECT current_user").ReadAll()
+				require.NoError(t, err, "client A "+test.statement)
+				require.Len(t, results, 2)
+				require.Equal(t, leakRole, scalarResult(t, results[1]), "client A should run as the role it set")
+				require.NoError(t, clientA.Close(ctx))
 
-			clientB, err := proxy.Connect(ctx, dbPooled, test.user)
-			require.NoError(t, err, "client B connect")
-			defer clientB.Close(context.Background())
+				clientB, err := pgx.Connect(ctx, connStr)
+				require.NoError(t, err, "client B connect")
+				defer clientB.Close(context.Background())
 
-			// The same PID also shows the reset succeeded: a failed reset closes the connection.
-			var bCurrent, bSession string
-			var bPID uint32
-			require.NoError(t, clientB.QueryRow(ctx, identity).Scan(&bCurrent, &bSession, &bPID))
-			require.Equal(t, basePID, bPID, "clients should share the single pooled backend connection")
-			require.Equal(t, baseCurrent, bCurrent, "client A's current_user must not leak to client B")
-			require.Equal(t, baseSession, bSession, "client A's session_user must not leak to client B")
+				// The same PID also shows the reset succeeded: a failed reset closes the connection.
+				var bCurrent, bSession string
+				var bPID uint32
+				require.NoError(t, clientB.QueryRow(ctx, identity).Scan(&bCurrent, &bSession, &bPID))
+				require.Equal(t, basePID, bPID, "clients should share the single pooled backend connection")
+				require.Equal(t, baseCurrent, bCurrent, "client A's current_user must not leak to client B")
+				require.Equal(t, baseSession, bSession, "client A's session_user must not leak to client B")
+			})
 		})
 	}
 }
@@ -308,7 +318,11 @@ func TestSimpleQueryProtocol(t *testing.T) {
 // after an error, commands fail with 25P02 until ROLLBACK, and ROLLBACK leaves
 // the pooled connection clean for the same client and the next one.
 func TestAbortedTransaction(t *testing.T) {
-	connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
+	forEachExecMode(t, testAbortedTransaction)
+}
+
+func testAbortedTransaction(t *testing.T, mode string) {
+	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -357,7 +371,11 @@ func TestAbortedTransaction(t *testing.T) {
 // inside an aborted transaction, without ROLLBACK or Terminate, does not strand
 // the only backend connection in that state.
 func TestClientDisconnectMidAbortedTransaction(t *testing.T) {
-	connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
+	forEachExecMode(t, testClientDisconnectMidAbortedTransaction)
+}
+
+func testClientDisconnectMidAbortedTransaction(t *testing.T, mode string) {
+	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -396,11 +414,15 @@ func TestClientDisconnectMidAbortedTransaction(t *testing.T) {
 // client 1 commits, client 3 must get the connection promptly: if client 2 had
 // kept its place, pg_sleep would hold the connection.
 func TestClientDisconnectWhileWaitingForPoolSlot(t *testing.T) {
+	forEachExecMode(t, testClientDisconnectWhileWaitingForPoolSlot)
+}
+
+func testClientDisconnectWhileWaitingForPoolSlot(t *testing.T, mode string) {
 	if runtime.GOOS != "linux" {
 		// See pkg/session/client_monitor.go: without POLLRDHUP a peer FIN is not detected.
 		t.Skip("detecting a dropped client before it holds a connection requires Linux POLLRDHUP")
 	}
-	connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
+	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 
@@ -465,11 +487,15 @@ func TestClientDisconnectWhileWaitingForPoolSlot(t *testing.T) {
 // TestTransactionStatus verifies the ReadyForQuery transaction status reaches
 // the client across a transaction: 'I' idle, 'T' in a block, 'E' aborted.
 func TestTransactionStatus(t *testing.T) {
-	proxy := startProxy(t)
+	forEachExecMode(t, testTransactionStatus)
+}
+
+func testTransactionStatus(t *testing.T, mode string) {
+	connStr := withExecMode(t, startProxy(t).URL(dbDefault, itest.PostgresUser), mode)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	conn, err := proxy.Connect(ctx, dbDefault, itest.PostgresUser)
+	conn, err := pgx.Connect(ctx, connStr)
 	require.NoError(t, err, "connect")
 	defer conn.Close(context.Background())
 

@@ -26,8 +26,16 @@ const (
 	dbPooled  = "testdb_pooled"
 )
 
+// runKnownBugs runs the proxy runs and hygiene checks that proxySkip and
+// hygieneSkip would skip, to reproduce the bugs they name. Set
+// PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to enable it.
+var runKnownBugs = os.Getenv("PG_PROXY_ITEST_RUN_KNOWN_BUGS") != ""
+
 // backend is the PostgreSQL container shared by every test in the package.
 var backend *itest.Postgres
+
+// backendMajor is backend's PostgreSQL major version, such as 14.
+var backendMajor int
 
 func TestMain(m *testing.M) {
 	os.Exit(itest.Main(func() int { return m.Run() }, func(ctx context.Context) (func(), error) {
@@ -36,7 +44,18 @@ func TestMain(m *testing.M) {
 			return nil, err
 		}
 		backend = pg
-		return func() { _ = pg.Terminate(context.Background()) }, nil
+		teardown := func() { _ = pg.Terminate(context.Background()) }
+		conn, err := pg.Connect(ctx, "postgres")
+		if err != nil {
+			return teardown, err
+		}
+		defer conn.Close(context.Background())
+		var version int
+		if err := conn.QueryRow(ctx, "SELECT current_setting('server_version_num')::int").Scan(&version); err != nil {
+			return teardown, err
+		}
+		backendMajor = version / 10000
+		return teardown, nil
 	}))
 }
 

@@ -16,20 +16,42 @@ import (
 )
 
 func TestImagesArePinnedPublicImages(t *testing.T) {
-	t.Setenv("PG_PROXY_TEST_POSTGRES_IMAGE", "")
-	require.NoError(t, os.Unsetenv("PG_PROXY_TEST_POSTGRES_IMAGE"))
+	unsetenv(t, "PG_PROXY_TEST_POSTGRES_IMAGE")
+	unsetenv(t, "PG_PROXY_TEST_POSTGRES_MAJOR")
 
-	for _, image := range []string{PostgresImage()} {
+	require.Equal(t, postgresImages[defaultPostgresMajor], PostgresImage())
+	for major, image := range postgresImages {
 		name, digest, pinned := strings.Cut(image, "@sha256:")
 		require.True(t, pinned, "%s must be pinned by digest", image)
 		require.Len(t, digest, 64)
 		require.NotContains(t, strings.SplitN(name, "/", 2)[0], ".", "%s must be a Docker Hub image", image)
+		require.Equal(t, "postgres:"+major+"-bookworm", name, "the image for major %s", major)
 	}
 }
 
 func TestPostgresImageOverride(t *testing.T) {
 	t.Setenv("PG_PROXY_TEST_POSTGRES_IMAGE", "registry.example.com/postgres:17")
+	t.Setenv("PG_PROXY_TEST_POSTGRES_MAJOR", "18")
 	require.Equal(t, "registry.example.com/postgres:17", PostgresImage())
+}
+
+func TestPostgresImageMajor(t *testing.T) {
+	unsetenv(t, "PG_PROXY_TEST_POSTGRES_IMAGE")
+	t.Setenv("PG_PROXY_TEST_POSTGRES_MAJOR", "18")
+	require.Equal(t, postgresImages["18"], PostgresImage())
+
+	t.Setenv("PG_PROXY_TEST_POSTGRES_MAJOR", "13")
+	_, err := postgresImage()
+	require.ErrorContains(t, err, `PG_PROXY_TEST_POSTGRES_MAJOR="13" has no pinned image`)
+	_, err = StartPostgres(t.Context())
+	require.ErrorContains(t, err, "has no pinned image")
+}
+
+// unsetenv unsets key for the duration of t and restores it afterwards.
+func unsetenv(t *testing.T, key string) {
+	t.Helper()
+	t.Setenv(key, "")
+	require.NoError(t, os.Unsetenv(key))
 }
 
 func TestPrebuiltBinaryMustBeAbsolute(t *testing.T) {
