@@ -285,25 +285,30 @@ func (failingRole) Set(context.Context, *pgxpool.Conn, []string) (string, error)
 	return "", errors.New("permission denied to set role")
 }
 
-// No link holds a conn whose link failed to build, so Acquire must destroy it:
-// released alone it would return to the pool in an unknown state, and kept it would
-// hold a pool slot forever.
-func TestAcquireDestroysConnWhenLinkFactoryFails(t *testing.T) {
+// When the default factory, link.New, fails, no link holds the conn, so Acquire must
+// destroy it: released alone it would return to the pool in an unknown state, and kept
+// it would hold a pool slot forever. A custom factory owns its conn on error, so
+// Acquire must leave it alone, including one the factory has already released.
+func TestAcquireDiscardsConnOnlyForDefaultFactory(t *testing.T) {
 	sentinel := errors.New("link factory sentinel")
 	for _, tc := range []struct {
-		name    string
-		factory LinkFactory // nil = link.New
-		role    link.RoleSession
+		name          string
+		factory       LinkFactory // nil = link.New
+		role          link.RoleSession
+		wantDestroyed bool
 	}{
-		{name: "custom factory", factory: func(*pgxpool.Conn, link.Options) (link.Link, error) { return nil, sentinel }},
-		{name: "role set fails", role: failingRole{}},
+		{name: "default factory, role set fails", role: failingRole{}, wantDestroyed: true},
+		{name: "custom factory releases its conn", factory: func(conn *pgxpool.Conn, _ link.Options) (link.Link, error) {
+			conn.Release()
+			return nil, sentinel
+		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pgPool := fakepg.NewPool(t, fakepg.Answer)
 			var acquired *pgxpool.Conn
 			t.Cleanup(func() {
 				if acquired != nil {
-					acquired.Release() // a no-op once destroyed; keeps a leak from hanging the pool's cleanup
+					acquired.Release() // a no-op once released; keeps a leak from hanging the pool's cleanup
 				}
 			})
 			cfg := Config{
@@ -322,6 +327,11 @@ func TestAcquireDestroysConnWhenLinkFactoryFails(t *testing.T) {
 
 			_, err := New(cfg).Acquire(context.Background(), session.LinkRequest{PassthroughRoleName: "app_user"})
 			require.Error(t, err)
+			if !tc.wantDestroyed {
+				require.ErrorIs(t, err, sentinel)
+				require.Equal(t, int32(1), pgPool.Stat().IdleConns(), "a custom factory's released conn stays pooled")
+				return
+			}
 			// pgxpool destroys a closed conn in the background, so wait for it to go.
 			require.Eventually(t, func() bool { return pgPool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
 				"the conn must be destroyed: not left checked out, and not pooled in an unknown state")

@@ -7,6 +7,7 @@ package link
 
 import (
 	"errors"
+	"maps"
 	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -99,14 +100,9 @@ func sortConnPreparedStmtBasedOnDeallocationPriority(sessionLinkCreatedTime int)
 	}
 }
 
-// StmtsToDeallocate returns the names (map keys) of the n least-used prepared statements.
+// StmtsToDeallocate returns the names of the n least-used prepared statements.
 func StmtsToDeallocate(connPreparedStmts map[string]ConnPreparedStmt, stmtsToDeallocate int, sessionLinkCreatedTime int) []string {
-	stmts := make([]ConnPreparedStmt, 0, len(connPreparedStmts))
-	for name, stmt := range connPreparedStmts {
-		stmt.Name = name
-		stmts = append(stmts, stmt)
-	}
-	return leastValuableStmts(stmts, stmtsToDeallocate, sessionLinkCreatedTime)
+	return leastValuableStmts(slices.Collect(maps.Values(connPreparedStmts)), stmtsToDeallocate, sessionLinkCreatedTime)
 }
 
 // stmtsToDeallocate returns the names of the n statements Release should evict first.

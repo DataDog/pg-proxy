@@ -46,8 +46,9 @@ var parameterStatusKeys = []string{
 // Returning nil disables role management for that checkout.
 type RoleSessionFactory func(roleName string) link.RoleSession
 
-// LinkFactory wraps an acquired connection as a session link. On error it must leave
-// the conn to Acquire, which discards it.
+// LinkFactory wraps an acquired connection as a session link. On error a custom
+// factory still owns conn and must close or release it, for example with
+// link.DiscardConn. Acquire discards it only for the default factory, link.New.
 type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
 
 // LinkDecorator wraps a link after checkout with the pool that supplied the
@@ -89,9 +90,12 @@ type Runtime struct {
 	loadShedder         session.LoadShedder
 	roleSessionFactory  RoleSessionFactory
 	linkFactory         LinkFactory
-	linkDecorator       LinkDecorator
-	primaryReset        link.ResetPolicy
-	replicaResets       []link.ResetPolicy
+	// discardOnLinkError is set for the default factory, link.New, which leaves conn
+	// to its caller on error. A custom factory owns its conn on error.
+	discardOnLinkError bool
+	linkDecorator      LinkDecorator
+	primaryReset       link.ResetPolicy
+	replicaResets      []link.ResetPolicy
 }
 
 var _ session.Backend = (*Runtime)(nil)
@@ -129,6 +133,7 @@ func New(cfg Config) *Runtime {
 		loadShedder:         loadShedder,
 		roleSessionFactory:  cfg.RoleSessionFactory,
 		linkFactory:         linkFactory,
+		discardOnLinkError:  cfg.LinkFactory == nil,
 		linkDecorator:       cfg.LinkDecorator,
 		primaryReset:        cfg.PrimaryReset,
 		replicaResets:       append([]link.ResetPolicy(nil), cfg.ReplicaResets...),
@@ -218,7 +223,7 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	}
 	backendLink, err := r.linkFactory(conn, opts)
 	if err != nil {
-		if conn != nil { // nothing was acquired, so there is nothing to discard
+		if r.discardOnLinkError {
 			link.DiscardConn(conn)
 		}
 		return nil, err
