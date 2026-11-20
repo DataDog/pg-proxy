@@ -575,3 +575,46 @@ func (bb *blockingBuffer) Write(p []byte) (int, error) {
 	bb.ch <- cp
 	return len(p), nil
 }
+
+// TestCancelAndForceCloseDoNothingOnceReleaseStarts pins the Link contract that
+// lets sessions call Cancel and ForceClose without a lock: once Release starts,
+// neither may touch the connection, which is back in the pool afterwards.
+func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
+	resetReceived := make(chan struct{})
+	replyToReset := make(chan struct{})
+	conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
+		if _, err := backend.Receive(); err != nil {
+			return
+		}
+		close(resetReceived)
+		<-replyToReset
+		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
+		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		_ = backend.Flush()
+		// Read the Terminate sent when the pool closes the connection.
+		_, _ = backend.Receive()
+	})
+	pooled := conn.Conn()
+	link, err := New(conn, Options{})
+	require.NoError(t, err)
+
+	released := make(chan error, 1)
+	go func() { released <- link.Release() }()
+	<-resetReceived
+
+	// ForceClose overlaps Release, so it must wait for Release and then do nothing.
+	forceClosed := make(chan bool, 1)
+	go func() { forceClosed <- link.ForceClose() }()
+	select {
+	case <-forceClosed:
+		t.Fatal("ForceClose did not wait for Release")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(replyToReset)
+	require.NoError(t, <-released)
+	assert.False(t, <-forceClosed)
+
+	assert.False(t, link.ForceClose())
+	assert.NoError(t, link.Cancel())
+	assert.False(t, pooled.IsClosed(), "the pooled connection must stay open")
+}

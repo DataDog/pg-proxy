@@ -161,8 +161,11 @@ type Session struct {
 	unnamedGen         uint64
 	unnamedPendingGens []uint64
 
-	// remapMu guards the pending remaps, and writes of backend and readStates,
-	// which only the session goroutine makes. Other goroutines read them under it.
+	// reportMu orders remaps and their hook reports. Remap* callers hold it to queue
+	// and report; the session goroutine holds it to apply and report, and is the only
+	// writer of backend and readStates. Other goroutines read those under it.
+	reportMu sync.Mutex
+	// remapMu guards the pending remaps. Hooks never run under it.
 	remapMu      sync.Mutex
 	remapPending atomic.Bool // set while a remap is pending; checked without remapMu
 	// Non-nil when the session has been remapped to a different state.
@@ -259,9 +262,9 @@ type Mirroring struct {
 }
 
 // Hooks expose optional session state transition notifications. Callbacks run
-// synchronously on the session goroutine and must return promptly. They must not
-// mutate message values. A callback that retains message data after it returns
-// must copy that data first.
+// synchronously on the session goroutine, except where noted, and must return
+// promptly. They must not mutate message values. A callback that retains message
+// data after it returns must copy that data first.
 type Hooks struct {
 	LinkChanged          func(link.Link)
 	RoutedLinkChanged    func(link.Link)
@@ -269,9 +272,11 @@ type Hooks struct {
 	BackendMessage       func(pgproto3.BackendMessage)
 	ClientFlushSucceeded func()
 	Closed               func()
-	// BackendChanged and ReadStatesChanged also report the pending value on the
-	// Remap* caller's goroutine while it holds remapMu. Those reports must use
-	// their arguments and must not call the session.
+	// BackendChanged and ReadStatesChanged report (current, pending) on the Remap*
+	// caller's goroutine when a remap is queued, and (applied, nil) on the session
+	// goroutine when it applies. One session's reports never overlap and arrive in
+	// that order. They must not call RemapBackend or RemapReadStates. Reports on
+	// the caller's goroutine may call Backend and PendingBackend, but not CurrentLink.
 	BackendChanged    func(current Backend, pending Backend)
 	ReadStatesChanged func(current []ReadStateConfig, pending []ReadStateConfig)
 	DiscardChanged    func(bool)
@@ -519,8 +524,8 @@ func (s *Session) TraceState() *query.TraceState {
 	return s.obsVals.traceState
 }
 
-// CurrentLink and Backend take no lock so that hooks can call them. Call them only
-// on the session goroutine, which runs every hook except the pending remap reports.
+// CurrentLink and Backend take no lock so that hooks can call them. Call them on the
+// session goroutine; pending remap reports may also call Backend.
 func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
@@ -584,7 +589,7 @@ func (s *Session) setDiscardUntilSync(discard bool) {
 }
 
 // Cancel runs on the listener's cancel-request goroutine. It does not hold linkMu
-// while contacting Postgres; Cancel on a since-released SessionLink is a no-op.
+// while contacting Postgres; the Link contract makes Cancel on a released link do nothing.
 func (s *Session) Cancel() error {
 	s.linkMu.Lock()
 	backendLink := s.link
@@ -882,26 +887,21 @@ func (s *Session) handleStateRemapping() bool {
 		return false
 	}
 
+	s.reportMu.Lock()
 	s.remapMu.Lock()
 	pendingBackend, pendingReadStates := s.remappedBackend, s.remappedReadStates
 	s.remappedBackend, s.remappedReadStates = nil, nil
 	s.remapPending.Store(false)
-	var newReadStates []*ReadState
-	if pendingReadStates != nil {
-		newReadStates = make([]*ReadState, 0, len(*pendingReadStates))
-		for _, rs := range *pendingReadStates {
-			newReadStates = append(newReadStates, &ReadState{backend: rs.Backend, weight: rs.Weight})
-		}
-		s.readStates = newReadStates
-	}
-	if pendingBackend != nil {
-		s.backend = pendingBackend
-	}
 	s.remapMu.Unlock()
 
 	// Apply read states update first — no link disruption needed since this only
 	// affects routing decisions for future link acquisitions.
 	if pendingReadStates != nil {
+		newReadStates := make([]*ReadState, 0, len(*pendingReadStates))
+		for _, rs := range *pendingReadStates {
+			newReadStates = append(newReadStates, &ReadState{backend: rs.Backend, weight: rs.Weight})
+		}
+		s.readStates = newReadStates
 		if len(newReadStates) > 0 {
 			s.dynamicRoutingEnabled = true
 		}
@@ -909,13 +909,16 @@ func (s *Session) handleStateRemapping() bool {
 			s.hooks.ReadStatesChanged(readStatesToConfig(newReadStates), nil)
 		}
 	}
+	if pendingBackend != nil {
+		s.backend = pendingBackend
+		if s.hooks.BackendChanged != nil {
+			s.hooks.BackendChanged(s.backend, nil)
+		}
+	}
+	s.reportMu.Unlock()
 
 	if pendingBackend == nil {
 		return false
-	}
-
-	if s.hooks.BackendChanged != nil {
-		s.hooks.BackendChanged(s.backend, nil)
 	}
 
 	// Guard link teardown under linkMu so the client monitor goroutine
@@ -968,11 +971,12 @@ func (s *Session) handleStateRemapping() bool {
 
 // RemapReadStates queues read routing for the next message boundary; the last call wins.
 func (s *Session) RemapReadStates(readStates []ReadStateConfig) {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
 	s.remapMu.Lock()
-	defer s.remapMu.Unlock()
 	s.remappedReadStates = &readStates
 	s.remapPending.Store(true)
-	// Report under remapMu so this precedes the session's applied report.
+	s.remapMu.Unlock()
 	if s.hooks.ReadStatesChanged != nil {
 		s.hooks.ReadStatesChanged(readStatesToConfig(s.readStates), readStates)
 	}
@@ -1486,12 +1490,11 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
 			s.invalidatePendingStmts(false)
-			// As in close: the client monitor must not force-close a pooled link.
-			s.linkMu.Lock()
 			err := s.link.Release()
 			if err != nil {
 				pgproxy.Logger().Warn("error releasing session link", "err", err)
 			}
+			s.linkMu.Lock()
 			s.setLink(nil)
 			s.linkMu.Unlock()
 			break
@@ -1523,12 +1526,14 @@ func (s *Session) flushPostgres() (bool, error) {
 
 // RemapBackend queues a backend for the next message boundary; the last call wins.
 func (s *Session) RemapBackend(backend Backend) {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
 	s.remapMu.Lock()
-	defer s.remapMu.Unlock()
 	s.remappedBackend = backend
 	s.remapPending.Store(s.remappedBackend != nil || s.remappedReadStates != nil)
+	s.remapMu.Unlock()
 	if s.hooks.BackendChanged != nil {
-		s.hooks.BackendChanged(s.backend, s.remappedBackend)
+		s.hooks.BackendChanged(s.backend, backend)
 	}
 }
 

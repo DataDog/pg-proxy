@@ -11,12 +11,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/DataDog/pg-proxy/pkg/link"
-	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
 // Run these with -race: each pairs a call from another goroutine with the
@@ -76,23 +73,22 @@ func TestRemapConcurrentWithMessageBoundary(t *testing.T) {
 	}
 }
 
-// Hooks on the session goroutine may read the session back through its getters,
-// even while another goroutine queues remaps. Pending reports use their arguments.
+// Hooks may read the session back through its getters while another goroutine
+// queues remaps: all of them on the session goroutine, and Backend and
+// PendingBackend in the pending reports on the Remap* caller's goroutine.
 func TestHooksCanCallGetters(t *testing.T) {
 	var s *Session
-	readBack := func() { s.CurrentLink(); s.Backend(); s.PendingBackend() }
+	readBack := func(onSessionGoroutine bool) {
+		if onSessionGoroutine {
+			s.CurrentLink()
+		}
+		s.Backend()
+		s.PendingBackend()
+	}
 	s = newConcurrencyTestSession(Hooks{
-		BackendChanged: func(_, pending Backend) {
-			if pending == nil {
-				readBack()
-			}
-		},
-		ReadStatesChanged: func(_, pending []ReadStateConfig) {
-			if pending == nil {
-				readBack()
-			}
-		},
-		LinkChanged: func(link.Link) { readBack() },
+		BackendChanged:    func(_, pending Backend) { readBack(pending == nil) },
+		ReadStatesChanged: func(_, pending []ReadStateConfig) { readBack(pending == nil) },
+		LinkChanged:       func(link.Link) { readBack(true) },
 	})
 	next := &namedBackend{name: "next"}
 	reads := []ReadStateConfig{{Backend: next, Weight: 1}}
@@ -120,6 +116,37 @@ func TestHooksCanCallGetters(t *testing.T) {
 	}
 }
 
+// A hook that tracks the current and pending backend from BackendChanged reports
+// must stay correct while remaps race with the session applying them.
+func TestRemapReportsArriveInOrder(t *testing.T) {
+	var current, pending Backend
+	var outOfOrder int
+	s := newConcurrencyTestSession(Hooks{
+		BackendChanged: func(reportedCurrent, reportedPending Backend) {
+			if reportedPending == nil {
+				// Applied: the session switched to the last pending backend.
+				if reportedCurrent != pending {
+					outOfOrder++
+				}
+				current, pending = reportedCurrent, nil
+				return
+			}
+			if reportedCurrent != current {
+				outOfOrder++
+			}
+			pending = reportedPending
+		},
+	})
+	current = s.Backend()
+	backends := []Backend{&namedBackend{name: "a"}, &namedBackend{name: "b"}}
+	remaps := 0
+	runConcurrently(
+		func() { s.handleStateRemapping() },
+		func() { s.RemapBackend(backends[remaps%2]); remaps++ },
+	)
+	assert.Zero(t, outOfOrder, "remap reports arrived out of order")
+}
+
 // The listener calls Cancel while the session goroutine checks links out and in.
 func TestCancelConcurrentWithCheckout(t *testing.T) {
 	s := newConcurrencyTestSession(Hooks{})
@@ -135,47 +162,4 @@ func TestCancelConcurrentWithCheckout(t *testing.T) {
 		},
 		func() { _ = s.Cancel() },
 	)
-}
-
-// The client monitor must not force-close a link that flushPostgres released.
-// SessionLink tolerates it, but the Link interface does not require that.
-func TestClientMonitorDoesNotForceCloseLinkReleasedByFlush(t *testing.T) {
-	releaseStarted := make(chan struct{})
-	finishRelease := make(chan struct{})
-	expectation := query.SyncReply
-	backendLink := &testLink{
-		nextExpectation:        func() query.ReplyExpectation { return expectation },
-		resolveNextExpectation: func() { expectation = query.NoReply },
-		receive: func() (pgproto3.BackendMessage, error) {
-			return &pgproto3.ReadyForQuery{TxStatus: 'I'}, nil
-		},
-		release: func() error {
-			close(releaseStarted)
-			<-finishRelease
-			return nil
-		},
-	}
-	probe := &fakeProbe{}
-	s := New(Config{
-		Context: context.Background(),
-		Client:  &testClient{}, ClientConn: &writeRecordingConn{},
-		Backend: &namedBackend{name: "initial"}, InitialLink: backendLink,
-		PostgresMsgBufferSize: 8192,
-	})
-	s.livenessProbe = probe
-
-	monitor, _ := s.startClientMonitor()
-	go func() {
-		<-releaseStarted
-		probe.triggerDisconnect()
-		// Give the monitor time to observe the disconnect while Release runs.
-		time.Sleep(250 * time.Millisecond)
-		close(finishRelease)
-	}()
-
-	_, err := s.flushPostgres()
-	require.NoError(t, err)
-	require.Nil(t, s.CurrentLink())
-	monitor.stop()
-	assert.Zero(t, backendLink.calls.forceClose, "client monitor force-closed a released link")
 }

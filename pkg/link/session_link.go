@@ -164,7 +164,8 @@ func (link *SessionLink) Idle() bool {
 	return link.getComputedState() == sessionLinkStateIdle
 }
 
-// Cancel cancels a request
+// Cancel cancels a request. A call that overlaps Release waits for it, and once
+// Release has run Cancel does nothing, as the Link contract requires.
 func (link *SessionLink) Cancel() error {
 	link.lock.Lock()
 	defer link.lock.Unlock()
@@ -297,7 +298,8 @@ func (link *SessionLink) nonIdleReleaseLogMessage(computedState string, pid uint
 // no live connection or the close fails. This unblocks any pending Receive()
 // call and ensures the connection is not returned to the pool. It is safe to
 // call concurrently with Receive() — net.Conn.Close() is goroutine-safe and
-// will cause a blocking Read to return immediately.
+// will cause a blocking Read to return immediately. A call that overlaps Release
+// waits for it, and once Release has run ForceClose does nothing.
 func (link *SessionLink) ForceClose() bool {
 	link.lock.Lock()
 	defer link.lock.Unlock()
