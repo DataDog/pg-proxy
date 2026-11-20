@@ -27,13 +27,10 @@ const DefaultPreparedStmtsPerConnection = 100
 
 // Link defines the behavior of PG conn <-> Session.
 //
-// The session goroutine calls every method. Other goroutines also call Cancel
-// and ForceClose, at any time and concurrently with any other method, so both
-// must be safe for concurrent use. Once Release starts, they must not act on the
-// connection, which may be back in the pool or in use by another session: a
-// call that overlaps Release either finishes before Release uses the connection
-// or does nothing, and a call after Release does nothing. SessionLink meets this
-// with its internal lock.
+// Other goroutines may call Cancel and ForceClose concurrently with any method.
+// Once Release starts, they must not touch the connection, which may be back in
+// the pool: a call that overlaps Release finishes before Release uses it or does
+// nothing, and a later call does nothing. SessionLink meets this with its lock.
 type Link interface {
 	Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation)
 	Flush() error

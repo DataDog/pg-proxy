@@ -22,14 +22,18 @@ import (
 const concurrencyIterations = 1000
 
 func newConcurrencyTestSession(hooks Hooks) *Session {
-	return New(Config{
-		Context: context.Background(),
-		User:    "user", Database: "database", Service: "service",
-		PID:     42,
-		Client:  &testClient{},
-		Backend: &namedBackend{name: "initial"},
-		Hooks:   hooks,
-	})
+	return newPortableSession(context.Background(), &testClient{}, nil, &namedBackend{name: "initial"},
+		func(cfg *Config) { cfg.Hooks = hooks })
+}
+
+// checkOutAndIn sets and clears the session's link, as a checkout does.
+func checkOutAndIn(s *Session, backendLink link.Link) {
+	s.linkMu.Lock()
+	s.setLink(backendLink)
+	s.linkMu.Unlock()
+	s.linkMu.Lock()
+	s.setLink(nil)
+	s.linkMu.Unlock()
 }
 
 // runConcurrently runs session and host on separate goroutines with no
@@ -50,27 +54,6 @@ func runConcurrently(session, host func()) {
 		}
 	}()
 	wg.Wait()
-}
-
-// The warden calls RemapBackend and RemapReadStates while the session goroutine
-// applies pending remaps at a message boundary. The hooks read the session's
-// current backend and read states on the caller's goroutine.
-func TestRemapConcurrentWithMessageBoundary(t *testing.T) {
-	next := &namedBackend{name: "next"}
-	reads := []ReadStateConfig{{Backend: &namedBackend{name: "read"}, Weight: 1}}
-	for name, test := range map[string]struct {
-		hooks Hooks
-		remap func(*Session)
-	}{
-		"backend":          {remap: func(s *Session) { s.RemapBackend(next) }},
-		"backend hook":     {hooks: Hooks{BackendChanged: func(Backend, Backend) {}}, remap: func(s *Session) { s.RemapBackend(next) }},
-		"read states hook": {hooks: Hooks{ReadStatesChanged: func(_, _ []ReadStateConfig) {}}, remap: func(s *Session) { s.RemapReadStates(reads) }},
-	} {
-		t.Run(name, func(t *testing.T) {
-			s := newConcurrencyTestSession(test.hooks)
-			runConcurrently(func() { s.handleStateRemapping() }, func() { test.remap(s) })
-		})
-	}
 }
 
 // Hooks may read the session back through its getters while another goroutine
@@ -99,12 +82,7 @@ func TestHooksCanCallGetters(t *testing.T) {
 		runConcurrently(
 			func() {
 				s.handleStateRemapping()
-				s.linkMu.Lock()
-				s.setLink(backendLink)
-				s.linkMu.Unlock()
-				s.linkMu.Lock()
-				s.setLink(nil)
-				s.linkMu.Unlock()
+				checkOutAndIn(s, backendLink)
 			},
 			func() { s.RemapBackend(next); s.RemapReadStates(reads) },
 		)
@@ -152,14 +130,7 @@ func TestCancelConcurrentWithCheckout(t *testing.T) {
 	s := newConcurrencyTestSession(Hooks{})
 	backendLink := &testLink{}
 	runConcurrently(
-		func() {
-			s.linkMu.Lock()
-			s.setLink(backendLink)
-			s.linkMu.Unlock()
-			s.linkMu.Lock()
-			s.setLink(nil)
-			s.linkMu.Unlock()
-		},
+		func() { checkOutAndIn(s, backendLink) },
 		func() { _ = s.Cancel() },
 	)
 }

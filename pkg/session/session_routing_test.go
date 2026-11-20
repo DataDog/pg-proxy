@@ -469,7 +469,7 @@ func TestReadClustersRemappingEnablesDynamicRouting(t *testing.T) {
 
 	assert.True(t, s.dynamicRoutingEnabled, "dynamic routing should be enabled after applying non-empty read states")
 	assert.Len(t, s.readStates, 1)
-	assert.Nil(t, s.remappedReadStates, "pending update should be cleared after applying")
+	assert.Nil(t, s.pending.Load(), "pending update should be cleared after applying")
 }
 
 // TestReadClustersRemappingToEmptyRoutesReadsToDefault verifies that when a session's
@@ -506,7 +506,7 @@ func TestReadClustersRemappingToEmptyRoutesReadsToDefault(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Empty(t, s.readStates, "read states should be cleared after applying empty remapping")
-	assert.Nil(t, s.remappedReadStates, "pending update should be cleared after applying")
+	assert.Nil(t, s.pending.Load(), "pending update should be cleared after applying")
 }
 
 // TestStateRemapDuringHeldLink verifies that handleStateRemapping guards link
