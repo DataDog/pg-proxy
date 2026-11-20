@@ -58,7 +58,8 @@ func runConcurrently(session, host func()) {
 
 // Hooks may read the session back through its getters while another goroutine
 // queues remaps: all of them on the session goroutine, and Backend and
-// PendingBackend in the pending reports on the Remap* caller's goroutine.
+// PendingBackend in the pending reports on the Remap* caller's goroutine. Nil
+// remaps must not look like applied reports.
 func TestHooksCanCallGetters(t *testing.T) {
 	var s *Session
 	readBack := func(onSessionGoroutine bool) {
@@ -84,7 +85,12 @@ func TestHooksCanCallGetters(t *testing.T) {
 				s.handleStateRemapping()
 				checkOutAndIn(s, backendLink)
 			},
-			func() { s.RemapBackend(next); s.RemapReadStates(reads) },
+			func() {
+				s.RemapBackend(nil)
+				s.RemapReadStates(nil)
+				s.RemapBackend(next)
+				s.RemapReadStates(reads)
+			},
 		)
 	}()
 	select {

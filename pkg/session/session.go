@@ -284,9 +284,12 @@ type Hooks struct {
 	Closed               func()
 	// BackendChanged and ReadStatesChanged report (current, pending) on the Remap*
 	// caller's goroutine when a remap is queued, and (applied, nil) on the session
-	// goroutine when it applies. One session's reports never overlap and arrive in
-	// that order. They must not call RemapBackend or RemapReadStates. Reports on
-	// the caller's goroutine may call Backend and PendingBackend, but not CurrentLink.
+	// goroutine when it applies. A queued report's pending is never nil, so nil marks
+	// the applied report: RemapReadStates(nil) reports an empty slice, and
+	// RemapBackend(nil), which cancels a queued backend, reports the current one.
+	// One session's reports never overlap and arrive in that order. They must not
+	// call RemapBackend or RemapReadStates. Reports on the caller's goroutine may
+	// call Backend and PendingBackend, but not CurrentLink.
 	BackendChanged    func(current Backend, pending Backend)
 	ReadStatesChanged func(current []ReadStateConfig, pending []ReadStateConfig)
 	DiscardChanged    func(bool)
@@ -978,6 +981,9 @@ func (s *Session) applyPendingRemaps() bool {
 
 // RemapReadStates queues read routing for the next message boundary; the last call wins.
 func (s *Session) RemapReadStates(readStates []ReadStateConfig) {
+	if readStates == nil {
+		readStates = []ReadStateConfig{} // a nil pending value marks the applied report
+	}
 	s.reportMu.Lock()
 	defer s.reportMu.Unlock()
 	next := s.pendingRemaps()
@@ -1538,6 +1544,11 @@ func (s *Session) RemapBackend(backend Backend) {
 	next.backend = backend
 	s.pending.Store(&next)
 	if s.hooks.BackendChanged != nil {
+		if backend == nil {
+			// Cancelled: the next boundary keeps the current backend. A nil pending
+			// value marks the applied report.
+			backend = s.backend
+		}
 		s.hooks.BackendChanged(s.backend, backend)
 	}
 }
