@@ -23,6 +23,7 @@ The public Go API lives under `pkg/`; the `pg-proxy` binary lives under `cmd/pg-
 | `pkg/datadog` | Native Datadog tracing and setup for traces, DogStatsD metrics, and JSON logs |
 | `pkg/otel` | OpenTelemetry trace, metric, and slog adapters |
 | `pkg/query` | Post-auth message decisions and query tracing |
+| `pkg/bindparams` | Bounded copies of Bind parameters, decoded into per-position trace tags |
 | `pkg/prepared` | Prepared-statement name mapping for txn pooling |
 | `pkg/pool` | Direct, discovered, static cloud, and replica pool runtimes; instance health, selection, and pgx adapters |
 | `pkg/link` | Session↔Postgres link: expectations, prepared-on-conn, release |

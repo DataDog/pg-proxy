@@ -11,9 +11,8 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/DataDog/dd-trace-go/v2/ddtrace/mocktracer"
 	pgproxy "github.com/DataDog/pg-proxy"
-	proxydatadog "github.com/DataDog/pg-proxy/pkg/datadog"
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
 	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -52,29 +51,9 @@ func runParameterQuery(t *testing.T, sql string, enable bool) {
 		cfg.EnableTraceParameters = enable
 	})
 	defer closeSession()
-	client.Send(&pgproto3.Parse{Query: sql})
-	client.Send(&pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}})
-	client.Send(&pgproto3.Execute{})
-	client.Send(&pgproto3.Sync{})
-	require.NoError(t, client.Flush())
-	for i := range 4 {
-		msg, err := postgres.Receive()
-		require.NoError(t, err)
-		if i == 1 {
-			bind, ok := msg.(*pgproto3.Bind)
-			require.True(t, ok)
-			require.Equal(t, [][]byte{[]byte(privateParameter)}, bind.Parameters)
-		}
-	}
-	responses := []pgproto3.BackendMessage{&pgproto3.ParseComplete{}, &pgproto3.BindComplete{}, &pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")}, &pgproto3.ReadyForQuery{TxStatus: 'I'}}
-	for _, response := range responses {
-		postgres.Send(response)
-	}
-	require.NoError(t, postgres.Flush())
-	for range responses {
-		_, err := client.Receive()
-		require.NoError(t, err)
-	}
+	bind := &pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}}
+	forwarded := exchange(t, client, postgres, nil, &pgproto3.Parse{Query: sql}, bind, &pgproto3.Execute{}, &pgproto3.Sync{})
+	require.Equal(t, bind.Parameters, forwarded.Parameters)
 	closeSession() // Join the session before reading its finished spans.
 }
 
@@ -88,19 +67,18 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 			t.Cleanup(func() { require.NoError(t, provider.Shutdown(context.Background())) })
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxyotel.NewTracer(provider.Tracer("test"))}))
 			runParameterQuery(t, tc.sql, tc.enable)
-			foundRoot, foundHandling, foundParameters := false, false, false
+			foundRoot, foundParameters := false, false
 			for _, span := range recorder.Ended() {
 				switch span.Name() {
 				case query.TransactionOpName:
 					foundRoot = true
 					require.Equal(t, "0000000000000000000000000000002a", span.SpanContext().TraceID().String())
 					require.Equal(t, "000000000000000b", span.Parent().SpanID().String())
-				case query.HandlingMessagesOpName:
-					foundHandling = true
 				}
 				for _, attr := range span.Attributes() {
-					if attr.Key == "db.parameters" {
+					if attr.Key == bindparams.TagPrefix+"0" {
 						foundParameters = true
+						require.Equal(t, query.TransactionOpName, span.Name(), "positions are tagged on the root span")
 						require.Equal(t, privateParameter, attr.Value.AsString())
 					}
 					if attr.Key == "db.statement" {
@@ -111,8 +89,7 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 					}
 				}
 			}
-			require.True(t, foundRoot)
-			require.True(t, foundHandling, "the span that carries db.parameters must be recorded")
+			require.True(t, foundRoot, "the span that carries the parameters must be recorded")
 			require.Equal(t, tc.wantParameters, foundParameters)
 		})
 	}
@@ -121,28 +98,23 @@ func TestExtendedQueryOTelParameterCapture(t *testing.T) {
 func TestExtendedQueryDatadogParameterCapture(t *testing.T) {
 	for _, tc := range parameterCaptureCases {
 		t.Run(tc.name, func(t *testing.T) {
-			tracer := mocktracer.Start()
-			t.Cleanup(tracer.Stop)
-			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxydatadog.Tracer{}}))
+			tracer := startMockTracer(t)
 			runParameterQuery(t, tc.sql, tc.enable)
-			foundRoot, foundHandling, foundParameters := false, false, false
+			foundRoot, foundParameters := false, false
 			for _, span := range tracer.FinishedSpans() {
-				switch span.OperationName() {
-				case query.TransactionOpName:
+				if span.OperationName() == query.TransactionOpName {
 					foundRoot = true
 					require.Equal(t, uint64(42), span.TraceID())
 					require.Equal(t, uint64(11), span.ParentID())
 					require.Equal(t, tc.sql, span.Tag("db.statement"))
-				case query.HandlingMessagesOpName:
-					foundHandling = true
 				}
-				if value := span.Tag("db.parameters"); value != nil {
+				if value := span.Tag(bindparams.TagPrefix + "0"); value != nil {
 					foundParameters = true
+					require.Equal(t, query.TransactionOpName, span.OperationName())
 					require.Equal(t, privateParameter, value)
 				}
 			}
-			require.True(t, foundRoot)
-			require.True(t, foundHandling, "mocktracer keeps unsampled spans, so the gate is what drops the tag")
+			require.True(t, foundRoot, "mocktracer keeps unsampled spans, so the gate is what drops the tags")
 			require.Equal(t, tc.wantParameters, foundParameters)
 		})
 	}
@@ -163,7 +135,7 @@ func TestDefaultParametersDoNotReachDebugLogs(t *testing.T) {
 			require.NoError(t, err)
 			require.Same(t, bind, action.ProxyMsgToPg)
 			require.NotContains(t, logs.String(), privateParameter)
-			require.NotContains(t, logs.String(), "db.parameters")
+			require.NotContains(t, logs.String(), bindparams.TagPrefix)
 		})
 	}
 }

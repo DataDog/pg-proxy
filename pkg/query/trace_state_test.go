@@ -114,3 +114,14 @@ func TestTraceStateSampled(t *testing.T) {
 		}
 	}
 }
+
+func TestTraceStateIgnoresBindParametersWithoutRoot(t *testing.T) {
+	traceState := &TraceState{}
+
+	traceState.RecordBindParameters(&pgproto3.Bind{Parameters: [][]byte{[]byte("1")}}, nil, nil)
+	traceState.FinishRootTrace() // must not render onto the missing root span
+
+	if traceState.bindParams.Recorded() {
+		t.Fatal("RecordBindParameters kept a Bind without a root span")
+	}
+}

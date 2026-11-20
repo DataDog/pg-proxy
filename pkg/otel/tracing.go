@@ -93,7 +93,7 @@ func (s otelSpan) Sampled() bool {
 	return s.span.IsRecording() && s.span.SpanContext().IsSampled()
 }
 
-// PostgreSQL text and binary Bind parameters may contain invalid UTF-8. Escape
+// SQL text, error messages and tag values may contain invalid UTF-8. Escape
 // only telemetry copies so protobuf encoding cannot drop the entire export batch.
 func escapeInvalidUTF8(value string) string {
 	if !utf8.ValidString(value) {
