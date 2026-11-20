@@ -69,7 +69,7 @@ type PgMessageAction struct {
 // from Postgres to a Session's linked connection. This function also requires the next
 // reply expectation, to determine if the message resolves the expectation or not.
 // (See PgMessageAction docs for the set of actions.) It does not record rows: a
-// caller that forwards a DataRow reports it with traceState.AddRow.
+// caller that forwards ProxyMsgToClient reports it with traceState.AddForwarded.
 func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpectation, traceState *TraceState) (PgMessageAction, error) {
 	action := PgMessageAction{
 		ProxyMsgToClient: msg, // currently, we always transparently proxy the msg back to the client.

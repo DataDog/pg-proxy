@@ -1345,7 +1345,6 @@ func (s *Session) flushPostgres() (bool, error) {
 	}
 	s.obsVals.traceState.FinishTrace(err)
 
-	flushClient := false
 	timesFlushed := 0
 	clientWriteSucceeded := false
 	discardedUntilSync := false
@@ -1435,13 +1434,9 @@ func (s *Session) flushPostgres() (bool, error) {
 			if encErr != nil {
 				return discardedUntilSync, fmt.Errorf("error encoding message to forward to client: %w", encErr)
 			}
-			if _, ok := action.ProxyMsgToClient.(*pgproto3.DataRow); ok {
-				s.obsVals.traceState.AddRow(len(encoded) - len(replyBuf))
-			}
+			s.obsVals.traceState.AddForwarded(action.ProxyMsgToClient, len(encoded)-len(replyBuf))
 			replyBuf = encoded
-			flushClient = true
 			if len(replyBuf) >= s.postgresMsgBufferSize {
-				flushClient = false // don't flush again if immediately release link before writing more to buffer
 				timesFlushed++
 				err = flushToClient()
 				if err != nil {
@@ -1477,7 +1472,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 	}
 	// ensure any remaining messages are also flushed
-	if flushClient {
+	if len(replyBuf) > 0 {
 		err := flushToClient()
 		if err != nil {
 			s.obsVals.traceState.FinishTrace(err)

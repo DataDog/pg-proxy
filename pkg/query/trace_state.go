@@ -71,11 +71,14 @@ func (t *TraceState) AddMessage(msg interface{}) {
 	}
 }
 
-// AddRow records a DataRow of n encoded bytes forwarded to the client. The
-// trace's rowsReturned/Affected and rowsTotalSize tags count only these rows.
-func (t *TraceState) AddRow(n int) {
-	t.rowsNumber++
-	t.rowsSize += n
+// AddForwarded records msg, encoded as n bytes, as forwarded to the client.
+// Only DataRows count toward the trace's rowsReturned/Affected and
+// rowsTotalSize tags.
+func (t *TraceState) AddForwarded(msg pgproto3.BackendMessage, n int) {
+	if _, ok := msg.(*pgproto3.DataRow); ok {
+		t.rowsNumber++
+		t.rowsSize += n
+	}
 }
 
 func traceMessageType(msg interface{}) string {
