@@ -6,7 +6,7 @@
 package link
 
 import (
-	"fmt"
+	"errors"
 	"maps"
 	"slices"
 
@@ -14,8 +14,7 @@ import (
 )
 
 const (
-	customDataPreparedStmtsKey = "preparedStmts"
-	customDataStatsKey         = "preparedStmtsStats"
+	customDataConnStateKey     = "preparedStmtsState"
 	customDataAuditBaselineKey = "resetAuditBaseline" // an auditBaseline
 	// customDataResetSkippedKey is set while the connection's last release skipped
 	// the reset, so it may hold another checkout's unnamed statement, until the
@@ -27,6 +26,10 @@ const (
 	connPreparedStmtMaxUsage         = "pg_proxy.sessions.connections.prepared_stmt.max_usage"
 )
 
+// errNoConnState is returned when a link has no connection, either because it was
+// built without one or because it has been released.
+var errNoConnState = errors.New("pool connection is nil")
+
 // statistics associated with a connection
 type connStats struct {
 	// how many prepared stmts have been deallocated on this connection due to max number of prepared stmts being reached
@@ -37,6 +40,14 @@ type connStats struct {
 	preparedStmtsMaxUsage int
 }
 
+// connState is the prepared statement state of one Postgres connection. It lives in
+// the connection's pgx CustomData, so it outlasts each SessionLink and stays with the
+// connection while it sits in the pool.
+type connState struct {
+	stmts map[string]ConnPreparedStmt
+	stats connStats
+}
+
 // ConnPreparedStmt is metadata associated with a prepared statement on a connection.
 type ConnPreparedStmt struct {
 	Name         string
@@ -44,67 +55,17 @@ type ConnPreparedStmt struct {
 	TimeLastUsed int
 }
 
-// Adds metadata to a connection, if it does not already exist.
+// setUpConnMetaData returns the connection's prepared statement state, creating it
+// on the connection's first checkout.
 // TODO standardize how we create pools and add beforeConnect hook
-func setUpConnMetaData(conn *pgxpool.Conn) {
+func setUpConnMetaData(conn *pgxpool.Conn) *connState {
 	customData := conn.Conn().PgConn().CustomData()
-	if _, ok := customData[customDataPreparedStmtsKey]; !ok {
-		customData[customDataPreparedStmtsKey] = make(map[string]ConnPreparedStmt)
+	if state, ok := customData[customDataConnStateKey].(*connState); ok {
+		return state
 	}
-	if _, ok := customData[customDataStatsKey]; !ok {
-		customData[customDataStatsKey] = &connStats{}
-	}
-}
-
-// safely get a connection's custom data
-func getConnCustomData(conn *pgxpool.Conn) (map[string]any, error) {
-	if conn == nil {
-		return nil, fmt.Errorf("pool connection is nil")
-	}
-	pgxConn := conn.Conn()
-	if pgxConn == nil {
-		return nil, fmt.Errorf("pool connection did not have an underlying conn")
-	}
-	pgConn := pgxConn.PgConn()
-	if pgConn == nil {
-		return nil, fmt.Errorf("pgx connection did not have an underlying pg conn")
-	}
-	connData := pgConn.CustomData()
-	return connData, nil
-}
-
-// safely get a connection's stats
-func getConnStats(conn *pgxpool.Conn) (*connStats, error) {
-	connData, err := getConnCustomData(conn)
-	if err != nil {
-		return nil, err
-	}
-	statsData, ok := connData[customDataStatsKey]
-	if !ok {
-		return nil, fmt.Errorf("expected connection to have data on which prepared statements it has created")
-	}
-	stats, ok := statsData.(*connStats)
-	if !ok {
-		return nil, fmt.Errorf("expected a pointer to a connStats struct in the connection's data")
-	}
-	return stats, nil
-}
-
-// safely get a connection's prepared statement data
-func getConnPreparedStmts(conn *pgxpool.Conn) (map[string]ConnPreparedStmt, error) {
-	connData, err := getConnCustomData(conn)
-	if err != nil {
-		return nil, err
-	}
-	connPreparedData, ok := connData[customDataPreparedStmtsKey]
-	if !ok {
-		return nil, fmt.Errorf("expected connection to have data on which prepared statements it has created")
-	}
-	connPreparedStmts, ok := connPreparedData.(map[string]ConnPreparedStmt)
-	if !ok {
-		return nil, fmt.Errorf("expected a map of prepared statement in the connection's data")
-	}
-	return connPreparedStmts, nil
+	state := &connState{stmts: make(map[string]ConnPreparedStmt)}
+	customData[customDataConnStateKey] = state
+	return state
 }
 
 // A sorting function for ConnPreparedStmt that is based on a statement's deallocation priority.

@@ -53,6 +53,7 @@ type SessionLink struct {
 	// request has been sent on this link yet.
 	foreignUnnamed bool
 
+	connState                  *connState // the conn's prepared statement state; nil once released
 	namedPreparedStmtThreshold int
 	createdTime                int
 	sessionLinkTags            []string
@@ -228,6 +229,7 @@ func (link *SessionLink) Release() error {
 			link.conn.Release()
 			link.conn = nil
 		}
+		link.connState = nil
 		link.pgConn = nil
 		link.lock.Unlock()
 	}()
@@ -548,23 +550,11 @@ func (link *SessionLink) HasExistingNamedPreparedStmt(preparedStatement prepared
 	if preparedStatement == nil || !preparedStatement.IsProxyNamedPreparedStmt() {
 		return false
 	}
-	_, hasExistingNamedPreparedStmt, _ := link.checkForValidSessionLinkAndExistingNamedPreparedStmt(preparedStatement)
-	return hasExistingNamedPreparedStmt
-}
-
-func (link *SessionLink) checkForValidSessionLinkAndExistingNamedPreparedStmt(preparedStatement prepared.PreparedStatement) (map[string]ConnPreparedStmt, bool, error) {
-	if preparedStatement == nil {
-		// this signifies a bug in the code
-		return nil, false, fmt.Errorf("unexpectedly attempting to check for a nil prepared stmt on a session link")
+	if link.connState == nil {
+		return false
 	}
-
-	connPreparedStmts, err := getConnPreparedStmts(link.conn)
-	if err != nil {
-		return nil, false, err
-	}
-	stmtName := preparedStatement.GetProxyName()
-	_, connHasPreparedStmt := connPreparedStmts[stmtName]
-	return connPreparedStmts, connHasPreparedStmt, nil
+	_, ok := link.connState.stmts[preparedStatement.GetProxyName()]
+	return ok
 }
 
 // Checks whether the SessionLink has already created a prepared statement. If it has not been created, it will
@@ -573,14 +563,11 @@ func (link *SessionLink) checkForValidSessionLinkAndExistingNamedPreparedStmt(pr
 // In the case that a prepared statement will be created, it checks whether it has exceeded the max number of prepared statements
 // on the connection, and if so, deallocates one.
 func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.PreparedStatement, existingOnConn bool) error {
-	connPreparedStmts, err := getConnPreparedStmts(link.conn)
-	if err != nil {
-		return err
+	state := link.connState
+	if state == nil {
+		return errNoConnState
 	}
-	stats, err := getConnStats(link.conn)
-	if err != nil {
-		return err
-	}
+	connPreparedStmts, stats := state.stmts, &state.stats
 
 	stmtName := preparedStatement.GetProxyName()
 
@@ -612,11 +599,11 @@ func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.Prep
 // SessionLinks are expected to be relatively short lived due to the nature of tx-level pooling. As a result,
 // this is expected to be called on events such as checkout & release rather than at time intervals.
 func (link *SessionLink) exportStats() {
-	connStats, err := getConnStats(link.conn)
-	if err != nil {
-		pgproxy.Logger().Error("error getting conn's statistics", "error", err)
+	if link.connState == nil {
+		pgproxy.Logger().Error("error getting conn's statistics", "error", errNoConnState)
 		return
 	}
+	connStats := &link.connState.stats
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtDeallocatedCount, float64(connStats.preparedStmtsDeallocatedCount), link.sessionLinkTags, 1)
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtCreatedCount, float64(connStats.preparedStmtsCreatedCount), link.sessionLinkTags, 1)
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtMaxUsage, float64(connStats.preparedStmtsMaxUsage), link.sessionLinkTags, 1)
@@ -628,10 +615,10 @@ func (link *SessionLink) exportStats() {
 // There is a roundtrip for each message that needs to be deallocated, which is a potential point of optimization.
 // However, if there is an error that occurs, it will not block subsequent error messages from being sent.
 func (link *SessionLink) deallocateExcessPreparedStatements() error {
-	connPreparedStmts, err := getConnPreparedStmts(link.conn)
-	if err != nil {
-		return err
+	if link.connState == nil {
+		return errNoConnState
 	}
+	connPreparedStmts := link.connState.stmts
 	preparedStmtCount := len(connPreparedStmts)
 	if preparedStmtCount <= link.namedPreparedStmtThreshold {
 		return nil
@@ -642,11 +629,7 @@ func (link *SessionLink) deallocateExcessPreparedStatements() error {
 			return err
 		}
 		delete(connPreparedStmts, stmtName)
-		stats, err := getConnStats(link.conn)
-		if err != nil {
-			return err
-		}
-		stats.preparedStmtsDeallocatedCount++
+		link.connState.stats.preparedStmtsDeallocatedCount++
 	}
 	return nil
 }

@@ -93,7 +93,6 @@ type Options struct {
 
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
-	setUpConnMetaData(conn)
 	// The link takes over the mark: its release sets it again if it skips too.
 	customData := conn.Conn().PgConn().CustomData()
 	_, foreignUnnamed := customData[customDataResetSkippedKey]
@@ -103,6 +102,7 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 
 	sl := &SessionLink{
 		conn:                       conn,
+		connState:                  setUpConnMetaData(conn),
 		pgConn:                     conn.Conn().PgConn().Frontend(),
 		txStatus:                   query.Idle,
 		replyExpectations:          []query.ReplyExpectation{},

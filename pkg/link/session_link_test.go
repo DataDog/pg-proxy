@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -678,4 +679,27 @@ func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
 	assert.False(t, link.ForceClose())
 	assert.NoError(t, link.Cancel())
 	assert.False(t, pooled.IsClosed(), "the pooled connection must stay open")
+}
+
+// Statement presence belongs to the connection, so it must outlive the link that
+// recorded it, and a released link must stop answering for a connection it no longer holds.
+func TestConnStateOutlivesLink(t *testing.T) {
+	pool := newBenchPool(t)
+	stmt := prepared.CreatePreparedStatement("s1", "proxy_s1", "SELECT id FROM users WHERE id = $1", []uint32{23})
+
+	first := newBenchLink(t, pool)
+	require.NoError(t, first.RecordNewNamedPreparedStmt(stmt))
+	require.True(t, first.HasExistingNamedPreparedStmt(stmt))
+	require.NoError(t, first.Release())
+	require.False(t, first.HasExistingNamedPreparedStmt(stmt))
+	require.ErrorIs(t, first.RecordExistingNamedPreparedStmtUsed(stmt), errNoConnState)
+
+	second := newBenchLink(t, pool)
+	require.True(t, second.HasExistingNamedPreparedStmt(stmt), "a new link on the same conn must see statements created earlier")
+	require.NoError(t, second.RecordExistingNamedPreparedStmtUsed(stmt))
+	require.NoError(t, second.Release())
+
+	unlinked := NewFrontendLink(nil)
+	require.False(t, unlinked.HasExistingNamedPreparedStmt(stmt))
+	require.ErrorIs(t, unlinked.RecordNewNamedPreparedStmt(stmt), errNoConnState)
 }

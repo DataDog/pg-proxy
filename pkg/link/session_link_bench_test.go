@@ -19,7 +19,7 @@ import (
 
 // newBenchPool returns a single-connection pool whose connection talks to a fake
 // Postgres that answers RESET and Deallocate, which is all Release sends.
-func newBenchPool(b *testing.B) *pgxpool.Pool {
+func newBenchPool(b testing.TB) *pgxpool.Pool {
 	b.Helper()
 	clientConn, serverConn := net.Pipe()
 	b.Cleanup(func() {
@@ -87,7 +87,7 @@ func benchStmts(prefix string, n int) []prepared.PreparedStatement {
 	return stmts
 }
 
-func newBenchLink(b *testing.B, pool *pgxpool.Pool) Link {
+func newBenchLink(b testing.TB, pool *pgxpool.Pool) Link {
 	b.Helper()
 	conn, err := pool.Acquire(context.Background())
 	if err != nil {
