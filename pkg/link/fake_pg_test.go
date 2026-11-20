@@ -28,31 +28,49 @@ type fakePg struct {
 func newFakePgPool(tb testing.TB) *fakePg {
 	tb.Helper()
 	fake := &fakePg{}
-	client, server := fakepg.Pipe()
-	go fakepg.Serve(server, func(backend *pgproto3.Backend, msg pgproto3.FrontendMessage) bool {
+	fake.pool = fakepg.NewPool(tb, func(backend *pgproto3.Backend, msg pgproto3.FrontendMessage) bool {
 		if _, ok := msg.(*pgproto3.Close); ok {
 			fake.closes.Add(1)
 		}
 		return fakepg.Answer(backend, msg)
 	})
-	fake.pool = fakepg.NewPool(tb, client)
 	return fake
 }
 
-// newFakePgLink checks out the pool's connection. The caller must release the link,
-// or the pool's cleanup blocks on it.
+// newFakePgLink checks out the pool's connection and releases it at cleanup, which
+// is a no-op if the test already released it.
 func newFakePgLink(tb testing.TB, pool *pgxpool.Pool, maxPreparedStmts int) Link {
 	tb.Helper()
-	conn, err := pool.Acquire(context.Background())
+	l, err := checkOut(pool, maxPreparedStmts)
 	if err != nil {
 		tb.Fatal(err)
+	}
+	tb.Cleanup(func() { _ = l.Release() })
+	return l
+}
+
+// checkOut is newFakePgLink without the test bookkeeping, for timed loops.
+func checkOut(pool *pgxpool.Pool, maxPreparedStmts int) (Link, error) {
+	conn, err := pool.Acquire(context.Background())
+	if err != nil {
+		return nil, err
 	}
 	l, err := New(conn, Options{MaxPreparedStmts: maxPreparedStmts, MetricTags: []string{"database:app_db"}})
 	if err != nil {
-		conn.Release()
-		tb.Fatal(err)
+		DiscardConn(conn)
+		return nil, err
 	}
-	return l
+	return l, nil
+}
+
+// recordAll records stmts as created on the link's connection.
+func recordAll(tb testing.TB, l Link, stmts []prepared.PreparedStatement) {
+	tb.Helper()
+	for _, st := range stmts {
+		if err := l.RecordNewNamedPreparedStmt(st); err != nil {
+			tb.Fatal(err)
+		}
+	}
 }
 
 // testStmts returns n named statements whose proxy names are distinct.

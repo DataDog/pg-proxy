@@ -567,30 +567,26 @@ func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.Prep
 		return errNoConnState
 	}
 	stmtName := preparedStatement.GetProxyName()
-	stmt, onConn := state.stmts[stmtName]
 
 	if existingOnConn {
+		usage, onConn := state.stmts[stmtName]
 		if !onConn {
 			// Nothing to count: an entry for a statement the connection lacks could never
 			// be deallocated. Callers check HasExistingNamedPreparedStmt first, and failing
 			// here would end the client's session over a usage statistic.
 			return nil
 		}
-		stmt.UsageCount++
-		stmt.TimeLastUsed = time.Now().Nanosecond()
-		if stmt.UsageCount > state.stats.preparedStmtsMaxUsage {
-			state.stats.preparedStmtsMaxUsage = stmt.UsageCount
+		usage.usageCount++
+		usage.timeLastUsed = time.Now().Nanosecond()
+		if usage.usageCount > state.stats.preparedStmtsMaxUsage {
+			state.stats.preparedStmtsMaxUsage = usage.usageCount
 		}
 		link.exportStats()
 		return nil
 	}
 
 	state.stats.preparedStmtsCreatedCount++
-	if !onConn {
-		stmt = &ConnPreparedStmt{}
-		state.stmts[stmtName] = stmt
-	}
-	*stmt = ConnPreparedStmt{Name: stmtName, TimeLastUsed: time.Now().Nanosecond()}
+	state.stmts[stmtName] = &stmtUsage{timeLastUsed: time.Now().Nanosecond()}
 	link.exportStats()
 
 	return nil
@@ -604,11 +600,8 @@ func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.Prep
 // we will only export stats when a connection is linked to a SessionLink.
 // SessionLinks are expected to be relatively short lived due to the nature of tx-level pooling. As a result,
 // this is expected to be called on events such as checkout & release rather than at time intervals.
+// The link must hold a connection.
 func (link *SessionLink) exportStats() {
-	if link.connState == nil {
-		pgproxy.Logger().Error("error getting conn's statistics", "error", errNoConnState)
-		return
-	}
 	connStats := &link.connState.stats
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtDeallocatedCount, float64(connStats.preparedStmtsDeallocatedCount), link.sessionLinkTags, 1)
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtCreatedCount, float64(connStats.preparedStmtsCreatedCount), link.sessionLinkTags, 1)
@@ -622,22 +615,19 @@ func (link *SessionLink) exportStats() {
 // It stops at the first failed Deallocate and leaves the rest on the connection. A
 // network failure has already closed the connection (pgx closes it on any I/O error),
 // so the pool discards it.
+// The link must hold a live connection.
 func (link *SessionLink) deallocateExcessPreparedStatements() error {
-	if link.connState == nil {
-		return errNoConnState
-	}
-	connPreparedStmts := link.connState.stmts
-	preparedStmtCount := len(connPreparedStmts)
-	if preparedStmtCount <= link.namedPreparedStmtThreshold {
+	state := link.connState
+	excess := len(state.stmts) - link.namedPreparedStmtThreshold
+	if excess <= 0 {
 		return nil
 	}
-	stmtsToDeallocateCount := preparedStmtCount - link.namedPreparedStmtThreshold
-	for _, stmtName := range link.connState.stmtsToDeallocate(stmtsToDeallocateCount, link.createdTime) {
+	for _, stmtName := range state.stmtsToDeallocate(excess, link.createdTime) {
 		if err := link.conn.Conn().PgConn().Deallocate(context.Background(), stmtName); err != nil {
 			return err
 		}
-		delete(connPreparedStmts, stmtName)
-		link.connState.stats.preparedStmtsDeallocatedCount++
+		delete(state.stmts, stmtName)
+		state.stats.preparedStmtsDeallocatedCount++
 	}
 	return nil
 }

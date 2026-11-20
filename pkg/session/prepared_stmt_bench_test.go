@@ -8,14 +8,12 @@ package session
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DataDog/pg-proxy/internal/fakepg"
 	"github.com/DataDog/pg-proxy/pkg/link"
-	"github.com/DataDog/pg-proxy/pkg/prepared"
 )
 
 const benchQuery = "SELECT id, name FROM users WHERE id = $1"
@@ -43,39 +41,15 @@ func (b *poolBackend) LoadShedder() LoadShedder { return &b.shed }
 // is the same before and after a change to the session.
 func newBenchSession(b *testing.B) *pgproto3.Frontend {
 	b.Helper()
-	pgClient, pgServer := fakepg.Pipe()
-	go fakepg.Serve(pgServer, fakepg.Answer)
-	pool := fakepg.NewPool(b, pgClient)
-
+	pool := fakepg.NewPool(b, fakepg.Answer)
 	clientEnd, sessionEnd := fakepg.Pipe()
+	// Runs after the session is told to stop, and before the pool's cleanup waits for
+	// the session's conn: if the session never exits, this unblocks its client read.
 	b.Cleanup(func() { _ = clientEnd.Close() })
 	fakeClient := pgproto3.NewFrontend(clientEnd, clientEnd)
-	s := New(Config{
-		Context:               context.Background(),
-		User:                  "testuser",
-		Database:              "testdb",
-		Service:               "testservice",
-		PID:                   1234,
-		Client:                pgproto3.NewBackend(sessionEnd, sessionEnd),
-		ClientConn:            sessionEnd,
-		Backend:               &poolBackend{pool: pool},
-		PostgresMsgBufferSize: 8192,
-		PreparedStatements:    prepared.CreateProxyPreparedStmtsState(nil),
-		MetricTags:            []string{"user:testuser", "database:app_db"},
-	})
-	done := make(chan error, 1)
-	go func() { done <- s.Run() }()
-	// Runs before the pool's cleanup, which waits for the session to give its conn back.
-	b.Cleanup(func() {
-		fakeClient.Send(&pgproto3.Terminate{})
-		_ = fakeClient.Flush()
-		select {
-		case <-done:
-		case <-time.After(5 * time.Second):
-			b.Error("session did not exit after Terminate")
-			_ = clientEnd.Close() // unblock its client read so the pool's cleanup can finish
-		}
-	})
+	s := newPortableSession(context.Background(), pgproto3.NewBackend(sessionEnd, sessionEnd), sessionEnd, &poolBackend{pool: pool}, nil)
+	_, closer := runTestSession(b, s, fakeClient)
+	b.Cleanup(closer)
 	return fakeClient
 }
 

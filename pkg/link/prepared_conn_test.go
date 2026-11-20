@@ -197,21 +197,11 @@ func TestStmtsToDeallocate(t *testing.T) {
 			assert.ElementsMatch(t, tt.expectedStmtNames, stmtNames, "Statements selected for deallocation should match expected")
 
 			// Release selects through the connection's own state; it must agree.
-			state := &connState{stmts: make(map[string]*ConnPreparedStmt, len(tt.connPreparedStmts))}
+			state := &connState{stmts: make(map[string]*stmtUsage, len(tt.connPreparedStmts))}
 			for name, stmt := range tt.connPreparedStmts {
-				state.stmts[name] = &stmt
+				state.stmts[name] = &stmtUsage{usageCount: stmt.UsageCount, timeLastUsed: stmt.TimeLastUsed}
 			}
 			assert.ElementsMatch(t, tt.expectedStmtNames, state.stmtsToDeallocate(tt.stmtsToDeallocateN, tt.sessionCreatedTime))
 		})
 	}
-}
-
-// Release deallocates and deletes by map key, so the selection must name keys even
-// if an entry's own Name has drifted from its key.
-func TestStmtsToDeallocateNamesMapKeys(t *testing.T) {
-	state := &connState{stmts: map[string]*ConnPreparedStmt{
-		"cold": {Name: "", UsageCount: 1},
-		"hot":  {Name: "hot", UsageCount: 9},
-	}}
-	assert.Equal(t, []string{"cold"}, state.stmtsToDeallocate(1, 0))
 }

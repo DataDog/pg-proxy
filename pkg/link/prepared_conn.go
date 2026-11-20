@@ -7,7 +7,6 @@ package link
 
 import (
 	"errors"
-	"maps"
 	"slices"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -44,9 +43,16 @@ type connStats struct {
 // the connection's pgx CustomData, so it outlasts each SessionLink and stays with the
 // connection while it sits in the pool.
 type connState struct {
-	// Pointers, so a Bind updates usage in place instead of a read and a write-back.
-	stmts map[string]*ConnPreparedStmt
+	// Keyed by proxy statement name. Pointers, so a Bind updates usage in place.
+	stmts map[string]*stmtUsage
 	stats connStats
+}
+
+// stmtUsage is what eviction needs to know about one statement on a connection. Its
+// name is the map key, so the two can never disagree.
+type stmtUsage struct {
+	usageCount   int
+	timeLastUsed int
 }
 
 // ConnPreparedStmt is metadata associated with a prepared statement on a connection.
@@ -57,14 +63,14 @@ type ConnPreparedStmt struct {
 }
 
 // setUpConnMetaData returns the connection's prepared statement state, creating it
-// on the connection's first checkout.
-// TODO standardize how we create pools and add beforeConnect hook
+// on the connection's first checkout. A pool hook cannot own this: links accept
+// conns from any pool.Pool, and the state only matters once a link uses the conn.
 func setUpConnMetaData(conn *pgxpool.Conn) *connState {
 	customData := conn.Conn().PgConn().CustomData()
 	if state, ok := customData[customDataConnStateKey].(*connState); ok {
 		return state
 	}
-	state := &connState{stmts: make(map[string]*ConnPreparedStmt)}
+	state := &connState{stmts: make(map[string]*stmtUsage)}
 	customData[customDataConnStateKey] = state
 	return state
 }
@@ -93,27 +99,21 @@ func sortConnPreparedStmtBasedOnDeallocationPriority(sessionLinkCreatedTime int)
 	}
 }
 
-// StmtsToDeallocate returns the names of the n least-used prepared statements.
+// StmtsToDeallocate returns the names (map keys) of the n least-used prepared statements.
 func StmtsToDeallocate(connPreparedStmts map[string]ConnPreparedStmt, stmtsToDeallocate int, sessionLinkCreatedTime int) []string {
-	if stmtsToDeallocate <= 0 || len(connPreparedStmts) == 0 {
-		return nil
+	stmts := make([]ConnPreparedStmt, 0, len(connPreparedStmts))
+	for name, stmt := range connPreparedStmts {
+		stmt.Name = name
+		stmts = append(stmts, stmt)
 	}
-
-	return leastValuableStmts(slices.Collect(maps.Values(connPreparedStmts)), stmtsToDeallocate, sessionLinkCreatedTime)
+	return leastValuableStmts(stmts, stmtsToDeallocate, sessionLinkCreatedTime)
 }
 
-// stmtsToDeallocate returns the map keys of the n statements Release should evict
-// first. Names come from the keys, which are what Deallocate and delete must use,
-// rather than from each entry's copy of its name.
+// stmtsToDeallocate returns the names of the n statements Release should evict first.
 func (s *connState) stmtsToDeallocate(n int, sessionLinkCreatedTime int) []string {
-	if n <= 0 || len(s.stmts) == 0 {
-		return nil
-	}
 	stmts := make([]ConnPreparedStmt, 0, len(s.stmts))
-	for name, stmt := range s.stmts {
-		entry := *stmt
-		entry.Name = name
-		stmts = append(stmts, entry)
+	for name, usage := range s.stmts {
+		stmts = append(stmts, ConnPreparedStmt{Name: name, UsageCount: usage.usageCount, TimeLastUsed: usage.timeLastUsed})
 	}
 	return leastValuableStmts(stmts, n, sessionLinkCreatedTime)
 }
@@ -121,9 +121,12 @@ func (s *connState) stmtsToDeallocate(n int, sessionLinkCreatedTime int) []strin
 // leastValuableStmts sorts stmts by deallocation priority, in place, and returns the
 // names of the first stmtsToDeallocate.
 func leastValuableStmts(stmts []ConnPreparedStmt, stmtsToDeallocate int, sessionLinkCreatedTime int) []string {
+	if stmtsToDeallocate <= 0 || len(stmts) == 0 {
+		return nil
+	}
 	slices.SortFunc(stmts, sortConnPreparedStmtBasedOnDeallocationPriority(sessionLinkCreatedTime))
 
-	result := make([]string, 0, stmtsToDeallocate)
+	result := make([]string, 0, min(stmtsToDeallocate, len(stmts)))
 	for i := 0; i < stmtsToDeallocate && i < len(stmts); i++ {
 		result = append(result, stmts[i].Name)
 	}

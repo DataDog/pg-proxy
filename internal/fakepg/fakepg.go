@@ -98,9 +98,9 @@ type addr struct{}
 func (addr) Network() string { return "fakepg" }
 func (addr) String() string  { return "fakepg" }
 
-// ServeRaw answers the startup handshake on conn, then hands the protocol to serve.
-// It returns when the handshake fails or serve returns.
-func ServeRaw(conn net.Conn, serve func(*pgproto3.Backend)) {
+// serve answers the startup handshake on conn, then passes each frontend message to
+// handle until the connection closes or handle returns false.
+func serve(conn net.Conn, handle func(*pgproto3.Backend, pgproto3.FrontendMessage) bool) {
 	backend := pgproto3.NewBackend(conn, conn)
 	if _, err := backend.ReceiveStartupMessage(); err != nil {
 		return
@@ -111,21 +111,26 @@ func ServeRaw(conn net.Conn, serve func(*pgproto3.Backend)) {
 	if backend.Flush() != nil {
 		return
 	}
-	serve(backend)
+	for {
+		msg, err := backend.Receive()
+		if err != nil || !handle(backend, msg) {
+			return
+		}
+	}
 }
 
-// Serve answers the startup handshake, then passes each frontend message to handle
-// until the connection closes or handle returns false.
-func Serve(conn net.Conn, handle func(*pgproto3.Backend, pgproto3.FrontendMessage) bool) {
-	ServeRaw(conn, func(backend *pgproto3.Backend) {
-		for {
-			msg, err := backend.Receive()
-			if err != nil || !handle(backend, msg) {
-				return
-			}
-		}
-	})
-}
+// Replies are only encoded, never modified, so Answer shares one of each instead of
+// allocating per message.
+var (
+	parseComplete        = &pgproto3.ParseComplete{}
+	bindComplete         = &pgproto3.BindComplete{}
+	parameterDescription = &pgproto3.ParameterDescription{ParameterOIDs: []uint32{23}}
+	noData               = &pgproto3.NoData{}
+	selectComplete       = &pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")}
+	closeComplete        = &pgproto3.CloseComplete{}
+	resetComplete        = &pgproto3.CommandComplete{CommandTag: []byte("RESET")}
+	readyForQuery        = &pgproto3.ReadyForQuery{TxStatus: 'I'}
+)
 
 // Answer replies to msg as an idle server with empty results: the extended query
 // protocol, statement and portal Close, and simple queries such as RESET ALL. It
@@ -134,24 +139,24 @@ func Answer(backend *pgproto3.Backend, msg pgproto3.FrontendMessage) bool {
 	flush := false
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
-		backend.Send(&pgproto3.ParseComplete{})
+		backend.Send(parseComplete)
 	case *pgproto3.Bind:
-		backend.Send(&pgproto3.BindComplete{})
+		backend.Send(bindComplete)
 	case *pgproto3.Describe:
 		if m.ObjectType == 'S' {
-			backend.Send(&pgproto3.ParameterDescription{ParameterOIDs: []uint32{23}})
+			backend.Send(parameterDescription)
 		}
-		backend.Send(&pgproto3.NoData{})
+		backend.Send(noData)
 	case *pgproto3.Execute:
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 0")})
+		backend.Send(selectComplete)
 	case *pgproto3.Close:
-		backend.Send(&pgproto3.CloseComplete{})
+		backend.Send(closeComplete)
 	case *pgproto3.Sync:
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		backend.Send(readyForQuery)
 		flush = true
 	case *pgproto3.Query:
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		backend.Send(resetComplete)
+		backend.Send(readyForQuery)
 		flush = true
 	case *pgproto3.Flush:
 		flush = true
@@ -161,14 +166,17 @@ func Answer(backend *pgproto3.Backend, msg pgproto3.FrontendMessage) bool {
 	return !flush || backend.Flush() == nil
 }
 
-// NewPool returns a pool of at most one connection, which dials client. A second
-// dial gets the same, by then closed, end, so a test whose conn is destroyed cannot
-// silently get a fresh one. The pool closes at cleanup, after every cleanup
-// registered later, and Close waits for acquired conns: a test must release them in
-// its own cleanups, or a failed assertion hangs instead of failing.
-func NewPool(tb testing.TB, client net.Conn) *pgxpool.Pool {
+// NewPool returns a pool of at most one connection, served by a fake Postgres that
+// passes each frontend message to handle (Answer, or a wrapper of it) until handle
+// returns false. A second dial gets the same, by then closed, pipe, so a test whose
+// conn is destroyed cannot silently get a fresh one. The pool closes at cleanup and
+// Close waits for acquired conns, so a test must release them in cleanups registered
+// after NewPool, or a failed assertion hangs instead of failing.
+func NewPool(tb testing.TB, handle func(*pgproto3.Backend, pgproto3.FrontendMessage) bool) *pgxpool.Pool {
 	tb.Helper()
+	client, server := Pipe()
 	tb.Cleanup(func() { _ = client.Close() })
+	go serve(server, handle)
 	config, err := pgxpool.ParseConfig("postgres://test@127.0.0.1/test?sslmode=disable")
 	if err != nil {
 		tb.Fatal(err)

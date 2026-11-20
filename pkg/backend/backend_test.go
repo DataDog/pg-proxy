@@ -299,9 +299,7 @@ func TestAcquireDestroysConnWhenLinkFactoryFails(t *testing.T) {
 		{name: "role set fails", role: failingRole{}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			client, server := fakepg.Pipe()
-			go fakepg.Serve(server, fakepg.Answer)
-			pgPool := fakepg.NewPool(t, client)
+			pgPool := fakepg.NewPool(t, fakepg.Answer)
 			var acquired *pgxpool.Conn
 			t.Cleanup(func() {
 				if acquired != nil {

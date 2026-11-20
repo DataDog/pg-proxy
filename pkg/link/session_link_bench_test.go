@@ -12,17 +12,18 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 )
 
+// newWarmLink checks out a link whose connection already holds n statements.
+func newWarmLink(b *testing.B, n int) (Link, []prepared.PreparedStatement) {
+	l := newFakePgLink(b, newFakePgPool(b).pool, DefaultPreparedStmtsPerConnection)
+	stmts := testStmts("warm", n)
+	recordAll(b, l, stmts)
+	return l, stmts
+}
+
 // BenchmarkBindExistingNamedStmt is the per-Bind work for a named statement already
 // on the connection: the presence check, then the usage update.
 func BenchmarkBindExistingNamedStmt(b *testing.B) {
-	l := newFakePgLink(b, newFakePgPool(b).pool, DefaultPreparedStmtsPerConnection)
-	b.Cleanup(func() { _ = l.Release() })
-	stmts := testStmts("warm", 50)
-	for _, st := range stmts {
-		if err := l.RecordNewNamedPreparedStmt(st); err != nil {
-			b.Fatal(err)
-		}
-	}
+	l, stmts := newWarmLink(b, 50)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -39,14 +40,7 @@ func BenchmarkBindExistingNamedStmt(b *testing.B) {
 // BenchmarkParseExistingNamedStmt is the presence check a Parse runs before the
 // proxy answers ParseComplete locally.
 func BenchmarkParseExistingNamedStmt(b *testing.B) {
-	l := newFakePgLink(b, newFakePgPool(b).pool, DefaultPreparedStmtsPerConnection)
-	b.Cleanup(func() { _ = l.Release() })
-	stmts := testStmts("warm", 50)
-	for _, st := range stmts {
-		if err := l.RecordNewNamedPreparedStmt(st); err != nil {
-			b.Fatal(err)
-		}
-	}
+	l, stmts := newWarmLink(b, 50)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
@@ -56,17 +50,22 @@ func BenchmarkParseExistingNamedStmt(b *testing.B) {
 	}
 }
 
-// BenchmarkRecordNewNamedStmt is the ParseComplete bookkeeping for a new statement.
+// BenchmarkRecordNewNamedStmt is the ParseComplete bookkeeping for a statement new to
+// the connection. Each name is removed again, so every record is an insert, as in
+// production, where a Parse of a held statement is answered without Postgres; the
+// removal is part of the measured cost.
 func BenchmarkRecordNewNamedStmt(b *testing.B) {
-	l := newFakePgLink(b, newFakePgPool(b).pool, DefaultPreparedStmtsPerConnection)
-	b.Cleanup(func() { _ = l.Release() })
+	l, _ := newWarmLink(b, 50)
+	held := l.(*SessionLink).connState.stmts
 	stmts := testStmts("new", 64)
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		if err := l.RecordNewNamedPreparedStmt(stmts[i%len(stmts)]); err != nil {
+		st := stmts[i%len(stmts)]
+		if err := l.RecordNewNamedPreparedStmt(st); err != nil {
 			b.Fatal(err)
 		}
+		delete(held, st.GetProxyName())
 	}
 }
 
@@ -86,11 +85,7 @@ func BenchmarkReleasePreparedStmts(b *testing.B) {
 			pool := newFakePgPool(b).pool
 			resident := testStmts("resident", tc.resident)
 			l := newFakePgLink(b, pool, DefaultPreparedStmtsPerConnection)
-			for _, st := range resident {
-				if err := l.RecordNewNamedPreparedStmt(st); err != nil {
-					b.Fatal(err)
-				}
-			}
+			recordAll(b, l, resident)
 			if err := l.Release(); err != nil {
 				b.Fatal(err)
 			}
@@ -103,7 +98,10 @@ func BenchmarkReleasePreparedStmts(b *testing.B) {
 			b.ReportAllocs()
 			b.ResetTimer()
 			for i := 0; i < b.N; i++ {
-				l := newFakePgLink(b, pool, DefaultPreparedStmtsPerConnection)
+				l, err := checkOut(pool, DefaultPreparedStmtsPerConnection)
+				if err != nil {
+					b.Fatal(err)
+				}
 				st := resident[i%len(resident)]
 				if l.HasExistingNamedPreparedStmt(st) {
 					if err := l.RecordExistingNamedPreparedStmtUsed(st); err != nil {

@@ -28,15 +28,15 @@ import (
 type recordingMetrics struct {
 	pgproxy.NoopMetrics
 	mu            sync.Mutex
-	counts        map[string]map[string][]int64   // metric -> tagsKey -> values
-	gauges        map[string]map[string][]float64 // metric -> tagsKey -> values
-	distributions map[string]int                  // metric -> number of values
+	counts        map[string]map[string][]int64 // metric -> tagsKey -> values
+	gauges        map[string]float64            // metric + tagsKey -> latest value
+	distributions map[string]int                // metric -> number of values
 }
 
 func newRecordingMetrics() *recordingMetrics {
 	return &recordingMetrics{
 		counts:        make(map[string]map[string][]int64),
-		gauges:        make(map[string]map[string][]float64),
+		gauges:        make(map[string]float64),
 		distributions: make(map[string]int),
 	}
 }
@@ -77,11 +77,7 @@ func (m *recordingMetrics) Count(name string, value int64, tags []string, rate f
 func (m *recordingMetrics) Gauge(name string, value float64, tags []string, rate float64) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.gauges[name] == nil {
-		m.gauges[name] = make(map[string][]float64)
-	}
-	key := tagsKey(tags)
-	m.gauges[name][key] = append(m.gauges[name][key], value)
+	m.gauges[name+"|"+tagsKey(tags)] = value
 	return nil
 }
 
@@ -89,11 +85,8 @@ func (m *recordingMetrics) Gauge(name string, value float64, tags []string, rate
 func (m *recordingMetrics) lastGauge(name string, tags []string) (value float64, ok bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	values := m.gauges[name][tagsKey(tags)]
-	if len(values) == 0 {
-		return 0, false
-	}
-	return values[len(values)-1], true
+	value, ok = m.gauges[name+"|"+tagsKey(tags)]
+	return value, ok
 }
 
 func (m *recordingMetrics) getCount(name string, tags []string) (values []int64, ok bool) {
@@ -719,7 +712,6 @@ func TestConnStateOutlivesLink(t *testing.T) {
 	stmt := prepared.CreatePreparedStatement("s1", "proxy_s1", "SELECT id FROM users WHERE id = $1", []uint32{23})
 
 	first := newFakePgLink(t, pool, DefaultPreparedStmtsPerConnection)
-	t.Cleanup(func() { _ = first.Release() }) // a no-op once released; frees the conn if an assertion fails
 	require.NoError(t, first.RecordNewNamedPreparedStmt(stmt))
 	require.True(t, first.HasExistingNamedPreparedStmt(stmt))
 	require.NoError(t, first.Release())
@@ -727,7 +719,6 @@ func TestConnStateOutlivesLink(t *testing.T) {
 	require.ErrorIs(t, first.RecordExistingNamedPreparedStmtUsed(stmt), errNoConnState)
 
 	second := newFakePgLink(t, pool, DefaultPreparedStmtsPerConnection)
-	t.Cleanup(func() { _ = second.Release() })
 	require.True(t, second.HasExistingNamedPreparedStmt(stmt), "a new link on the same conn must see statements created earlier")
 	require.NoError(t, second.RecordExistingNamedPreparedStmtUsed(stmt))
 	require.NoError(t, second.Release())
@@ -741,7 +732,6 @@ func TestConnStateOutlivesLink(t *testing.T) {
 // no statement behind it could never be evicted, and an error would end the session.
 func TestRecordUseOfAbsentStmtIsIgnored(t *testing.T) {
 	l := newFakePgLink(t, newFakePgPool(t).pool, DefaultPreparedStmtsPerConnection)
-	t.Cleanup(func() { _ = l.Release() })
 	stmt := testStmts("absent", 1)[0]
 
 	require.NoError(t, l.RecordExistingNamedPreparedStmtUsed(stmt))
@@ -759,7 +749,6 @@ func TestReleaseDeallocatesExcessAndReportsStats(t *testing.T) {
 	stmts := testStmts("cap", limit+1)
 
 	l := newFakePgLink(t, fake.pool, limit)
-	t.Cleanup(func() { _ = l.Release() })
 	for _, st := range stmts {
 		require.NoError(t, l.RecordNewNamedPreparedStmt(st))
 	}
@@ -770,7 +759,6 @@ func TestReleaseDeallocatesExcessAndReportsStats(t *testing.T) {
 
 	// The next checkout reports the connection's stats and sees only the survivors.
 	next := newFakePgLink(t, fake.pool, limit)
-	t.Cleanup(func() { _ = next.Release() })
 	held := 0
 	for _, st := range stmts {
 		if next.HasExistingNamedPreparedStmt(st) {
@@ -781,9 +769,9 @@ func TestReleaseDeallocatesExcessAndReportsStats(t *testing.T) {
 
 	tags := []string{"database:app_db"}
 	for name, want := range map[string]float64{
-		"datadog." + connPreparedStmtCreatedCount:     limit + 1,
-		"datadog." + connPreparedStmtDeallocatedCount: 1,
-		"datadog." + connPreparedStmtMaxUsage:         2,
+		pgproxy.MetricName(connPreparedStmtCreatedCount):     limit + 1,
+		pgproxy.MetricName(connPreparedStmtDeallocatedCount): 1,
+		pgproxy.MetricName(connPreparedStmtMaxUsage):         2,
 	} {
 		got, ok := metrics.lastGauge(name, tags)
 		require.True(t, ok, "%s was not reported", name)

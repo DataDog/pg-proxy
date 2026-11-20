@@ -47,7 +47,7 @@ var parameterStatusKeys = []string{
 type RoleSessionFactory func(roleName string) link.RoleSession
 
 // LinkFactory wraps an acquired connection as a session link. On error it must leave
-// the conn to Acquire, which closes and releases it.
+// the conn to Acquire, which discards it.
 type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
 
 // LinkDecorator wraps a link after checkout with the pool that supplied the
@@ -218,30 +218,15 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	}
 	backendLink, err := r.linkFactory(conn, opts)
 	if err != nil {
-		destroyConn(conn)
+		if conn != nil { // nothing was acquired, so there is nothing to discard
+			link.DiscardConn(conn)
+		}
 		return nil, err
 	}
 	if r.linkDecorator != nil && request.DecorateLink {
 		backendLink = r.linkDecorator(backendLink, r.selector.pool(replica), conn, request)
 	}
 	return backendLink, nil
-}
-
-// connCloseTimeout bounds the Terminate sent when a conn is destroyed, so a backend
-// that stopped reading cannot stall checkout.
-const connCloseTimeout = 5 * time.Second
-
-// destroyConn closes conn and releases it, so the pool discards it. A conn whose link
-// failed to build is in an unknown session state, such as a role half set, and must
-// not be reused. No link holds it, so nothing else would ever release it.
-func destroyConn(conn *pgxpool.Conn) {
-	if conn == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), connCloseTimeout)
-	defer cancel()
-	_ = conn.Conn().Close(ctx)
-	conn.Release()
 }
 
 func buildSessionLinkMetricTags(baseTags []string, clusterName string, forRead bool) []string {
