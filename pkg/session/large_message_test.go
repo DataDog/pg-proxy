@@ -16,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
 )
 
@@ -61,7 +62,7 @@ func TestLargeBindAmplification(t *testing.T) {
 		foundParameters := false
 		for _, span := range recorder.Ended()[warmUpSpans:] {
 			for _, attr := range span.Attributes() {
-				foundParameters = foundParameters || attr.Key == "db.parameters.0"
+				foundParameters = foundParameters || attr.Key == bindparams.TagPrefix+"0"
 			}
 		}
 		require.True(t, foundParameters, "the measured cycle's trace must carry the Bind parameters")

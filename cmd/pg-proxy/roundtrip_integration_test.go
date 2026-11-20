@@ -47,13 +47,11 @@ func TestBackendStatementsPerClientStatement(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { cleanupExec(t, admin, "DROP DATABASE "+database) })
 
-	backendURL, err := url.Parse(adminURL)
+	poolURL, err := connectionString(ctx, "pool_max_conns=1", "pool_health_check_period=1h") // no background statements during the count
+	require.NoError(t, err)
+	backendURL, err := url.Parse(poolURL)
 	require.NoError(t, err)
 	backendURL.Path = "/" + database
-	query := backendURL.Query()
-	query.Set("pool_max_conns", "1")
-	query.Set("pool_health_check_period", "1h") // no background statements during the count
-	backendURL.RawQuery = query.Encode()
 	proxyCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	proxy, err := newProxy(proxyCtx, backendConfig(t, backendURL.String()))
@@ -89,37 +87,26 @@ func TestBackendStatementsPerClientStatement(t *testing.T) {
 	rows, err := admin.Query(ctx, `SELECT query, calls FROM pg_stat_statements
 		WHERE dbid = (SELECT oid FROM pg_database WHERE datname = $1)`, database)
 	require.NoError(t, err)
-	calls, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (statementCalls, error) {
-		var call statementCalls
-		return call, row.Scan(&call.query, &call.calls)
+	statements := map[string]int64{}
+	var query string
+	var calls int64
+	_, err = pgx.ForEachRow(rows, []any{&query, &calls}, func() error {
+		statements[query] += calls // pg_stat_statements has a row per user
+		return nil
 	})
 	require.NoError(t, err)
-	byQuery := make(map[string]int64, len(calls))
-	var backendStatements int64
-	for _, call := range calls {
-		byQuery[call.query] = call.calls
-		backendStatements += call.calls
-	}
-	t.Logf("calls per statement for %d client statements: %v", clientStatements, byQuery)
-	require.EqualValues(t, clientStatements, byQuery["SELECT $1::int"])
 
 	// Each statement is its own transaction, so the proxy releases the backend
 	// after each one, and the release runs one reset query. Without role
-	// management, that one simple query holds three statements: RESET SESSION
-	// AUTHORIZATION, RESET ROLE, and RESET ALL, so RESET ALL counts reset
-	// queries. Today a client statement costs 2 round trips and 4 statements.
-	// Lower these budgets when the proxy elides or merges the reset.
-	resetsPerClientStatement := float64(byQuery["RESET ALL"]) / clientStatements
-	require.LessOrEqual(t, resetsPerClientStatement, 1.0, "more than one reset query per client statement")
-	roundTripsPerClientStatement := float64(byQuery["SELECT $1::int"]+byQuery["RESET ALL"]) / clientStatements
-	require.LessOrEqual(t, roundTripsPerClientStatement, 2.0, "more than 2 backend round trips per client statement")
-	statementsPerClientStatement := float64(backendStatements) / clientStatements
-	require.LessOrEqual(t, statementsPerClientStatement, 4.0, "Postgres runs a statement the proxy did not run before")
-}
-
-type statementCalls struct {
-	query string
-	calls int64
+	// management, that one simple query holds three statements. A client
+	// statement therefore costs 2 round trips and 4 statements. Update these
+	// counts when the proxy elides or merges the reset.
+	require.Equal(t, map[string]int64{
+		"SELECT $1::int":              clientStatements,
+		"RESET SESSION AUTHORIZATION": clientStatements,
+		"RESET ROLE":                  clientStatements,
+		"RESET ALL":                   clientStatements,
+	}, statements, "Postgres must run each client statement and one reset query per release, and nothing else")
 }
 
 // requireStatementStatistics creates pg_stat_statements if it is missing. It

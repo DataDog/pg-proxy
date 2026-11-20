@@ -6,6 +6,8 @@
 package session
 
 import (
+	"cmp"
+	"math"
 	"runtime"
 	"runtime/debug"
 	"testing"
@@ -31,11 +33,6 @@ var protocolCycleAllocBudgets = map[string]float64{
 	"pipeline_30":           493,
 }
 
-// allocBudgetSlack absorbs amortized allocations, which only some cycles make:
-// pgxpool, for one, allocates its Conn wrappers 128 at a time. A change that
-// allocates on one cycle in 20 still exceeds its budget.
-const allocBudgetSlack = 0.05
-
 func TestProtocolCycleAllocationBudgets(t *testing.T) {
 	if raceEnabled {
 		t.Skip("the race detector changes allocation counts")
@@ -46,41 +43,51 @@ func TestProtocolCycleAllocationBudgets(t *testing.T) {
 			require.True(t, ok, "add an allocation budget for this cycle")
 			client, script := pc.prepare(t, newCycleHarness(t, false))
 			var err error
-			allocs := cycleAllocsPerRun(100, func() {
-				if runErr := client.run(script); runErr != nil && err == nil {
-					err = runErr
-				}
-			})
+			allocs := cycleAllocsPerRun(func() { err = cmp.Or(err, client.run(script)) })
 			require.NoError(t, err)
-			t.Logf("%s allocates %.2f times per cycle; its budget is %v", pc.name, allocs, budget)
-			require.LessOrEqualf(t, allocs, budget+allocBudgetSlack,
+			t.Logf("%s allocates %v times per cycle; its budget is %v", pc.name, allocs, budget)
+			require.LessOrEqualf(t, allocs, budget,
 				"a %s cycle allocates more than its budget; find the new allocation with BenchmarkProtocolCycle and -memprofile", pc.name)
-			if allocs <= budget-1+allocBudgetSlack {
+			if allocs <= budget-1 {
 				t.Logf("a whole allocation is gone: lower the %s budget", pc.name)
 			}
 		})
 	}
 }
 
-// cycleAllocsPerRun returns the mean heap allocations of run. Unlike
-// testing.AllocsPerRun, it does not round the mean down, so an allocation made
-// on only some cycles still exceeds a budget. It first runs 64 warm-up cycles,
-// so that slices and maps reach their steady size. Garbage collection is off
-// while it measures: a collection empties sync.Pools, and refilling them would
-// add allocations that depend on when it runs.
-func cycleAllocsPerRun(runs int, run func()) float64 {
+// allocWindow is the number of cycles in one measurement. pgxpool allocates its
+// Conn wrappers this many at a time, so each window holds exactly one of those
+// allocations.
+const allocWindow = 128
+
+// cycleAllocsPerRun returns the heap allocations per cycle of run, without
+// pgxpool's Conn wrapper batch. After one warm-up window, so that slices and
+// maps reach their steady size, it measures 20 windows and keeps the one with
+// the fewest allocations, since other goroutines now and then allocate during
+// a window, more often on a busy machine. Unlike testing.AllocsPerRun, it does
+// not round the mean down, so an allocation made on only some cycles still
+// exceeds a budget. Garbage collection is off within a window: a collection
+// empties sync.Pools, and refilling them would add allocations that depend on
+// when it runs.
+func cycleAllocsPerRun(run func()) float64 {
 	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
 	defer debug.SetGCPercent(debug.SetGCPercent(-1))
-	for range 64 {
+	for range allocWindow {
 		run()
 	}
-	var before, after runtime.MemStats
-	runtime.ReadMemStats(&before)
-	for range runs {
-		run()
+	fewest := uint64(math.MaxUint64)
+	for range 20 {
+		runtime.GC() // bounds the heap
+		run()        // re-creates the sync.Pool caches that the collection dropped
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for range allocWindow {
+			run()
+		}
+		runtime.ReadMemStats(&after)
+		fewest = min(fewest, after.Mallocs-before.Mallocs)
 	}
-	runtime.ReadMemStats(&after)
-	return float64(after.Mallocs-before.Mallocs) / float64(runs)
+	return float64(fewest-1) / allocWindow
 }
 
 func BenchmarkProtocolCycle(b *testing.B) {

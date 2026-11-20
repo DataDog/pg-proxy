@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -35,13 +36,6 @@ var (
 	errPartialMessage  = errors.New("cycleConn: a write ends inside a message; the harness counts whole messages only")
 )
 
-// releaseResetSQL holds the queries SessionLink.Release sends, without and with
-// a RoleSession. Keep it in step with Release.
-var releaseResetSQL = map[string]bool{
-	"RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL": true,
-	"RESET ALL": true,
-}
-
 // cycleConn is a net.Conn that returns scripted bytes and counts the writes made to it.
 // Each Write is one socket write in production.
 type cycleConn struct {
@@ -50,9 +44,19 @@ type cycleConn struct {
 	writes    int
 	// Postgres side only, counted once frames is set after the startup handshake:
 	frames     bool
-	flushes    int // writes that carry anything but the release reset
-	resets     int // writes that carry the release reset query
-	statements int // forwarded simple Query and Execute messages
+	inReset    bool // set by resetTracer while the release reset runs
+	flushes    int  // writes of forwarded messages
+	resets     int  // writes of the release reset
+	statements int  // forwarded simple Query and Execute messages
+}
+
+// messageSize returns the size of the message that b starts with, or 0 if b
+// is shorter than a message header.
+func messageSize(b []byte) int {
+	if len(b) < 5 {
+		return 0
+	}
+	return 1 + int(binary.BigEndian.Uint32(b[1:5]))
 }
 
 // Read returns at most the rest of one message. The pgproto3 readers then
@@ -63,9 +67,9 @@ func (c *cycleConn) Read(p []byte) (int, error) {
 		return 0, errScriptExhausted
 	}
 	if c.readFrame == 0 {
-		c.readFrame = len(c.in)
-		if len(c.in) >= 5 {
-			c.readFrame = min(c.readFrame, 1+int(binary.BigEndian.Uint32(c.in[1:5])))
+		c.readFrame = messageSize(c.in)
+		if c.readFrame == 0 || c.readFrame > len(c.in) {
+			c.readFrame = len(c.in)
 		}
 	}
 	n := copy(p[:min(len(p), c.readFrame)], c.in)
@@ -73,42 +77,31 @@ func (c *cycleConn) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// Write counts a write that carries both the release reset and other messages
-// as both a flush and a reset; backendWrites then shows the merge.
 func (c *cycleConn) Write(p []byte) (int, error) {
 	c.writes++
-	if !c.frames {
+	switch {
+	case !c.frames:
+		return len(p), nil
+	case c.inReset:
+		c.resets++
 		return len(p), nil
 	}
-	forwarded, reset, statements := false, false, 0
+	statements := 0
 	for msg := p; len(msg) > 0; {
-		if len(msg) < 5 {
+		size := messageSize(msg)
+		if size == 0 || size > len(msg) {
 			return 0, errPartialMessage
 		}
-		size := 1 + int(binary.BigEndian.Uint32(msg[1:5]))
-		if size > len(msg) {
-			return 0, errPartialMessage
-		}
-		switch {
-		case msg[0] == 'X': // Terminate, sent when the pool closes the connection
+		switch msg[0] {
+		case 'X': // Terminate, sent when the pool closes the connection
 			return len(p), nil
-		case msg[0] == 'Q' && releaseResetSQL[string(msg[5:size-1])]: // the string ends in a zero byte
-			reset = true
-		default:
-			forwarded = true
-			if msg[0] == 'Q' || msg[0] == 'E' {
-				statements++
-			}
+		case 'Q', 'E':
+			statements++
 		}
 		msg = msg[size:]
 	}
-	if forwarded {
-		c.flushes++
-		c.statements += statements
-	}
-	if reset {
-		c.resets++
-	}
+	c.flushes++
+	c.statements += statements
 	return len(p), nil
 }
 
@@ -121,6 +114,20 @@ func (*cycleConn) SetWriteDeadline(time.Time) error { return nil }
 
 func (c *cycleConn) resetCounts() {
 	c.writes, c.flushes, c.resets, c.statements = 0, 0, 0, 0
+}
+
+// resetTracer marks the scripted Postgres's writes during a pgx query as the
+// release reset. In a cycle, only SessionLink.Release runs a query through pgx;
+// the session forwards client messages through the connection's Frontend.
+type resetTracer struct{ postgres *cycleConn }
+
+func (t resetTracer) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	t.postgres.inReset = true
+	return ctx
+}
+
+func (t resetTracer) TraceQueryEnd(context.Context, *pgx.Conn, pgx.TraceQueryEndData) {
+	t.postgres.inReset = false
 }
 
 // countingRoleSession manages the role without SQL and counts its calls.
@@ -136,37 +143,11 @@ func (r *countingRoleSession) Reset(context.Context, *pgxpool.Conn, string, []st
 	return nil
 }
 
-// cycleBackend checks out links the way the production backend adapter does,
-// from a pool whose only connection is the scripted Postgres.
-type cycleBackend struct {
-	pool        *pgxpool.Pool
-	role        link.RoleSession // nil: no role management
-	checkouts   int
-	loadShedder passthroughLoadShedder
-}
-
-func (b *cycleBackend) Acquire(ctx context.Context, request LinkRequest) (link.Link, error) {
-	conn, err := b.pool.Acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	backendLink, err := link.New(conn, link.Options{
-		MaxPreparedStmts: request.MaxPreparedStmts, MetricTags: request.MetricTags, Role: b.role,
-	})
-	if err != nil {
-		conn.Release()
-		return nil, err
-	}
-	b.checkouts++
-	return backendLink, nil
-}
-
-func (b *cycleBackend) LoadShedder() LoadShedder { return &b.loadShedder }
-
 type cycleHarness struct {
 	postgres   *cycleConn
-	backend    *cycleBackend
-	role       *countingRoleSession // nil without role management
+	pool       *pgxpool.Pool
+	backend    *namedBackend
+	role       countingRoleSession // its counts stay 0 without role management
 	resetReply []byte
 }
 
@@ -175,24 +156,34 @@ type cycleHarness struct {
 // without one, it also resets the session authorization and role.
 func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 	tb.Helper()
-	h := &cycleHarness{
-		postgres: &cycleConn{in: encodeMessages(tb,
-			&pgproto3.AuthenticationOk{},
-			&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}},
-			&pgproto3.ReadyForQuery{TxStatus: 'I'},
-		)},
-		backend: &cycleBackend{},
-	}
-	resetStatements := 3 // RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL
+	h := &cycleHarness{postgres: &cycleConn{in: encodeMessages[pgproto3.BackendMessage](tb,
+		&pgproto3.AuthenticationOk{},
+		&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}},
+		cycleReadyForQuery(),
+	)}}
+	reset := &pgproto3.CommandComplete{CommandTag: []byte("RESET")}
+	// RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL
+	resetReplies := []pgproto3.BackendMessage{reset, reset, reset, cycleReadyForQuery()}
+	var role link.RoleSession
 	if withRole {
-		h.role = &countingRoleSession{}
-		h.backend.role = h.role
-		resetStatements = 1 // RESET ALL
+		role, resetReplies = &h.role, resetReplies[2:] // RESET ALL
 	}
-	for range resetStatements {
-		h.resetReply = encodeMessagesTo(tb, h.resetReply, &pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-	}
-	h.resetReply = encodeMessagesTo(tb, h.resetReply, &pgproto3.ReadyForQuery{TxStatus: 'I'})
+	h.resetReply = encodeMessages(tb, resetReplies...)
+	// Checkouts follow the production backend adapter.
+	h.backend = &namedBackend{name: "cycle", acquire: func(ctx context.Context, request LinkRequest) (link.Link, error) {
+		conn, err := h.pool.Acquire(ctx)
+		if err != nil {
+			return nil, err
+		}
+		backendLink, err := link.New(conn, link.Options{
+			MaxPreparedStmts: request.MaxPreparedStmts, MetricTags: request.MetricTags, Role: role,
+		})
+		if err != nil {
+			conn.Release()
+			return nil, err
+		}
+		return backendLink, nil
+	}}
 
 	config, err := pgxpool.ParseConfig("postgres://app_user@127.0.0.1/app_db?sslmode=disable")
 	require.NoError(tb, err)
@@ -200,6 +191,7 @@ func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 	config.HealthCheckPeriod = time.Hour
 	// A ping on checkout would need a scripted reply; production pings only idle connections.
 	config.ShouldPing = func(context.Context, pgxpool.ShouldPingParams) bool { return false }
+	config.ConnConfig.Tracer = resetTracer{h.postgres}
 	dialed := false
 	config.ConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
 		if dialed {
@@ -208,12 +200,12 @@ func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 		dialed = true
 		return h.postgres, nil
 	}
-	h.backend.pool, err = pgxpool.NewWithConfig(context.Background(), config)
+	h.pool, err = pgxpool.NewWithConfig(context.Background(), config)
 	require.NoError(tb, err)
-	tb.Cleanup(h.backend.pool.Close)
+	tb.Cleanup(h.pool.Close)
 
 	// Connect before counting: the startup message has no type byte to frame.
-	conn, err := h.backend.pool.Acquire(context.Background())
+	conn, err := h.pool.Acquire(context.Background())
 	require.NoError(tb, err)
 	conn.Release()
 	require.Empty(tb, h.postgres.in, "startup handshake left scripted bytes unread")
@@ -251,15 +243,7 @@ type cycleScript struct {
 
 func (h *cycleHarness) script(tb testing.TB, frontend []pgproto3.FrontendMessage, backend []pgproto3.BackendMessage) cycleScript {
 	tb.Helper()
-	var script cycleScript
-	for _, msg := range frontend {
-		script.frontend = encodeMessagesTo(tb, script.frontend, msg)
-	}
-	for _, msg := range backend {
-		script.backend = encodeMessagesTo(tb, script.backend, msg)
-	}
-	script.backend = append(script.backend, h.resetReply...)
-	return script
+	return cycleScript{frontend: encodeMessages(tb, frontend...), backend: append(encodeMessages(tb, backend...), h.resetReply...)}
 }
 
 // run serves one cycle. It returns once the session has released its link.
@@ -284,41 +268,29 @@ type cycleCounts struct {
 	clientWrites, checkouts, roleSets, roleResets                   int
 }
 
-func (h *cycleHarness) resetCounts(clients ...*cycleClient) {
+func (h *cycleHarness) resetCounts(client *cycleClient) {
 	h.postgres.resetCounts()
-	for _, client := range clients {
-		client.conn.resetCounts()
-	}
-	h.backend.checkouts = 0
-	if h.role != nil {
-		h.role.sets, h.role.resets = 0, 0
-	}
+	client.conn.resetCounts()
+	h.backend.acquisitions.Store(0)
+	h.role = countingRoleSession{}
 }
 
 func (h *cycleHarness) counts(client *cycleClient) cycleCounts {
-	counts := cycleCounts{
+	return cycleCounts{
 		backendWrites: h.postgres.writes, backendFlushes: h.postgres.flushes, backendStatements: h.postgres.statements,
-		releaseResets: h.postgres.resets, clientWrites: client.conn.writes, checkouts: h.backend.checkouts,
+		releaseResets: h.postgres.resets, clientWrites: client.conn.writes, checkouts: int(h.backend.acquisitions.Load()),
+		roleSets: h.role.sets, roleResets: h.role.resets,
 	}
-	if h.role != nil {
-		counts.roleSets, counts.roleResets = h.role.sets, h.role.resets
-	}
-	return counts
 }
 
-func encodeMessages(tb testing.TB, msgs ...pgproto3.Message) []byte {
+func encodeMessages[M pgproto3.Message](tb testing.TB, msgs ...M) []byte {
 	tb.Helper()
 	var encoded []byte
 	for _, msg := range msgs {
-		encoded = encodeMessagesTo(tb, encoded, msg)
+		var err error
+		encoded, err = msg.Encode(encoded)
+		require.NoError(tb, err)
 	}
-	return encoded
-}
-
-func encodeMessagesTo(tb testing.TB, dst []byte, msg pgproto3.Message) []byte {
-	tb.Helper()
-	encoded, err := msg.Encode(dst)
-	require.NoError(tb, err)
 	return encoded
 }
 
@@ -349,11 +321,7 @@ func cycleBind(statement string) *pgproto3.Bind {
 	payload := cycleBindSize - 5 - 2 - len(statement) - 6 - 4*len(cycleParamOIDs)
 	params := make([][]byte, len(cycleParamOIDs))
 	for i := range params {
-		size := payload / len(params)
-		if i == len(params)-1 {
-			size = payload - size*(len(params)-1)
-		}
-		params[i] = bytes.Repeat([]byte{'7'}, size)
+		params[i] = bytes.Repeat([]byte{'7'}, (payload+i)/len(params)) // the sizes sum to payload
 	}
 	return &pgproto3.Bind{PreparedStatement: statement, Parameters: params}
 }
@@ -373,12 +341,11 @@ func cycleRowReplies() []pgproto3.BackendMessage {
 
 func cycleReadyForQuery() pgproto3.BackendMessage { return &pgproto3.ReadyForQuery{TxStatus: 'I'} }
 
-// protocolCycle is one measured cycle. setup, when set, runs once first; the
-// named-statement cycle uses it to prepare the statement it reuses.
+// protocolCycle is one measured cycle.
 type protocolCycle struct {
 	name       string
-	statements int // client statements per cycle
-	setup      func(tb testing.TB, h *cycleHarness) cycleScript
+	statements int  // client statements per cycle
+	prepared   bool // a first cycle prepares the named statement that this one reuses
 	cycle      func(tb testing.TB, h *cycleHarness) cycleScript
 }
 
@@ -394,14 +361,22 @@ func oneShotExtendedScript(tb testing.TB, h *cycleHarness, statements int) cycle
 	return h.script(tb, append(frontend, &pgproto3.Sync{}), append(backend, cycleReadyForQuery()))
 }
 
-func preparedStatementScript(tb testing.TB, h *cycleHarness) cycleScript {
-	return h.script(tb,
-		[]pgproto3.FrontendMessage{
-			&pgproto3.Parse{Name: cycleStmtName, Query: cycleExtendedSQL, ParameterOIDs: cycleParamOIDs},
-			cycleBind(cycleStmtName), &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{},
-		},
-		append(append([]pgproto3.BackendMessage{&pgproto3.ParseComplete{}, &pgproto3.BindComplete{}}, cycleRowReplies()...), cycleReadyForQuery()),
-	)
+// namedStatementScript executes the cycleStmtName statement once. With parse,
+// the client sends its Parse first. With parseComplete, Postgres answers that
+// Parse, which it does unless the backend connection already has the statement.
+func namedStatementScript(tb testing.TB, h *cycleHarness, parse, parseComplete bool) cycleScript {
+	frontend := []pgproto3.FrontendMessage{
+		cycleBind(cycleStmtName), &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{},
+	}
+	if parse {
+		parseMsg := &pgproto3.Parse{Name: cycleStmtName, Query: cycleExtendedSQL, ParameterOIDs: cycleParamOIDs}
+		frontend = append([]pgproto3.FrontendMessage{parseMsg}, frontend...)
+	}
+	backend := append([]pgproto3.BackendMessage{&pgproto3.BindComplete{}}, cycleRowReplies()...)
+	if parseComplete {
+		backend = append([]pgproto3.BackendMessage{&pgproto3.ParseComplete{}}, backend...)
+	}
+	return h.script(tb, frontend, append(backend, cycleReadyForQuery()))
 }
 
 var protocolCycles = []protocolCycle{
@@ -422,13 +397,9 @@ var protocolCycles = []protocolCycle{
 	{
 		name:       "named_statement_reuse",
 		statements: 1,
-		setup:      preparedStatementScript,
+		prepared:   true,
 		cycle: func(tb testing.TB, h *cycleHarness) cycleScript {
-			return h.script(tb,
-				[]pgproto3.FrontendMessage{
-					cycleBind(cycleStmtName), &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{},
-				},
-				append(append([]pgproto3.BackendMessage{&pgproto3.BindComplete{}}, cycleRowReplies()...), cycleReadyForQuery()))
+			return namedStatementScript(tb, h, false, false) // Bind only
 		},
 	},
 	{
@@ -438,12 +409,12 @@ var protocolCycles = []protocolCycle{
 	},
 }
 
-// prepare returns a client that has run the cycle's setup, and the cycle's script.
+// prepare returns a client ready for the cycle, and the cycle's script.
 func (pc protocolCycle) prepare(tb testing.TB, h *cycleHarness) (*cycleClient, cycleScript) {
 	tb.Helper()
 	client := h.newClient()
-	if pc.setup != nil {
-		require.NoError(tb, client.run(pc.setup(tb, h)))
+	if pc.prepared {
+		require.NoError(tb, client.run(namedStatementScript(tb, h, true, true)))
 	}
 	return client, pc.cycle(tb, h)
 }

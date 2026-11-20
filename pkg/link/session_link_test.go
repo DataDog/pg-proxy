@@ -268,22 +268,8 @@ func TestReleaseResetSQL(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			// Check what the backend received once the pool has closed the
-			// connection, so the list also holds any message Release did not wait
-			// on. Registered before the fixture's cleanups, this one runs after them.
 			var sent []pgproto3.FrontendMessage
-			served := make(chan struct{})
-			t.Cleanup(func() {
-				select {
-				case <-served:
-				case <-time.After(5 * time.Second):
-					t.Fatal("the backend did not see the connection close")
-				}
-				require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
-					"Release must reset the connection with exactly one simple query")
-			})
-			conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
-				defer close(served)
+			conn, closeAndWait := newSessionLinkTestPoolServing(t, func(backend *pgproto3.Backend) {
 				// Answer every query until the pool closes the connection, so a second
 				// query is recorded instead of hanging Release.
 				for {
@@ -310,6 +296,11 @@ func TestReleaseResetSQL(t *testing.T) {
 			require.NoError(t, err)
 
 			require.NoError(t, link.Release())
+			// Once the backend has seen the connection close, sent also holds any
+			// message Release did not wait on.
+			closeAndWait()
+			require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
+				"Release must reset the connection with exactly one simple query")
 		})
 	}
 }
@@ -354,6 +345,14 @@ func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
 // the startup handshake and then hands the connection to serve.
 func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backend)) *pgxpool.Conn {
 	t.Helper()
+	conn, _ := newSessionLinkTestPoolServing(t, serve)
+	return conn
+}
+
+// newSessionLinkTestPoolServing is newSessionLinkTestPoolConnServing that also
+// returns closeAndWait, which closes the pool and returns once serve has.
+func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
+	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
 	t.Cleanup(func() {
@@ -362,7 +361,9 @@ func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backen
 	})
 
 	handshakeResult := make(chan error, 1)
+	served := make(chan struct{})
 	go func() {
+		defer close(served)
 		backend := pgproto3.NewBackend(serverConn, serverConn)
 		if _, err := backend.ReceiveStartupMessage(); err != nil {
 			handshakeResult <- err
@@ -391,11 +392,14 @@ func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backen
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	conn, err := pool.Acquire(context.Background())
+	conn, err = pool.Acquire(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, <-handshakeResult)
 	setUpConnMetaData(conn)
-	return conn
+	return conn, func() {
+		pool.Close()
+		<-served
+	}
 }
 
 func TestSendSimple(t *testing.T) {

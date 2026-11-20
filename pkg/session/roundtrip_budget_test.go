@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 )
 
@@ -52,16 +51,10 @@ func TestProtocolCycleRoundTripBudgets(t *testing.T) {
 // message precedes the Parse, or adds ParseComplete to the cycle's client write.
 func TestNamedParseOfStatementOnConnectionRoundTrips(t *testing.T) {
 	h := newCycleHarness(t, false)
-	require.NoError(t, h.newClient().run(preparedStatementScript(t, h)))
+	require.NoError(t, h.newClient().run(namedStatementScript(t, h, true, true)))
 
 	client := h.newClient()
-	script := h.script(t,
-		[]pgproto3.FrontendMessage{
-			&pgproto3.Parse{Name: cycleStmtName, Query: cycleExtendedSQL, ParameterOIDs: cycleParamOIDs},
-			cycleBind(cycleStmtName), &pgproto3.Describe{ObjectType: 'P'}, &pgproto3.Execute{}, &pgproto3.Sync{},
-		},
-		append(append([]pgproto3.BackendMessage{&pgproto3.BindComplete{}}, cycleRowReplies()...), cycleReadyForQuery()),
-	)
+	script := namedStatementScript(t, h, true, false) // the session answers the Parse
 	h.resetCounts(client)
 	require.NoError(t, client.run(script))
 	require.Equal(t, cycleCounts{
