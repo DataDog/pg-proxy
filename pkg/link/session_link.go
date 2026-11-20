@@ -557,34 +557,39 @@ func (link *SessionLink) HasExistingNamedPreparedStmt(preparedStatement prepared
 	return ok
 }
 
-// Checks whether the SessionLink has already created a prepared statement. If it has not been created, it will
-// record on the underlying connection that it has. If the statement was already created, increment its usage count.
-// Check its calling methods for an explanation on when these different scenarios occur.
-// In the case that a prepared statement will be created, it checks whether it has exceeded the max number of prepared statements
-// on the connection, and if so, deallocates one.
+// recordPreparedStatement records on the connection that a named prepared statement
+// was created on it, or, when existingOnConn is set, that one it already holds was
+// used. Check its calling methods for when each happens. Nothing here enforces the
+// per-connection cap: Release deallocates the excess.
 func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.PreparedStatement, existingOnConn bool) error {
 	state := link.connState
 	if state == nil {
 		return errNoConnState
 	}
-	connPreparedStmts, stats := state.stmts, &state.stats
-
 	stmtName := preparedStatement.GetProxyName()
+	stmt, onConn := state.stmts[stmtName]
 
 	if existingOnConn {
-		metaData := connPreparedStmts[stmtName]
-		metaData.UsageCount++
-		metaData.TimeLastUsed = time.Now().Nanosecond()
-		connPreparedStmts[stmtName] = metaData
-		if metaData.UsageCount > stats.preparedStmtsMaxUsage {
-			stats.preparedStmtsMaxUsage = metaData.UsageCount
+		if !onConn {
+			// Counting a use of a statement the connection lacks would add an entry that
+			// eviction could never deallocate.
+			return fmt.Errorf("recording a use of prepared statement %s, which is not on the connection", stmtName)
+		}
+		stmt.UsageCount++
+		stmt.TimeLastUsed = time.Now().Nanosecond()
+		if stmt.UsageCount > state.stats.preparedStmtsMaxUsage {
+			state.stats.preparedStmtsMaxUsage = stmt.UsageCount
 		}
 		link.exportStats()
 		return nil
 	}
 
-	stats.preparedStmtsCreatedCount++
-	connPreparedStmts[stmtName] = ConnPreparedStmt{Name: stmtName, TimeLastUsed: time.Now().Nanosecond()}
+	state.stats.preparedStmtsCreatedCount++
+	if !onConn {
+		stmt = &ConnPreparedStmt{}
+		state.stmts[stmtName] = stmt
+	}
+	*stmt = ConnPreparedStmt{Name: stmtName, TimeLastUsed: time.Now().Nanosecond()}
 	link.exportStats()
 
 	return nil
@@ -613,7 +618,9 @@ func (link *SessionLink) exportStats() {
 // if the total number of prepared statements exceeds the maximum allowed. It ensures that the
 // connection stays within the configured limit of prepared statements to avoid memory overuse.
 // There is a roundtrip for each message that needs to be deallocated, which is a potential point of optimization.
-// However, if there is an error that occurs, it will not block subsequent error messages from being sent.
+// It stops at the first failed Deallocate and leaves the rest on the connection. A
+// network failure has already closed the connection (pgx closes it on any I/O error),
+// so the pool discards it.
 func (link *SessionLink) deallocateExcessPreparedStatements() error {
 	if link.connState == nil {
 		return errNoConnState
@@ -624,7 +631,11 @@ func (link *SessionLink) deallocateExcessPreparedStatements() error {
 		return nil
 	}
 	stmtsToDeallocateCount := preparedStmtCount - link.namedPreparedStmtThreshold
-	for _, stmtName := range StmtsToDeallocate(connPreparedStmts, stmtsToDeallocateCount, link.createdTime) {
+	stmts := make([]ConnPreparedStmt, 0, preparedStmtCount)
+	for _, stmt := range connPreparedStmts {
+		stmts = append(stmts, *stmt)
+	}
+	for _, stmtName := range leastValuableStmts(stmts, stmtsToDeallocateCount, link.createdTime) {
 		if err := link.conn.Conn().PgConn().Deallocate(context.Background(), stmtName); err != nil {
 			return err
 		}

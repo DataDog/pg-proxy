@@ -7,6 +7,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -22,17 +23,22 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
-// recordingMetrics is a minimal pgproxy.MetricsClient that records Count and
-// Distribution calls.
+// recordingMetrics is a minimal pgproxy.MetricsClient that records Count, Gauge,
+// and Distribution calls.
 type recordingMetrics struct {
 	pgproxy.NoopMetrics
 	mu            sync.Mutex
-	counts        map[string]map[string][]int64 // metric -> tagsKey -> values
-	distributions map[string]int                // metric -> number of values
+	counts        map[string]map[string][]int64   // metric -> tagsKey -> values
+	gauges        map[string]map[string][]float64 // metric -> tagsKey -> values
+	distributions map[string]int                  // metric -> number of values
 }
 
 func newRecordingMetrics() *recordingMetrics {
-	return &recordingMetrics{counts: make(map[string]map[string][]int64), distributions: make(map[string]int)}
+	return &recordingMetrics{
+		counts:        make(map[string]map[string][]int64),
+		gauges:        make(map[string]map[string][]float64),
+		distributions: make(map[string]int),
+	}
 }
 
 func (m *recordingMetrics) Distribution(name string, _ float64, _ []string, _ float64) error {
@@ -66,6 +72,28 @@ func (m *recordingMetrics) Count(name string, value int64, tags []string, rate f
 	key := tagsKey(tags)
 	m.counts[name][key] = append(m.counts[name][key], value)
 	return nil
+}
+
+func (m *recordingMetrics) Gauge(name string, value float64, tags []string, rate float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.gauges[name] == nil {
+		m.gauges[name] = make(map[string][]float64)
+	}
+	key := tagsKey(tags)
+	m.gauges[name][key] = append(m.gauges[name][key], value)
+	return nil
+}
+
+// lastGauge returns the most recent value reported for name and tags.
+func (m *recordingMetrics) lastGauge(name string, tags []string) (value float64, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	values := m.gauges[name][tagsKey(tags)]
+	if len(values) == 0 {
+		return 0, false
+	}
+	return values[len(values)-1], true
 }
 
 func (m *recordingMetrics) getCount(name string, tags []string) (values []int64, ok bool) {
@@ -126,8 +154,10 @@ func TestReleaseNonIdleCountsDestroyedConnection(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			sessionLinkTags := make([]string, 2, 4)
 			copy(sessionLinkTags, []string{"session:test-session", "database_cluster:test-cluster"})
+			conn := newSessionLinkTestPoolConn(t)
 			link := &SessionLink{
-				conn:                       newSessionLinkTestPoolConn(t),
+				conn:                       conn,
+				connState:                  setUpConnMetaData(conn),
 				txStatus:                   query.Idle,
 				readyForQuery:              true,
 				namedPreparedStmtThreshold: 0,
@@ -213,8 +243,10 @@ func TestReleaseNonIdleDestroysBeforeRoleReset(t *testing.T) {
 	restore := pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics})
 	t.Cleanup(restore)
 
+	conn := newSessionLinkTestPoolConn(t)
 	link := &SessionLink{
-		conn:                       newSessionLinkTestPoolConn(t),
+		conn:                       conn,
+		connState:                  setUpConnMetaData(conn),
 		txStatus:                   query.Idle,
 		readyForQuery:              false, // mid-COPY or an extended batch that ended in Flush
 		namedPreparedStmtThreshold: 0,
@@ -423,7 +455,6 @@ func newSessionLinkTestPoolServingVersion(t *testing.T, serverVersion string, se
 	conn, err = pool.Acquire(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, <-handshakeResult)
-	setUpConnMetaData(conn)
 	return conn, func() {
 		pool.Close()
 		<-served
@@ -684,17 +715,19 @@ func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
 // Statement presence belongs to the connection, so it must outlive the link that
 // recorded it, and a released link must stop answering for a connection it no longer holds.
 func TestConnStateOutlivesLink(t *testing.T) {
-	pool := newBenchPool(t)
+	pool := newFakePgPool(t).pool
 	stmt := prepared.CreatePreparedStatement("s1", "proxy_s1", "SELECT id FROM users WHERE id = $1", []uint32{23})
 
-	first := newBenchLink(t, pool)
+	first := newFakePgLink(t, pool, DefaultPreparedStmtsPerConnection)
+	t.Cleanup(func() { _ = first.Release() }) // a no-op once released; frees the conn if an assertion fails
 	require.NoError(t, first.RecordNewNamedPreparedStmt(stmt))
 	require.True(t, first.HasExistingNamedPreparedStmt(stmt))
 	require.NoError(t, first.Release())
 	require.False(t, first.HasExistingNamedPreparedStmt(stmt))
 	require.ErrorIs(t, first.RecordExistingNamedPreparedStmtUsed(stmt), errNoConnState)
 
-	second := newBenchLink(t, pool)
+	second := newFakePgLink(t, pool, DefaultPreparedStmtsPerConnection)
+	t.Cleanup(func() { _ = second.Release() })
 	require.True(t, second.HasExistingNamedPreparedStmt(stmt), "a new link on the same conn must see statements created earlier")
 	require.NoError(t, second.RecordExistingNamedPreparedStmtUsed(stmt))
 	require.NoError(t, second.Release())
@@ -702,4 +735,81 @@ func TestConnStateOutlivesLink(t *testing.T) {
 	unlinked := NewFrontendLink(nil)
 	require.False(t, unlinked.HasExistingNamedPreparedStmt(stmt))
 	require.ErrorIs(t, unlinked.RecordNewNamedPreparedStmt(stmt), errNoConnState)
+}
+
+// Counting a use of a statement the connection lacks must fail and leave nothing
+// behind: an entry with no statement behind it could never be evicted.
+func TestRecordUseOfAbsentStmtFails(t *testing.T) {
+	l := newFakePgLink(t, newFakePgPool(t).pool, DefaultPreparedStmtsPerConnection)
+	t.Cleanup(func() { _ = l.Release() })
+	stmt := testStmts("absent", 1)[0]
+
+	require.Error(t, l.RecordExistingNamedPreparedStmtUsed(stmt))
+	require.False(t, l.HasExistingNamedPreparedStmt(stmt))
+	require.Empty(t, l.(*SessionLink).connState.stmts)
+}
+
+// Release deallocates what exceeds the cap, one Close per statement, and the
+// connection's gauges report the creations, the deallocations and the top usage.
+func TestReleaseDeallocatesExcessAndReportsStats(t *testing.T) {
+	metrics := newRecordingMetrics()
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+	fake := newFakePgPool(t)
+	const limit = 2
+	stmts := testStmts("cap", limit+1)
+
+	l := newFakePgLink(t, fake.pool, limit)
+	t.Cleanup(func() { _ = l.Release() })
+	for _, st := range stmts {
+		require.NoError(t, l.RecordNewNamedPreparedStmt(st))
+	}
+	require.NoError(t, l.RecordExistingNamedPreparedStmtUsed(stmts[0]))
+	require.NoError(t, l.RecordExistingNamedPreparedStmtUsed(stmts[0]))
+	require.NoError(t, l.Release())
+	require.Equal(t, int64(1), fake.closes.Load(), "one statement over the cap means one Deallocate")
+
+	// The next checkout reports the connection's stats and sees only the survivors.
+	next := newFakePgLink(t, fake.pool, limit)
+	t.Cleanup(func() { _ = next.Release() })
+	held := 0
+	for _, st := range stmts {
+		if next.HasExistingNamedPreparedStmt(st) {
+			held++
+		}
+	}
+	require.Equal(t, limit, held)
+
+	tags := []string{"database:app_db"}
+	for name, want := range map[string]float64{
+		"datadog." + connPreparedStmtCreatedCount:     limit + 1,
+		"datadog." + connPreparedStmtDeallocatedCount: 1,
+		"datadog." + connPreparedStmtMaxUsage:         2,
+	} {
+		got, ok := metrics.lastGauge(name, tags)
+		require.True(t, ok, "%s was not reported", name)
+		require.Equal(t, want, got, name)
+	}
+}
+
+// failingRoleSession fails to set the role.
+type failingRoleSession struct{ noopRoleSession }
+
+func (failingRoleSession) Set(context.Context, *pgxpool.Conn, []string) (string, error) {
+	return "", errors.New("permission denied to set role")
+}
+
+// A link that fails to set the role is never built, so nothing else will release
+// the conn: New must hand it back to the pool, destroyed, rather than leak it.
+func TestNewReleasesConnWhenRoleSetFails(t *testing.T) {
+	pool := newFakePgPool(t).pool
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(conn.Release) // a no-op once released; keeps a leak from hanging the pool's cleanup
+
+	l, err := New(conn, Options{Role: failingRoleSession{}})
+	require.Error(t, err)
+	require.Nil(t, l)
+	// pgxpool destroys a closed conn in the background, so wait for it to go.
+	require.Eventually(t, func() bool { return pool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
+		"the conn must be destroyed: not left checked out, and not pooled in an unknown role")
 }

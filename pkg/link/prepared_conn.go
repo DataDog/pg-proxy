@@ -44,7 +44,8 @@ type connStats struct {
 // the connection's pgx CustomData, so it outlasts each SessionLink and stays with the
 // connection while it sits in the pool.
 type connState struct {
-	stmts map[string]ConnPreparedStmt
+	// Pointers, so a Bind updates usage in place instead of a read and a write-back.
+	stmts map[string]*ConnPreparedStmt
 	stats connStats
 }
 
@@ -63,7 +64,7 @@ func setUpConnMetaData(conn *pgxpool.Conn) *connState {
 	if state, ok := customData[customDataConnStateKey].(*connState); ok {
 		return state
 	}
-	state := &connState{stmts: make(map[string]ConnPreparedStmt)}
+	state := &connState{stmts: make(map[string]*ConnPreparedStmt)}
 	customData[customDataConnStateKey] = state
 	return state
 }
@@ -98,7 +99,12 @@ func StmtsToDeallocate(connPreparedStmts map[string]ConnPreparedStmt, stmtsToDea
 		return nil
 	}
 
-	stmts := slices.Collect(maps.Values(connPreparedStmts))
+	return leastValuableStmts(slices.Collect(maps.Values(connPreparedStmts)), stmtsToDeallocate, sessionLinkCreatedTime)
+}
+
+// leastValuableStmts sorts stmts by deallocation priority, in place, and returns the
+// names of the first stmtsToDeallocate.
+func leastValuableStmts(stmts []ConnPreparedStmt, stmtsToDeallocate int, sessionLinkCreatedTime int) []string {
 	slices.SortFunc(stmts, sortConnPreparedStmtBasedOnDeallocationPriority(sessionLinkCreatedTime))
 
 	result := make([]string, 0, stmtsToDeallocate)

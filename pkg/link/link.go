@@ -92,6 +92,8 @@ type Options struct {
 }
 
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
+// On success the link owns conn until Release. On error New has already closed and
+// released conn, so the caller must not use it again.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	// The link takes over the mark: its release sets it again if it skips too.
 	customData := conn.Conn().PgConn().CustomData()
@@ -120,6 +122,10 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	if opts.Role != nil {
 		token, err := opts.Role.Set(context.TODO(), conn, opts.MetricTags)
 		if err != nil {
+			// No link will ever release conn, and its role is now unknown, so it must not
+			// go back to the pool as is: closing it makes Release destroy it.
+			conn.Conn().Close(context.Background())
+			conn.Release()
 			return nil, err
 		}
 		sl.token = token
