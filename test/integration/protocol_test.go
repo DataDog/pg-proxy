@@ -269,16 +269,12 @@ func TestCommitErrorAtSync(t *testing.T) {
 }
 
 // protocolCase is a message exchange checked against PostgreSQL directly and
-// through the proxy. After each run, a new client checks that the case left
-// the backend clean (see requireCleanBackend).
+// through the proxy's dbPooled. After the proxy run, a new client checks that
+// the case left the backend clean (see requireCleanBackend).
 type protocolCase struct {
 	name  string
 	steps []step
 	check func(t *testing.T, replies [][]pgproto3.BackendMessage)
-	// database is the logical database the proxy run connects to; empty means
-	// dbPooled, whose single backend connection every client of the run and
-	// the hygiene check share.
-	database string
 	// setup runs on the backend before each run, for example to recreate a table.
 	setup []string
 	// proxySkip, if set, skips the proxy run: it names a known proxy bug.
@@ -290,49 +286,65 @@ type protocolCase struct {
 	stepTimeout time.Duration
 }
 
+// runProtocolCases runs each case against PostgreSQL directly and through
+// proxy's dbPooled, whose single backend connection every client of the proxy
+// run and its hygiene check share.
 func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 	t.Helper()
-	// The proxy keeps the statements clients parse on the backend for reuse,
-	// so a case may find those of the cases before it.
-	parsed := map[string]bool{}
+	parsed := clientStatements{sql: map[string]bool{}, names: map[string]bool{}}
 	for _, tc := range cases {
 		for _, step := range tc.steps {
 			for _, msg := range step.send {
 				if parse, ok := msg.(*pgproto3.Parse); ok && parse.Name != "" {
-					parsed[parse.Query] = true
+					parsed.sql[parse.Query] = true
+					parsed.names[parse.Name] = true
 				}
 			}
 		}
-		database := tc.database
-		if database == "" {
-			database = dbPooled
-		}
 		targets := map[string]string{
 			"direct": backend.URL("postgres"),
-			"proxy":  proxy.URL(database, itest.PostgresUser),
+			"proxy":  proxy.URL(dbPooled, itest.PostgresUser),
 		}
 		for target, url := range targets {
 			t.Run(tc.name+"/"+target, func(t *testing.T) {
 				if target == "proxy" && tc.proxySkip != "" && !runKnownBugs {
 					t.Skip(tc.proxySkip)
 				}
-				if target == "proxy" && (tc.proxySkip != "" || tc.hygieneSkip != "") {
-					// A known bug may leave state on the backend; keep it from later cases.
-					defer terminatePooledBackend(t)
+				if target == "proxy" {
+					defer func() {
+						// A known bug or a failure may leave state on the backend; keep it from later cases.
+						if t.Failed() || tc.proxySkip != "" || tc.hygieneSkip != "" {
+							terminatePooledBackend(t)
+						}
+					}()
 				}
 				if len(tc.setup) > 0 {
 					require.NoError(t, backend.Exec(t.Context(), tc.setup...))
 				}
 				tc.check(t, exchange(t, url, tc.steps, tc.stepTimeout))
-				t.Run("hygiene", func(t *testing.T) {
-					if target == "proxy" && tc.hygieneSkip != "" && !runKnownBugs {
-						t.Skip(tc.hygieneSkip)
-					}
-					requireCleanBackend(t, url, parsed)
-				})
+				// A new direct session is always clean, so only the proxy run is checked.
+				if target == "proxy" {
+					t.Run("hygiene", func(t *testing.T) {
+						if tc.hygieneSkip != "" && !runKnownBugs {
+							t.Skip(tc.hygieneSkip)
+						}
+						requireCleanBackend(t, url, parsed)
+					})
+				}
 			})
 		}
 	}
+}
+
+// clientStatements are the statements the clients of a series of cases parse
+// with a name.
+type clientStatements struct {
+	// sql holds their SQL. The proxy keeps each such statement on the backend
+	// under a name of its own, for reuse by any client.
+	sql map[string]bool
+	// names holds the names the clients give them, which belong to the
+	// clients' sessions and must not outlive them on the backend.
+	names map[string]bool
 }
 
 // Queries the hygiene check runs. Each counts session state that outlives
@@ -344,18 +356,18 @@ const (
 	cursorsQuery           = "SELECT count(*) FROM pg_cursors"
 )
 
-// requireCleanBackend connects a new client to url and checks that its
-// backend holds nothing a previous client left behind. Through the proxy the
+// requireCleanBackend connects a new client to url, the proxy's dbPooled, and
+// checks that its backend holds nothing a previous client left behind. The
 // client lands on the backend the case used, because dbPooled has a single
-// backend connection. Directly it gets a new session, so the direct run is
-// the control. The client must:
+// backend connection; if the proxy replaced that connection, the state on it
+// is gone with it. The client must:
 //   - get its own replies in the simple and the extended protocol, so no
 //     reply to a previous client is left over;
 //   - find no LISTEN, session advisory lock, temporary relation or cursor;
 //   - find only prepared statements whose SQL a client parsed with a name,
-//     which the proxy keeps on the backend for reuse;
+//     and none under a client's name;
 //   - see the server's value of every parameter ParameterStatus reported.
-func requireCleanBackend(t *testing.T, url string, parsed map[string]bool) {
+func requireCleanBackend(t *testing.T, url string, parsed clientStatements) {
 	t.Helper()
 	c := connectRaw(t, url)
 	defer c.close()
@@ -381,14 +393,17 @@ func requireCleanBackend(t *testing.T, url string, parsed map[string]bool) {
 			"the backend holds %s", probe.state)
 	}
 
-	reply := c.do(t, ready(&pgproto3.Query{String: "SELECT statement, from_sql FROM pg_prepared_statements"}), 0)
+	reply := c.do(t, ready(&pgproto3.Query{String: "SELECT name, statement, from_sql FROM pg_prepared_statements"}), 0)
 	requireNoError(t, reply)
 	for _, msg := range reply {
 		if row, ok := msg.(*pgproto3.DataRow); ok {
-			statement := string(row.Values[0])
-			if string(row.Values[1]) == "t" {
+			name, statement := string(row.Values[0]), string(row.Values[1])
+			switch {
+			case string(row.Values[2]) == "t":
 				t.Errorf("the backend holds a statement prepared with SQL PREPARE: %s", statement)
-			} else if !parsed[statement] {
+			case parsed.names[name]:
+				t.Errorf("the backend holds a statement under a client's name %q: %s", name, statement)
+			case !parsed.sql[statement]:
 				t.Errorf("the backend holds a statement no client parsed with a name: %s", statement)
 			}
 		}
@@ -408,8 +423,13 @@ func requireParameterView(t *testing.T, c *rawClient) {
 	}
 	reply := c.do(t, ready(&pgproto3.Query{String: "SELECT " + strings.Join(settings, ", ")}), 0)
 	requireNoError(t, reply)
-	require.IsType(t, &pgproto3.DataRow{}, reply[1], "%v", summarize(reply))
-	values := reply[1].(*pgproto3.DataRow).Values
+	var values [][]byte
+	for _, msg := range reply {
+		if row, ok := msg.(*pgproto3.DataRow); ok {
+			values = row.Values
+		}
+	}
+	require.Len(t, values, len(names), "%v", summarize(reply))
 	for i, name := range names {
 		assert.Equal(t, string(values[i]), c.parameters[name], "the client's view of %s", name)
 	}
@@ -480,7 +500,8 @@ type rawClient struct {
 	// parameters is the client's view of the server parameters: the last
 	// value ParameterStatus reported for each.
 	parameters map[string]string
-	// closed is set once the server has sent a FATAL error and closed the connection.
+	// closed is set once the server has sent an error that ends the session
+	// and closed the connection.
 	closed bool
 }
 
@@ -497,8 +518,8 @@ func connectRaw(t *testing.T, url string) *rawClient {
 }
 
 // do sends the step's messages and reads their replies for up to timeout;
-// zero means 20 seconds. A FATAL error ends the replies, and after it do
-// sends nothing and returns no replies.
+// zero means 20 seconds. An error that ends the session ends the replies, and
+// after it do sends nothing and returns no replies.
 func (c *rawClient) do(t *testing.T, step step, timeout time.Duration) []pgproto3.BackendMessage {
 	t.Helper()
 	if c.closed {
@@ -528,7 +549,7 @@ func (c *rawClient) do(t *testing.T, step step, timeout time.Duration) []pgproto
 			c.parameters[status.Name] = status.Value
 		}
 		reply = append(reply, msg)
-		if errorResponse, ok := msg.(*pgproto3.ErrorResponse); ok && errorResponse.Severity == "FATAL" {
+		if errorResponse, ok := msg.(*pgproto3.ErrorResponse); ok && endsSession(errorResponse) {
 			// The server closes the connection after it.
 			c.closed = true
 			break
@@ -542,6 +563,18 @@ func (c *rawClient) do(t *testing.T, step step, timeout time.Duration) []pgproto
 		}
 	}
 	return reply
+}
+
+// endsSession reports whether the server closes the connection after
+// errorResponse: its severity is FATAL or PANIC.
+func endsSession(errorResponse *pgproto3.ErrorResponse) bool {
+	// The localized severity depends on lc_messages; servers before
+	// PostgreSQL 9.6 send no other.
+	severity := errorResponse.SeverityUnlocalized
+	if severity == "" {
+		severity = errorResponse.Severity
+	}
+	return severity == "FATAL" || severity == "PANIC"
 }
 
 // close sends Terminate and closes the connection.

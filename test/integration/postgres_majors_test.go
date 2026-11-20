@@ -23,27 +23,37 @@ type postgresMajor struct {
 	// ParameterStatus at startup.
 	startupParameters []string
 	// unproxiedStartupParameters are the startupParameters the proxy does not
-	// report: it reports a fixed list, which predates them.
+	// report, a known bug (see unproxiedStartupParametersBug).
 	unproxiedStartupParameters []string
 }
 
-// startupParameters14 are the parameters PostgreSQL 14 reports at startup.
-var startupParameters14 = []string{
-	"DateStyle", "IntervalStyle", "TimeZone", "application_name", "client_encoding", "default_transaction_read_only",
-	"in_hot_standby", "integer_datetimes", "is_superuser", "server_encoding", "server_version", "session_authorization",
-	"standard_conforming_strings",
-}
+// unproxiedStartupParametersBug is a known bug. The proxy run of
+// TestStartupParameterStatus expects only the parameters the proxy reports;
+// set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to expect all of PostgreSQL's.
+const unproxiedStartupParametersBug = "TODO: proxy reports a fixed list of startup parameters, " +
+	"which lacks those that PostgreSQL 16 and later add: %v"
 
-// postgresMajors has an entry for each major the suite runs on (see
-// internal/itest/images.go). Record here anything a test expects only on some
-// majors, so that a new major, or a new difference, is added explicitly.
+// Parameters PostgreSQL reports at startup, from the major that first does.
+var (
+	startupParameters14 = []string{
+		"DateStyle", "IntervalStyle", "TimeZone", "application_name", "client_encoding", "default_transaction_read_only",
+		"in_hot_standby", "integer_datetimes", "is_superuser", "server_encoding", "server_version", "session_authorization",
+		"standard_conforming_strings",
+	}
+	startupParameters16 = append(slices.Clone(startupParameters14), "scram_iterations")
+	startupParameters18 = append(slices.Clone(startupParameters16), "search_path")
+)
+
+// postgresMajors has an entry for each supported major. CI runs those with a
+// pinned image (see internal/itest/images.go); run the others with
+// PG_PROXY_TEST_POSTGRES_IMAGE. Record here anything a test expects only on
+// some majors, so that a new major, or a new difference, is added explicitly.
 var postgresMajors = map[int]postgresMajor{
 	14: {startupParameters: startupParameters14},
-	18: {
-		// PostgreSQL 16 added scram_iterations, and 18 search_path.
-		startupParameters:          append(slices.Clone(startupParameters14), "scram_iterations", "search_path"),
-		unproxiedStartupParameters: []string{"scram_iterations", "search_path"},
-	},
+	15: {startupParameters: startupParameters14},
+	16: {startupParameters: startupParameters16, unproxiedStartupParameters: []string{"scram_iterations"}},
+	17: {startupParameters: startupParameters16, unproxiedStartupParameters: []string{"scram_iterations"}},
+	18: {startupParameters: startupParameters18, unproxiedStartupParameters: []string{"scram_iterations", "search_path"}},
 }
 
 // expectedOfMajor returns the expectations for the backend's major.
@@ -59,21 +69,22 @@ func expectedOfMajor(t *testing.T) postgresMajor {
 // reported value is the server's.
 func TestStartupParameterStatus(t *testing.T) {
 	expected := expectedOfMajor(t)
-	proxied := slices.DeleteFunc(slices.Clone(expected.startupParameters), func(name string) bool {
-		return slices.Contains(expected.unproxiedStartupParameters, name)
-	})
 	proxy := startProxy(t)
-	for target, test := range map[string]struct {
-		url  string
-		want []string
-	}{
-		"direct": {backend.URL("postgres"), expected.startupParameters},
-		"proxy":  {proxy.URL(dbPooled, itest.PostgresUser), proxied},
+	for target, url := range map[string]string{
+		"direct": backend.URL("postgres"),
+		"proxy":  proxy.URL(dbPooled, itest.PostgresUser),
 	} {
 		t.Run(target, func(t *testing.T) {
-			c := connectRaw(t, test.url)
+			want := expected.startupParameters
+			if target == "proxy" && len(expected.unproxiedStartupParameters) > 0 && !runKnownBugs {
+				t.Logf(unproxiedStartupParametersBug, expected.unproxiedStartupParameters)
+				want = slices.DeleteFunc(slices.Clone(want), func(name string) bool {
+					return slices.Contains(expected.unproxiedStartupParameters, name)
+				})
+			}
+			c := connectRaw(t, url)
 			defer c.close()
-			require.ElementsMatch(t, test.want, slices.Collect(maps.Keys(c.parameters)))
+			require.ElementsMatch(t, want, slices.Collect(maps.Keys(c.parameters)))
 			requireParameterView(t, c)
 		})
 	}

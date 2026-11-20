@@ -20,7 +20,8 @@ import (
 // images such as Ryuk, and keeps the digest. The harness never sets it.
 //
 // postgresImages maps each PostgreSQL major the integration suite runs on to
-// its pinned image. CI runs every major listed here.
+// its pinned image. CI runs every major listed here, and no other (see
+// TestCIRunsEveryPinnedMajor).
 var postgresImages = map[string]string{
 	"14": "postgres:14-bookworm@sha256:5a05f61a534e50e679d27fb45953afec7821f2ffc2aa6c738b94515ca0891ac2",
 	"18": "postgres:18-bookworm@sha256:194e55feb2597b1465dbee81cc9fd8d204566cd2eb42c8d22fd6c931a38781b1",

@@ -231,8 +231,9 @@ func TestSessionIdentityIsolation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			proxy := itest.MustStartProxy(t, test.config)
 			forEachExecMode(t, func(t *testing.T, mode string) {
-				connStr := withExecMode(t, itest.MustStartProxy(t, test.config).URL(dbPooled, test.user), mode)
+				connStr := withExecMode(t, proxy.URL(dbPooled, test.user), mode)
 				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 				defer cancel()
 

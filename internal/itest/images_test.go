@@ -8,11 +8,14 @@
 package itest
 
 import (
+	"maps"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestImagesArePinnedPublicImages(t *testing.T) {
@@ -45,6 +48,24 @@ func TestPostgresImageMajor(t *testing.T) {
 	require.ErrorContains(t, err, `PG_PROXY_TEST_POSTGRES_MAJOR="13" has no pinned image`)
 	_, err = StartPostgres(t.Context())
 	require.ErrorContains(t, err, "has no pinned image")
+}
+
+// TestCIRunsEveryPinnedMajor verifies that the integration job in CI runs
+// every major with a pinned image, and no other.
+func TestCIRunsEveryPinnedMajor(t *testing.T) {
+	source, err := os.ReadFile("../../.github/workflows/ci.yml")
+	require.NoError(t, err)
+	var workflow struct {
+		Jobs map[string]struct {
+			Strategy struct {
+				Matrix struct {
+					Major []string `yaml:"major"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	require.NoError(t, yaml.Unmarshal(source, &workflow))
+	require.ElementsMatch(t, slices.Collect(maps.Keys(postgresImages)), workflow.Jobs["integration"].Strategy.Matrix.Major)
 }
 
 // unsetenv unsets key for the duration of t and restores it afterwards.
