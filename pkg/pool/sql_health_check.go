@@ -22,6 +22,7 @@ const (
 	SQLHealthCheckAcquireStage    SQLHealthCheckStage = "acquire"
 	SQLHealthCheckQueryStage      SQLHealthCheckStage = "query"
 
+	sqlHealthCheckAdminShutdown    = "57P01"
 	sqlHealthCheckCrashShutdown    = "57P02"
 	sqlHealthCheckCannotConnectNow = "57P03"
 	sqlHealthCheckInvalidPassword  = "28P01"
@@ -363,13 +364,14 @@ func IsSQLHealthCheckPasswordAuthenticationError(err error) bool {
 }
 
 // IsSQLHealthCheckRetriable reports whether retrying an error can provide new information.
-// PostgreSQL crash-shutdown, cannot-connect-now, and invalid-password responses are conclusive for
-// the iteration.
+// PostgreSQL administrative/crash-shutdown, cannot-connect-now, and invalid-password responses
+// are conclusive for the iteration. Retrying shutdown evidence could replace it with a timeout
+// before the routing banlist sees it.
 func IsSQLHealthCheckRetriable(err error) bool {
 	var sqlStateErr sqlHealthCheckSQLStateError
 	if errors.As(err, &sqlStateErr) {
 		switch sqlStateErr.SQLState() {
-		case sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow, sqlHealthCheckInvalidPassword:
+		case sqlHealthCheckAdminShutdown, sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow, sqlHealthCheckInvalidPassword:
 			return false
 		}
 	}

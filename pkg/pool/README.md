@@ -38,7 +38,7 @@ of choosing a route from SQL results.
 The main path is:
 
 `scheduleSQLRefresh` -> `SQLHealthChecker.Check` -> `completeSQLHealthCheck` ->
-`aggregateSQLHealthCheckOutcomes` -> `hybridHealthPolicy.observeSQL`.
+`aggregateSQLHealthCheckOutcomes` -> `hybridHealthPolicy.observeSQLRound`.
 
 Patroni updates arrive separately through `applyPatroniHealth` -> `observePatroni`.
 The policy chooses a result, and the worker publishes it for client routing.
@@ -88,6 +88,9 @@ Overlapping probes, missing timestamps, and invalid intervals cannot establish
 which role is newer, so their conflicting successful results still require
 Patroni fallback. Errors do not replace successful roles. Raw per-credential
 snapshots remain available for diagnosis.
+
+Shutdown-banlist exclusions take precedence over this table for routing; see
+[SQL shutdown banlist](#sql-shutdown-banlist). Raw comparison results are unchanged.
 
 | Results for the same IP | How routing treats that IP |
 | --- | --- |
@@ -163,7 +166,7 @@ owned routing, the worker restores the saved Patroni snapshot instead.
 To keep previous SQL leader B, B must still be a candidate. A successful standby
 answer for B rules it out. An unusable error also rules it out unless another
 credential successfully reports B as primary. Conflicting successful roles or
-more than one primary IP prevent keeping B.
+more than one primary IP prevent keeping B. A shutdown ban also rules B out.
 
 For a snapshot that reaches `observeSQL`, use the following order:
 
@@ -226,6 +229,47 @@ falling back. Probe timeouts do not cover these cases.
 
 See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 [health_worker_test.go](health_worker_test.go) for scheduling and publication tests.
+
+## SQL shutdown banlist
+
+The hybrid policy remembers an IP after PostgreSQL `57P01` administrative
+termination, `57P02` crash shutdown, or `57P03` containing
+`the database system is shutting down`. Timeouts, connection refusal,
+authentication failures, and startup responses do not create a ban.
+`57P01` can also mean an individual session was terminated; banning its IP until
+a fresh successful role probe is an intentional policy choice.
+Wrapped and joined errors are checked cause by cause. Any qualifying shutdown
+cause creates a ban, regardless of other causes or their order.
+
+Any accepted credential poll can record a shutdown ban for its IP, even if DNS
+added another candidate that the poll did not check. With SQL routing enabled,
+the ban also marks that IP unhealthy in the current published route immediately.
+Partial polls still cannot select a replacement or clear a ban using a successful
+role result. Routing ownership and retained addresses stay unchanged.
+
+If older SQL evidence cannot replace a Patroni recovery route, shutdown bans
+still mark those IPs unhealthy in the published route. This does not select a
+replacement leader or change the recovery freshness boundary.
+
+Banned IPs remain discovery candidates and continue to be probed. Their results
+do not force SQL fallback, and cached Patroni fallback cannot select them. A
+successful role result from a poll started after the latest observed shutdown
+clears it, provided the current credential evidence contains neither shutdown
+nor conflicting roles for that IP. Cached successes and polls already in flight
+when the ban was observed cannot clear it. Removing an IP from the retained SQL
+candidate set also removes its ban, including when the last candidate is evicted
+and routing returns to Patroni. Raw DNS misses alone do not clear retained bans.
+The map is bounded by the retained set, rather than growing with every historical
+address. There is no time-based expiry.
+
+`SQLHealthWorkerHooks.RoutingBanChanged` reports transitions with the IP, new
+`Banned` state, and reason, including during shadow evaluation. The event list is
+local to each evaluation and discarded after reporting; no event history is kept.
+Banned IPs are excluded from repeated `ConclusiveError` callbacks. The raw
+SQL/Patroni comparison and Patroni-only shadow routing remain unchanged. Client
+routing uses the worker publication path; mismatch metrics still reflect the raw
+observations. A newer Patroni observation of a banned IP cannot invalidate an
+otherwise usable SQL route: that IP is not an eligible fallback.
 
 ## SQL snapshot timing
 

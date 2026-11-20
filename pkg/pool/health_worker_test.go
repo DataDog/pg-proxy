@@ -769,12 +769,12 @@ func TestHybridEvaluationLateTimeoutDoesNotOverwriteOtherCredentials(t *testing.
 	snapshot := buildSQLHealthComparisonSnapshot(map[string]struct{}{ip: {}}, health.sqlComparisonLatest)
 	assert.Empty(t, snapshot.health, "comparison must derive roles from the latest credential results")
 
-	// Determinate shutdown evidence resolves the same-IP timeouts and is reported once.
-	shutdown := &pgconn.PgError{Code: "57P01"}
-	complete(c, t0.Add(3*time.Second), shutdown)
+	// Determinate startup evidence resolves the same-IP timeouts and is reported once.
+	startup := &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}
+	complete(c, t0.Add(3*time.Second), startup)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	require.Len(t, conclusiveErrors, 1)
-	assert.Same(t, shutdown, conclusiveErrors[0])
+	assert.Same(t, startup, conclusiveErrors[0])
 	complete(a, t0.Add(3*time.Second), context.DeadlineExceeded)
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[len(iterations)-1].RoutingResult)
 	assert.Len(t, conclusiveErrors, 1, "cached errors are evidence, not new probe events")
@@ -2550,7 +2550,7 @@ func TestHybridTelemetryUsesDecisionRoutingMode(t *testing.T) {
 		result  string
 		wantTag string
 	}{
-		{"conclusive before disable", true, &pgconn.PgError{Code: "57P01"}, SQLRoutingResultConclusive, "sql_health_routing_enabled:true"},
+		{"conclusive before disable", true, &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, SQLRoutingResultConclusive, "sql_health_routing_enabled:true"},
 		{"fallback before disable", true, context.DeadlineExceeded, SQLRoutingResultCachedFallback, "sql_health_routing_enabled:true"},
 		{"shadow before enable", false, nil, SQLRoutingResultShadow, "sql_health_routing_enabled:false"},
 	} {
@@ -2675,6 +2675,65 @@ func TestHybridRoutingPreservesPatroniWhenSQLDiscoveryHasNoCandidates(t *testing
 
 	assert.True(t, health.IsHealthy(ip), "empty SQL discovery must preserve the Patroni route")
 	assert.ElementsMatch(t, []string{ip}, health.Snapshot().Resolved)
+}
+
+func TestEmptySQLDiscoveryClearsRoutingBans(t *testing.T) {
+	const a, b = "10.0.0.1", "10.0.0.2"
+	for _, fallback := range []bool{false, true} {
+		t.Run(fmt.Sprintf("cached_fallback_%t", fallback), func(t *testing.T) {
+			prober := newMockProber(map[string][]string{"primary.local": {a, b}}, a)
+			w := newTestWorker(prober)
+			other := fakeSQLHealthProbeResponse{inRecovery: true}
+			if fallback {
+				other.err = context.DeadlineExceeded
+			}
+			sqlProber := &credentialSQLHealthProber{responses: map[string]fakeSQLHealthProbeResponse{
+				a: {err: &pgconn.PgError{Code: "57P02"}}, b: other,
+			}}
+			w.newSQLChecker = func(context.Context) *SQLHealthChecker {
+				return newTestSQLHealthChecker(t, sqlProber, 1, SQLHealthCheckHooks{})
+			}
+			updates := w.Subscribe("primary.local", false, "db", nil, &SQLHealthConfig{
+				ConnStringForIP: func(ip string) string { return ip },
+				RoutingEnabled:  func(context.Context) SQLHealthFeatureFlagEvaluation { return validSQLHealthFeatureFlag(true) },
+			})
+			health := receivePoolHealth(t, updates)
+			t.Cleanup(func() { w.Unsubscribe(updates) })
+			var changes []SQLRoutingBanChange
+			w.sqlHooks.RoutingBanChanged = func(change SQLRoutingBanChange, _ []string) {
+				if assert.True(t, health.sqlComparisonMu.TryLock(), "hooks must run outside snapshot locks") {
+					health.sqlComparisonMu.Unlock()
+				}
+				if assert.True(t, health.routingMu.TryLock(), "hooks must run outside routing locks") {
+					health.routingMu.Unlock()
+				}
+				changes = append(changes, change)
+			}
+			w.RefreshSQL()
+			require.Contains(t, health.hybridPolicy.routingBannedIPs, a)
+			require.Empty(t, health.sqlHealthState.lastKnownHealthy, "SQL has never confirmed a primary")
+			require.Equal(t, !fallback, health.sqlRoutingActive)
+			prober.mu.Lock()
+			prober.ipsByHost["primary.local"] = nil
+			prober.mu.Unlock()
+			for range maxFailedHostLookups - 1 {
+				w.RefreshSQL()
+				require.Contains(t, health.hybridPolicy.routingBannedIPs, a, "raw DNS misses must not clear retained bans")
+			}
+			w.RefreshSQL()
+			require.Empty(t, health.sqlHealthState.Snapshot().Resolved)
+			require.Empty(t, health.hybridPolicy.routingBannedIPs)
+			assert.False(t, health.sqlRoutingActive)
+			assert.Equal(t, []SQLRoutingBanChange{
+				{IP: a, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown},
+				{IP: a, Reason: SQLRoutingUnbanReasonDNSRemoved},
+			}, changes)
+			w.RefreshSQL()
+			assert.Len(t, changes, 2, "empty discovery must not repeat removal events")
+			w.applyPatroniHealth(health, map[string]bool{a: true, b: false}, nil, []string{a, b}, time.Now())
+			assert.True(t, health.IsHealthy(a), "an obsolete ban must not filter later Patroni updates")
+		})
+	}
 }
 
 func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T) {
@@ -3605,6 +3664,269 @@ func TestSQLPatroniMismatchReason(t *testing.T) {
 			assert.Equal(t, tc.want == SQLPatroniMatch, snapshot.Matches())
 		})
 	}
+}
+
+func TestPartialSQLPollRecordsShutdownBan(t *testing.T) {
+	const a, b = "10.0.0.1", "10.0.0.2"
+	for _, tc := range []struct {
+		name    string
+		err     error
+		wantBan bool
+		shadow  bool
+	}{
+		{"crash shutdown", &pgconn.PgError{Code: "57P02"}, true, false},
+		{"shutting down", &pgconn.PgError{Code: "57P03", Message: "the database system is shutting down"}, true, false},
+		{"admin termination", &pgconn.PgError{Code: "57P01"}, true, false},
+		{"startup", &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}, false, false},
+		{"shadow shutdown", &pgconn.PgError{Code: "57P02"}, true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			health := newTestPoolHealth(a)
+			health.sqlHealthState = NewHealthState()
+			health.sqlHealthState.Track([]string{a})
+			health.hybridPolicy = newHybridHealthPolicy(!tc.shadow)
+			updates := make(chan *PoolHealth, 1)
+			health.subscribers = map[HealthUpdates]chan *PoolHealth{HealthUpdates(updates): updates}
+			var iterations []SQLIteration
+			var changes []SQLRoutingBanChange
+			w := &HealthWorker{absenceThreshold: 5, sqlHooks: SQLHealthWorkerHooks{
+				Iteration: func(i SQLIteration, _ []string) { iterations = append(iterations, i) },
+				RoutingBanChanged: func(c SQLRoutingBanChange, _ []string) {
+					if assert.True(t, health.routingMu.TryLock(), "hooks must run outside the routing lock") {
+						health.routingMu.Unlock()
+					}
+					changes = append(changes, c)
+				},
+			}}
+			old := &sqlHealthTarget{poolHealth: health}
+			current := &sqlHealthTarget{poolHealth: health}
+			w.applyPatroniHealth(health, map[string]bool{a: true}, nil, []string{a}, time.Now())
+			w.completeSQLHealthCheck(old, 0, time.Now(), []string{a}, map[string]struct{}{a: {}}, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{{IP: a}},
+			})
+			require.True(t, health.IsHealthy(a))
+			<-updates
+			policy := health.hybridPolicy
+			recoveryAt, noPrimaryAt := policy.patroniRecoveryAt, policy.sqlNoPrimaryAt
+			ownedBySQL := health.sqlRoutingActive
+
+			// B was discovered while the current credential was checking only A.
+			health.sqlHealthState.Track([]string{a, b})
+			w.completeSQLHealthCheck(current, 0, time.Now(), []string{a}, map[string]struct{}{a: {}}, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{{IP: a, Err: tc.err}},
+			})
+			require.Len(t, iterations, 1, "partial coverage must not choose a SQL route")
+			_, banned := health.hybridPolicy.routingBannedIPs[a]
+			require.Equal(t, tc.wantBan, banned)
+			assert.NotContains(t, health.hybridPolicy.routingBannedIPs, b)
+			wantHealthy := !tc.wantBan || tc.shadow
+			require.Equal(t, wantHealthy, health.IsHealthy(a), "a published shutdown leader must be excluded immediately outside shadow mode")
+			assert.False(t, health.IsHealthy(b), "partial evidence must not select newly discovered B")
+			assert.Equal(t, []string{a}, health.Snapshot().Resolved, "exclusions must preserve published membership")
+			assert.ElementsMatch(t, []string{a, b}, health.sqlHealthState.Snapshot().Resolved, "partial exclusions must preserve SQL candidates")
+			assert.Equal(t, ownedBySQL, health.sqlRoutingActive)
+			assert.Equal(t, recoveryAt, policy.patroniRecoveryAt)
+			assert.Equal(t, noPrimaryAt, policy.sqlNoPrimaryAt)
+			select {
+			case <-updates:
+				assert.False(t, wantHealthy, "only a routing exclusion should notify the pool")
+			default:
+				assert.True(t, wantHealthy, "the pool must be notified immediately when A is excluded")
+			}
+			w.applyPatroniHealth(health, map[string]bool{a: true}, nil, []string{a}, time.Now())
+			assert.Equal(t, wantHealthy, health.IsHealthy(a), "an ordinary Patroni refresh must not revive banned A")
+			if tc.wantBan {
+				require.Equal(t, []SQLRoutingBanChange{{IP: a, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown}}, changes)
+				w.completeSQLHealthCheck(current, 0, time.Now(), []string{a}, map[string]struct{}{a: {}}, SQLHealthCheckOutcome{
+					Results: []SQLHealthCheckResult{{IP: a}},
+				})
+				require.Contains(t, health.hybridPolicy.routingBannedIPs, a, "partial successes cannot establish recovery")
+				require.Len(t, iterations, 1)
+			} else {
+				require.Empty(t, changes)
+			}
+
+			// The next poll overwrites this credential's shutdown with timeouts.
+			// The other credential still has its old success, and Patroni still says A.
+			w.completeSQLHealthCheck(current, 0, time.Now(), []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{{IP: a, Err: context.DeadlineExceeded}, {IP: b, Err: context.DeadlineExceeded}},
+			})
+			require.Len(t, iterations, 2)
+			wantResult := SQLRoutingResultCachedFallback
+			if tc.shadow {
+				wantResult = SQLRoutingResultShadow
+			}
+			assert.Equal(t, wantResult, iterations[1].RoutingResult)
+			assert.Equal(t, wantHealthy, health.IsHealthy(a), "cached success and Patroni must not undo a shutdown ban")
+			assert.False(t, health.IsHealthy(b))
+			if tc.wantBan {
+				assert.Len(t, changes, 1, "the same ban must not be reported again")
+			}
+		})
+	}
+}
+
+func TestShutdownBanFiltersPublishedPatroniRecovery(t *testing.T) {
+	const a, b, c = "10.0.0.1", "10.0.0.2", "10.0.0.3"
+	for _, shutdownIP := range []string{b, a} {
+		t.Run(shutdownIP, func(t *testing.T) {
+			ips := []string{a, b, c}
+			health := newTestPoolHealth(ips...)
+			health.sqlHealthState = NewHealthState()
+			health.sqlHealthState.Track(ips)
+			health.hybridPolicy = newHybridHealthPolicy(true)
+			updates := make(chan *PoolHealth, 1)
+			health.subscribers = map[HealthUpdates]chan *PoolHealth{HealthUpdates(updates): updates}
+			var iterations []SQLIteration
+			w := &HealthWorker{absenceThreshold: 5, sqlHooks: SQLHealthWorkerHooks{
+				Iteration: func(i SQLIteration, _ []string) { iterations = append(iterations, i) },
+			}}
+			old, fast := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
+			before := time.Now().Add(-time.Second)
+			w.applyPatroniHealth(health, map[string]bool{a: true, b: false, c: false}, nil, ips, before)
+			complete := func(target *sqlHealthTarget, outcome SQLHealthCheckOutcome) {
+				w.completeSQLHealthCheck(target, 0, time.Now(), ips, map[string]struct{}{a: {}, b: {}, c: {}}, outcome)
+			}
+			standbys := SQLHealthCheckOutcome{StartedAt: before, Results: []SQLHealthCheckResult{
+				{IP: a, InRecovery: true}, {IP: b, InRecovery: true}, {IP: c, InRecovery: true},
+			}}
+			complete(old, standbys)
+			complete(fast, standbys)
+
+			// Patroni finds B before SQL, while the old credential still says all standby.
+			w.applyPatroniHealth(health, map[string]bool{a: false, b: true, c: false}, nil, ips, time.Now())
+			require.True(t, health.IsHealthy(b))
+			policy := health.hybridPolicy
+			recoveryAt, noPrimaryAt := policy.patroniRecoveryAt, policy.sqlNoPrimaryAt
+			ownedBySQL := health.sqlRoutingActive
+			<-updates
+
+			shutdown := SQLHealthCheckOutcome{StartedAt: time.Now(), Results: []SQLHealthCheckResult{
+				{IP: a, InRecovery: true}, {IP: b, InRecovery: true}, {IP: c, InRecovery: true},
+			}}
+			for i := range shutdown.Results {
+				if shutdown.Results[i].IP == shutdownIP {
+					shutdown.Results[i].Err = &pgconn.PgError{Code: "57P02"}
+				}
+			}
+			complete(fast, shutdown)
+			require.Contains(t, policy.routingBannedIPs, shutdownIP)
+			require.Equal(t, SQLRoutingResultPatroniRecovery, iterations[len(iterations)-1].RoutingResult)
+			assert.Equal(t, shutdownIP != b, health.IsHealthy(b))
+			assert.False(t, health.IsHealthy(a))
+			assert.False(t, health.IsHealthy(c), "excluding B must not invent a replacement")
+			assert.ElementsMatch(t, ips, health.Snapshot().Resolved, "bans must not remove discovery candidates")
+			assert.Equal(t, recoveryAt, policy.patroniRecoveryAt)
+			assert.True(t, policy.patroniRecoveryActive)
+			assert.Equal(t, noPrimaryAt, policy.sqlNoPrimaryAt)
+			assert.Empty(t, policy.awaitingPatroniLeader)
+			assert.Empty(t, policy.supersededPatroniLeader)
+			assert.Empty(t, policy.supersededSQLLeaders)
+			assert.Equal(t, ownedBySQL, health.sqlRoutingActive)
+			assert.Equal(t, shutdownIP != b, policy.routingTiming.candidate.current[b], "routing timing must follow publication")
+			select {
+			case <-updates:
+				assert.Equal(t, b, shutdownIP, "a ban on an unhealthy standby must not republish routing")
+			default:
+				assert.NotEqual(t, b, shutdownIP, "the pool must be notified when its leader is excluded")
+			}
+
+			complete(fast, shutdown)
+			select {
+			case <-updates:
+				t.Error("an already-excluded IP must not cause repeated publication")
+			default:
+			}
+			// Patroni can still publish C immediately after the next switchover.
+			w.applyPatroniHealth(health, map[string]bool{a: false, b: false, c: true}, nil, ips, time.Now())
+			assert.True(t, health.IsHealthy(c))
+			assert.False(t, health.IsHealthy(b))
+		})
+	}
+}
+
+func TestPartialSQLShutdownRejectsInvalidPoll(t *testing.T) {
+	for _, invalid := range []string{"disabled", "retired", "routing mode changed"} {
+		t.Run(invalid, func(t *testing.T) {
+			health := newTestPoolHealth("A", "B")
+			health.sqlHealthState = NewHealthState()
+			health.sqlHealthState.Track([]string{"A", "B"})
+			health.hybridPolicy = newHybridHealthPolicy(true)
+			target := &sqlHealthTarget{poolHealth: health}
+			scheduledAt := time.Now()
+			switch invalid {
+			case "disabled":
+				health.disableSQLComparisonTarget(target)
+			case "retired":
+				health.retireSQLComparisonTarget(target)
+			case "routing mode changed":
+				health.routingChangedAt = scheduledAt.Add(time.Second)
+			}
+			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
+				RoutingBanChanged: func(SQLRoutingBanChange, []string) { t.Error("invalid poll reported a ban") },
+			}}
+			w.completeSQLHealthCheck(target, 0, scheduledAt, []string{"A"}, map[string]struct{}{"A": {}}, SQLHealthCheckOutcome{
+				Results: []SQLHealthCheckResult{{IP: "A", Err: &pgconn.PgError{Code: "57P02"}}},
+			})
+			assert.Empty(t, health.hybridPolicy.routingBannedIPs)
+		})
+	}
+}
+
+func TestReportConclusiveErrorsSkipsRoutingBannedIPs(t *testing.T) {
+	const (
+		bannedIP   = "10.0.0.1"
+		eligibleIP = "10.0.0.2"
+	)
+	w := &HealthWorker{}
+	var reported []string
+	w.sqlHooks.ConclusiveError = func(result SQLHealthCheckResult, _ []string) {
+		reported = append(reported, result.IP)
+	}
+	checks := []completedSQLHealthCheck{{
+		target: &sqlHealthTarget{tags: []string{"database:test"}},
+		outcome: SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
+			{IP: bannedIP, Err: context.DeadlineExceeded},
+			{IP: eligibleIP, Err: &pgconn.PgError{Code: "57P01"}},
+		}},
+	}}
+	decision := hybridRoutingDecision{
+		routingResult:    SQLRoutingResultConclusive,
+		routingBannedIPs: map[string]time.Time{bannedIP: time.Now()},
+	}
+
+	w.reportConclusiveErrors(checks, decision)
+
+	assert.Equal(t, []string{eligibleIP}, reported)
+}
+
+func TestReportHybridDecisionReportsBanTransitionsOnce(t *testing.T) {
+	const ip = "10.0.0.1"
+	at := time.Now()
+	policy := newHybridHealthPolicy(true)
+	var changes []SQLRoutingBanChange
+	w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
+		RoutingBanChanged: func(change SQLRoutingBanChange, tags []string) {
+			changes = append(changes, change)
+			assert.Contains(t, tags, "cluster:test")
+			assert.Contains(t, tags, "sql_health_routing_enabled:true")
+		},
+	}}
+	poolHealth := &PoolHealth{patroniTags: []string{"cluster:test"}}
+	for i, result := range []SQLHealthCheckResult{
+		{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		{IP: ip, Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}},
+		{IP: ip, Err: context.DeadlineExceeded},
+		{IP: ip, InRecovery: true},
+		{IP: ip, InRecovery: true},
+	} {
+		decision := policy.observeSQL([]string{ip}, aggregateSQLHealthCheckResults([]SQLHealthCheckResult{result}).Outcome, at.Add(time.Duration(i)*time.Second))
+		w.reportHybridDecision(poolHealth, decision, true)
+	}
+	assert.Equal(t, []SQLRoutingBanChange{
+		{IP: ip, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown},
+		{IP: ip, Banned: false, Reason: SQLRoutingUnbanReasonConclusiveResult},
+	}, changes)
 }
 
 // Mirror a promotion between two credentials' scheduled polls. The old role
