@@ -51,6 +51,9 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 		}
 		return []pgproto3.FrontendMessage{&pgproto3.Bind{PreparedStatement: name, Parameters: values}, &pgproto3.Execute{}, &pgproto3.Sync{}}
 	}
+	parseBindExecute := func(parse *pgproto3.Parse, params ...string) step {
+		return ready(append([]pgproto3.FrontendMessage{parse}, bindExecute(parse.Name, params...)...)...)
+	}
 	selected := func(row string) []string {
 		return []string{"BindComplete", "DataRow " + row, "CommandComplete SELECT 1", "ReadyForQuery I"}
 	}
@@ -61,9 +64,9 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 			name:      name,
 			proxySkip: fmt.Sprintf(statementsDiscarded, statement),
 			steps: []step{
-				ready(append([]pgproto3.FrontendMessage{&pgproto3.Parse{Name: "a", Query: plusOne}}, bindExecute("a", "1")...)...),
-				ready(&pgproto3.Query{String: statement}),
-				onClient(1, ready(append([]pgproto3.FrontendMessage{&pgproto3.Parse{Name: "b", Query: plusOne}}, bindExecute("b", "2")...)...)),
+				parseBindExecute(&pgproto3.Parse{Name: "a", Query: plusOne}, "1"),
+				simpleQuery(statement),
+				onClient(1, parseBindExecute(&pgproto3.Parse{Name: "b", Query: plusOne}, "2")),
 			},
 			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
@@ -85,13 +88,13 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 		},
 		proxySkip: staleAfterResultTypeChange,
 		steps: []step{
-			ready(append([]pgproto3.FrontendMessage{parseUserByID("user_by_id")}, bindExecute("user_by_id", "1")...)...),
+			parseBindExecute(parseUserByID("user_by_id"), "1"),
 			{send: bindExecute("user_by_id", "1"), until: untilReady, before: func(t *testing.T) {
 				require.NoError(t, backend.Exec(t.Context(), "ALTER TABLE lifecycle_users ADD COLUMN email text"))
 			}},
 			ready(append([]pgproto3.FrontendMessage{&pgproto3.Close{ObjectType: 'S', Name: "user_by_id"}, parseUserByID("user_by_id")},
 				bindExecute("user_by_id", "1")...)...),
-			onClient(1, ready(append([]pgproto3.FrontendMessage{parseUserByID("user_by_id_2")}, bindExecute("user_by_id_2", "1")...)...)),
+			onClient(1, parseBindExecute(parseUserByID("user_by_id_2"), "1")),
 		},
 		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
@@ -136,13 +139,13 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 			setup:     []string{"DROP TABLE IF EXISTS lifecycle_events", "CREATE TABLE lifecycle_events (label text)"},
 			proxySkip: localErrorInTransaction,
 			steps: []step{
-				ready(&pgproto3.Query{String: "BEGIN"}),
+				simpleQuery("BEGIN"),
 				ready(&pgproto3.Parse{Name: "duplicate", Query: "SELECT 'first' AS label"}, &pgproto3.Sync{}),
-				ready(&pgproto3.Query{String: "INSERT INTO lifecycle_events VALUES ('before')"}),
+				simpleQuery("INSERT INTO lifecycle_events VALUES ('before')"),
 				ready(&pgproto3.Parse{Name: "duplicate", Query: "SELECT 'second' AS label"}, &pgproto3.Sync{}),
-				ready(&pgproto3.Query{String: "INSERT INTO lifecycle_events VALUES ('after')"}),
-				ready(&pgproto3.Query{String: "COMMIT"}),
-				ready(&pgproto3.Query{String: "SELECT count(*) FROM lifecycle_events"}),
+				simpleQuery("INSERT INTO lifecycle_events VALUES ('after')"),
+				simpleQuery("COMMIT"),
+				simpleQuery("SELECT count(*) FROM lifecycle_events"),
 			},
 			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
@@ -160,7 +163,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 			proxySkip: sqlDeallocate,
 			steps: []step{
 				ready(&pgproto3.Parse{Name: "deallocated", Query: "SELECT 7"}, &pgproto3.Sync{}),
-				ready(&pgproto3.Query{String: "DEALLOCATE deallocated"}),
+				simpleQuery("DEALLOCATE deallocated"),
 				ready(&pgproto3.Parse{Name: "deallocated", Query: "SELECT 8"}, &pgproto3.Sync{}),
 				ready(bindExecute("deallocated")...),
 			},

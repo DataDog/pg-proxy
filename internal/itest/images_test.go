@@ -27,8 +27,7 @@ func TestImagesArePinnedPublicImages(t *testing.T) {
 		name, digest, pinned := strings.Cut(image, "@sha256:")
 		require.True(t, pinned, "%s must be pinned by digest", image)
 		require.Len(t, digest, 64)
-		require.NotContains(t, strings.SplitN(name, "/", 2)[0], ".", "%s must be a Docker Hub image", image)
-		require.Equal(t, "postgres:"+major+"-bookworm", name, "the image for major %s", major)
+		require.Equal(t, "postgres:"+major+"-bookworm", name, "the image for major %s must be Docker Hub's", major)
 	}
 }
 

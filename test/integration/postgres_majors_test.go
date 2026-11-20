@@ -22,18 +22,16 @@ type postgresMajor struct {
 	// startupParameters are the parameters PostgreSQL reports with
 	// ParameterStatus at startup.
 	startupParameters []string
-	// unproxiedStartupParameters are the startupParameters the proxy does not
-	// report, a known bug (see unproxiedStartupParametersBug).
-	unproxiedStartupParameters []string
 }
 
-// unproxiedStartupParametersBug is a known bug. The proxy run of
+// unproxiedStartupParameters is a known bug. The proxy run of
 // TestStartupParameterStatus expects only the parameters the proxy reports;
 // set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to expect all of PostgreSQL's.
-const unproxiedStartupParametersBug = "TODO: proxy reports a fixed list of startup parameters, " +
+const unproxiedStartupParameters = "TODO: proxy reports a fixed list of startup parameters, " +
 	"which lacks those that PostgreSQL 16 and later add: %v"
 
 // Parameters PostgreSQL reports at startup, from the major that first does.
+// The proxy reports startupParameters14 on every major.
 var (
 	startupParameters14 = []string{
 		"DateStyle", "IntervalStyle", "TimeZone", "application_name", "client_encoding", "default_transaction_read_only",
@@ -51,9 +49,9 @@ var (
 var postgresMajors = map[int]postgresMajor{
 	14: {startupParameters: startupParameters14},
 	15: {startupParameters: startupParameters14},
-	16: {startupParameters: startupParameters16, unproxiedStartupParameters: []string{"scram_iterations"}},
-	17: {startupParameters: startupParameters16, unproxiedStartupParameters: []string{"scram_iterations"}},
-	18: {startupParameters: startupParameters18, unproxiedStartupParameters: []string{"scram_iterations", "search_path"}},
+	16: {startupParameters: startupParameters16},
+	17: {startupParameters: startupParameters16},
+	18: {startupParameters: startupParameters18},
 }
 
 // expectedOfMajor returns the expectations for the backend's major.
@@ -76,11 +74,9 @@ func TestStartupParameterStatus(t *testing.T) {
 	} {
 		t.Run(target, func(t *testing.T) {
 			want := expected.startupParameters
-			if target == "proxy" && len(expected.unproxiedStartupParameters) > 0 && !runKnownBugs {
-				t.Logf(unproxiedStartupParametersBug, expected.unproxiedStartupParameters)
-				want = slices.DeleteFunc(slices.Clone(want), func(name string) bool {
-					return slices.Contains(expected.unproxiedStartupParameters, name)
-				})
+			if unproxied := want[len(startupParameters14):]; target == "proxy" && len(unproxied) > 0 && !runKnownBugs {
+				t.Logf(unproxiedStartupParameters, unproxied)
+				want = startupParameters14
 			}
 			c := connectRaw(t, url)
 			defer c.close()

@@ -20,11 +20,10 @@ import (
 
 // TestSelectOne is the end-to-end smoke test through the default pool.
 func TestSelectOne(t *testing.T) {
-	forEachExecMode(t, testSelectOne)
+	forEachExecMode(t, startProxy(t).URL(dbDefault, itest.PostgresUser), testSelectOne)
 }
 
-func testSelectOne(t *testing.T, mode string) {
-	connStr := withExecMode(t, startProxy(t).URL(dbDefault, itest.PostgresUser), mode)
+func testSelectOne(t *testing.T, connStr string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 

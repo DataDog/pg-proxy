@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"slices"
 	"testing"
 	"time"
 
@@ -30,11 +31,12 @@ import (
 var execModes = []string{"cache_statement", "exec"}
 
 // forEachExecMode runs test once for each of execModes, as a subtest named
-// after the mode.
-func forEachExecMode(t *testing.T, test func(t *testing.T, mode string)) {
+// after the mode, with connStr set to that mode. The runs share whatever
+// connStr points to, such as one proxy and its backend connections.
+func forEachExecMode(t *testing.T, connStr string, test func(t *testing.T, connStr string)) {
 	t.Helper()
 	for _, mode := range execModes {
-		t.Run(mode, func(t *testing.T) { test(t, mode) })
+		t.Run(mode, func(t *testing.T) { test(t, withExecMode(t, connStr, mode)) })
 	}
 }
 
@@ -54,8 +56,7 @@ func withExecMode(t *testing.T, connStr, mode string) string {
 // results of several types. In exec mode each query replaces the other
 // client's unnamed statement on the backend.
 func TestInterleavedClients(t *testing.T) {
-	forEachExecMode(t, func(t *testing.T, mode string) {
-		connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+	forEachExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), func(t *testing.T, connStr string) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		clients := make([]*pgx.Conn, 2)
@@ -100,24 +101,17 @@ func TestInterleavedClients(t *testing.T) {
 func TestBatch(t *testing.T) {
 	require.NoError(t, backend.Exec(t.Context(),
 		"DROP TABLE IF EXISTS batch_users", "CREATE TABLE batch_users (id int PRIMARY KEY)"))
-	// run sends queries as one batch, optionally inside a transaction, and
-	// returns each query's first value or SQLSTATE, then the transaction
-	// status after the batch and the row count.
-	run := func(t *testing.T, conn *pgx.Conn, inTransaction bool, queries ...string) []string {
+	// run sends queries as one batch and returns each query's first value or
+	// SQLSTATE, then the transaction status after the batch and the row count.
+	run := func(t *testing.T, conn *pgx.Conn, queries ...string) []string {
 		t.Helper()
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		_, err := conn.Exec(ctx, "TRUNCATE batch_users")
 		require.NoError(t, err)
 		batch := &pgx.Batch{}
-		if inTransaction {
-			batch.Queue("BEGIN")
-		}
 		for _, query := range queries {
 			batch.Queue(query)
-		}
-		if inTransaction {
-			batch.Queue("COMMIT")
 		}
 		results := conn.SendBatch(ctx, batch)
 		var outcomes []string
@@ -155,27 +149,27 @@ func TestBatch(t *testing.T) {
 		"INSERT INTO batch_users VALUES (2) RETURNING id",
 	}
 
-	forEachExecMode(t, func(t *testing.T, mode string) {
-		targets := map[string]string{
-			"direct": backend.URL("postgres"),
-			"proxy":  startProxy(t).URL(dbPooled, itest.PostgresUser),
-		}
-		outcomes := map[string][][]string{}
-		for target, connStr := range targets {
-			conn, err := pgx.Connect(t.Context(), withExecMode(t, connStr, mode))
-			require.NoError(t, err)
-			defer conn.Close(context.Background())
-			outcomes[target] = [][]string{
-				run(t, conn, false, many...),
-				run(t, conn, false, failing...),
-				run(t, conn, true, failing...),
+	inTransaction := slices.Concat([]string{"BEGIN"}, failing, []string{"COMMIT"})
+
+	targets := map[string]string{
+		"direct": backend.URL("postgres"),
+		"proxy":  startProxy(t).URL(dbPooled, itest.PostgresUser),
+	}
+	for _, mode := range execModes {
+		t.Run(mode, func(t *testing.T) {
+			outcomes := map[string][][]string{}
+			for target, connStr := range targets {
+				conn, err := pgx.Connect(t.Context(), withExecMode(t, connStr, mode))
+				require.NoError(t, err)
+				defer conn.Close(context.Background())
+				outcomes[target] = [][]string{run(t, conn, many...), run(t, conn, failing...), run(t, conn, inTransaction...)}
 			}
-		}
-		require.Equal(t, []string{"status I", "rows 200"}, outcomes["direct"][0][200:])
-		require.Equal(t, []string{"1", "error 22012"}, outcomes["direct"][1][:2])
-		require.Equal(t, "rows 0", outcomes["direct"][2][len(outcomes["direct"][2])-1])
-		require.Equal(t, outcomes["direct"], outcomes["proxy"])
-	})
+			require.Equal(t, []string{"status I", "rows 200"}, outcomes["direct"][0][200:])
+			require.Equal(t, []string{"1", "error 22012"}, outcomes["direct"][1][:2])
+			require.Equal(t, "rows 0", outcomes["direct"][2][len(outcomes["direct"][2])-1])
+			require.Equal(t, outcomes["direct"], outcomes["proxy"])
+		})
+	}
 }
 
 // TestSavepoints verifies that a transaction keeps its backend connection
@@ -184,8 +178,7 @@ func TestBatch(t *testing.T) {
 func TestSavepoints(t *testing.T) {
 	require.NoError(t, backend.Exec(t.Context(),
 		"DROP TABLE IF EXISTS savepoint_users", "CREATE TABLE savepoint_users (id int PRIMARY KEY)"))
-	forEachExecMode(t, func(t *testing.T, mode string) {
-		connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+	forEachExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), func(t *testing.T, connStr string) {
 		ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 		defer cancel()
 		conn, err := pgx.Connect(ctx, connStr)

@@ -26,11 +26,10 @@ import (
 // sessions share backend connections, and an open transaction pins its backend
 // connection until it ends. With max_conns=1 both properties are observable.
 func TestTransactionPooling(t *testing.T) {
-	forEachExecMode(t, testTransactionPooling)
+	forEachExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), testTransactionPooling)
 }
 
-func testTransactionPooling(t *testing.T, mode string) {
-	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+func testTransactionPooling(t *testing.T, connStr string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -89,11 +88,10 @@ func testTransactionPooling(t *testing.T, mode string) {
 // leak to the next client on the same backend connection: the proxy resets
 // session state when it releases a connection at a transaction boundary.
 func TestSessionStateIsolation(t *testing.T) {
-	forEachExecMode(t, testSessionStateIsolation)
+	forEachExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), testSessionStateIsolation)
 }
 
-func testSessionStateIsolation(t *testing.T, mode string) {
-	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+func testSessionStateIsolation(t *testing.T, connStr string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -231,9 +229,7 @@ func TestSessionIdentityIsolation(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			proxy := itest.MustStartProxy(t, test.config)
-			forEachExecMode(t, func(t *testing.T, mode string) {
-				connStr := withExecMode(t, proxy.URL(dbPooled, test.user), mode)
+			forEachExecMode(t, itest.MustStartProxy(t, test.config).URL(dbPooled, test.user), func(t *testing.T, connStr string) {
 				ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 				defer cancel()
 
@@ -319,11 +315,10 @@ func TestSimpleQueryProtocol(t *testing.T) {
 // after an error, commands fail with 25P02 until ROLLBACK, and ROLLBACK leaves
 // the pooled connection clean for the same client and the next one.
 func TestAbortedTransaction(t *testing.T) {
-	forEachExecMode(t, testAbortedTransaction)
+	forEachExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), testAbortedTransaction)
 }
 
-func testAbortedTransaction(t *testing.T, mode string) {
-	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+func testAbortedTransaction(t *testing.T, connStr string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -372,11 +367,10 @@ func testAbortedTransaction(t *testing.T, mode string) {
 // inside an aborted transaction, without ROLLBACK or Terminate, does not strand
 // the only backend connection in that state.
 func TestClientDisconnectMidAbortedTransaction(t *testing.T) {
-	forEachExecMode(t, testClientDisconnectMidAbortedTransaction)
+	forEachExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), testClientDisconnectMidAbortedTransaction)
 }
 
-func testClientDisconnectMidAbortedTransaction(t *testing.T, mode string) {
-	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+func testClientDisconnectMidAbortedTransaction(t *testing.T, connStr string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
@@ -415,15 +409,11 @@ func testClientDisconnectMidAbortedTransaction(t *testing.T, mode string) {
 // client 1 commits, client 3 must get the connection promptly: if client 2 had
 // kept its place, pg_sleep would hold the connection.
 func TestClientDisconnectWhileWaitingForPoolSlot(t *testing.T) {
-	forEachExecMode(t, testClientDisconnectWhileWaitingForPoolSlot)
-}
-
-func testClientDisconnectWhileWaitingForPoolSlot(t *testing.T, mode string) {
 	if runtime.GOOS != "linux" {
 		// See pkg/session/client_monitor.go: without POLLRDHUP a peer FIN is not detected.
 		t.Skip("detecting a dropped client before it holds a connection requires Linux POLLRDHUP")
 	}
-	connStr := withExecMode(t, startProxy(t).URL(dbPooled, itest.PostgresUser), mode)
+	connStr := startProxy(t).URL(dbPooled, itest.PostgresUser)
 	ctx, cancel := context.WithTimeout(t.Context(), 45*time.Second)
 	defer cancel()
 
@@ -488,15 +478,11 @@ func testClientDisconnectWhileWaitingForPoolSlot(t *testing.T, mode string) {
 // TestTransactionStatus verifies the ReadyForQuery transaction status reaches
 // the client across a transaction: 'I' idle, 'T' in a block, 'E' aborted.
 func TestTransactionStatus(t *testing.T) {
-	forEachExecMode(t, testTransactionStatus)
-}
-
-func testTransactionStatus(t *testing.T, mode string) {
-	connStr := withExecMode(t, startProxy(t).URL(dbDefault, itest.PostgresUser), mode)
+	proxy := startProxy(t)
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	conn, err := pgx.Connect(ctx, connStr)
+	conn, err := proxy.Connect(ctx, dbDefault, itest.PostgresUser)
 	require.NoError(t, err, "connect")
 	defer conn.Close(context.Background())
 
