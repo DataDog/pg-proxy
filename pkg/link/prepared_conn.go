@@ -16,6 +16,7 @@ import (
 const (
 	customDataPreparedStmtsKey = "preparedStmts"
 	customDataStatsKey         = "preparedStmtsStats"
+	customDataAuditBaselineKey = "resetAuditBaseline" // an auditBaseline
 
 	connPreparedStmtDeallocatedCount = "pg_proxy.sessions.connections.prepared_stmt.deallocated.count"
 	connPreparedStmtCreatedCount     = "pg_proxy.sessions.connections.prepared_stmt.created.count"

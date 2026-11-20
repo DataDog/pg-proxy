@@ -179,7 +179,8 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 
 	// Note that if dynamic routing acquires a replica conn for a qualified parse,
 	// then all subsequent queries in the tx will be forwarded to the replica
-	conn, selectedPool, replica, rerouted, err := r.acquireConnection(ctx, request.DynamicRoutingEnabled && request.ForReadQuery, request.SessionLastWrite)
+	conn, replica, err := r.acquireConnection(ctx, request.DynamicRoutingEnabled && request.ForReadQuery, request.SessionLastWrite)
+	rerouted := replica >= 0
 	// Emitting the metric before the error check to maintain existing behaviour
 	// and to have observability on the number of connections that are rerouted
 	// even if they fail
@@ -219,7 +220,7 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 		return nil, err
 	}
 	if r.linkDecorator != nil && request.DecorateLink {
-		backendLink = r.linkDecorator(backendLink, selectedPool, conn, request)
+		backendLink = r.linkDecorator(backendLink, r.selector.pool(replica), conn, request)
 	}
 	return backendLink, nil
 }
@@ -233,35 +234,33 @@ func buildSessionLinkMetricTags(baseTags []string, clusterName string, forRead b
 
 // AcquireConnection returns a connection and whether it came from a replica pool.
 func (r *Runtime) AcquireConnection(ctx context.Context, replicaReroutingEligible bool, sessionLastWrite time.Time) (*pgxpool.Conn, bool, error) {
-	conn, _, _, rerouted, err := r.acquireConnection(ctx, replicaReroutingEligible, sessionLastWrite)
-	return conn, rerouted, err
+	conn, replica, err := r.acquireConnection(ctx, replicaReroutingEligible, sessionLastWrite)
+	return conn, replica >= 0, err
 }
 
-// acquireConnection also returns the pool the connection came from and, for a
-// replica, its index in the replicas, or -1 for the primary.
-func (r *Runtime) acquireConnection(ctx context.Context, replicaReroutingEligible bool, sessionLastWrite time.Time) (*pgxpool.Conn, pool.Pool, int, bool, error) {
+// acquireConnection returns a connection and, when it came from a replica, that
+// replica's index in the replicas. -1 means the primary, including a fallback
+// to it after a replica failed.
+func (r *Runtime) acquireConnection(ctx context.Context, replicaReroutingEligible bool, sessionLastWrite time.Time) (*pgxpool.Conn, int, error) {
 	r.sessionsWaiting.Add(1)
 	defer r.decrementSessionsWaiting()
 
 	if replicaReroutingEligible {
-		selected, replica, rerouted := r.selector.selectPoolIndex(sessionLastWrite)
-		if rerouted {
+		if replica := r.selector.selectReplica(sessionLastWrite); replica >= 0 {
 			replicaCtx, cancel := context.WithTimeout(ctx, replicaAcquireConnectionTimeout)
 			defer cancel()
-			conn, err := selected.Acquire(replicaCtx)
+			conn, err := r.selector.replicas[replica].Acquire(replicaCtx)
 			if err != nil {
 				pgproxy.Logger().Error(fmt.Sprintf("failed to acquire connection from replica pool: %v", err))
 				conn, err = r.fallbackToPrimary(ctx)
-				return conn, r.selector.primary, -1, false, err
+				return conn, -1, err
 			}
-			return conn, selected, replica, true, nil
+			return conn, replica, nil
 		}
-		conn, err := selected.Acquire(ctx)
-		return conn, selected, replica, rerouted, err
 	}
 
 	conn, err := r.selector.primary.Acquire(ctx)
-	return conn, r.selector.primary, -1, false, err
+	return conn, -1, err
 }
 
 func (r *Runtime) decrementSessionsWaiting() {
@@ -327,20 +326,21 @@ func (p *PoolSelector) roundRobinIndex() int {
 	return idx
 }
 
-// selectPool returns a primary or replica pool to query and if the query will be rerouted to a replica pool
-func (p *PoolSelector) selectPool(sessionLastWrite time.Time) (pool.Pool, bool) {
-	selected, _, rerouted := p.selectPoolIndex(sessionLastWrite)
-	return selected, rerouted
+// selectReplica returns the index in p.replicas of the replica to reroute a
+// query to, or -1 to keep it on the primary.
+func (p *PoolSelector) selectReplica(sessionLastWrite time.Time) int {
+	if p.shouldReroute(sessionLastWrite) {
+		return p.roundRobinIndex()
+	}
+	return -1
 }
 
-// selectPoolIndex is selectPool that also returns the replica's index in
-// p.replicas, or -1 for the primary.
-func (p *PoolSelector) selectPoolIndex(sessionLastWrite time.Time) (pool.Pool, int, bool) {
-	if p.shouldReroute(sessionLastWrite) {
-		idx := p.roundRobinIndex()
-		return p.replicas[idx], idx, true
+// pool returns the replica at index replica, or the primary when it is negative.
+func (p *PoolSelector) pool(replica int) pool.Pool {
+	if replica < 0 {
+		return p.primary
 	}
-	return p.primary, -1, false
+	return p.replicas[replica]
 }
 
 // StartStats starts exporting sessions-waiting and primary pool stats every two seconds.

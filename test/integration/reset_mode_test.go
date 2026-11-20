@@ -9,7 +9,6 @@ package integration
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -59,7 +58,7 @@ func showSetting(t *testing.T, ctx context.Context, conn *pgx.Conn, name string)
 func requirePgErrorCode(t *testing.T, err error, code string) {
 	t.Helper()
 	var pgErr *pgconn.PgError
-	require.True(t, errors.As(err, &pgErr), "want SQLSTATE %s, got %v", code, err)
+	require.ErrorAs(t, err, &pgErr, "want SQLSTATE %s", code)
 	require.Equal(t, code, pgErr.Code, pgErr.Message)
 }
 
@@ -273,8 +272,7 @@ func TestUnnamedStatementGuard(t *testing.T) {
 				_, err := conn.PgConn().Prepare(ctx, "", "SELECT 'from client B'", nil)
 				require.NoError(t, err)
 				result = conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
-				require.NoError(t, result.Err)
-				require.Equal(t, "from client B", string(result.Rows[0][0]))
+				require.Equal(t, "from client B", scalarResult(t, result))
 			})
 		})
 	}

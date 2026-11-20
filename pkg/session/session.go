@@ -1356,7 +1356,7 @@ func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 	if generation != s.unnamedGen {
 		return
 	}
-	s.unnamedStmt = prepared.CreatePreparedStatement("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs())
+	s.unnamedStmt = prepared.CreatePreparedStatementWithFlags("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs(), confirmed.SessionFlags())
 	s.unnamedStmtOnLink = true
 }
 

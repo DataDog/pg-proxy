@@ -103,15 +103,14 @@ func Scan(sql string, scsOn bool) Flags {
 			state = leaveStart(state)
 			i++
 		case clsQuote:
+			if afterSet(state) {
+				return failClosed
+			}
 			j, ok := skipString(sql, i, !scsOn)
 			if !ok {
 				return failClosed
 			}
-			i = j
-			if afterSet(state) {
-				return failClosed
-			}
-			state = stBody
+			i, state = j, stBody
 		case clsDQuote:
 			j, ok := skipQuotedIdent(sql, i)
 			if !ok {
@@ -149,12 +148,11 @@ func Scan(sql string, scsOn bool) Flags {
 				// Past the first words only setter names, EXECUTE, currval
 				// and lastval matter, and their lengths are 7, 9, 10 and 11.
 				if l := j - i; l >= 7 && l <= 11 && l != 8 {
-					switch f := bodyWordFlags(sql[i:j]); f {
-					case MayChangeSession:
+					f := bodyWordFlags(sql[i:j])
+					if f == MayChangeSession {
 						return failClosed
-					default:
-						flags |= f
 					}
+					flags |= f
 				}
 				i = j
 				continue
@@ -163,15 +161,14 @@ func Scan(sql string, scsOn bool) Flags {
 			if j < n {
 				switch {
 				case len(word) == 1 && (c == 'E' || c == 'e') && sql[j] == '\'':
+					if afterSet(state) {
+						return failClosed
+					}
 					k, ok := skipString(sql, j, true)
 					if !ok {
 						return failClosed
 					}
-					i = k
-					if afterSet(state) {
-						return failClosed
-					}
-					state = stBody
+					i, state = k, stBody
 					continue
 				case len(word) == 1 && (c == 'U' || c == 'u') && sql[j] == '&' && j+1 < n:
 					switch sql[j+1] {
@@ -179,15 +176,14 @@ func Scan(sql string, scsOn bool) Flags {
 						// A U&"..." identifier can spell any name.
 						return failClosed
 					case '\'':
+						if afterSet(state) {
+							return failClosed
+						}
 						k, ok := skipString(sql, j+1, false)
 						if !ok {
 							return failClosed
 						}
-						i = k
-						if afterSet(state) {
-							return failClosed
-						}
-						state = stBody
+						i, state = k, stBody
 						continue
 					}
 				}
@@ -224,17 +220,13 @@ func Scan(sql string, scsOn bool) Flags {
 				}
 				state = stBody
 			default:
-				switch f := bodyWordFlags(word); f {
-				case MayChangeSession:
-					return failClosed
-				default:
-					flags |= f
-				}
+				// stBody: a one-byte word, which no rule names. Longer words
+				// took the path above.
 			}
 			i = j
 		case clsDigit:
 			j := i + 1
-			for j < n && isIdentByte(sql[j]) {
+			for j < n && identCont[sql[j]] {
 				j++
 			}
 			state = leaveStart(state)
@@ -252,7 +244,7 @@ func Scan(sql string, scsOn bool) Flags {
 	}
 	// A statement that ends right after SET is a syntax error; the server
 	// rejects it, but count it rather than reason about it.
-	if state == stAfterSet || state == stAfterSession {
+	if afterSet(state) {
 		return failClosed
 	}
 	return flags
@@ -264,16 +256,16 @@ func Scan(sql string, scsOn bool) Flags {
 // with one is scanned twice. Use it where the session's value is unknown, or
 // where the verdict is stored and may be read under another value.
 func ScanEither(sql string) Flags {
-	if strings.IndexByte(sql, '\\') < 0 {
-		return Scan(sql, true)
+	flags := Scan(sql, true)
+	if flags == failClosed || strings.IndexByte(sql, '\\') < 0 {
+		return flags
 	}
-	return Scan(sql, true) | Scan(sql, false)
+	return flags | Scan(sql, false)
 }
 
 const (
 	clsOther byte = iota
 	clsSpace
-	clsIdent // letters, digits, _, $ and non-ASCII bytes after the first
 	clsIdentStart
 	clsQuote  // '
 	clsDQuote // "
@@ -316,8 +308,6 @@ var identCont = func() (t [256]bool) {
 	}
 	return t
 }()
-
-func isIdentByte(c byte) bool { return identCont[c] }
 
 // boring marks bytes that cannot start a token the rules look at once a
 // statement is past its first words: whitespace and punctuation other than
@@ -467,7 +457,7 @@ func skipDollar(sql string, i int) (end int, ok, isQuote bool) {
 		return j, true, false
 	}
 	for j < n && sql[j] != '$' {
-		if !isIdentByte(sql[j]) || sql[j] == '$' {
+		if !identCont[sql[j]] {
 			return i + 1, true, false
 		}
 		j++

@@ -71,20 +71,20 @@ func TestSelectPool(t *testing.T) {
 	runtime := newTestRuntime(primary, replica)
 
 	runtime.selector.randomIntFn = func(int) int { return 5 }
-	selected, rerouted := runtime.selector.selectPool(time.Time{})
-	assert.Same(t, primary, selected)
-	assert.False(t, rerouted)
+	index := runtime.selector.selectReplica(time.Time{})
+	assert.Equal(t, -1, index)
+	assert.Same(t, primary, runtime.selector.pool(index))
 
 	runtime.selector.randomIntFn = func(int) int { return 25 }
-	selected, rerouted = runtime.selector.selectPool(time.Time{})
-	assert.Same(t, replica, selected)
-	assert.True(t, rerouted)
+	index = runtime.selector.selectReplica(time.Time{})
+	assert.Equal(t, 0, index)
+	assert.Same(t, replica, runtime.selector.pool(index))
 
 	runtime = newTestRuntime(primary)
 	runtime.selector.randomIntFn = func(int) int { return 25 }
-	selected, rerouted = runtime.selector.selectPool(time.Time{})
-	assert.Same(t, primary, selected)
-	assert.False(t, rerouted)
+	index = runtime.selector.selectReplica(time.Time{})
+	assert.Equal(t, -1, index)
+	assert.Same(t, primary, runtime.selector.pool(index))
 }
 
 func TestSelectPoolRoundRobin(t *testing.T) {
@@ -93,9 +93,9 @@ func TestSelectPoolRoundRobin(t *testing.T) {
 	runtime := newTestRuntime(primary, replicas...)
 	runtime.selector.randomIntFn = func(int) int { return 25 }
 	for _, expected := range []int{1, 0, 1, 0} {
-		selected, rerouted := runtime.selector.selectPool(time.Time{})
-		assert.Same(t, replicas[expected], selected)
-		assert.True(t, rerouted)
+		index := runtime.selector.selectReplica(time.Time{})
+		assert.Equal(t, expected, index)
+		assert.Same(t, replicas[expected], runtime.selector.pool(index))
 	}
 }
 

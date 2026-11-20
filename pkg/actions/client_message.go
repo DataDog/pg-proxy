@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
@@ -259,14 +260,14 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			action.SessionMarks = bindSessionMarks(clientName, state.PreparedStatements, state.UnnamedStmt)
 			return action, nil
 		}
-		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
+		proxyName, stmt, found, errorAction := findPreparedStatement(clientName, state.PreparedStatements)
 		if errorAction != nil {
 			observeErrorAction(errorAction, hooks)
 			return *errorAction, nil
 		}
 		m.PreparedStatement = proxyName
 		action.CheckExistingPreparedStmt = stmt
-		action.SessionMarks = bindSessionMarks(clientName, state.PreparedStatements, nil)
+		action.SessionMarks = sessionMarks(found.SessionFlags(), link.MarkPreparedStmt)
 		return action, nil
 
 	case *pgproto3.Execute:
@@ -353,12 +354,11 @@ func sessionMarks(flags sessionsql.Flags, source link.SessionMarks) link.Session
 	return marks
 }
 
-// bindSessionMarks returns the marks for a Bind of the statement the client calls
-// clientName. The statement's flags were judged once, at Parse. A statement still
-// pending in this pipeline is the one the Bind refers to, so it wins over a
-// confirmed one. unnamed is the client's confirmed unnamed statement, when the
-// proxy keeps it outside the prepared statement state. A Bind the proxy cannot
-// match to a Parse may run anything.
+// bindSessionMarks returns the marks for a Bind of the unnamed statement, which the
+// proxy does not keep in the prepared statement state once confirmed. The
+// statement's flags were judged once, at Parse. One still pending in this
+// pipeline is the one the Bind refers to, so it wins over unnamed, the client's
+// confirmed one. A Bind the proxy cannot match to a Parse may run anything.
 func bindSessionMarks(clientName string, state prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
 	stmt := state.FindPendingNamedStmtFromClientName(clientName)
 	if stmt == nil {
@@ -381,8 +381,7 @@ func unnamedStmtGuard(state State, hooks Hooks) *ClientMessageAction {
 	if state.HasUnnamedStmt {
 		return nil
 	}
-	action := NewFlushErrorAction(BuildUnnamedStatementDoesNotExistErrorResponse())
-	observeErrorAction(&action, hooks)
+	action := newObservedFlushErrorAction(BuildUnnamedStatementDoesNotExistErrorResponse(), nil, hooks)
 	return &action
 }
 
@@ -442,17 +441,24 @@ func LookupPreparedStatement(clientName string, state prepared.PreparedStatement
 // It returns the proxy name and the prepared statement if it was confirmed already.
 // It returns a non-nil error action if the prepared statement does not exist.
 func FindPotentiallyExistingPreparedStatement(clientName string, state prepared.PreparedStatementState) (string, prepared.PreparedStatement, *ClientMessageAction) {
+	proxyName, stmt, _, errorAction := findPreparedStatement(clientName, state)
+	return proxyName, stmt, errorAction
+}
+
+// findPreparedStatement is FindPotentiallyExistingPreparedStatement that also
+// returns the statement it found, pending or confirmed.
+func findPreparedStatement(clientName string, state prepared.PreparedStatementState) (proxyName string, existing, found prepared.PreparedStatement, errorAction *ClientMessageAction) {
 	stmt, confirmed := LookupPreparedStatement(clientName, state)
 	if stmt == nil {
 		action := NewFlushErrorAction(BuildPreparedStatementDoesNotExistErrorResponse(clientName))
-		return "", nil, &action
+		return "", nil, nil, &action
 	}
 	if !confirmed {
 		// we only want to check if the stmt is confirmed
 		// since if its pending we already checked that the underlying connection does not have the prepared statement
-		return stmt.GetProxyName(), nil, nil
+		return stmt.GetProxyName(), nil, stmt, nil
 	}
-	return stmt.GetProxyName(), stmt, nil
+	return stmt.GetProxyName(), stmt, stmt, nil
 }
 
 // GetParameterString formats Bind parameters for optional diagnostics.
@@ -527,7 +533,7 @@ func BuildPreparedStatementDoesNotExistErrorResponse(name string) *pgproto3.Erro
 func BuildUnnamedStatementDoesNotExistErrorResponse() *pgproto3.ErrorResponse {
 	return &pgproto3.ErrorResponse{
 		Severity: "ERROR",
-		Code:     "26000",
+		Code:     pgerrcode.InvalidSQLStatementName,
 		Message:  "unnamed prepared statement does not exist",
 	}
 }

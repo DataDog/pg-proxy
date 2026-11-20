@@ -53,8 +53,8 @@ type mirrorItem struct {
 	msg         pgproto3.FrontendMessage // nil for a sentinel
 	expectation query.ReplyExpectation
 	typ         mirrorItemType
-	size        int
 	marks       link.SessionMarks // for a release sentinel: the source checkout's session marks
+	size        int
 }
 
 // enqueueOutcome reports why an enqueue was accepted or dropped, so the caller can

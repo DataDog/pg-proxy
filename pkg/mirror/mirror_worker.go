@@ -15,6 +15,7 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 type Link = link.Link
@@ -140,7 +141,10 @@ func (w *mirrorWorker) run() {
 			// Parse, so a definition lost here is lost for the rest of the session.
 			var parsed prepared.PreparedStatement
 			if m, ok := it.msg.(*pgproto3.Parse); ok {
-				parsed = prepared.CreatePreparedStatement("", m.Name, m.Query, m.ParameterOIDs)
+				// Not scanned: the shadow takes its session marks from the source
+				// checkout, so these flags only claim the worst.
+				parsed = prepared.CreatePreparedStatementWithFlags("", m.Name, m.Query, m.ParameterOIDs,
+					sessionsql.MayChangeSession|sessionsql.MayReadSequenceState)
 				if parsed.IsProxyNamedPreparedStmt() {
 					cat.put(parsed)
 				}
@@ -223,10 +227,7 @@ func (w *mirrorWorker) run() {
 		case mirrorRelease:
 			recorded = false
 			release() // free budget before the (possibly slow) shadow RESET
-			if link := w.getLink(); link != nil && it.marks != 0 {
-				link.MarkSession(it.marks) // the shadow replayed what the source checkout ran
-			}
-			w.releaseLink()
+			w.releaseLink(it.marks)
 			skipping = false // next batch starts clean
 		}
 	}
@@ -367,11 +368,14 @@ func (w *mirrorWorker) discardLink() {
 }
 
 // releaseLink returns the borrowed shadow link to the pool. No-op if none is held.
-func (w *mirrorWorker) releaseLink() {
+// releaseLink returns the shadow link to its pool, marked first with the source
+// checkout's session marks: the shadow replayed what that checkout ran.
+func (w *mirrorWorker) releaseLink(marks link.SessionMarks) {
 	link := w.take()
 	if link == nil {
 		return
 	}
+	link.MarkSession(marks)
 	if err := link.Release(); err != nil {
 		pgproxy.Logger().Warn("mirror worker failed to release shadow link", "err", err)
 	}

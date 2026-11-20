@@ -74,12 +74,18 @@ func PreparedStatementEquivalent(a, b PreparedStatement) bool {
 }
 
 func CreatePreparedStatement(clientName string, proxyName string, sql string, paramOIDs []uint32) PreparedStatement {
+	return CreatePreparedStatementWithFlags(clientName, proxyName, sql, paramOIDs, sessionsql.ScanEither(sql))
+}
+
+// CreatePreparedStatementWithFlags is CreatePreparedStatement for a caller that
+// already has the statement's session flags, so its text is not scanned again.
+func CreatePreparedStatementWithFlags(clientName string, proxyName string, sql string, paramOIDs []uint32, flags sessionsql.Flags) PreparedStatement {
 	return &proxyPreparedStmt{
 		clientName:   clientName,
 		proxyName:    proxyName,
 		sql:          sql,
 		paramOIDs:    paramOIDs,
-		sessionFlags: sessionsql.ScanEither(sql),
+		sessionFlags: flags,
 	}
 }
 

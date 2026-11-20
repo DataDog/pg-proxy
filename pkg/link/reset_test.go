@@ -30,34 +30,34 @@ func TestResetDecision(t *testing.T) {
 	tests := []struct {
 		mode       config.ResetMode
 		marks      SessionMarks
-		wantSend   bool
+		wantAction resetAction
 		wantReason string
 	}{
-		{config.ResetDefault, 0, true, "always"},
-		{config.ResetAlways, MarkClientSQL, true, "always"},
-		{config.ResetOff, MarkClientSQL, false, "off"},
-		{config.ResetDynamic, 0, false, "clean"},
-		{config.ResetDynamic, MarkReadsSequenceState, false, "clean"},
-		{config.ResetDynamic, MarkClientSQL, true, "client_sql"},
-		{config.ResetDynamic, MarkPreparedStmt, true, "prepared_stmt"},
-		{config.ResetDynamic, MarkParameterStatus, true, "parameter_status"},
-		{config.ResetDynamic, MarkPreparedStmt | MarkClientSQL, true, "client_sql"},
-		{config.ResetAudit, 0, true, "audit"},
-		{config.ResetAudit, MarkParameterStatus, true, "parameter_status"},
+		{config.ResetDefault, 0, resetSend, "always"},
+		{config.ResetAlways, MarkClientSQL, resetSend, "always"},
+		{config.ResetOff, MarkClientSQL, resetSkip, "off"},
+		{config.ResetDynamic, 0, resetSkip, "clean"},
+		{config.ResetDynamic, MarkReadsSequenceState, resetSkip, "clean"},
+		{config.ResetDynamic, MarkClientSQL, resetSend, "client_sql"},
+		{config.ResetDynamic, MarkPreparedStmt, resetSend, "prepared_stmt"},
+		{config.ResetDynamic, MarkParameterStatus, resetSend, "parameter_status"},
+		{config.ResetDynamic, MarkPreparedStmt | MarkClientSQL, resetSend, "client_sql"},
+		{config.ResetAudit, 0, resetAudited, "audit"},
+		{config.ResetAudit, MarkParameterStatus, resetSend, "parameter_status"},
 	}
 	for _, test := range tests {
-		send, reason := mustResetPolicy(t, test.mode).resetDecision(test.marks)
-		assert.Equal(t, test.wantSend, send, "mode %q marks %b", test.mode, test.marks)
+		action, reason := mustResetPolicy(t, test.mode).resetDecision(test.marks)
+		assert.Equal(t, test.wantAction, action, "mode %q marks %b", test.mode, test.marks)
 		assert.Equal(t, test.wantReason, reason, "mode %q marks %b", test.mode, test.marks)
 	}
-	send, reason := ResetPolicy{}.resetDecision(MarkClientSQL)
-	assert.True(t, send, "the zero policy resets on every release")
+	action, reason := ResetPolicy{}.resetDecision(MarkClientSQL)
+	assert.Equal(t, resetSend, action, "the zero policy resets on every release")
 	assert.Equal(t, "always", reason)
 }
 
 func TestResetSQL(t *testing.T) {
-	assert.Equal(t, "RESET ALL", resetSQL(true), "with a RoleSession")
-	assert.Equal(t, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL", resetSQL(false), "without a RoleSession")
+	assert.Equal(t, []string{"RESET ALL"}, resetSQL(true), "with a RoleSession")
+	assert.Equal(t, []string{"RESET SESSION AUTHORIZATION", "RESET ROLE", "RESET ALL"}, resetSQL(false), "without a RoleSession")
 }
 
 func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
@@ -213,7 +213,7 @@ func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 		assert.Equal(t, []int64{1}, wouldLeak(metrics, setting, "list"), setting)
 	}
 	assert.Empty(t, wouldLeak(metrics, "statement_timeout", "list"), "unchanged settings are not counted")
-	assert.Equal(t, auditBaseline{sql: policy.auditSQL, values: after}, pgConn.CustomData()[auditBaselineKey],
+	assert.Equal(t, auditBaseline{sql: policy.auditSQL, values: after}, pgConn.CustomData()[customDataAuditBaselineKey],
 		"the row read after the reset becomes the connection's baseline")
 	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
 		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit"})
@@ -238,7 +238,7 @@ func TestReleaseAuditComparesWithBaseline(t *testing.T) {
 			received := make(chan pgproto3.FrontendMessage, 1)
 			conn := newSessionLinkTestPoolConnServing(t, serveReset(received, before))
 			pgConn := conn.Conn().PgConn()
-			pgConn.CustomData()[auditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+			pgConn.CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
 			link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 			require.NoError(t, err)
 
@@ -249,7 +249,7 @@ func TestReleaseAuditComparesWithBaseline(t *testing.T) {
 			for setting := range test.changed {
 				assert.Equal(t, []int64{1}, wouldLeak(metrics, setting, "list"), setting)
 			}
-			_, kept := pgConn.CustomData()[auditBaselineKey]
+			_, kept := pgConn.CustomData()[customDataAuditBaselineKey]
 			assert.Equal(t, test.keepBaseline, kept, "a change drops the baseline, so the next check reads it again")
 		})
 	}
@@ -265,7 +265,7 @@ func TestReleaseAuditSampledFullCheck(t *testing.T) {
 	full := [][]byte{[]byte("synchronous_commit,work_mem")}
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, full, before))
-	conn.Conn().PgConn().CustomData()[auditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+	conn.Conn().PgConn().CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 
@@ -292,7 +292,7 @@ func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
 	before, baseline := auditRows(policy, nil)
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, [][]byte{nil}, before))
-	conn.Conn().PgConn().CustomData()[auditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+	conn.Conn().PgConn().CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 

@@ -19,9 +19,6 @@ const (
 	metricResetWouldLeak    = "pg_proxy.sessions.connections.reset.would_leak"
 	metricResetFullCheck    = "pg_proxy.sessions.connections.reset.full_check"
 	metricCrossCheckoutRead = "pg_proxy.sessions.sequence_state.cross_checkout_read"
-	// sqlstateNotInPrerequisiteState is object_not_in_prerequisite_state, which
-	// currval and lastval raise when the session has no value yet.
-	sqlstateNotInPrerequisiteState = "55000"
 )
 
 // SessionMarks record what a checkout may have done to session state. Each
@@ -119,8 +116,8 @@ func NewResetPolicy(mode config.ResetMode, auditSettings []string) (ResetPolicy,
 	if err := (config.DatabaseSettings{ResetMode: mode, ResetAuditSettings: auditSettings}).ValidateReset(); err != nil {
 		return ResetPolicy{}, err
 	}
-	policy := ResetPolicy{mode: mode.Resolve()}
-	if policy.mode != config.ResetAudit {
+	policy := ResetPolicy{mode: mode}
+	if policy.Mode() != config.ResetAudit {
 		return policy, nil
 	}
 	var columns, exprs []string
@@ -153,11 +150,11 @@ func (p ResetPolicy) Mode() config.ResetMode { return p.mode.Resolve() }
 // sampleFullCheck reports whether this audited release also runs fullCheckSQL.
 // The draw is random, so a periodic workload cannot fall between samples.
 func (p ResetPolicy) sampleFullCheck() bool {
-	return p.fullCheckRate > 0 && rand.Float64() < p.fullCheckRate
+	return rand.Float64() < p.fullCheckRate
 }
 
-// resetSQL returns the reset statement. roleManaged says an embedder RoleSession
-// has already reset the role.
+// resetSQL returns the reset statements, which run as one simple query.
+// roleManaged says an embedder RoleSession has already reset the role.
 //
 // RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). Without a
 // RoleSession, the same simple query resets identity first: any user may run
@@ -169,11 +166,11 @@ func (p ResetPolicy) sampleFullCheck() bool {
 // sees and ResetDynamic differs from ResetAlways only in whether it is sent.
 // Closing held cursors and discarding sequence state (OSQQUERY-823, -826) would
 // change every mode at once.
-func resetSQL(roleManaged bool) string {
+func resetSQL(roleManaged bool) []string {
 	if roleManaged {
-		return "RESET ALL"
+		return []string{"RESET ALL"}
 	}
-	return "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL"
+	return []string{"RESET SESSION AUTHORIZATION", "RESET ROLE", "RESET ALL"}
 }
 
 // Reset reasons, the reason tag of the reset metric.
@@ -187,32 +184,38 @@ const (
 	resetReasonClean           = "clean"
 )
 
-// resetDecision reports whether a release with marks sends the reset, and why.
-func (p ResetPolicy) resetDecision(marks SessionMarks) (send bool, reason string) {
+// resetAction is what a release does about the reset.
+type resetAction uint8
+
+const (
+	resetSkip    resetAction = iota
+	resetSend                // send the reset
+	resetAudited             // send the reset inside the audit check
+)
+
+// resetDecision reports what a release with marks does about the reset, and why.
+func (p ResetPolicy) resetDecision(marks SessionMarks) (action resetAction, reason string) {
 	mode := p.Mode()
 	switch {
 	case mode == config.ResetAlways:
-		return true, resetReasonAlways
+		return resetSend, resetReasonAlways
 	case mode == config.ResetOff:
-		return false, resetReasonOff
+		return resetSkip, resetReasonOff
 	case marks&MarkClientSQL != 0:
-		return true, resetReasonClientSQL
+		return resetSend, resetReasonClientSQL
 	case marks&MarkPreparedStmt != 0:
-		return true, resetReasonPreparedStmt
+		return resetSend, resetReasonPreparedStmt
 	case marks&MarkParameterStatus != 0:
-		return true, resetReasonParameterStatus
+		return resetSend, resetReasonParameterStatus
 	case mode == config.ResetAudit:
-		return true, resetReasonAudit
+		return resetAudited, resetReasonAudit
 	default:
-		return false, resetReasonClean
+		return resetSkip, resetReasonClean
 	}
 }
 
-// auditBaselineKey keys a connection's auditBaseline in pgconn's CustomData,
-// which lives as long as the backend connection.
-const auditBaselineKey = "github.com/DataDog/pg-proxy/pkg/link.auditBaseline"
-
-// auditBaseline is the audit row a connection reads right after a reset: what
+// auditBaseline, kept in pgconn's CustomData for the life of the backend
+// connection, is the audit row the connection reads right after a reset: what
 // every audited setting reads at the connection's baseline.
 type auditBaseline struct {
 	sql    string // the audit query the values answer
@@ -224,9 +227,6 @@ type auditBaseline struct {
 func (p ResetPolicy) changedColumns(before, after [][]byte) []string {
 	var changed []string
 	for i, name := range p.auditColumns {
-		if i >= len(before) || i >= len(after) {
-			break
-		}
 		if !slices.Equal(before[i], after[i]) || (before[i] == nil) != (after[i] == nil) {
 			changed = append(changed, name)
 		}

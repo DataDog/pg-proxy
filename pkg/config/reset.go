@@ -8,6 +8,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 )
 
@@ -55,7 +56,7 @@ func (m ResetMode) Resolve() ResetMode {
 // semantic checks.
 func (s DatabaseSettings) ValidateReset() error {
 	var issues []error
-	if s.ResetMode != ResetDefault && !isResetMode(s.ResetMode) {
+	if s.ResetMode != ResetDefault && !slices.Contains(ResetModes, s.ResetMode) {
 		allowed := make([]string, len(ResetModes))
 		for i, m := range ResetModes {
 			allowed[i] = string(m)
@@ -68,15 +69,6 @@ func (s DatabaseSettings) ValidateReset() error {
 		}
 	}
 	return errors.Join(issues...)
-}
-
-func isResetMode(m ResetMode) bool {
-	for _, known := range ResetModes {
-		if m == known {
-			return true
-		}
-	}
-	return false
 }
 
 // isCustomSettingName reports whether name is two or more simple identifiers
