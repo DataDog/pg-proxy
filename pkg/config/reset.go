@@ -25,10 +25,10 @@ const (
 	// ResetAlways runs the reset on every release.
 	ResetAlways ResetMode = "always"
 	// ResetAudit runs the same reset as ResetAlways on every release, so clients
-	// see no difference. On each release that ResetDynamic would skip, it also
-	// reports the settings the checkout left changed, which ResetDynamic would
-	// have leaked: a fixed list of settings on every such release, and every
-	// setting on a sample of them.
+	// see no difference. On a sample of the releases that ResetDynamic would skip
+	// (reset_audit_rate), it also reports the settings the checkout left changed,
+	// which ResetDynamic would have leaked: a fixed list of settings on each
+	// sampled release, and every setting on a smaller sample.
 	ResetAudit ResetMode = "audit"
 	// ResetDynamic runs the reset only when something in the checkout may have
 	// changed session state. It does not see changes made inside functions or
@@ -51,9 +51,9 @@ func (m ResetMode) Resolve() ResetMode {
 	return m
 }
 
-// ValidateReset checks the reset_mode and reset_audit_settings fields. Readers
-// do not call it; applications and the pg-proxy binary call it with their other
-// semantic checks.
+// ValidateReset checks the reset_mode, reset_audit_settings and reset_audit_rate
+// fields. Readers do not call it; applications and the pg-proxy binary call it
+// with their other semantic checks.
 func (s DatabaseSettings) ValidateReset() error {
 	var issues []error
 	if s.ResetMode != ResetDefault && !slices.Contains(ResetModes, s.ResetMode) {
@@ -67,6 +67,10 @@ func (s DatabaseSettings) ValidateReset() error {
 		if !isCustomSettingName(name) {
 			issues = append(issues, fmt.Errorf("reset_audit_settings[%d]: %q is not a custom setting name of the form prefix.name", i, name))
 		}
+	}
+	// Written so that NaN fails too.
+	if !(s.ResetAuditRate >= 0 && s.ResetAuditRate <= 1) {
+		issues = append(issues, fmt.Errorf("reset_audit_rate: %v is not between 0 and 1", s.ResetAuditRate))
 	}
 	return errors.Join(issues...)
 }

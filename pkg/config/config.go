@@ -51,6 +51,10 @@ type DatabaseSettings struct {
 	// settings that ResetAudit checks on every audited release. pg_settings does
 	// not list custom settings, so its sampled full check cannot find them.
 	ResetAuditSettings []string `mapstructure:"reset_audit_settings" json:"resetAuditSettings,omitempty" yaml:"reset_audit_settings,omitempty"`
+	// ResetAuditRate is the share, from 0 to 1, of the releases ResetDynamic
+	// would skip that ResetAudit checks. The others get the plain reset. Zero
+	// selects the library default, a tenth.
+	ResetAuditRate float64 `mapstructure:"reset_audit_rate" json:"resetAuditRate,omitempty" yaml:"reset_audit_rate,omitempty"`
 }
 
 // PoolConfig contains additional standalone pool tuning options.

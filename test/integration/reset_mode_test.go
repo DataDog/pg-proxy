@@ -23,12 +23,14 @@ import (
 
 // startResetModeProxy starts startProxy's configuration with dbPooled's single
 // backend connection reset in mode, so consecutive clients share one backend.
+// Audit checks every release, so a test sees each check it causes.
 func startResetModeProxy(t *testing.T, mode pgconfig.ResetMode) *itest.Proxy {
 	t.Helper()
 	cfg := proxyConfig()
 	for i := range cfg.Databases {
 		if cfg.Databases[i].Name == pooledPrimary {
 			cfg.Databases[i].ResetMode = mode
+			cfg.Databases[i].ResetAuditRate = 1
 		}
 	}
 	return itest.MustStartProxy(t, cfg)

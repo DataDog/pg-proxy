@@ -265,9 +265,11 @@ func TestResetModeConfiguration(t *testing.T) {
 	shared = ossConfig()
 	shared.Databases[0].ResetMode = "sometimes"
 	shared.Databases[0].ResetAuditSettings = []string{"work_mem"}
+	shared.Databases[0].ResetAuditRate = 2
 	_, err = (config{}).withSharedConfig(shared)
 	require.ErrorContains(t, err, `databases[0]: reset_mode: unknown mode "sometimes"; use one of always, audit, dynamic, off`)
 	require.ErrorContains(t, err, `databases[0]: reset_audit_settings[0]: "work_mem" is not a custom setting name`)
+	require.ErrorContains(t, err, `databases[0]: reset_audit_rate: 2 is not between 0 and 1`)
 
 	cfg, err = (config{}).withSharedConfig(ossConfig())
 	require.NoError(t, err)

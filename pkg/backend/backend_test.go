@@ -467,7 +467,7 @@ func TestFallbackMetricIdentity(t *testing.T) {
 
 func TestAcquireUsesSelectedPoolsResetPolicy(t *testing.T) {
 	policy := func(mode config.ResetMode) link.ResetPolicy {
-		p, err := link.NewResetPolicy(mode, nil)
+		p, err := link.NewResetPolicy(config.DatabaseSettings{ResetMode: mode})
 		require.NoError(t, err)
 		return p
 	}

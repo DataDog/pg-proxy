@@ -322,7 +322,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		if err != nil {
 			issues = append(issues, configurationContext(fmt.Sprintf("databases[%d]", i), err))
 		}
-		reset, err := link.NewResetPolicy(database.ResetMode, database.ResetAuditSettings)
+		reset, err := link.NewResetPolicy(database.DatabaseSettings)
 		if err != nil {
 			issues = append(issues, configurationContext(fmt.Sprintf("databases[%d]", i), err))
 		}

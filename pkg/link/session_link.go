@@ -258,17 +258,19 @@ func (link *SessionLink) Release() error {
 	// pgx docs on client config startup packets: https://pkg.go.dev/github.com/jackc/pgx#ConnConfig
 	//
 	// The policy decides whether this release sends it: always, never, or only when the
-	// checkout's marks say something may have changed. resetSQL builds the statement,
-	// the same in every mode, including the identity reset when no RoleSession ran above.
+	// checkout's marks say something may have changed; and in audit mode, whether it
+	// also runs the check. resetSQL builds the statement, the same in every mode,
+	// including the identity reset when no RoleSession ran above.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
 		action, reason := link.reset.resetDecision(link.marks)
+		tags := reasonTags(action, reason)
 		outcome := "outcome:reset"
 		if action == resetSkip {
 			outcome = "outcome:skipped"
 		}
-		_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(outcome, "reason:"+reason), 1)
+		_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(append([]string{outcome}, tags...)...), 1)
 		if action != resetSkip {
-			if err := link.runReset(action == resetAudited, reason); err != nil {
+			if err := link.runReset(action, tags); err != nil {
 				return err
 			}
 		}
@@ -288,18 +290,19 @@ func (link *SessionLink) Release() error {
 }
 
 // runReset sends the reset query (pgx sends a zero-argument Exec as one simple
-// query). audited wraps the reset in the audit check. A failure closes the
-// connection, so nothing it might have left behind reaches the pool.
-func (link *SessionLink) runReset(audited bool, reason string) error {
+// query). An audited action wraps the reset in the audit check. tags are the
+// decision's reasonTags. A failure closes the connection, so nothing it might
+// have left behind reaches the pool.
+func (link *SessionLink) runReset(action resetAction, tags []string) error {
 	reset := resetSQL(link.role != nil)
 	resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	start := time.Now()
 	var err error
-	if audited {
-		err = link.runAuditedReset(resetCtx, reset)
-	} else {
+	if action == resetSend {
 		_, err = link.conn.Exec(resetCtx, strings.Join(reset, "; "))
+	} else {
+		err = link.runAuditedReset(resetCtx, reset, action == resetFullAudited)
 	}
 	if err != nil {
 		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
@@ -307,7 +310,7 @@ func (link *SessionLink) runReset(audited bool, reason string) error {
 		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", strings.Join(reset, "; "), "error", err)
 		return err
 	}
-	_ = pgproxy.Metrics().Distribution(pgproxy.MetricResetLatency, float64(time.Since(start).Microseconds()), link.resetTags("reason:"+reason), 1)
+	_ = pgproxy.Metrics().Distribution(pgproxy.MetricResetLatency, float64(time.Since(start).Microseconds()), link.resetTags(tags...), 1)
 	return nil
 }
 
@@ -318,15 +321,14 @@ func (link *SessionLink) runReset(audited bool, reason string) error {
 // The check reads the audited settings before the reset and compares them with
 // the connection's baseline. A connection without one, or whose last check found
 // a change, also reads them after the reset and keeps that row as its baseline,
-// so a changed server default costs one count per connection. On a sample of
-// releases the query starts with fullCheckSQL, which names settings the list
-// misses. Values are never logged; they can hold tenant ids. A failure closes
-// the connection.
-func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string) error {
+// so a changed server default costs one count per connection. With fullCheck
+// the query starts with fullCheckSQL, which names settings the list misses.
+// Values are never logged; they can hold tenant ids. A failure closes the
+// connection.
+func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string, fullCheck bool) error {
 	pgConn := link.conn.Conn().PgConn()
 	baseline, haveBaseline := pgConn.CustomData()[customDataAuditBaselineKey].(auditBaseline)
 	haveBaseline = haveBaseline && baseline.sql == link.reset.auditSQL
-	fullCheck := link.reset.sampleFullCheck()
 
 	var statements []string
 	if fullCheck {
@@ -381,7 +383,6 @@ func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string) er
 	}
 	var unlisted []string
 	if fullCheck {
-		_ = pgproxy.Metrics().Count(metricResetFullCheck, 1, link.resetTags(), 1)
 		for _, setting := range fullNames {
 			_ = pgproxy.Metrics().Count(metricResetWouldLeak, 1, link.resetTags("setting:"+setting, "check:full"), 1)
 			if !slices.Contains(link.reset.auditColumns, setting) {

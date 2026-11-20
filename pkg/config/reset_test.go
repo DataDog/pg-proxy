@@ -7,6 +7,7 @@ package config
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"strings"
 	"testing"
@@ -17,17 +18,18 @@ func TestResetFieldsReadFromYAMLAndJSON(t *testing.T) {
 - name: write
   reset_mode: audit
   reset_audit_settings: [app.tenant_id]
+  reset_audit_rate: 0.25
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	fromJSON, err := ReadJSON(strings.NewReader(`{"databases":[{"name":"write","resetMode":"audit","resetAuditSettings":["app.tenant_id"]}]}`))
+	fromJSON, err := ReadJSON(strings.NewReader(`{"databases":[{"name":"write","resetMode":"audit","resetAuditSettings":["app.tenant_id"],"resetAuditRate":0.25}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	for format, cfg := range map[string]Config{"yaml": fromYAML, "json": fromJSON} {
 		db := cfg.Databases[0]
-		if db.ResetMode != ResetAudit || !reflect.DeepEqual(db.ResetAuditSettings, []string{"app.tenant_id"}) {
+		if db.ResetMode != ResetAudit || !reflect.DeepEqual(db.ResetAuditSettings, []string{"app.tenant_id"}) || db.ResetAuditRate != 0.25 {
 			t.Fatalf("%s: lost reset settings: %+v", format, db.DatabaseSettings)
 		}
 	}
@@ -61,8 +63,10 @@ func TestValidateReset(t *testing.T) {
 		{},
 		{ResetMode: ResetAlways},
 		{ResetMode: ResetAudit, ResetAuditSettings: []string{"app.tenant_id", "pg_trgm.similarity_threshold", "a.b.c", "x_1.y$2"}},
+		{ResetMode: ResetAudit, ResetAuditRate: 1},
+		{ResetMode: ResetAudit, ResetAuditRate: 0.001},
 		{ResetMode: ResetDynamic},
-		{ResetMode: ResetOff},
+		{ResetMode: ResetOff, ResetAuditRate: 0.5},
 	}
 	for _, s := range valid {
 		if err := s.ValidateReset(); err != nil {
@@ -75,6 +79,9 @@ func TestValidateReset(t *testing.T) {
 		`reset_audit_settings[1]: "app.x'); DROP TABLE t; --"`:                      {ResetAuditSettings: []string{"app.ok", "app.x'); DROP TABLE t; --"}},
 		`reset_audit_settings[0]: "app."`:                                           {ResetAuditSettings: []string{"app."}},
 		`reset_audit_settings[0]: "1app.x"`:                                         {ResetAuditSettings: []string{"1app.x"}},
+		`reset_audit_rate: -0.1 is not between 0 and 1`:                             {ResetAuditRate: -0.1},
+		`reset_audit_rate: 1.5 is not between 0 and 1`:                              {ResetAuditRate: 1.5},
+		`reset_audit_rate: NaN is not between 0 and 1`:                              {ResetAuditRate: math.NaN()},
 	}
 	for want, s := range invalid {
 		err := s.ValidateReset()

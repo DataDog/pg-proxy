@@ -21,8 +21,17 @@ import (
 
 func mustResetPolicy(t *testing.T, mode config.ResetMode, auditSettings ...string) ResetPolicy {
 	t.Helper()
-	policy, err := NewResetPolicy(mode, auditSettings)
+	policy, err := NewResetPolicy(config.DatabaseSettings{ResetMode: mode, ResetAuditSettings: auditSettings})
 	require.NoError(t, err)
+	return policy
+}
+
+// auditEveryRelease returns an audit policy that checks every release
+// ResetDynamic would skip, and full-checks them at fullCheckRate, 0 or 1.
+func auditEveryRelease(t *testing.T, fullCheckRate float64, auditSettings ...string) ResetPolicy {
+	t.Helper()
+	policy := mustResetPolicy(t, config.ResetAudit, auditSettings...)
+	policy.auditRate, policy.fullCheckRate = 1, fullCheckRate
 	return policy
 }
 
@@ -42,7 +51,6 @@ func TestResetDecision(t *testing.T) {
 		{config.ResetDynamic, MarkPreparedStmt, resetSend, "prepared_stmt"},
 		{config.ResetDynamic, MarkParameterStatus, resetSend, "parameter_status"},
 		{config.ResetDynamic, MarkPreparedStmt | MarkClientSQL, resetSend, "client_sql"},
-		{config.ResetAudit, 0, resetAudited, "audit"},
 		{config.ResetAudit, MarkParameterStatus, resetSend, "parameter_status"},
 	}
 	for _, test := range tests {
@@ -53,6 +61,41 @@ func TestResetDecision(t *testing.T) {
 	action, reason := ResetPolicy{}.resetDecision(MarkClientSQL)
 	assert.Equal(t, resetSend, action, "the zero policy resets on every release")
 	assert.Equal(t, "always", reason)
+}
+
+func TestAuditSampling(t *testing.T) {
+	policy := mustResetPolicy(t, config.ResetAudit)
+	assert.Equal(t, defaultAuditRate, policy.auditRate)
+	assert.Equal(t, defaultFullCheckRate, policy.fullCheckRate)
+	custom, err := NewResetPolicy(config.DatabaseSettings{ResetMode: config.ResetAudit, ResetAuditRate: 0.25})
+	require.NoError(t, err)
+	assert.Equal(t, 0.25, custom.auditRate)
+
+	for _, test := range []struct {
+		auditRate, fullCheckRate float64
+		want                     resetAction
+	}{
+		{0, 0, resetSend},
+		{0, 1, resetSend}, // only an audited release runs the full check
+		{1, 0, resetAudited},
+		{1, 1, resetFullAudited},
+	} {
+		policy.auditRate, policy.fullCheckRate = test.auditRate, test.fullCheckRate
+		action, reason := policy.resetDecision(0)
+		assert.Equal(t, test.want, action, "audit rate %v, full-check rate %v", test.auditRate, test.fullCheckRate)
+		assert.Equal(t, "audit", reason, "every release dynamic would skip counts as audit, checked or not")
+	}
+
+	// The full-check rate is a share of all the releases dynamic would skip, not
+	// of the audited ones. Both bounds are more than five standard deviations wide.
+	policy.auditRate, policy.fullCheckRate = defaultAuditRate, defaultFullCheckRate
+	const draws = 100_000
+	counts := map[resetAction]int{}
+	for range draws {
+		counts[policy.sampleAudit()]++
+	}
+	assert.InDelta(t, draws*(defaultAuditRate-defaultFullCheckRate), counts[resetAudited], 500)
+	assert.InDelta(t, draws*defaultFullCheckRate, counts[resetFullAudited], 200)
 }
 
 func TestResetSQL(t *testing.T) {
@@ -71,16 +114,17 @@ func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(policy.auditSQL, "app.tenant_id"), "duplicate names are checked once")
 	assert.Len(t, policy.auditColumns, len(auditedSettings)+2)
 	assert.Len(t, auditedSettings, 29)
-	assert.Equal(t, defaultFullCheckRate, policy.fullCheckRate)
 
 	dynamic := mustResetPolicy(t, config.ResetDynamic)
 	assert.Empty(t, dynamic.auditSQL, "only audit runs the check")
-	assert.False(t, dynamic.sampleFullCheck())
+	assert.Zero(t, dynamic.auditRate)
 
-	_, err := NewResetPolicy("sometimes", nil)
+	_, err := NewResetPolicy(config.DatabaseSettings{ResetMode: "sometimes"})
 	assert.ErrorContains(t, err, `reset_mode: unknown mode "sometimes"`)
-	_, err = NewResetPolicy(config.ResetAudit, []string{"app.x'); SELECT 1; --"})
+	_, err = NewResetPolicy(config.DatabaseSettings{ResetMode: config.ResetAudit, ResetAuditSettings: []string{"app.x'); SELECT 1; --"}})
 	assert.ErrorContains(t, err, "reset_audit_settings[0]")
+	_, err = NewResetPolicy(config.DatabaseSettings{ResetMode: config.ResetAudit, ResetAuditRate: 1.5})
+	assert.ErrorContains(t, err, "reset_audit_rate: 1.5 is not between 0 and 1")
 }
 
 func TestChangedColumns(t *testing.T) {
@@ -191,11 +235,28 @@ func wouldLeak(metrics *recordingMetrics, setting, check string) []int64 {
 	return counts
 }
 
+func TestReleaseAuditUnsampledSendsPlainReset(t *testing.T) {
+	metrics := newRecordingMetrics()
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+	policy := mustResetPolicy(t, config.ResetAudit)
+	policy.auditRate = 0
+	received := make(chan pgproto3.FrontendMessage, 1)
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
+	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
+	require.NoError(t, err)
+
+	require.NoError(t, link.Release())
+
+	require.Equal(t, &pgproto3.Query{String: testReset}, <-received, "a release outside the sample gets the plain reset")
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit", "check:none"})
+	assert.Equal(t, []int64{1}, counts)
+}
+
 func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 	metrics := newRecordingMetrics()
 	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
-	policy := mustResetPolicy(t, config.ResetAudit, "app.tenant_id")
-	policy.fullCheckRate = 0
+	policy := auditEveryRelease(t, 0, "app.tenant_id")
 
 	// A function changed search_path and app.tenant_id; the reset restores both.
 	before, after := auditRows(policy, map[string][]byte{"search_path": []byte("leaked"), "app.tenant_id": []byte("t1")})
@@ -216,7 +277,7 @@ func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 	assert.Equal(t, auditBaseline{sql: policy.auditSQL, values: after}, pgConn.CustomData()[customDataAuditBaselineKey],
 		"the row read after the reset becomes the connection's baseline")
 	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
-		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit"})
+		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit", "check:list"})
 	assert.Equal(t, []int64{1}, counts)
 }
 
@@ -232,8 +293,7 @@ func TestReleaseAuditComparesWithBaseline(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			metrics := newRecordingMetrics()
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
-			policy := mustResetPolicy(t, config.ResetAudit)
-			policy.fullCheckRate = 0
+			policy := auditEveryRelease(t, 0)
 			before, baseline := auditRows(policy, test.changed)
 			received := make(chan pgproto3.FrontendMessage, 1)
 			conn := newSessionLinkTestPoolConnServing(t, serveReset(received, before))
@@ -259,8 +319,7 @@ func TestReleaseAuditSampledFullCheck(t *testing.T) {
 	metrics := newRecordingMetrics()
 	var logs bytes.Buffer
 	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics, LogHandler: slog.NewTextHandler(&logs, nil)}))
-	policy := mustResetPolicy(t, config.ResetAudit)
-	policy.fullCheckRate = 1
+	policy := auditEveryRelease(t, 1)
 	before, baseline := auditRows(policy, map[string][]byte{"synchronous_commit": []byte("off")})
 	full := [][]byte{[]byte("synchronous_commit,work_mem")}
 	received := make(chan pgproto3.FrontendMessage, 1)
@@ -277,8 +336,8 @@ func TestReleaseAuditSampledFullCheck(t *testing.T) {
 	assert.Equal(t, []int64{1}, wouldLeak(metrics, "synchronous_commit", "full"))
 	assert.Equal(t, []int64{1}, wouldLeak(metrics, "work_mem", "full"))
 	assert.Empty(t, wouldLeak(metrics, "work_mem", "list"), "work_mem is not on the list")
-	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.full_check",
-		[]string{"database_cluster:test-cluster", "reset_mode:audit"})
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit", "check:full"})
 	assert.Equal(t, []int64{1}, counts)
 	assert.Contains(t, logs.String(), "settings=[synchronous_commit] unlisted_settings=[work_mem]")
 	assert.NotContains(t, logs.String(), "off", "values are never logged")
@@ -287,8 +346,7 @@ func TestReleaseAuditSampledFullCheck(t *testing.T) {
 func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
 	metrics := newRecordingMetrics()
 	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
-	policy := mustResetPolicy(t, config.ResetAudit)
-	policy.fullCheckRate = 1
+	policy := auditEveryRelease(t, 1)
 	before, baseline := auditRows(policy, nil)
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, [][]byte{nil}, before))
@@ -299,8 +357,8 @@ func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
 	require.NoError(t, link.Release())
 
 	<-received
-	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset.full_check",
-		[]string{"database_cluster:test-cluster", "reset_mode:audit"})
+	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
+		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit", "check:full"})
 	assert.Equal(t, []int64{1}, counts)
 	_, emitted := metrics.counts["datadog.pg_proxy.sessions.connections.reset.would_leak"]
 	assert.False(t, emitted, "a NULL full check names no setting")
@@ -318,7 +376,7 @@ func TestReleaseAuditCheckFailureClosesConnection(t *testing.T) {
 		_, _ = backend.Receive()
 	})
 	pgxConn := conn.Conn()
-	link, err := New(conn, Options{Reset: mustResetPolicy(t, config.ResetAudit)})
+	link, err := New(conn, Options{Reset: auditEveryRelease(t, 0)})
 	require.NoError(t, err)
 
 	require.Error(t, link.Release())
