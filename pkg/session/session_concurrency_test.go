@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -72,6 +73,32 @@ func TestRemapConcurrentWithMessageBoundary(t *testing.T) {
 			s := newConcurrencyTestSession(test.hooks)
 			runConcurrently(func() { s.handleStateRemapping() }, func() { test.remap(s) })
 		})
+	}
+}
+
+// Hooks run while the session holds remapMu or linkMu and may read the session
+// back through its getters.
+func TestHooksCanCallGetters(t *testing.T) {
+	var s *Session
+	s = newConcurrencyTestSession(Hooks{
+		BackendChanged:    func(Backend, Backend) { s.Backend(); s.PendingBackend() },
+		ReadStatesChanged: func(_, _ []ReadStateConfig) { s.Backend(); s.PendingBackend() },
+		LinkChanged:       func(link.Link) { s.CurrentLink() },
+	})
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.RemapBackend(&namedBackend{name: "next"})
+		s.RemapReadStates(nil)
+		s.handleStateRemapping()
+		s.linkMu.Lock()
+		s.setLink(&testLink{})
+		s.linkMu.Unlock()
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a hook deadlocked calling a session getter")
 	}
 }
 

@@ -517,28 +517,19 @@ func (s *Session) MetricTags() []string        { return s.obsVals.metricTags }
 func (s *Session) TraceState() *query.TraceState {
 	return s.obsVals.traceState
 }
-func (s *Session) CurrentLink() link.Link {
-	s.linkMu.Lock()
-	defer s.linkMu.Unlock()
-	return s.link
-}
+
+// CurrentLink, Backend, and PendingBackend take no lock, so hooks can call them.
+// Call them only from the session goroutine or from a hook.
+func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
 }
 func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 	return s.pStmtState
 }
-func (s *Session) DiscardUntilSync() bool { return s.discardUntilSync }
-func (s *Session) Backend() Backend {
-	s.remapMu.Lock()
-	defer s.remapMu.Unlock()
-	return s.backend
-}
-func (s *Session) PendingBackend() Backend {
-	s.remapMu.Lock()
-	defer s.remapMu.Unlock()
-	return s.remappedBackend
-}
+func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
+func (s *Session) Backend() Backend        { return s.backend }
+func (s *Session) PendingBackend() Backend { return s.remappedBackend }
 func (s *Session) SetLivenessProbe(probe ClientLivenessProbe) {
 	s.livenessProbe = probe
 }
