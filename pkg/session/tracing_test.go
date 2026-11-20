@@ -15,6 +15,7 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
 	"github.com/DataDog/pg-proxy/pkg/query"
+	"github.com/dustin/go-humanize"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -138,4 +139,48 @@ func TestDefaultParametersDoNotReachDebugLogs(t *testing.T) {
 			require.NotContains(t, logs.String(), bindparams.TagPrefix)
 		})
 	}
+}
+
+// The rows span reports the encoded size of the DataRows forwarded to the client.
+func TestRowsSpanReportsEncodedRowSize(t *testing.T) {
+	tracer := startMockTracer(t)
+	_, client, postgres, _, closeSession := newRunningTestSessionWithBackend(t)
+	defer closeSession()
+
+	client.Send(&pgproto3.Query{String: "SELECT id, name FROM users"})
+	require.NoError(t, client.Flush())
+	_, err := postgres.Receive()
+	require.NoError(t, err)
+	rows := []*pgproto3.DataRow{
+		{Values: [][]byte{[]byte("1"), []byte("alice")}},
+		{Values: [][]byte{[]byte("2"), nil}},
+	}
+	responses := []pgproto3.BackendMessage{&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("id")}, {Name: []byte("name")}}}}
+	wantSize := 0
+	for _, row := range rows {
+		encoded, err := row.Encode(nil)
+		require.NoError(t, err)
+		wantSize += len(encoded)
+		responses = append(responses, row)
+	}
+	responses = append(responses, &pgproto3.CommandComplete{CommandTag: []byte("SELECT 2")}, &pgproto3.ReadyForQuery{TxStatus: 'I'})
+	for _, response := range responses {
+		postgres.Send(response)
+	}
+	require.NoError(t, postgres.Flush())
+	for range responses {
+		_, err := client.Receive()
+		require.NoError(t, err)
+	}
+	closeSession() // Join the session before reading its finished spans.
+
+	var found bool
+	for _, span := range tracer.FinishedSpans() {
+		if span.OperationName() == query.DataRoundTrips {
+			found = true
+			require.EqualValues(t, len(rows), span.Tag("rowsReturned/Affected"))
+			require.Equal(t, humanize.Bytes(uint64(wantSize)), span.Tag("rowsTotalSize"))
+		}
+	}
+	require.True(t, found, "the rows span must be recorded")
 }
