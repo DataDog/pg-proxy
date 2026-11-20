@@ -167,6 +167,44 @@ func TestSQLRoutingBanlistRequiresFreshUnambiguousRecovery(t *testing.T) {
 	}
 }
 
+func TestSQLRoutingBanlistCachedShutdownVetoesLaterSuccess(t *testing.T) {
+	const ip = "10.0.0.1"
+	for _, standby := range []bool{false, true} {
+		t.Run(fmt.Sprintf("standby_%t", standby), func(t *testing.T) {
+			at := time.Date(2026, time.November, 19, 12, 0, 0, 0, time.UTC)
+			bans := make(sqlRoutingBanlist)
+			shutdown := SQLHealthCheckResult{
+				IP: ip, StartedAt: at, CompletedAt: at.Add(time.Millisecond),
+				Err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown},
+			}
+			bannedAt := at.Add(2 * time.Millisecond)
+			changes := bans.update([]string{ip}, aggregateSQLHealthCheckResults([]SQLHealthCheckResult{shutdown}).Outcome, SQLHealthResultsSnapshot{
+				ScheduledAt: at, ObservedAt: bannedAt, Results: []SQLHealthCheckResult{shutdown},
+			})
+			require.Equal(t, []SQLRoutingBanChange{{IP: ip, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown}}, changes)
+
+			// Credential A's next poll is still running. Credential B succeeds after the ban,
+			// but A's last completed snapshot still contains the shutdown.
+			success := SQLHealthCheckResult{
+				IP: ip, InRecovery: standby,
+				StartedAt: at.Add(time.Second), CompletedAt: at.Add(time.Second + time.Millisecond),
+			}
+			fresh := SQLHealthResultsSnapshot{
+				ScheduledAt: success.StartedAt, ObservedAt: at.Add(2 * time.Second), Results: []SQLHealthCheckResult{success},
+			}
+			changes = bans.update([]string{ip}, aggregateSQLHealthCheckResults([]SQLHealthCheckResult{shutdown, success}).Outcome, fresh)
+			assert.Empty(t, changes, "cached shutdown vetoes recovery without repeating the ban event")
+			require.Contains(t, bans, ip)
+			assert.Equal(t, bannedAt, bans[ip], "cached shutdown must not advance the recovery boundary")
+
+			// Without A's cached shutdown, the identical fresh success qualifies for recovery.
+			changes = bans.update([]string{ip}, aggregateSQLHealthCheckResults([]SQLHealthCheckResult{success}).Outcome, fresh)
+			assert.Equal(t, []SQLRoutingBanChange{{IP: ip, Reason: SQLRoutingUnbanReasonConclusiveResult}}, changes)
+			assert.Empty(t, bans)
+		})
+	}
+}
+
 func TestSQLRoutingBanlistRepeatedShutdownAdvancesRecoveryBoundary(t *testing.T) {
 	const ip = "10.0.0.1"
 	at := time.Now()
