@@ -379,6 +379,17 @@ func TestRecordBoundsTheCopy(t *testing.T) {
 	assert.Len(t, c.data, MaxParams*copyLimit, "copyLimit bytes from each binary value")
 }
 
+func TestRenderKeepsOutputThatFitsTheRetainLimit(t *testing.T) {
+	// Eight 128-byte values render to 1 KiB, though Render's size estimate for
+	// them exceeds retainLimit.
+	values := slices.Repeat([][]byte{[]byte(strings.Repeat("v", 128))}, 8)
+	var c Capture
+	c.Record(&pgproto3.Bind{Parameters: values}, nil, nil)
+	collect(t, &c)
+	require.NotNil(t, c.out, "the output buffer is kept for the next Render")
+	assert.LessOrEqual(t, cap(c.out), retainLimit)
+}
+
 func TestRecordCopiesValues(t *testing.T) {
 	// pgproto3 reuses its read buffer, so Record must not keep the slices.
 	buf := []byte("before")

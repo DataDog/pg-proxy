@@ -277,10 +277,11 @@ func (t *TraceState) WantsBindParameters() bool {
 
 // RecordBindParameters copies b's values to render as db.parameters.N tags on
 // the root span when it finishes. It ignores b unless WantsBindParameters, so
-// only a sampled root's first Bind is kept; callers may check it first to skip
-// gathering parseOIDs and describedOIDs.
+// only a sampled root's first Bind with parameters is kept; a Bind with none,
+// such as SELECT 1's, leaves the slot to a later one. Callers may check
+// WantsBindParameters first to skip gathering parseOIDs and describedOIDs.
 func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
-	if !t.WantsBindParameters() {
+	if len(b.Parameters) == 0 || !t.WantsBindParameters() {
 		return
 	}
 	if t.bindParams == nil {

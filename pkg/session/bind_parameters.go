@@ -113,6 +113,10 @@ func (s *Session) observeBackendMessage(msg pgproto3.BackendMessage) {
 		}
 	case *pgproto3.ReadyForQuery:
 		// Describes that failed get no reply; forget them at the end of the cycle.
+		// This also forgets Describes a client pipelined after a later Sync, whose
+		// binary values then render as hex. Splitting the queue at each Sync and
+		// simple Query would keep them, but a miscounted boundary would pair a
+		// reply with the wrong statement and decode values as the wrong type.
 		t.describing = t.describing[:0]
 		t.answered = 0
 	}

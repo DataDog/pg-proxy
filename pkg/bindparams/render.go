@@ -52,8 +52,9 @@ func (c *Capture) Render(setTag func(key string, value any)) {
 	// Render every value into one buffer and convert it to a string once; each
 	// tag value is a substring of it, so the values cost one allocation, plus
 	// one per tag to pass it as an interface. Hex doubles the copied bytes, and
-	// each position may add a "(+N bytes)" suffix.
-	out := slices.Grow(c.out[:0], min(2*len(c.data)+16*len(c.params), TotalLimit))
+	// each position may add a "(+N bytes)" suffix. The estimate stops at
+	// retainLimit, so an output that fits a kept buffer does not outgrow it.
+	out := slices.Grow(c.out[:0], min(2*len(c.data)+16*len(c.params), retainLimit))
 	data := c.data
 	var ends [MaxParams]int
 	rendered := 0

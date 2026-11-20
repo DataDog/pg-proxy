@@ -167,6 +167,23 @@ func TestBindParametersKeepFirstBindOfRoot(t *testing.T) {
 	assert.Equal(t, "first", roots[0][bindparams.TagPrefix+"0"])
 }
 
+func TestBindParametersSkipBindsWithoutParameters(t *testing.T) {
+	tracer, client, postgres, closeSession := captureSession(t)
+	exchange(t, client, postgres, nil,
+		&pgproto3.Parse{Query: "SELECT 1"},
+		&pgproto3.Bind{},
+		&pgproto3.Execute{},
+		&pgproto3.Parse{Query: parameterQuery},
+		&pgproto3.Bind{Parameters: [][]byte{[]byte("second")}},
+		&pgproto3.Execute{},
+		&pgproto3.Sync{})
+	closeSession()
+
+	roots := rootTags(tracer)
+	require.Len(t, roots, 1)
+	assert.Equal(t, "second", roots[0][bindparams.TagPrefix+"0"], "an empty Bind leaves the slot to the next one")
+}
+
 func TestDescribeTrackingIsBounded(t *testing.T) {
 	s := New(Config{EnableTraceParameters: true})
 	for range maxPendingDescribes + 10 {
