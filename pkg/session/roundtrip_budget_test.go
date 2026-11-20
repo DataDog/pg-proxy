@@ -15,8 +15,8 @@ import (
 
 // Socket writes, backend round trips, and the release reset are the largest
 // per-statement costs of forwarding. Unlike timings, their counts per cycle are
-// deterministic, so these tests pin them. A change that removes a round trip,
-// such as flushing the reply to the client before the release reset, should
+// deterministic, so these tests pin them. A change that removes a write, such
+// as skipping the release reset or sending it with the cycle's flush, should
 // lower the expected counts here in the same change.
 
 func TestProtocolCycleRoundTripBudgets(t *testing.T) {
@@ -30,7 +30,7 @@ func TestProtocolCycleRoundTripBudgets(t *testing.T) {
 				// One flush to Postgres, one write to the client, and one checkout
 				// whose release runs one reset query, whatever the cycle's length.
 				want := cycleCounts{
-					backendFlushes: 1, backendStatements: pc.statements, releaseResets: 1,
+					backendWrites: 2, backendFlushes: 1, backendStatements: pc.statements, releaseResets: 1,
 					clientWrites: 1, checkouts: 1,
 				}
 				if withRole {
@@ -44,10 +44,12 @@ func TestProtocolCycleRoundTripBudgets(t *testing.T) {
 
 // A client's first Parse of a named statement that its backend connection
 // already has, for example from another session, is not forwarded. The session
-// flushes the messages before it to Postgres, answers ParseComplete itself, and
-// then forwards the rest of the cycle: one more flush and one more client write
-// than a forwarded Parse. This pins that cost; lower it if the session learns
-// to answer ParseComplete in the same client write.
+// answers ParseComplete itself, but only after it sends Postgres a Flush and
+// reads the replies to the messages before the Parse, in case one failed. Here
+// the Parse starts the cycle, so the Flush carries nothing and gets no reply.
+// The cycle costs one more backend write and one more client write than a
+// forwarded Parse. Lower these counts if the session skips the Flush when no
+// message precedes the Parse, or adds ParseComplete to the cycle's client write.
 func TestNamedParseOfStatementOnConnectionRoundTrips(t *testing.T) {
 	h := newCycleHarness(t, false)
 	require.NoError(t, h.newClient().run(preparedStatementScript(t, h)))
@@ -63,6 +65,6 @@ func TestNamedParseOfStatementOnConnectionRoundTrips(t *testing.T) {
 	h.resetCounts(client)
 	require.NoError(t, client.run(script))
 	require.Equal(t, cycleCounts{
-		backendFlushes: 2, backendStatements: 1, releaseResets: 1, clientWrites: 2, checkouts: 1,
+		backendWrites: 3, backendFlushes: 2, backendStatements: 1, releaseResets: 1, clientWrites: 2, checkouts: 1,
 	}, h.counts(client))
 }

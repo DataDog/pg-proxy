@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"net/url"
 	"os"
 	"testing"
@@ -28,23 +29,23 @@ import (
 func TestBackendStatementsPerClientStatement(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Minute)
 	defer cancel()
-	adminURL, external := statementStatisticsPostgres(t, ctx)
+	_, external := os.LookupEnv(testDatabaseURLVariable)
+	connectionString := postgresTestConnectionString(t, ctx, itest.WithContainerOptions(
+		testcontainers.WithCmdArgs("-c", "shared_preload_libraries=pg_stat_statements")))
+	adminURL, err := connectionString(ctx)
+	require.NoError(t, err)
 	admin, err := pgx.Connect(ctx, adminURL)
 	require.NoError(t, err)
-	defer admin.Close(context.Background())
-	_, err = admin.Exec(ctx, "CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
-	require.NoError(t, err)
-	if _, err := admin.Exec(ctx, "SELECT pg_stat_statements_reset()"); err != nil {
-		if external {
-			t.Skipf("PG_PROXY_TEST_DATABASE_URL must preload pg_stat_statements: %v", err)
-		}
-		require.NoError(t, err)
-	}
+	// Cleanups run in reverse order: the proxy stops, the test database and any
+	// extension this test created are dropped, and then admin closes.
+	t.Cleanup(func() { _ = admin.Close(context.Background()) })
+	requireStatementStatistics(t, ctx, admin, external)
 	const database = "statement_budget"
 	_, err = admin.Exec(ctx, "DROP DATABASE IF EXISTS "+database)
 	require.NoError(t, err)
 	_, err = admin.Exec(ctx, "CREATE DATABASE "+database)
 	require.NoError(t, err)
+	t.Cleanup(func() { cleanupExec(t, admin, "DROP DATABASE "+database) })
 
 	backendURL, err := url.Parse(adminURL)
 	require.NoError(t, err)
@@ -75,7 +76,8 @@ func TestBackendStatementsPerClientStatement(t *testing.T) {
 	defer client.Close(context.Background())
 
 	// The proxy's startup checks ran in the same database, so count from here.
-	_, err = admin.Exec(ctx, "SELECT pg_stat_statements_reset()")
+	// Resetting only this database leaves the server's other statistics alone.
+	_, err = admin.Exec(ctx, "SELECT pg_stat_statements_reset(dbid => oid) FROM pg_database WHERE datname = $1", database)
 	require.NoError(t, err)
 	const clientStatements = 1000
 	for i := range clientStatements {
@@ -120,17 +122,38 @@ type statementCalls struct {
 	calls int64
 }
 
-// statementStatisticsPostgres returns a superuser URL for a Postgres that
-// preloads pg_stat_statements. PG_PROXY_TEST_DATABASE_URL selects an external
-// disposable instance instead; external reports whether it did.
-func statementStatisticsPostgres(t *testing.T, ctx context.Context) (adminURL string, external bool) {
+// requireStatementStatistics creates pg_stat_statements if it is missing. It
+// then checks that the server preloads the library and counts utility
+// statements; otherwise RESET statements count 0 and every budget passes. An
+// external database that does not qualify skips the test.
+func requireStatementStatistics(t *testing.T, ctx context.Context, admin *pgx.Conn, external bool) {
 	t.Helper()
-	if value, supplied := os.LookupEnv("PG_PROXY_TEST_DATABASE_URL"); supplied {
-		return value, true
+	var installed bool
+	require.NoError(t, admin.QueryRow(ctx,
+		"SELECT EXISTS (SELECT FROM pg_extension WHERE extname = 'pg_stat_statements')").Scan(&installed))
+	if !installed {
+		_, err := admin.Exec(ctx, "CREATE EXTENSION pg_stat_statements")
+		require.NoError(t, err)
+		t.Cleanup(func() { cleanupExec(t, admin, "DROP EXTENSION pg_stat_statements") })
 	}
-	pg, err := itest.StartPostgres(ctx, itest.WithContainerOptions(
-		testcontainers.WithCmdArgs("-c", "shared_preload_libraries=pg_stat_statements")))
+	// The setting exists only when the server preloads the library.
+	var trackUtility string
+	err := admin.QueryRow(ctx, "SELECT current_setting('pg_stat_statements.track_utility')").Scan(&trackUtility)
+	if err == nil && trackUtility != "on" {
+		err = errors.New("pg_stat_statements.track_utility is off")
+	}
+	if err != nil {
+		if external {
+			t.Skipf("%s must preload pg_stat_statements and track utility statements: %v", testDatabaseURLVariable, err)
+		}
+		require.NoError(t, err)
+	}
+}
+
+// cleanupExec runs a cleanup statement, which outlives the test's context.
+func cleanupExec(t *testing.T, conn *pgx.Conn, sql string) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := conn.Exec(ctx, sql)
 	require.NoError(t, err)
-	t.Cleanup(func() { require.NoError(t, pg.Terminate(context.Background())) })
-	return pg.URL("postgres"), false
 }

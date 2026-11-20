@@ -6,6 +6,8 @@
 package session
 
 import (
+	"runtime"
+	"runtime/debug"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -29,6 +31,11 @@ var protocolCycleAllocBudgets = map[string]float64{
 	"pipeline_30":           493,
 }
 
+// allocBudgetSlack absorbs amortized allocations, which only some cycles make:
+// pgxpool, for one, allocates its Conn wrappers 128 at a time. A change that
+// allocates on one cycle in 20 still exceeds its budget.
+const allocBudgetSlack = 0.05
+
 func TestProtocolCycleAllocationBudgets(t *testing.T) {
 	if raceEnabled {
 		t.Skip("the race detector changes allocation counts")
@@ -39,19 +46,41 @@ func TestProtocolCycleAllocationBudgets(t *testing.T) {
 			require.True(t, ok, "add an allocation budget for this cycle")
 			client, script := pc.prepare(t, newCycleHarness(t, false))
 			var err error
-			allocs := testing.AllocsPerRun(100, func() {
+			allocs := cycleAllocsPerRun(100, func() {
 				if runErr := client.run(script); runErr != nil && err == nil {
 					err = runErr
 				}
 			})
 			require.NoError(t, err)
-			require.LessOrEqualf(t, allocs, budget,
+			t.Logf("%s allocates %.2f times per cycle; its budget is %v", pc.name, allocs, budget)
+			require.LessOrEqualf(t, allocs, budget+allocBudgetSlack,
 				"a %s cycle allocates more than its budget; find the new allocation with BenchmarkProtocolCycle and -memprofile", pc.name)
-			if allocs < budget {
-				t.Logf("%s allocates %v times per cycle: lower its budget from %v", pc.name, allocs, budget)
+			if allocs <= budget-1+allocBudgetSlack {
+				t.Logf("a whole allocation is gone: lower the %s budget", pc.name)
 			}
 		})
 	}
+}
+
+// cycleAllocsPerRun returns the mean heap allocations of run. Unlike
+// testing.AllocsPerRun, it does not round the mean down, so an allocation made
+// on only some cycles still exceeds a budget. It first runs 64 warm-up cycles,
+// so that slices and maps reach their steady size. Garbage collection is off
+// while it measures: a collection empties sync.Pools, and refilling them would
+// add allocations that depend on when it runs.
+func cycleAllocsPerRun(runs int, run func()) float64 {
+	defer runtime.GOMAXPROCS(runtime.GOMAXPROCS(1))
+	defer debug.SetGCPercent(debug.SetGCPercent(-1))
+	for range 64 {
+		run()
+	}
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range runs {
+		run()
+	}
+	runtime.ReadMemStats(&after)
+	return float64(after.Mallocs-before.Mallocs) / float64(runs)
 }
 
 func BenchmarkProtocolCycle(b *testing.B) {

@@ -252,8 +252,9 @@ func (noopRoleSession) Reset(context.Context, *pgxpool.Conn, string, []string) e
 // next client, and RESET ALL does not cover either. With one, the RoleSession owns
 // the role, so only GUCs are reset.
 //
-// It also pins the cost: one release sends one reset query and nothing else, so a
-// client statement costs at most one reset round trip. The session package's
+// It also pins the cost: releasing a link with no excess prepared statements to
+// deallocate sends one reset query and nothing else, so a client statement costs
+// at most one reset round trip. The session package's
 // TestProtocolCycleRoundTripBudgets counts one release per protocol cycle.
 func TestReleaseResetSQL(t *testing.T) {
 	tests := []struct {
@@ -267,8 +268,22 @@ func TestReleaseResetSQL(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			received := make(chan pgproto3.FrontendMessage, 8)
+			// Check what the backend received once the pool has closed the
+			// connection, so the list also holds any message Release did not wait
+			// on. Registered before the fixture's cleanups, this one runs after them.
+			var sent []pgproto3.FrontendMessage
+			served := make(chan struct{})
+			t.Cleanup(func() {
+				select {
+				case <-served:
+				case <-time.After(5 * time.Second):
+					t.Fatal("the backend did not see the connection close")
+				}
+				require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
+					"Release must reset the connection with exactly one simple query")
+			})
 			conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
+				defer close(served)
 				// Answer every query until the pool closes the connection, so a second
 				// query is recorded instead of hanging Release.
 				for {
@@ -281,13 +296,13 @@ func TestReleaseResetSQL(t *testing.T) {
 						return
 					case *pgproto3.Query:
 						copied := *msg // Receive reuses message values.
-						received <- &copied
+						sent = append(sent, &copied)
 						// pgx reads results until ReadyForQuery, so one CommandComplete suffices.
 						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
 						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 						_ = backend.Flush()
 					default:
-						received <- msg
+						sent = append(sent, msg)
 					}
 				}
 			})
@@ -295,15 +310,6 @@ func TestReleaseResetSQL(t *testing.T) {
 			require.NoError(t, err)
 
 			require.NoError(t, link.Release())
-
-			// Release waits for the reply to each query it sends, and the backend
-			// records a query before replying, so every query it sent is in received.
-			var sent []pgproto3.FrontendMessage
-			for len(received) > 0 {
-				sent = append(sent, <-received)
-			}
-			require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
-				"Release must reset the connection with exactly one simple query")
 		})
 	}
 }

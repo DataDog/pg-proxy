@@ -30,58 +30,84 @@ import (
 // the link checkout, the release reset, and the pool round trip, but not the
 // client liveness monitor or a backend adapter's own metric tags.
 
-var errScriptExhausted = errors.New("cycleConn: read past the scripted bytes")
+var (
+	errScriptExhausted = errors.New("cycleConn: read past the scripted bytes")
+	errPartialMessage  = errors.New("cycleConn: a write ends inside a message; the harness counts whole messages only")
+)
 
-var resetQueryPrefix = []byte("RESET")
+// releaseResetSQL holds the queries SessionLink.Release sends, without and with
+// a RoleSession. Keep it in step with Release.
+var releaseResetSQL = map[string]bool{
+	"RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL": true,
+	"RESET ALL": true,
+}
 
 // cycleConn is a net.Conn that returns scripted bytes and counts the writes made to it.
 // Each Write is one socket write in production.
 type cycleConn struct {
-	in     []byte // bytes the next Reads return
-	writes int
+	in        []byte // bytes the next Reads return
+	readFrame int    // bytes left in the message the last Read started
+	writes    int
 	// Postgres side only, counted once frames is set after the startup handshake:
 	frames     bool
-	flushes    int // writes that carry forwarded client messages
+	flushes    int // writes that carry anything but the release reset
 	resets     int // writes that carry the release reset query
 	statements int // forwarded simple Query and Execute messages
 }
 
+// Read returns at most the rest of one message. The pgproto3 readers then
+// buffer no message that their session or connection has not asked for, so
+// bytes a cycle does not consume stay in in, where run finds them.
 func (c *cycleConn) Read(p []byte) (int, error) {
 	if len(c.in) == 0 {
 		return 0, errScriptExhausted
 	}
-	n := copy(p, c.in)
-	c.in = c.in[n:]
+	if c.readFrame == 0 {
+		c.readFrame = len(c.in)
+		if len(c.in) >= 5 {
+			c.readFrame = min(c.readFrame, 1+int(binary.BigEndian.Uint32(c.in[1:5])))
+		}
+	}
+	n := copy(p[:min(len(p), c.readFrame)], c.in)
+	c.in, c.readFrame = c.in[n:], c.readFrame-n
 	return n, nil
 }
 
+// Write counts a write that carries both the release reset and other messages
+// as both a flush and a reset; backendWrites then shows the merge.
 func (c *cycleConn) Write(p []byte) (int, error) {
 	c.writes++
 	if !c.frames {
 		return len(p), nil
 	}
-	reset, statements := false, 0
-	for msg := p; len(msg) >= 5; {
+	forwarded, reset, statements := false, false, 0
+	for msg := p; len(msg) > 0; {
+		if len(msg) < 5 {
+			return 0, errPartialMessage
+		}
 		size := 1 + int(binary.BigEndian.Uint32(msg[1:5]))
-		switch msg[0] {
-		case 'Q':
-			if bytes.HasPrefix(msg[5:size], resetQueryPrefix) {
-				reset = true
-			} else {
+		if size > len(msg) {
+			return 0, errPartialMessage
+		}
+		switch {
+		case msg[0] == 'X': // Terminate, sent when the pool closes the connection
+			return len(p), nil
+		case msg[0] == 'Q' && releaseResetSQL[string(msg[5:size-1])]: // the string ends in a zero byte
+			reset = true
+		default:
+			forwarded = true
+			if msg[0] == 'Q' || msg[0] == 'E' {
 				statements++
 			}
-		case 'E':
-			statements++
-		case 'X': // Terminate, sent when the pool closes the connection
-			return len(p), nil
 		}
 		msg = msg[size:]
 	}
-	if reset {
-		c.resets++
-	} else {
+	if forwarded {
 		c.flushes++
 		c.statements += statements
+	}
+	if reset {
+		c.resets++
 	}
 	return len(p), nil
 }
@@ -254,8 +280,8 @@ func (c *cycleClient) run(script cycleScript) error {
 
 // cycleCounts are the socket writes and checkouts of one or more cycles.
 type cycleCounts struct {
-	backendFlushes, backendStatements, releaseResets int
-	clientWrites, checkouts, roleSets, roleResets    int
+	backendWrites, backendFlushes, backendStatements, releaseResets int
+	clientWrites, checkouts, roleSets, roleResets                   int
 }
 
 func (h *cycleHarness) resetCounts(clients ...*cycleClient) {
@@ -271,7 +297,7 @@ func (h *cycleHarness) resetCounts(clients ...*cycleClient) {
 
 func (h *cycleHarness) counts(client *cycleClient) cycleCounts {
 	counts := cycleCounts{
-		backendFlushes: h.postgres.flushes, backendStatements: h.postgres.statements,
+		backendWrites: h.postgres.writes, backendFlushes: h.postgres.flushes, backendStatements: h.postgres.statements,
 		releaseResets: h.postgres.resets, clientWrites: client.conn.writes, checkouts: h.backend.checkouts,
 	}
 	if h.role != nil {

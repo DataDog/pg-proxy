@@ -54,16 +54,17 @@ func TestLargeBindAmplification(t *testing.T) {
 		t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Tracer: proxyotel.NewTracer(provider.Tracer("test"))}))
 
 		require.NoError(t, client.run(small)) // first traced cycle
+		warmUpSpans := len(recorder.Ended())
 		traced := cycleHeapBytes(t, client, large)
 		t.Logf("with a sampled trace and trace parameters, it allocated %.2fx the payload, %d bytes more",
 			float64(traced)/largeBindPayload, int64(traced)-int64(untraced))
 		foundParameters := false
-		for _, span := range recorder.Ended() {
+		for _, span := range recorder.Ended()[warmUpSpans:] {
 			for _, attr := range span.Attributes() {
 				foundParameters = foundParameters || attr.Key == "db.parameters.0"
 			}
 		}
-		require.True(t, foundParameters, "the trace must carry the Bind parameters")
+		require.True(t, foundParameters, "the measured cycle's trace must carry the Bind parameters")
 		require.LessOrEqual(t, traced, untraced+largeBindTraceBudget)
 	})
 }
