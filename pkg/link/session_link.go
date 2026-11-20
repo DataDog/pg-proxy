@@ -571,9 +571,10 @@ func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.Prep
 
 	if existingOnConn {
 		if !onConn {
-			// Counting a use of a statement the connection lacks would add an entry that
-			// eviction could never deallocate.
-			return fmt.Errorf("recording a use of prepared statement %s, which is not on the connection", stmtName)
+			// Nothing to count: an entry for a statement the connection lacks could never
+			// be deallocated. Callers check HasExistingNamedPreparedStmt first, and failing
+			// here would end the client's session over a usage statistic.
+			return nil
 		}
 		stmt.UsageCount++
 		stmt.TimeLastUsed = time.Now().Nanosecond()
@@ -631,11 +632,7 @@ func (link *SessionLink) deallocateExcessPreparedStatements() error {
 		return nil
 	}
 	stmtsToDeallocateCount := preparedStmtCount - link.namedPreparedStmtThreshold
-	stmts := make([]ConnPreparedStmt, 0, preparedStmtCount)
-	for _, stmt := range connPreparedStmts {
-		stmts = append(stmts, *stmt)
-	}
-	for _, stmtName := range leastValuableStmts(stmts, stmtsToDeallocateCount, link.createdTime) {
+	for _, stmtName := range link.connState.stmtsToDeallocate(stmtsToDeallocateCount, link.createdTime) {
 		if err := link.conn.Conn().PgConn().Deallocate(context.Background(), stmtName); err != nil {
 			return err
 		}

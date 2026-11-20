@@ -8,13 +8,13 @@ package link
 import (
 	"context"
 	"fmt"
-	"net"
 	"sync/atomic"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/DataDog/pg-proxy/internal/fakepg"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 )
 
@@ -28,63 +28,14 @@ type fakePg struct {
 func newFakePgPool(tb testing.TB) *fakePg {
 	tb.Helper()
 	fake := &fakePg{}
-	clientConn, serverConn := net.Pipe()
-	tb.Cleanup(func() {
-		_ = clientConn.Close()
-		_ = serverConn.Close()
+	client, server := fakepg.Pipe()
+	go fakepg.Serve(server, func(backend *pgproto3.Backend, msg pgproto3.FrontendMessage) bool {
+		if _, ok := msg.(*pgproto3.Close); ok {
+			fake.closes.Add(1)
+		}
+		return fakepg.Answer(backend, msg)
 	})
-	go func() {
-		backend := pgproto3.NewBackend(serverConn, serverConn)
-		if _, err := backend.ReceiveStartupMessage(); err != nil {
-			return
-		}
-		backend.Send(&pgproto3.AuthenticationOk{})
-		backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		if backend.Flush() != nil {
-			return
-		}
-		for {
-			msg, err := backend.Receive()
-			if err != nil {
-				return
-			}
-			switch msg.(type) {
-			case *pgproto3.Close:
-				fake.closes.Add(1)
-				backend.Send(&pgproto3.CloseComplete{})
-			case *pgproto3.Query:
-				backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-				backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-				if backend.Flush() != nil {
-					return
-				}
-			case *pgproto3.Sync:
-				backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-				if backend.Flush() != nil {
-					return
-				}
-			case *pgproto3.Terminate:
-				return
-			}
-		}
-	}()
-
-	config, err := pgxpool.ParseConfig("postgres://test@127.0.0.1/test?sslmode=disable")
-	if err != nil {
-		tb.Fatal(err)
-	}
-	config.MaxConns = 1
-	config.ConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
-		return clientConn, nil
-	}
-	fake.pool, err = pgxpool.NewWithConfig(context.Background(), config)
-	if err != nil {
-		tb.Fatal(err)
-	}
-	// Close waits for every acquired conn, so a link still holding one when a test
-	// fails would hang here; tests release their links in their own cleanups first.
-	tb.Cleanup(fake.pool.Close)
+	fake.pool = fakepg.NewPool(tb, client)
 	return fake
 }
 
@@ -98,6 +49,7 @@ func newFakePgLink(tb testing.TB, pool *pgxpool.Pool, maxPreparedStmts int) Link
 	}
 	l, err := New(conn, Options{MaxPreparedStmts: maxPreparedStmts, MetricTags: []string{"database:app_db"}})
 	if err != nil {
+		conn.Release()
 		tb.Fatal(err)
 	}
 	return l

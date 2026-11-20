@@ -737,14 +737,14 @@ func TestConnStateOutlivesLink(t *testing.T) {
 	require.ErrorIs(t, unlinked.RecordNewNamedPreparedStmt(stmt), errNoConnState)
 }
 
-// Counting a use of a statement the connection lacks must fail and leave nothing
-// behind: an entry with no statement behind it could never be evicted.
-func TestRecordUseOfAbsentStmtFails(t *testing.T) {
+// Counting a use of a statement the connection lacks changes nothing: an entry with
+// no statement behind it could never be evicted, and an error would end the session.
+func TestRecordUseOfAbsentStmtIsIgnored(t *testing.T) {
 	l := newFakePgLink(t, newFakePgPool(t).pool, DefaultPreparedStmtsPerConnection)
 	t.Cleanup(func() { _ = l.Release() })
 	stmt := testStmts("absent", 1)[0]
 
-	require.Error(t, l.RecordExistingNamedPreparedStmtUsed(stmt))
+	require.NoError(t, l.RecordExistingNamedPreparedStmtUsed(stmt))
 	require.False(t, l.HasExistingNamedPreparedStmt(stmt))
 	require.Empty(t, l.(*SessionLink).connState.stmts)
 }
@@ -798,18 +798,18 @@ func (failingRoleSession) Set(context.Context, *pgxpool.Conn, []string) (string,
 	return "", errors.New("permission denied to set role")
 }
 
-// A link that fails to set the role is never built, so nothing else will release
-// the conn: New must hand it back to the pool, destroyed, rather than leak it.
-func TestNewReleasesConnWhenRoleSetFails(t *testing.T) {
+// A link that fails to set the role is never built. The conn stays the caller's:
+// New must neither use it again nor hand it back to the pool, since the caller may
+// still close it, and backend.Runtime.Acquire does.
+func TestNewLeavesConnToCallerWhenRoleSetFails(t *testing.T) {
 	pool := newFakePgPool(t).pool
 	conn, err := pool.Acquire(context.Background())
 	require.NoError(t, err)
-	t.Cleanup(conn.Release) // a no-op once released; keeps a leak from hanging the pool's cleanup
+	t.Cleanup(conn.Release)
 
 	l, err := New(conn, Options{Role: failingRoleSession{}})
 	require.Error(t, err)
 	require.Nil(t, l)
-	// pgxpool destroys a closed conn in the background, so wait for it to go.
-	require.Eventually(t, func() bool { return pool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
-		"the conn must be destroyed: not left checked out, and not pooled in an unknown role")
+	require.Equal(t, int32(1), pool.Stat().AcquiredConns(), "the caller still holds the conn")
+	require.False(t, conn.Conn().IsClosed(), "the caller decides what to do with the conn")
 }

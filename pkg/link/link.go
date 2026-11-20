@@ -70,6 +70,7 @@ type Link interface {
 // conn returns to the pool. Nil Options.Role means no role management.
 type RoleSession interface {
 	// Set changes the Postgres role after acquire; returns opaque token for Reset.
+	// It must not release or close conn: on error, the caller of link.New does.
 	Set(ctx context.Context, conn *pgxpool.Conn, tags []string) (token string, err error)
 	// Reset restores the role before the conn returns to the pool. It must undo
 	// everything Set changed, and a client's SET ROLE or SET SESSION AUTHORIZATION:
@@ -92,8 +93,9 @@ type Options struct {
 }
 
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
-// On success the link owns conn until Release. On error New has already closed and
-// released conn, so the caller must not use it again.
+// On success the link owns conn until Release. On error the caller still owns conn,
+// whose session state is then unknown: close it before releasing it, as
+// backend.Runtime.Acquire does.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	// The link takes over the mark: its release sets it again if it skips too.
 	customData := conn.Conn().PgConn().CustomData()
@@ -122,10 +124,6 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	if opts.Role != nil {
 		token, err := opts.Role.Set(context.TODO(), conn, opts.MetricTags)
 		if err != nil {
-			// No link will ever release conn, and its role is now unknown, so it must not
-			// go back to the pool as is: closing it makes Release destroy it.
-			conn.Conn().Close(context.Background())
-			conn.Release()
 			return nil, err
 		}
 		sl.token = token

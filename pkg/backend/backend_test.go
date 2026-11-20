@@ -20,6 +20,7 @@ import (
 	"golang.org/x/time/rate"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/internal/fakepg"
 	"github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/pool"
@@ -277,6 +278,58 @@ type fakeRole struct{}
 
 func (fakeRole) Set(context.Context, *pgxpool.Conn, []string) (string, error) { return "", nil }
 func (fakeRole) Reset(context.Context, *pgxpool.Conn, string, []string) error { return nil }
+
+type failingRole struct{ fakeRole }
+
+func (failingRole) Set(context.Context, *pgxpool.Conn, []string) (string, error) {
+	return "", errors.New("permission denied to set role")
+}
+
+// No link holds a conn whose link failed to build, so Acquire must destroy it:
+// released alone it would return to the pool in an unknown state, and kept it would
+// hold a pool slot forever.
+func TestAcquireDestroysConnWhenLinkFactoryFails(t *testing.T) {
+	sentinel := errors.New("link factory sentinel")
+	for _, tc := range []struct {
+		name    string
+		factory LinkFactory // nil = link.New
+		role    link.RoleSession
+	}{
+		{name: "custom factory", factory: func(*pgxpool.Conn, link.Options) (link.Link, error) { return nil, sentinel }},
+		{name: "role set fails", role: failingRole{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, server := fakepg.Pipe()
+			go fakepg.Serve(server, fakepg.Answer)
+			pgPool := fakepg.NewPool(t, client)
+			var acquired *pgxpool.Conn
+			t.Cleanup(func() {
+				if acquired != nil {
+					acquired.Release() // a no-op once destroyed; keeps a leak from hanging the pool's cleanup
+				}
+			})
+			cfg := Config{
+				ClusterName:         "cluster-a",
+				PrimaryDatabaseName: "primary-a",
+				Primary: &fakePool{acquire: func(ctx context.Context) (*pgxpool.Conn, error) {
+					conn, err := pgPool.Acquire(ctx)
+					acquired = conn
+					return conn, err
+				}},
+				LinkFactory: tc.factory,
+			}
+			if tc.role != nil {
+				cfg.RoleSessionFactory = func(string) link.RoleSession { return tc.role }
+			}
+
+			_, err := New(cfg).Acquire(context.Background(), session.LinkRequest{PassthroughRoleName: "app_user"})
+			require.Error(t, err)
+			// pgxpool destroys a closed conn in the background, so wait for it to go.
+			require.Eventually(t, func() bool { return pgPool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
+				"the conn must be destroyed: not left checked out, and not pooled in an unknown state")
+		})
+	}
+}
 
 func TestAcquireBuildsLinkWithInjectedDependencies(t *testing.T) {
 	metrics := &recordingMetrics{}

@@ -28,7 +28,7 @@ const (
 
 // errNoConnState is returned when a link has no connection, either because it was
 // built without one or because it has been released.
-var errNoConnState = errors.New("pool connection is nil")
+var errNoConnState = errors.New("session link has no connection: never acquired or already released")
 
 // statistics associated with a connection
 type connStats struct {
@@ -100,6 +100,22 @@ func StmtsToDeallocate(connPreparedStmts map[string]ConnPreparedStmt, stmtsToDea
 	}
 
 	return leastValuableStmts(slices.Collect(maps.Values(connPreparedStmts)), stmtsToDeallocate, sessionLinkCreatedTime)
+}
+
+// stmtsToDeallocate returns the map keys of the n statements Release should evict
+// first. Names come from the keys, which are what Deallocate and delete must use,
+// rather than from each entry's copy of its name.
+func (s *connState) stmtsToDeallocate(n int, sessionLinkCreatedTime int) []string {
+	if n <= 0 || len(s.stmts) == 0 {
+		return nil
+	}
+	stmts := make([]ConnPreparedStmt, 0, len(s.stmts))
+	for name, stmt := range s.stmts {
+		entry := *stmt
+		entry.Name = name
+		stmts = append(stmts, entry)
+	}
+	return leastValuableStmts(stmts, n, sessionLinkCreatedTime)
 }
 
 // leastValuableStmts sorts stmts by deallocation priority, in place, and returns the
