@@ -110,7 +110,7 @@ If your Collector exports to Datadog, use [Send OTel metrics to Datadog](../../h
 
 ## Native Datadog
 
-The Datadog Agent must accept traces and DogStatsD metrics. To collect logs, configure it to read the process's stderr or container logs. PG Proxy writes JSON logs but does not upload them directly.
+The Datadog Agent must accept traces and DogStatsD metrics. Use Agent 7.25.0 or later, because PG Proxy aggregates DogStatsD distributions and timings in the client. To collect logs, configure it to read the process's stderr or container logs. PG Proxy writes JSON logs but does not upload them directly.
 
 Set the Agent address and service tags, and remove any previous OTel trace selection for this command. This `env` command works in Fish, Bash, and Zsh:
 
