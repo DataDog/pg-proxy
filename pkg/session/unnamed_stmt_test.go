@@ -54,20 +54,31 @@ func TestSupersededParseCompleteDoesNotRestoreUnnamedStmt(t *testing.T) {
 	require.Empty(t, s.unnamedPendingGens)
 }
 
-// sendThroughSession has a session holding backendLink handle msg, and returns
-// what the link was sent and what the client received.
-func sendThroughSession(t *testing.T, backendLink *testLink, msg pgproto3.FrontendMessage) (sent []pgproto3.FrontendMessage, received []pgproto3.BackendMessage) {
+// sendThroughSession has a session holding backendLink handle msgs in order, and
+// returns what the link was sent and what the client received.
+func sendThroughSession(t *testing.T, backendLink *testLink, msgs ...pgproto3.FrontendMessage) (sent []pgproto3.FrontendMessage, received []pgproto3.BackendMessage) {
 	t.Helper()
-	backendLink.send = func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) { sent = append(sent, msg) }
+	_, received = sendThroughSessionState(t, backendLink, &sent, msgs...)
+	return sent, received
+}
+
+// sendThroughSessionState is sendThroughSession that also returns the session.
+func sendThroughSessionState(t *testing.T, backendLink *testLink, sent *[]pgproto3.FrontendMessage, msgs ...pgproto3.FrontendMessage) (*Session, []pgproto3.BackendMessage) {
+	t.Helper()
+	backendLink.send = func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) { *sent = append(*sent, msg) }
 	fakeClient, client, _ := newFrontendBackendPair()
 	s := New(Config{Context: context.Background(), Client: client, InitialLink: backendLink})
-	require.NoError(t, s.handleClientMessage(msg))
-	if s.discardUntilSync {
-		reply, err := fakeClient.Receive()
-		require.NoError(t, err)
-		received = append(received, reply)
+	var received []pgproto3.BackendMessage
+	for _, msg := range msgs {
+		require.NoError(t, s.handleClientMessage(msg))
+		if s.discardUntilSync {
+			reply, err := fakeClient.Receive()
+			require.NoError(t, err)
+			received = append(received, reply)
+			break
+		}
 	}
-	return sent, received
+	return s, received
 }
 
 // TestForeignUnnamedStmtGuard: a Bind or Describe of the unnamed statement from a
@@ -87,6 +98,22 @@ func TestForeignUnnamedStmtGuard(t *testing.T) {
 	}
 }
 
+// TestForeignUnnamedStmtGuardLetsClientsOwnStatementsThrough: a client's own unnamed
+// statement, parsed earlier in the pipeline, and a Describe of a portal reach
+// Postgres even on a connection whose last release skipped the reset.
+func TestForeignUnnamedStmtGuardLetsClientsOwnStatementsThrough(t *testing.T) {
+	parse := &pgproto3.Parse{Query: "SELECT 1"}
+	bind := &pgproto3.Bind{}
+	sent, received := sendThroughSession(t, &testLink{mayHoldForeignUnnamed: true}, parse, bind)
+	assert.Equal(t, []pgproto3.FrontendMessage{parse, bind}, sent, "a Parse pending in the pipeline is the client's statement")
+	assert.Empty(t, received)
+
+	portal := &pgproto3.Describe{ObjectType: 'P'}
+	sent, received = sendThroughSession(t, &testLink{mayHoldForeignUnnamed: true}, portal)
+	assert.Equal(t, []pgproto3.FrontendMessage{portal}, sent, "a portal is not a statement")
+	assert.Empty(t, received)
+}
+
 // TestSessionMarksOnlyForLinksThatUseThem: the session judges a message only for
 // a link whose release reads the marks.
 func TestSessionMarksOnlyForLinksThatUseThem(t *testing.T) {
@@ -98,4 +125,25 @@ func TestSessionMarksOnlyForLinksThatUseThem(t *testing.T) {
 	using := &testLink{usesMarks: true}
 	sendThroughSession(t, using, setter)
 	assert.Equal(t, link.MarkClientSQL, using.marks)
+}
+
+// TestPreparedStatementsUnjudgedForLinksWithoutMarks: Parse and Bind through a link
+// that does not use session marks scan no statement text, named or unnamed.
+func TestPreparedStatementsUnjudgedForLinksWithoutMarks(t *testing.T) {
+	for _, name := range []string{"named", ""} {
+		for _, usesMarks := range []bool{false, true} {
+			backendLink := &testLink{usesMarks: usesMarks}
+			var sent []pgproto3.FrontendMessage
+			s, _ := sendThroughSessionState(t, backendLink, &sent,
+				&pgproto3.Parse{Name: name, Query: "SET search_path = app"},
+				&pgproto3.Bind{PreparedStatement: name})
+			require.Len(t, sent, 2)
+			stmt := s.pStmtState.FindPendingNamedStmtFromClientName(name)
+			require.NotNil(t, stmt, "statement %q", name)
+			assert.Equal(t, usesMarks, prepared.Judged(stmt), "statement %q, link uses marks: %v", name, usesMarks)
+			if usesMarks {
+				assert.Equal(t, link.MarkPreparedStmt, backendLink.marks)
+			}
+		}
+	}
 }

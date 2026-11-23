@@ -14,12 +14,12 @@ import (
 
 func TestScan(t *testing.T) {
 	const (
-		clean   = Flags(0)
-		changes = failClosed
+		clean   = false
+		changes = true
 	)
 	cases := []struct {
 		sql  string
-		want Flags
+		want bool
 	}{
 		{"SELECT 1", clean},
 		{"", clean},
@@ -83,18 +83,13 @@ func TestScanStandardConformingStrings(t *testing.T) {
 	// before the SET. With it off, the backslash escapes the quote, and the SET
 	// is inside the literal.
 	sql := `SELECT 'a\'; SET search_path = x; --'`
-	assert.Equal(t, failClosed, Scan(sql, true))
-	assert.Equal(t, Flags(0), Scan(sql, false))
-	assert.Equal(t, failClosed, ScanEither(sql), "the verdict holds under either value")
+	assert.True(t, Scan(sql, true))
+	assert.False(t, Scan(sql, false))
+	assert.True(t, ScanEither(sql), "the verdict holds under either value")
 
 	escaped := `SELECT E'a\'; SET search_path = x; --'`
-	assert.Equal(t, Flags(0), Scan(escaped, true), "E'' literals always take backslash escapes")
-	assert.Equal(t, Flags(0), ScanEither("SELECT 1"))
-}
-
-func TestFlagsHas(t *testing.T) {
-	assert.True(t, failClosed.Has(MayChangeSession))
-	assert.False(t, Flags(0).Has(MayChangeSession))
+	assert.False(t, Scan(escaped, true), "E'' literals always take backslash escapes")
+	assert.False(t, ScanEither("SELECT 1"))
 }
 
 func TestScanAllocatesNothing(t *testing.T) {

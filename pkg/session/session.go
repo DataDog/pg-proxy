@@ -1204,10 +1204,6 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 		}
 	}
 
-	if s.runsForeignUnnamedStmt(action) {
-		return s.handleAction(NewFlushErrorAction(actions.BuildUnnamedStatementDoesNotExistErrorResponse(), nil))
-	}
-
 	if proxyMsgToPostgres, err := s.handleRecordNewPreparedStmt(action); err != nil {
 		return err
 	} else if !proxyMsgToPostgres {
@@ -1218,6 +1214,15 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 		return err
 	}
 	s.handleEnsureUnnamedPreparedStmt(action)
+	if action.EnsureUnnamedPreparedStmt && s.link.MayHoldForeignUnnamedStmt() {
+		// The client has no unnamed statement (handleEnsureUnnamedPreparedStmt would
+		// have re-created it, and a Parse in this pipeline was sent on the link), and
+		// the connection's last release skipped the reset. Postgres would run or
+		// describe the statement the previous client left there, so answer with the
+		// error Postgres gives a connection that has none. Every other connection,
+		// including every one in ResetAlways and ResetAudit, gets the message.
+		return s.handleAction(NewFlushErrorAction(actions.BuildUnnamedStatementDoesNotExistErrorResponse(), nil))
+	}
 
 	if s.link.UsesSessionMarks() {
 		s.link.MarkSession(action.SessionMarks(s.pStmtState, s.unnamedStmt))
@@ -1317,29 +1322,13 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 	return nil
 }
 
-// runsForeignUnnamedStmt reports whether action is a Bind or Describe of the unnamed
-// statement from a client that has none, on a connection whose last release skipped
-// the reset. Postgres would run or describe the statement the previous client left
-// there, so the session answers with the error Postgres gives a connection that has
-// none. Other connections, including every one in ResetAlways and ResetAudit, get
-// the message, and Postgres answers.
-func (s *Session) runsForeignUnnamedStmt(action ClientMessageAction) bool {
-	return action.EnsureUnnamedPreparedStmt && !s.hasUnnamedStmt() && s.link.MayHoldForeignUnnamedStmt()
-}
-
-// hasUnnamedStmt reports whether the client has an unnamed prepared statement,
-// confirmed or still pending in this pipeline.
-func (s *Session) hasUnnamedStmt() bool {
-	return s.unnamedStmt != nil || len(s.unnamedPendingGens) > 0
-}
-
 // handleEnsureUnnamedPreparedStmt re-creates the client's unnamed prepared statement
 // on the link's connection before a Bind or Describe that refers to it. The client
 // may have parsed it on a link that has since been released (for example psql's
 // \gdesc sends Parse+Sync, then Describe+Sync). The release reset is a simple Query,
 // and any simple Query discards the unnamed statement. A release that skips the
 // reset can leave another client's unnamed statement on the connection, which this
-// Parse replaces; when the client has none, runsForeignUnnamedStmt answers instead.
+// Parse replaces; when the client has none, handleProxyMsgToPg answers instead.
 // The ParseComplete is not forwarded to the client.
 func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
@@ -1364,9 +1353,9 @@ func (s *Session) invalidateUnnamedStmt() {
 }
 
 // confirmUnnamedStmt records the unnamed statement a ParseComplete confirms, if
-// no later message replaced or destroyed it. It stores a plain copy: the
-// confirmed value wraps the statement for the pending queue, and re-creating it
-// would otherwise nest another wrapper on each reuse.
+// no later message replaced or destroyed it. It stores the plain statement: the
+// confirmed value wraps it for the pending queue, and keeping the wrapper would
+// nest another one on each reuse. The plain statement keeps any cached verdict.
 func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 	if len(s.unnamedPendingGens) == 0 {
 		return
@@ -1376,7 +1365,7 @@ func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 	if generation != s.unnamedGen {
 		return
 	}
-	s.unnamedStmt = prepared.CreatePreparedStatement("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs())
+	s.unnamedStmt = prepared.Unwrap(confirmed)
 	s.unnamedStmtOnLink = true
 }
 

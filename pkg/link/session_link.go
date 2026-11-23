@@ -56,6 +56,9 @@ type SessionLink struct {
 	role                       RoleSession
 	reset                      ResetPolicy
 	marks                      SessionMarks // what this checkout may have done to session state
+	// unnamedReplaced: this checkout sent a message that replaces or drops the
+	// connection's unnamed statement, so any one it holds now is this checkout's.
+	unnamedReplaced bool
 }
 
 // MarkSession records what this checkout may have done to session state.
@@ -66,9 +69,10 @@ func (link *SessionLink) MarkSession(marks SessionMarks) { link.marks |= marks }
 func (link *SessionLink) UsesSessionMarks() bool { return link.reset.usesMarks() }
 
 // MayHoldForeignUnnamedStmt reports whether the connection's last release skipped
-// the reset. Only ResetDynamic and ResetOff skip it.
+// the reset, which only ResetDynamic and ResetOff do, and nothing sent on this
+// link since has replaced or dropped the unnamed statement.
 func (link *SessionLink) MayHoldForeignUnnamedStmt() bool {
-	if link.conn == nil {
+	if link.conn == nil || link.unnamedReplaced {
 		return false
 	}
 	_, skipped := link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey]
@@ -93,6 +97,9 @@ func (link *SessionLink) SetRoleToken(token string) {
 // Send sends a message to the linked Postgres connection, and optionally (but typically) adds
 // a ReplyExpectation to the queue.
 func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
+	if !link.unnamedReplaced && replacesUnnamedStmt(msg) {
+		link.unnamedReplaced = true
+	}
 	link.pgConn.Send(msg)
 	if expectation != query.NoReply {
 		link.readyForQuery = false
@@ -119,6 +126,20 @@ func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
 		link.marks |= MarkParameterStatus
 	}
 	return msg, err
+}
+
+// replacesUnnamedStmt reports whether msg replaces or drops the connection's
+// unnamed statement: a Parse or Close of it, or any simple Query.
+func replacesUnnamedStmt(msg pgproto3.FrontendMessage) bool {
+	switch m := msg.(type) {
+	case *pgproto3.Parse:
+		return m.Name == ""
+	case *pgproto3.Close:
+		return m.ObjectType == 'S' && m.Name == ""
+	case *pgproto3.Query:
+		return true
+	}
+	return false
 }
 
 // resetTags returns the link's metric tags plus its reset mode.

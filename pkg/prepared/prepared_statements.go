@@ -55,11 +55,11 @@ type PreparedStatement interface {
 	GetParamOIDs() []uint32
 	GetErrorTags() []string
 	GetMetricTags() []string
-	// SessionFlags reports what running the statement may do to session state,
-	// judged from its text under either value of standard_conforming_strings, so
-	// the verdict holds on any later connection. The text is scanned on the first
+	// MayChangeSession reports whether running the statement may change session
+	// state, judged from its text under either value of standard_conforming_strings,
+	// so the verdict holds on any later connection. The text is scanned on the first
 	// call, which only reset modes that use session marks make.
-	SessionFlags() sessionsql.Flags
+	MayChangeSession() bool
 }
 
 func PreparedStatementEquivalent(a, b PreparedStatement) bool {
@@ -84,20 +84,48 @@ func CreatePreparedStatement(clientName string, proxyName string, sql string, pa
 	}
 }
 
-// CreatePreparedStatementWithFlags is CreatePreparedStatement for a caller that
-// already has the statement's session flags, so its text is never scanned.
-func CreatePreparedStatementWithFlags(clientName string, proxyName string, sql string, paramOIDs []uint32, flags sessionsql.Flags) PreparedStatement {
+// CreateJudgedPreparedStatement is CreatePreparedStatement for a caller that
+// already has the statement's verdict, so its text is never scanned.
+func CreateJudgedPreparedStatement(clientName string, proxyName string, sql string, paramOIDs []uint32, mayChangeSession bool) PreparedStatement {
+	verdict := verdictClean
+	if mayChangeSession {
+		verdict = verdictChanges
+	}
 	return &proxyPreparedStmt{
-		clientName:   clientName,
-		proxyName:    proxyName,
-		sql:          sql,
-		paramOIDs:    paramOIDs,
-		sessionFlags: uint32(flags) | flagsJudged,
+		clientName: clientName,
+		proxyName:  proxyName,
+		sql:        sql,
+		paramOIDs:  paramOIDs,
+		verdict:    verdict,
 	}
 }
 
-// flagsJudged marks proxyPreparedStmt.sessionFlags as holding a verdict.
-const flagsJudged = 1 << 8
+// Values of proxyPreparedStmt.verdict.
+const (
+	verdictUnjudged uint32 = iota
+	verdictClean
+	verdictChanges
+)
+
+// Unwrap returns the statement that a pending-queue entry wraps, or stmt itself.
+// The plain statement keeps its cached verdict.
+func Unwrap(stmt PreparedStatement) PreparedStatement {
+	for {
+		queued, ok := stmt.(queuedPreparedStmt)
+		if !ok {
+			return stmt
+		}
+		stmt = queued.PreparedStatement
+	}
+}
+
+// Judged reports whether stmt's text has already been scanned for
+// MayChangeSession. Tests use it to check that a reset mode that does not use
+// session marks scans nothing.
+func Judged(stmt PreparedStatement) bool {
+	p, ok := Unwrap(stmt).(*proxyPreparedStmt)
+	return ok && atomic.LoadUint32(&p.verdict) != verdictUnjudged
+}
 
 // contains the client name and the corresponding prepared statement created between the proxy and PG
 type proxyPreparedStmt struct {
@@ -105,19 +133,22 @@ type proxyPreparedStmt struct {
 	proxyName  string
 	sql        string
 	paramOIDs  []uint32
-	// sessionFlags caches SessionFlags with flagsJudged set, or is zero until the
-	// first call. It is read and written atomically: a mirror worker can hold the
-	// statement too. The methods take a pointer so that no copy reads it.
-	sessionFlags uint32
+	// verdict caches MayChangeSession: verdictUnjudged until the first call. It is
+	// read and written atomically: a mirror worker can hold the statement too. The
+	// methods take a pointer so that no copy reads it.
+	verdict uint32
 }
 
-func (p *proxyPreparedStmt) SessionFlags() sessionsql.Flags {
-	flags := atomic.LoadUint32(&p.sessionFlags)
-	if flags == 0 {
-		flags = uint32(sessionsql.ScanEither(p.sql)) | flagsJudged
-		atomic.StoreUint32(&p.sessionFlags, flags)
+func (p *proxyPreparedStmt) MayChangeSession() bool {
+	verdict := atomic.LoadUint32(&p.verdict)
+	if verdict == verdictUnjudged {
+		verdict = verdictClean
+		if sessionsql.ScanEither(p.sql) {
+			verdict = verdictChanges
+		}
+		atomic.StoreUint32(&p.verdict, verdict)
 	}
-	return sessionsql.Flags(flags &^ flagsJudged)
+	return verdict == verdictChanges
 }
 
 func (p *proxyPreparedStmt) IsClientNamedPreparedStmt() bool {

@@ -34,7 +34,7 @@ type testLink struct {
 	calls                  testLinkCalls
 	marks                  link.SessionMarks
 	usesMarks              bool // UsesSessionMarks
-	mayHoldForeignUnnamed  bool // MayHoldForeignUnnamedStmt
+	mayHoldForeignUnnamed  bool // MayHoldForeignUnnamedStmt, cleared as SessionLink clears it
 	send                   func(pgproto3.FrontendMessage, query.ReplyExpectation)
 	flush                  func() error
 	receive                func() (pgproto3.BackendMessage, error)
@@ -67,6 +67,12 @@ func (l *testLink) assertCalls(t *testing.T, expected testLinkCalls) {
 }
 
 func (l *testLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
+	if parse, ok := msg.(*pgproto3.Parse); ok && parse.Name == "" {
+		l.mayHoldForeignUnnamed = false
+	}
+	if _, ok := msg.(*pgproto3.Query); ok {
+		l.mayHoldForeignUnnamed = false
+	}
 	l.calls.send++
 	if l.send != nil {
 		l.send(msg, expectation)

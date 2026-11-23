@@ -17,6 +17,7 @@ import (
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/config"
+	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
 func mustResetPolicy(t *testing.T, mode config.ResetMode, auditSettings ...string) ResetPolicy {
@@ -245,6 +246,9 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 			link, err := New(conn, Options{Reset: mustResetPolicy(t, test.mode)})
 			require.NoError(t, err)
 			assert.True(t, link.MayHoldForeignUnnamedStmt())
+			link.(*SessionLink).unnamedReplaced = true
+			assert.False(t, link.MayHoldForeignUnnamedStmt(), "a statement this checkout replaced is its own")
+			link.(*SessionLink).unnamedReplaced = false
 			link.MarkSession(MarkClientSQL)
 
 			require.NoError(t, link.Release())
@@ -253,6 +257,26 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 			_, skipped := pgConn.CustomData()[customDataResetSkippedKey]
 			assert.Equal(t, test.wantSkipped, skipped)
 		})
+	}
+}
+
+func TestSendTracksUnnamedStmtReplacement(t *testing.T) {
+	for _, test := range []struct {
+		msg  pgproto3.FrontendMessage
+		want bool
+	}{
+		{&pgproto3.Parse{Query: "SELECT 1"}, true},
+		{&pgproto3.Parse{Name: "named", Query: "SELECT 1"}, false},
+		{&pgproto3.Query{String: "SELECT 1"}, true},
+		{&pgproto3.Close{ObjectType: 'S'}, true},
+		{&pgproto3.Close{ObjectType: 'P'}, false},
+		{&pgproto3.Close{ObjectType: 'S', Name: "named"}, false},
+		{&pgproto3.Bind{}, false},
+		{&pgproto3.Describe{ObjectType: 'S'}, false},
+	} {
+		link, _ := newTestSessionLink()
+		link.Send(test.msg, query.NoReply)
+		assert.Equal(t, test.want, link.unnamedReplaced, "%#v", test.msg)
 	}
 }
 

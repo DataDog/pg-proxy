@@ -59,10 +59,11 @@ type Link interface {
 	// UsesSessionMarks reports whether Release reads the marks. When it does not,
 	// the session skips judging its messages, which scans SQL text.
 	UsesSessionMarks() bool
-	// MayHoldForeignUnnamedStmt reports whether the connection's last release
-	// skipped the reset, so its unnamed statement, if any, may belong to another
-	// client. The session answers a Bind or Describe of the unnamed statement
-	// itself when its client has none and this reports true.
+	// MayHoldForeignUnnamedStmt reports whether the connection's unnamed statement,
+	// if any, may belong to another client: its last release skipped the reset, and
+	// nothing sent on this link since has replaced or dropped the statement. A
+	// sender must not send a Bind or Describe of the unnamed statement while it
+	// reports true; the session answers the client itself.
 	MayHoldForeignUnnamedStmt() bool
 }
 
@@ -75,6 +76,11 @@ type RoleSession interface {
 	// everything Set changed, and a client's SET ROLE or SET SESSION AUTHORIZATION:
 	// after it, Release sends at most RESET ALL, which leaves both in place, and
 	// under config.ResetDynamic or config.ResetOff it may send nothing.
+	//
+	// Neither Set nor Reset may leave the unnamed prepared statement holding their
+	// query, as pgx's exec and describe-exec modes do: MayHoldForeignUnnamedStmt
+	// tracks only what a skipped reset leaves, so a client's Bind of the unnamed
+	// statement would run the role change with the client's arguments.
 	Reset(ctx context.Context, conn *pgxpool.Conn, token string, tags []string) error
 }
 

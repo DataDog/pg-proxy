@@ -68,26 +68,27 @@ type ClientMessageAction struct {
 	// This is only valid for replacing auto-cached unnamed prepared statements, as named prepared statements must be deallocated
 	// before the name can be reused.
 	UpdateAutoCachedUnnamedPreparedStmt prepared.PreparedStatement
-
-	// What the message runs, kept unjudged for SessionMarks: judging scans SQL text,
-	// which only some reset modes need, and the mode is known only once the link is.
-	runsSQL     string                     // a simple Query's text
-	runsStmt    prepared.PreparedStatement // the statement a Bind names
-	runsUnnamed bool                       // a Bind of the unnamed statement without auto-caching
+	// bindStmt is the statement a Bind of a named or auto-cached statement runs,
+	// kept unjudged for SessionMarks.
+	bindStmt prepared.PreparedStatement
 }
 
 // SessionMarks returns what proxying the action's message may do to session state:
-// running a simple Query's text, or the statement a Bind names. The session calls it
-// just before sending, and only for a link that uses the marks. stmts and unnamed
-// are the session's prepared statements and its confirmed unnamed statement then.
+// running a simple Query's text, or the statement a Bind names. Judging scans SQL
+// text, which only some reset modes need, so the session calls it just before
+// sending, and only for a link that uses the marks. stmts and unnamed are the
+// session's prepared statements and its confirmed unnamed statement then.
 func (action *ClientMessageAction) SessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
-	switch {
-	case action.runsSQL != "":
-		return sessionMarks(sessionsql.ScanEither(action.runsSQL), link.MarkClientSQL)
-	case action.runsStmt != nil:
-		return sessionMarks(action.runsStmt.SessionFlags(), link.MarkPreparedStmt)
-	case action.runsUnnamed:
-		return bindSessionMarks(stmts, unnamed)
+	switch m := action.ProxyMsgToPg.(type) {
+	case *pgproto3.Query:
+		return sessionMarks(sessionsql.ScanEither(m.String), link.MarkClientSQL)
+	case *pgproto3.Bind:
+		if action.bindStmt != nil {
+			return sessionMarks(action.bindStmt.MayChangeSession(), link.MarkPreparedStmt)
+		}
+		if action.EnsureUnnamedPreparedStmt {
+			return bindSessionMarks(stmts, unnamed)
+		}
 	}
 	return 0
 }
@@ -162,9 +163,6 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		}
 		action, err := handleClientQuery(m, m.String, SimpleQueryProtocol, action, state, hooks)
 		action.InvalidateUnnamedPreparedStmt = true
-		if action.ProxyMsgToPg != nil {
-			action.runsSQL = m.String
-		}
 		return action, err
 
 	case *pgproto3.Parse:
@@ -265,7 +263,6 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		clientName := m.PreparedStatement
 		if state.UsesUnnamedStmt(clientName) {
 			action.EnsureUnnamedPreparedStmt = true
-			action.runsUnnamed = true
 			return action, nil
 		}
 		proxyName, stmt, found, errorAction := findPreparedStatement(clientName, state.PreparedStatements)
@@ -275,7 +272,7 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 		}
 		m.PreparedStatement = proxyName
 		action.CheckExistingPreparedStmt = stmt
-		action.runsStmt = found
+		action.bindStmt = found
 		return action, nil
 
 	case *pgproto3.Execute:
@@ -349,10 +346,10 @@ func handleClientQuery(msg pgproto3.FrontendMessage, sql string, protocol PGQuer
 	return action, nil
 }
 
-// sessionMarks converts scanner flags to the marks a link records. source is the
-// mark for a possible session change.
-func sessionMarks(flags sessionsql.Flags, source link.SessionMarks) link.SessionMarks {
-	if flags.Has(sessionsql.MayChangeSession) {
+// sessionMarks converts a scanner verdict to the marks a link records. source is
+// the mark for a possible session change.
+func sessionMarks(mayChangeSession bool, source link.SessionMarks) link.SessionMarks {
+	if mayChangeSession {
 		return source
 	}
 	return 0
@@ -374,7 +371,7 @@ func bindSessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.Pr
 	if stmt == nil {
 		return link.MarkPreparedStmt
 	}
-	return sessionMarks(stmt.SessionFlags(), link.MarkPreparedStmt)
+	return sessionMarks(stmt.MayChangeSession(), link.MarkPreparedStmt)
 }
 
 // ShouldDiscardUntilSync reports whether the proxy should skip the message.

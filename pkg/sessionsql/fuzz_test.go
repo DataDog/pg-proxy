@@ -37,9 +37,8 @@ func FuzzScanVsParseTree(f *testing.F) {
 		if err != nil {
 			return
 		}
-		want := treeFlags(tree)
-		if got := Scan(sql, true); !got.Has(want) {
-			t.Errorf("scanner says %b, parse tree %b: %q", got, want, sql)
+		if want, got := treeChanges(tree), Scan(sql, true); want && !got {
+			t.Errorf("scanner says clean, parse tree changes the session: %q", sql)
 		}
 	})
 }
@@ -47,12 +46,12 @@ func FuzzScanVsParseTree(f *testing.F) {
 // cursorOptHold is CURSOR_OPT_HOLD from PostgreSQL's parsenodes.h.
 const cursorOptHold = 0x0020
 
-// treeFlags applies the scanner's rules to a parse tree: a session-level SET
+// treeChanges applies the scanner's rules to a parse tree: a session-level SET
 // (not LOCAL, not a transaction form), SET SESSION CHARACTERISTICS, DO,
 // EXECUTE, CALL, a WITH HOLD cursor, a call to set_config or set_limit
 // anywhere, and an UPDATE of pg_settings change the session.
-func treeFlags(tree *pg_query.ParseResult) Flags {
-	var flags Flags
+func treeChanges(tree *pg_query.ParseResult) bool {
+	var changes bool
 	for _, raw := range tree.GetStmts() {
 		switch n := raw.GetStmt().GetNode().(type) {
 		case *pg_query.Node_VariableSetStmt:
@@ -60,18 +59,18 @@ func treeFlags(tree *pg_query.ParseResult) Flags {
 			switch v.GetKind() {
 			case pg_query.VariableSetKind_VAR_SET_VALUE:
 				if !v.GetIsLocal() {
-					flags |= MayChangeSession
+					changes = true
 				}
 			case pg_query.VariableSetKind_VAR_SET_MULTI:
 				if v.GetName() == "SESSION CHARACTERISTICS" {
-					flags |= MayChangeSession
+					changes = true
 				}
 			}
 		case *pg_query.Node_DoStmt, *pg_query.Node_ExecuteStmt, *pg_query.Node_CallStmt:
-			flags |= MayChangeSession
+			changes = true
 		case *pg_query.Node_DeclareCursorStmt:
 			if n.DeclareCursorStmt.GetOptions()&cursorOptHold != 0 {
-				flags |= MayChangeSession
+				changes = true
 			}
 		}
 		walkTree(raw.GetStmt(), func(m proto.Message) {
@@ -79,18 +78,18 @@ func treeFlags(tree *pg_query.ParseResult) Flags {
 			case *pg_query.FuncCall:
 				switch lastName(x) {
 				case "set_config", "set_limit":
-					flags |= MayChangeSession
+					changes = true
 				}
 			case *pg_query.UpdateStmt:
 				if x.GetRelation().GetRelname() == "pg_settings" {
-					flags |= MayChangeSession
+					changes = true
 				}
 			case *pg_query.ExecuteStmt:
-				flags |= MayChangeSession // EXPLAIN ANALYZE EXECUTE, CREATE TABLE AS EXECUTE
+				changes = true // EXPLAIN ANALYZE EXECUTE, CREATE TABLE AS EXECUTE
 			}
 		})
 	}
-	return flags
+	return changes
 }
 
 // walkTree calls fn for every message under m, depth first, m included.

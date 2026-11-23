@@ -7,26 +7,12 @@ package sessionsql
 
 import "strings"
 
-// Flags report what a SQL text may do to session state.
-type Flags uint8
-
-const (
-	// MayChangeSession reports that the text may change session state that
-	// outlives the checkout: a setting, the role, or a held cursor.
-	MayChangeSession Flags = 1 << iota
-)
-
-// Has reports whether f includes every flag in x.
-func (f Flags) Has(x Flags) bool { return f&x == x }
-
-// failClosed is the result when scanning stops early, at a session change or at
-// text the scanner cannot lex: the rest of the text is not read.
-const failClosed = MayChangeSession
-
-// Scan follows the Postgres scanner closely enough to know where comments,
-// literals and quoted identifiers start and end, and judges each statement by
-// its keywords. scsOn is the value of standard_conforming_strings: with it off,
-// a backslash escapes a quote in a plain literal.
+// Scan reports whether sql may change session state that outlives the checkout:
+// a setting, the role, or a held cursor. It follows the Postgres scanner closely
+// enough to know where comments, literals and quoted identifiers start and end,
+// and judges each statement by its keywords. scsOn is the value of
+// standard_conforming_strings: with it off, a backslash escapes a quote in a
+// plain literal.
 //
 //   - A statement that starts with SET may change the session unless the next
 //     word is LOCAL, TRANSACTION or CONSTRAINTS, or the next two are SESSION
@@ -43,8 +29,9 @@ const failClosed = MayChangeSession
 //     quote) may change the session: the scanner cannot tell where it ends.
 //
 // RESET and DISCARD never count: they can only return a session to its
-// baseline. Scan stops at the first sign of a session change.
-func Scan(sql string, scsOn bool) Flags {
+// baseline. Scan stops at the first sign of a session change, or at text it
+// cannot lex, and reports true without reading the rest.
+func Scan(sql string, scsOn bool) bool {
 	n := len(sql)
 	state := stStart
 	for i := 0; i < n; {
@@ -89,7 +76,7 @@ func Scan(sql string, scsOn bool) Flags {
 			if i+1 < n && sql[i+1] == '*' {
 				j, ok := skipBlockComment(sql, i)
 				if !ok {
-					return failClosed
+					return true
 				}
 				i = j
 				continue
@@ -98,35 +85,35 @@ func Scan(sql string, scsOn bool) Flags {
 			i++
 		case clsQuote:
 			if afterSet(state) {
-				return failClosed
+				return true
 			}
 			j, ok := skipString(sql, i, !scsOn)
 			if !ok {
-				return failClosed
+				return true
 			}
 			i, state = j, stBody
 		case clsDQuote:
 			j, ok := skipQuotedIdent(sql, i)
 			if !ok {
-				return failClosed
+				return true
 			}
 			name := sql[i+1 : j-1]
 			if isSetterName(name) {
-				return failClosed
+				return true
 			}
 			if afterSet(state) {
 				// SET "search_path" = ...
-				return failClosed
+				return true
 			}
 			state = stBody
 			i = j
 		case clsDollar:
 			j, ok, isQuote := skipDollar(sql, i)
 			if !ok {
-				return failClosed
+				return true
 			}
 			if isQuote && afterSet(state) {
-				return failClosed
+				return true
 			}
 			if isQuote {
 				state = stBody
@@ -141,7 +128,7 @@ func Scan(sql string, scsOn bool) Flags {
 				// Past the first words only setter names and EXECUTE matter,
 				// and their lengths are 7, 9, 10 and 11.
 				if l := j - i; l >= 7 && l <= 11 && l != 8 && bodyWordChangesSession(sql[i:j]) {
-					return failClosed
+					return true
 				}
 				i = j
 				continue
@@ -151,11 +138,11 @@ func Scan(sql string, scsOn bool) Flags {
 				switch {
 				case len(word) == 1 && (c == 'E' || c == 'e') && sql[j] == '\'':
 					if afterSet(state) {
-						return failClosed
+						return true
 					}
 					k, ok := skipString(sql, j, true)
 					if !ok {
-						return failClosed
+						return true
 					}
 					i, state = k, stBody
 					continue
@@ -163,14 +150,14 @@ func Scan(sql string, scsOn bool) Flags {
 					switch sql[j+1] {
 					case '"':
 						// A U&"..." identifier can spell any name.
-						return failClosed
+						return true
 					case '\'':
 						if afterSet(state) {
-							return failClosed
+							return true
 						}
 						k, ok := skipString(sql, j+1, false)
 						if !ok {
-							return failClosed
+							return true
 						}
 						i, state = k, stBody
 						continue
@@ -183,7 +170,7 @@ func Scan(sql string, scsOn bool) Flags {
 				case eqFold(word, "set"):
 					state = stAfterSet
 				case eqFold(word, "do"), eqFold(word, "call"), eqFold(word, "execute"), eqFold(word, "declare"):
-					return failClosed
+					return true
 				default:
 					state = stBody
 				}
@@ -194,18 +181,18 @@ func Scan(sql string, scsOn bool) Flags {
 				case eqFold(word, "session"):
 					state = stAfterSession
 				default:
-					return failClosed
+					return true
 				}
 			case stAfterSession:
 				// SET SESSION TRANSACTION is SET TRANSACTION; anything else
 				// (a setting, CHARACTERISTICS, AUTHORIZATION) persists.
 				if !eqFold(word, "transaction") {
-					return failClosed
+					return true
 				}
 				state = stAfterScope
 			case stAfterScope:
 				if eqFold(word, "to") {
-					return failClosed // SET local TO ...: a setting named local
+					return true // SET local TO ...: a setting named local
 				}
 				state = stBody
 			default:
@@ -223,7 +210,7 @@ func Scan(sql string, scsOn bool) Flags {
 		default:
 			if state == stAfterScope {
 				if scopeNameDirty(c) {
-					return failClosed
+					return true
 				}
 				state = stBody
 			}
@@ -234,22 +221,18 @@ func Scan(sql string, scsOn bool) Flags {
 	// A statement that ends right after SET is a syntax error; the server
 	// rejects it, but count it rather than reason about it.
 	if afterSet(state) {
-		return failClosed
+		return true
 	}
-	return 0
+	return false
 }
 
-// ScanEither returns the flags of sql under either value of
+// ScanEither reports whether sql may change the session under either value of
 // standard_conforming_strings. The setting only changes how a backslash in a
 // plain literal reads, so text without one scans the same under both, and text
 // with one is scanned twice. Use it where the session's value is unknown, or
 // where the verdict is stored and may be read under another value.
-func ScanEither(sql string) Flags {
-	flags := Scan(sql, true)
-	if flags == failClosed || strings.IndexByte(sql, '\\') < 0 {
-		return flags
-	}
-	return Scan(sql, false)
+func ScanEither(sql string) bool {
+	return Scan(sql, true) || (strings.IndexByte(sql, '\\') >= 0 && Scan(sql, false))
 }
 
 const (

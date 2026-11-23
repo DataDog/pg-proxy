@@ -15,7 +15,6 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
-	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 type Link = link.Link
@@ -142,8 +141,8 @@ func (w *mirrorWorker) run() {
 			var parsed prepared.PreparedStatement
 			if m, ok := it.msg.(*pgproto3.Parse); ok {
 				// Not scanned: the shadow takes its session marks from the source
-				// checkout, so these flags only claim the worst.
-				parsed = prepared.CreatePreparedStatementWithFlags("", m.Name, m.Query, m.ParameterOIDs, sessionsql.MayChangeSession)
+				// checkout, so this verdict only claims the worst.
+				parsed = prepared.CreateJudgedPreparedStatement("", m.Name, m.Query, m.ParameterOIDs, true)
 				if parsed.IsProxyNamedPreparedStmt() {
 					cat.put(parsed)
 				}
@@ -175,6 +174,14 @@ func (w *mirrorWorker) run() {
 					recorded = true
 				}
 			case *pgproto3.Bind:
+				if m.PreparedStatement == "" && link.MayHoldForeignUnnamedStmt() {
+					// The shadow connection skipped its last reset and may still hold another
+					// session's unnamed statement, which this Bind would run. A Describe only
+					// returns a description, which the worker discards.
+					w.count("mirror.replay_errors", "op:foreign_unnamed_stmt")
+					skipping = true
+					break
+				}
 				n, rec, admitted := w.reparseIfMissing(link, cat, m.PreparedStatement)
 				if !admitted {
 					skipping = true

@@ -83,8 +83,7 @@ func TestCorpus(t *testing.T) {
 	cases := loadCorpus(t)
 	var clean, flaggedClean, outOfScope, missedOutOfScope int
 	for i, c := range cases {
-		got := Scan(c.SQL, !c.SCSOff)
-		changes := got.Has(MayChangeSession)
+		changes := Scan(c.SQL, !c.SCSOff)
 		if c.Label == "dirty" {
 			if c.Category == "P9" {
 				outOfScope++
