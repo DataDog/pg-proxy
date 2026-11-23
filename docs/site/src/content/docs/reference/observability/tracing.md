@@ -77,22 +77,55 @@ For batches, use `Batch execution and proxying` rather than assuming every query
 
 The root span receives the query text as `db.statement`.
 
-For OTel export, SQL and captured parameter strings containing invalid UTF-8 are quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
+For OTel export, SQL containing invalid UTF-8 is quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
 
 Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`. `messages` lists the type names of the first 15 protocol messages the span handled; `DataRow` and `CopyData` messages are not counted, and if there are more, the span gets `messages_truncated`. `rowsTotalSize` is a human-readable string such as `1.2 kB`, not a number. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
 
 The `pg-proxy` binary omits bind parameter values by default in both Datadog and OTel
-modes. Set `-trace-parameters=true` to capture actual values as `db.parameters`,
-without obfuscation. The library also defaults to capture disabled; embedders can
+modes. Set `-trace-parameters=true` to capture actual values, without obfuscation.
+The library also defaults to capture disabled; embedders can
 set `server.RuntimeConfig.EnableTraceParameters` (or `session.Config.EnableTraceParameters`
 when constructing sessions directly) to `true` to enable it.
+
+With capture on, the root span carries one tag per parameter position,
+`db.parameters.0` through `db.parameters.n`, taken from the first Bind of the
+trace. `$1` is `db.parameters.0`. A binary value is decoded with the type
+declared in Parse, else the one PostgreSQL reported for the statement in a
+ParameterDescription; a type declared as 0 or `unknown` counts as not declared.
+A binary value whose type is neither declared nor described renders as hex.
+
+Values are strings, including numbers, so values above 2^53 keep their
+precision.
+
+| Value | Tag value |
+| --- | --- |
+| NULL | `null` |
+| Text format | Up to the first 256 bytes, cut at the start of a UTF-8 character, then `(+N bytes)` for the rest |
+| Binary `bool`, `int2`, `int4`, `int8`, `oid`, `float4`, `float8`, `numeric`, `uuid`, `date`, `timestamp`, `timestamptz` | PostgreSQL's text form; timestamps are shown in UTC |
+| Binary `text`, `varchar`, `bpchar`, `name`, `json`, `jsonb`, `xml` | As text |
+| Binary arrays of those types | `array[len=N]{…}` with the first 10 elements; text elements are double-quoted |
+| Any other type, malformed binary value, or format code other than text or binary | `\x` and the hex of the first 128 bytes, then `(+N bytes)` |
+
+Tag values are not quoted, so NULL and the text `null` render alike, and a text
+value that itself ends in `(+N bytes)` looks truncated.
+
+The tags total at most about 4 KB and 32 positions. When a limit drops
+positions, the root also gets `pgproxy.bind.truncated=true` and
+`pgproxy.bind.rendered` with the number of positions emitted. Invalid UTF-8 is
+escaped as `\xNN` for both tracers.
+
+Each position adds one attribute, so a full Bind adds at most 34, within the
+OpenTelemetry SDK's default of 128 per span. If the SDK's
+attribute limit is lowered below that, it drops the positions that do not fit
+and counts them in the span's dropped-attribute count; `pgproxy.bind.truncated`
+and `pgproxy.bind.rendered` describe only the proxy's own limits. They are set
+before the positions, so the SDK keeps them.
 
 Values are recorded only when the root span's head sampling decision keeps the
 trace: a Datadog sampling priority above zero or not yet set, or an OTel span that is recording
 and sampled. Traces kept later, for example because they contain errors, omit
 `db.parameters`. Root spans that do not implement `pgproxy.SamplingReporter`
-are treated as sampled. `db.parameters` is set on the child span that is active
-when the `Bind` arrives, not on the root span.
+are treated as sampled.
 
 Disabling capture skips parameter formatting and trace tagging; it does not change
 the values forwarded to PostgreSQL. SQL text in `db.statement`, including literal

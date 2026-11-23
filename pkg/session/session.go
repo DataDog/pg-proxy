@@ -172,6 +172,7 @@ type Session struct {
 	hooks                 Hooks
 	decorateLink          bool
 	enableTraceParameters bool
+	paramTypes            *bindParamTypes // allocated on the first statement Describe
 
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
@@ -1279,10 +1280,14 @@ func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 }
 
 // invalidateUnnamedStmt forgets the client's unnamed prepared statement and
-// starts a new generation, so ParseComplete replies for unnamed Parses sent
-// before this point cannot restore it.
+// its described types, and starts a new generation, so ParseComplete and
+// ParameterDescription replies for messages sent before this point cannot
+// restore them.
 func (s *Session) invalidateUnnamedStmt() {
 	s.unnamedStmt = nil
+	if s.paramTypes != nil {
+		s.paramTypes.unnamed = s.paramTypes.unnamed[:0]
+	}
 	s.unnamedGen++
 }
 
@@ -1340,8 +1345,6 @@ func (s *Session) flushPostgres() (bool, error) {
 	}
 	s.obsVals.traceState.FinishTrace(err)
 
-	flushClient := false
-	bufferSize := 0
 	timesFlushed := 0
 	clientWriteSucceeded := false
 	discardedUntilSync := false
@@ -1408,6 +1411,9 @@ func (s *Session) flushPostgres() (bool, error) {
 		if err != nil {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
 		}
+		if s.paramTypes != nil && len(s.paramTypes.describing) > 0 {
+			s.observeBackendMessage(msg)
+		}
 
 		if action.AddNewPreparedStatement {
 			confirmedPreparedStmt := s.pStmtState.ConfirmPendingStmt()
@@ -1428,12 +1434,9 @@ func (s *Session) flushPostgres() (bool, error) {
 			if encErr != nil {
 				return discardedUntilSync, fmt.Errorf("error encoding message to forward to client: %w", encErr)
 			}
+			s.obsVals.traceState.AddForwarded(action.ProxyMsgToClient, len(encoded)-len(replyBuf))
 			replyBuf = encoded
-			flushClient = true
-			bufferSize += action.ProxyMsgSize
-			if bufferSize >= s.postgresMsgBufferSize {
-				flushClient = false // don't flush again if immediately release link before writing more to buffer
-				bufferSize = 0
+			if len(replyBuf) >= s.postgresMsgBufferSize {
 				timesFlushed++
 				err = flushToClient()
 				if err != nil {
@@ -1469,7 +1472,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 	}
 	// ensure any remaining messages are also flushed
-	if flushClient {
+	if len(replyBuf) > 0 {
 		err := flushToClient()
 		if err != nil {
 			s.obsVals.traceState.FinishTrace(err)

@@ -584,7 +584,7 @@ func writeStartupResponse(conn net.Conn, statuses map[string]string, pid uint32,
 	var err error
 	buf, err = (&pgproto3.AuthenticationOk{}).Encode(buf)
 	if err != nil {
-		return fmt.Errorf("error encoding authentication ok message: %v", err)
+		return fmt.Errorf("error encoding authentication ok message: %w", err)
 	}
 	keys := make([]string, 0, len(statuses))
 	for key := range statuses {
@@ -594,16 +594,16 @@ func writeStartupResponse(conn net.Conn, statuses map[string]string, pid uint32,
 	for _, key := range keys {
 		buf, err = (&pgproto3.ParameterStatus{Name: key, Value: statuses[key]}).Encode(buf)
 		if err != nil {
-			return fmt.Errorf("error encoding parameter status %q: %v", key, err)
+			return fmt.Errorf("error encoding parameter status %q: %w", key, err)
 		}
 	}
 	buf, err = (&pgproto3.BackendKeyData{ProcessID: pid, SecretKey: secret}).Encode(buf)
 	if err != nil {
-		return fmt.Errorf("error encoding backend key data: %v", err)
+		return fmt.Errorf("error encoding backend key data: %w", err)
 	}
 	buf, err = (&pgproto3.ReadyForQuery{TxStatus: 'I'}).Encode(buf)
 	if err != nil {
-		return fmt.Errorf("error encoding ready for query message: %v", err)
+		return fmt.Errorf("error encoding ready for query message: %w", err)
 	}
 	if _, err = conn.Write(buf); err != nil {
 		return fmt.Errorf("error sending ready for query: %w", err)

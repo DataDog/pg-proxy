@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/bindparams"
 )
 
 type RequestType = string
@@ -46,6 +47,10 @@ type TraceState struct {
 	// Fixed-size buffer for messages - keeps first MaxTrackedMessages messages
 	messages     [MaxTrackedMessages]string
 	messageCount int // Number of messages currently stored
+	// The root trace's Bind values, rendered on the root span when it finishes.
+	// It is allocated on the first sampled capture, so sessions without
+	// parameter capture do not carry it.
+	bindParams *bindparams.Capture
 }
 
 // AddMessage records msg in the trace's message buffer, so it can be attached to
@@ -63,6 +68,16 @@ func (t *TraceState) AddMessage(msg interface{}) {
 		t.messageCount++
 	} else {
 		t.SetTag("messages_truncated", true)
+	}
+}
+
+// AddForwarded records msg, encoded as n bytes, as forwarded to the client.
+// Only DataRows count toward the trace's rowsReturned/Affected and
+// rowsTotalSize tags.
+func (t *TraceState) AddForwarded(msg pgproto3.BackendMessage, n int) {
+	if _, ok := msg.(*pgproto3.DataRow); ok {
+		t.rowsNumber++
+		t.rowsSize += n
 	}
 }
 
@@ -263,6 +278,28 @@ func (t *TraceState) Sampled() bool {
 	return !ok || reporter.Sampled()
 }
 
+// WantsBindParameters reports whether RecordBindParameters would keep a Bind:
+// the root trace is sampled, since the tracer would drop an unsampled trace's
+// tags, and none of its Binds was recorded yet.
+func (t *TraceState) WantsBindParameters() bool {
+	return !t.bindParams.Recorded() && t.Sampled()
+}
+
+// RecordBindParameters copies b's values to render as db.parameters.N tags on
+// the root span when it finishes. It ignores b unless WantsBindParameters, so
+// only a sampled root's first Bind with parameters is kept; a Bind with none,
+// such as SELECT 1's, leaves the slot to a later one. Callers may check
+// WantsBindParameters first to skip gathering parseOIDs and describedOIDs.
+func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, describedOIDs []uint32) {
+	if len(b.Parameters) == 0 || !t.WantsBindParameters() {
+		return
+	}
+	if t.bindParams == nil {
+		t.bindParams = &bindparams.Capture{}
+	}
+	t.bindParams.Record(b, parseOIDs, describedOIDs)
+}
+
 func (t *TraceState) FinishTrace(errs ...error) {
 	messages := t.getMessages()
 	t.trace = finishSpan(t.trace, messages, t.rowsNumber, t.rowsSize, errs...)
@@ -273,6 +310,10 @@ func (t *TraceState) FinishTrace(errs ...error) {
 
 func (t *TraceState) FinishRootTrace(errs ...error) {
 	t.FinishTrace(errs...) // Ensure trace is cleaned up first
+	// RecordBindParameters keeps a Bind only under a sampled root.
+	if t.bindParams.Recorded() {
+		t.bindParams.Render(t.rootTrace.SetTag)
+	}
 	t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)
 
 	t.rootQuery = ""

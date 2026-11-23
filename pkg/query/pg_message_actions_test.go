@@ -183,7 +183,6 @@ func TestPgMessageActions(t *testing.T) {
 				ResolveReplyExpectation: true,
 				ReleaseLinkIfIdle:       true,
 				SetTxStatus:             Idle,
-				ProxyMsgSize:            6,
 			},
 			wantTraceFinished: true,
 		},
@@ -196,7 +195,6 @@ func TestPgMessageActions(t *testing.T) {
 				ResolveReplyExpectation: true,
 				ReleaseLinkIfIdle:       true,
 				SetTxStatus:             Idle,
-				ProxyMsgSize:            6,
 			},
 			wantTraceFinished: true,
 		},
@@ -209,7 +207,6 @@ func TestPgMessageActions(t *testing.T) {
 				ResolveReplyExpectation: true,
 				ReleaseLinkIfIdle:       true,
 				SetTxStatus:             InTransaction,
-				ProxyMsgSize:            6,
 			},
 			wantTraceFinished: true,
 		},
@@ -222,7 +219,6 @@ func TestPgMessageActions(t *testing.T) {
 				ResolveReplyExpectation: true,
 				ReleaseLinkIfIdle:       true,
 				SetTxStatus:             InErroredTransaction,
-				ProxyMsgSize:            6,
 			},
 			wantTraceFinished: true,
 		},
@@ -282,7 +278,6 @@ func TestPgMessageActions(t *testing.T) {
 			wantAction: PgMessageAction{
 				ProxyMsgToClient: &pgproto3.ErrorResponse{Message: "testing"},
 				DiscardUntilSync: true,
-				ProxyMsgSize:     15,
 			},
 			wantTraceFinished: true,
 		},
@@ -293,7 +288,6 @@ func TestPgMessageActions(t *testing.T) {
 			wantAction: PgMessageAction{
 				ProxyMsgToClient: &pgproto3.ErrorResponse{Message: "testing"},
 				DiscardUntilSync: true,
-				ProxyMsgSize:     15,
 			},
 			wantTraceFinished: true,
 		},
@@ -397,7 +391,6 @@ func TestPgMessageActions(t *testing.T) {
 			wantAction := PgMessageAction{
 				ProxyMsgToClient:        test.msg,
 				ResolveReplyExpectation: true,
-				ProxyMsgSize:            getMessageSize(test.msg),
 				AddNewPreparedStatement: test.wantAddNewPreparedStmt,
 			}
 			assert.EqualValues(wantAction, action, "for test %s", test.name)
@@ -405,7 +398,6 @@ func TestPgMessageActions(t *testing.T) {
 			assert.NoError(err, "for test %s", test.name)
 			wantAction := PgMessageAction{
 				ProxyMsgToClient:        test.msg,
-				ProxyMsgSize:            getMessageSize(test.msg),
 				AddNewPreparedStatement: test.wantAddNewPreparedStmt,
 			}
 			assert.EqualValues(wantAction, action, "for test %s", test.name)

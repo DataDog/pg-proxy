@@ -153,7 +153,7 @@ The Datadog SDK also reads `OTEL_TRACES_EXPORTER`. Unsetting it, as in the examp
 
 ## Query parameters
 
-Bind parameter capture is **off by default** in both Datadog and OTel modes. To include raw values as `db.parameters`, add `-trace-parameters=true` to a command that enables tracing:
+Bind parameter capture is **off by default** in both Datadog and OTel modes. To include raw values as `db.parameters.0` … `db.parameters.n` on the root span, add `-trace-parameters=true` to a command that enables tracing:
 
 ```bash
 pg-proxy \
@@ -164,7 +164,7 @@ pg-proxy \
 
 This flag does not enable tracing by itself or change the parameters sent to PostgreSQL. SQL text, including literal values, is still recorded as `db.statement`; error messages are also unaffected. Parameter capture does not obfuscate values. See [Recorded data](tracing/#recorded-data).
 
-Values are added only to sampled traces, so unsampled traces skip the formatting cost. The decision is the one made when the root span starts: the Datadog sampling priority, or the OTel span's sampled flag. A trace kept later, for example because it contains an error, has no `db.parameters`.
+Values are added only to sampled traces, so unsampled traces skip the formatting cost. The decision is the one made when the root span starts: the Datadog sampling priority, or the OTel span's sampled flag. A trace kept later, for example because it contains an error, has no parameter tags. Values are copied on the Bind path and decoded when the trace finishes; see [Recorded data](tracing/#recorded-data) for the format and limits.
 
 For the Go library, the equivalent option is `EnableTraceParameters`, also `false` by default.
 
