@@ -355,7 +355,7 @@ func (p *terminatingIntegrationSQLHealthProber) Probe(ctx context.Context, _ str
 	return inRecovery, err
 }
 
-func TestSQLHealthCheckRetriesTerminatedSessionAgainstPostgres(t *testing.T) {
+func TestSQLHealthCheckDoesNotRetryTerminatedSessionAgainstPostgres(t *testing.T) {
 	ctx, connString, config := startSQLHealthCheckIntegrationPostgres(t)
 	admin, err := pgx.Connect(ctx, connString)
 	require.NoError(t, err)
@@ -366,11 +366,14 @@ func TestSQLHealthCheckRetriesTerminatedSessionAgainstPostgres(t *testing.T) {
 	var postgresErr *pgconn.PgError
 	require.ErrorAs(t, prober.firstError, &postgresErr)
 	assert.Equal(t, "57P01", postgresErr.Code)
-	assert.Equal(t, 2, prober.attempts)
+	assert.Equal(t, 1, prober.attempts)
 	require.Len(t, outcome.Results, 1)
-	require.NoError(t, outcome.Results[0].Err)
-	assert.True(t, outcome.Results[0].HealthyPrimary(), "terminating one session must not remove a healthy primary")
+	assert.ErrorIs(t, outcome.Results[0].Err, prober.firstError)
+	assert.False(t, outcome.Results[0].HealthyPrimary())
+	var inRecovery bool
+	require.NoError(t, admin.QueryRow(ctx, SQLHealthCheckQuery).Scan(&inRecovery))
+	assert.False(t, inRecovery, "the server remains primary; banning session termination is intentional")
 	bans := make(sqlRoutingBanlist)
 	bans.update([]string{config.Host}, outcome, SQLHealthResultsSnapshot{ScheduledAt: outcome.StartedAt, ObservedAt: time.Now(), Results: outcome.Results})
-	assert.Empty(t, bans)
+	assert.Contains(t, bans, config.Host)
 }

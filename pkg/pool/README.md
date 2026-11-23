@@ -236,12 +236,12 @@ The hybrid policy remembers an IP after PostgreSQL `57P01` administrative
 termination, `57P02` crash shutdown, or `57P03` containing
 `the database system is shutting down`. Timeouts, connection refusal,
 authentication failures, and startup responses do not create a ban.
-`57P01` can also mean an individual session was terminated, so it uses the
-configured retries. If a retry returns a primary or standby role, that poll does
-not create a ban. If retries fail, the result keeps the shutdown evidence even
-when the final error is a timeout, so the IP is banned. `57P02` and `57P03` stop
-retries immediately. A cached shutdown from another credential still vetoes
-recovery until that credential's snapshot is replaced or removed.
+`57P01` can also mean an individual session was terminated. Treating it as
+shutdown evidence and banning its IP immediately is an intentional policy choice.
+Do not retry it within the poll: a later timeout or success must not hide the
+shutdown observation. Recovery requires a qualifying later poll, and cached
+shutdown evidence from another credential still vetoes recovery until that
+credential's snapshot is replaced or removed.
 Wrapped and joined errors are checked cause by cause. Any qualifying shutdown
 cause creates a ban, regardless of other causes or their order.
 

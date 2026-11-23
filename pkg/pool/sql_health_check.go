@@ -22,6 +22,7 @@ const (
 	SQLHealthCheckAcquireStage    SQLHealthCheckStage = "acquire"
 	SQLHealthCheckQueryStage      SQLHealthCheckStage = "query"
 
+	sqlHealthCheckAdminShutdown    = "57P01"
 	sqlHealthCheckCrashShutdown    = "57P02"
 	sqlHealthCheckCannotConnectNow = "57P03"
 	sqlHealthCheckInvalidPassword  = "28P01"
@@ -306,13 +307,9 @@ func (c *SQLHealthChecker) checkIP(
 	start := time.Now()
 	metricTags := append(slices.Clone(tags), "ip:"+ip)
 	var inRecovery bool
-	var shutdownEvidence error
 	attempt := func() error {
 		var err error
 		inRecovery, err = c.prober.Probe(ctx, ip, connString, metricTags)
-		if shutdownEvidence == nil && isPostgresShutdownError(err) {
-			shutdownEvidence = err
-		}
 		return err
 	}
 	var err error
@@ -320,11 +317,6 @@ func (c *SQLHealthChecker) checkIP(
 		err = attempt()
 	} else {
 		err = c.runWithRetry(ctx, metricTags, attempt)
-	}
-	// A successful retry disproves a session-only administrative termination.
-	// If retries fail, preserve shutdown evidence even when the final error is a timeout.
-	if err != nil && shutdownEvidence != nil && !errors.Is(err, shutdownEvidence) {
-		err = errors.Join(err, shutdownEvidence)
 	}
 	result := SQLHealthCheckResult{
 		StartedAt:   start,
@@ -372,9 +364,9 @@ func IsSQLHealthCheckPasswordAuthenticationError(err error) bool {
 }
 
 // IsSQLHealthCheckRetriable reports whether retrying an error can provide new information.
-// Crash-shutdown, cannot-connect-now, and invalid-password responses stop retries.
-// Administrative termination can affect only one session, so it may be retried.
-// checkIP preserves that evidence if retries fail instead of returning a role.
+// Administrative/crash-shutdown, cannot-connect-now, and invalid-password responses
+// stop retries. Preserve shutdown evidence for the banlist instead of allowing a
+// later attempt to replace it with a timeout or successful role.
 func IsSQLHealthCheckRetriable(err error) bool {
 	// A joined connection error can contain several PostgreSQL causes. Any
 	// non-retriable cause must stop retries, regardless of its position.
@@ -393,7 +385,7 @@ func IsSQLHealthCheckRetriable(err error) bool {
 	var sqlStateErr sqlHealthCheckSQLStateError
 	if errors.As(err, &sqlStateErr) {
 		switch sqlStateErr.SQLState() {
-		case sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow, sqlHealthCheckInvalidPassword:
+		case sqlHealthCheckAdminShutdown, sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow, sqlHealthCheckInvalidPassword:
 			return false
 		}
 	}

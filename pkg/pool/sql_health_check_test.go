@@ -165,7 +165,7 @@ func TestSQLHealthCheckerRetriesAndEventuallySucceeds(t *testing.T) {
 }
 
 func TestSQLHealthCheckerStopsAfterConclusivePostgresError(t *testing.T) {
-	for _, code := range []string{sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow} {
+	for _, code := range []string{sqlHealthCheckAdminShutdown, sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow} {
 		t.Run(code, func(t *testing.T) {
 			shutdown := &sqlHealthProbeError{
 				stage: SQLHealthCheckAcquireStage,
@@ -243,7 +243,7 @@ func TestRegistrySQLHealthProberReportsPoolLookupFailure(t *testing.T) {
 
 func TestIsSQLHealthCheckRetriable(t *testing.T) {
 	assert.True(t, IsSQLHealthCheckRetriable(errors.New("temporary")))
-	assert.True(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: "57P01"}))
+	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: "57P01"}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCrashShutdown}))
 	assert.False(t, IsSQLHealthCheckRetriable(errors.Join(&pgconn.PgError{Code: "57P01"}, &pgconn.PgError{Code: "57P02"})))
 	assert.False(t, IsSQLHealthCheckRetriable(errors.Join(&pgconn.PgError{Code: "57P02"}, &pgconn.PgError{Code: "57P01"})))
@@ -429,17 +429,16 @@ func TestSQLHealthCheckerRecordsEachIPBeforeTheRoundCompletes(t *testing.T) {
 	}
 }
 
-func TestSQLHealthCheckerRetriesAdministrativeTermination(t *testing.T) {
+func TestSQLHealthCheckerDoesNotRetryAdministrativeTermination(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
-		retry  fakeSQLHealthProbeResponse
+		next   fakeSQLHealthProbeResponse
 		joined bool
 	}{
-		{name: "primary retry succeeds"},
-		{name: "standby retry succeeds", retry: fakeSQLHealthProbeResponse{inRecovery: true}},
-		{name: "retry times out", retry: fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}},
-		{name: "joined shutdown then timeout", retry: fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}, joined: true},
-		{name: "retry reports crash shutdown", retry: fakeSQLHealthProbeResponse{err: &pgconn.PgError{Code: "57P02"}}},
+		{name: "later primary cannot replace shutdown"},
+		{name: "later standby cannot replace shutdown", next: fakeSQLHealthProbeResponse{inRecovery: true}},
+		{name: "later timeout cannot replace shutdown", next: fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}},
+		{name: "joined shutdown is not retried", joined: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const ip = "10.0.0.1"
@@ -449,26 +448,18 @@ func TestSQLHealthCheckerRetriesAdministrativeTermination(t *testing.T) {
 				initial = errors.Join(&pgconn.PgError{Code: "XX000"}, shutdown)
 			}
 			prober := &fakeSQLHealthProber{
-				responses: map[string][]fakeSQLHealthProbeResponse{ip: {{err: initial}, tc.retry}},
+				responses: map[string][]fakeSQLHealthProbeResponse{ip: {{err: initial}, tc.next}},
 				calls:     make(map[string]int),
 			}
-			checker := newTestSQLHealthChecker(t, prober, 2, SQLHealthCheckHooks{})
+			checker := newTestSQLHealthChecker(t, prober, 3, SQLHealthCheckHooks{})
 			outcome := checker.Check(context.Background(), []string{ip}, func(ip string) string { return ip }, nil, nil, nil)
-			require.Equal(t, 2, prober.callCount(ip))
+			require.Equal(t, 1, prober.callCount(ip))
 			require.Len(t, outcome.Results, 1)
-			result := outcome.Results[0]
-			if tc.retry.err == nil {
-				require.NoError(t, result.Err)
-				assert.Equal(t, tc.retry.inRecovery, result.InRecovery)
-				assert.Equal(t, !tc.retry.inRecovery, result.HealthyPrimary())
-			} else {
-				assert.ErrorIs(t, result.Err, tc.retry.err)
-				assert.ErrorIs(t, result.Err, shutdown, "failed retries must retain administrative shutdown evidence")
-			}
+			assert.ErrorIs(t, outcome.Results[0].Err, shutdown)
+			assert.False(t, outcome.Results[0].HealthyPrimary())
 			bans := make(sqlRoutingBanlist)
 			bans.update([]string{ip}, outcome, SQLHealthResultsSnapshot{ScheduledAt: outcome.StartedAt, ObservedAt: time.Now(), Results: outcome.Results})
-			_, banned := bans[ip]
-			assert.Equal(t, tc.retry.err != nil, banned)
+			assert.Contains(t, bans, ip)
 		})
 	}
 }
