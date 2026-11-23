@@ -251,28 +251,7 @@ func (p *hybridHealthPolicy) reconcilePatroniRoutingLocked(
 		}
 		decision.publish = true
 		decision.routingResult = SQLRoutingResultPatroniRecovery
-		if comparison := p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult); comparison != nil {
-			decision.routingComparison = comparison
-		}
 	}
-}
-
-// observeSQL evaluates one complete SQL snapshot. SQL routing is conclusive only when every IP has
-// a successful role or a narrowly classified unroutable result. Unknown errors, multiple distinct
-// primaries, or conflicting deterministic roles require fallback. While Patroni has not caught
-// up to a SQL-selected leader, uncertainty can retain that leader but cannot restore the
-// superseded Patroni leader.
-// candidateIPs includes every address retained for this snapshot, not only addresses returned by
-// its latest DNS lookup. Banlisted IPs remain probed for recovery but are excluded from SQL
-// decisions and cached Patroni fallback. Raw comparison snapshots remain unchanged.
-func (p *hybridHealthPolicy) observeSQL(
-	candidateIPs []string,
-	outcome SQLHealthCheckOutcome,
-	observedAt time.Time,
-) hybridRoutingDecision {
-	return p.observeSQLRound(candidateIPs, outcome, SQLHealthResultsSnapshot{
-		ScheduledAt: observedAt, ObservedAt: observedAt, Results: outcome.Results,
-	})
 }
 
 // clearRoutingBansForEmptyDiscovery removes bans for the empty retained SQL set
@@ -309,8 +288,9 @@ func (p *hybridHealthPolicy) observeSQLShutdowns(candidateIPs []string, fresh SQ
 	return decision
 }
 
-// observeSQLRound distinguishes this completed poll from cached credential evidence. Only a
-// successful poll started after a ban may clear it; an older success is not recovery evidence.
+// observeSQLRound evaluates complete SQL evidence separately from route publication.
+// Only a successful poll started after a ban may clear it; an older success is not
+// recovery evidence. The worker records hybrid timing only after publishing a route.
 func (p *hybridHealthPolicy) observeSQLRound(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
@@ -365,7 +345,6 @@ func (p *hybridHealthPolicy) observeSQLRound(
 			for _, ip := range candidateIPs {
 				decision.health[ip] = ip == p.awaitingPatroniLeader
 			}
-			decision.routingComparison = p.recordRoutingLeaderLocked("hybrid", decision.health, observedAt, decision.routingResult)
 			return decision
 		}
 		if slices.Contains(candidateIPs, p.awaitingPatroniLeader) {
@@ -389,12 +368,6 @@ func (p *hybridHealthPolicy) observeSQLRound(
 			}
 			decision.hasCachedAge = true
 		}
-		decision.routingComparison = p.recordRoutingLeaderLocked(
-			"hybrid",
-			decision.health,
-			observedAt,
-			SQLRoutingResultCachedFallback,
-		)
 		return decision
 	}
 
@@ -408,12 +381,6 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		decision.health[routingOutcome.PrimaryIPs[0]] = true
 	}
 	p.applyRoutingBanlistLocked(decision.health)
-	decision.routingComparison = p.recordRoutingLeaderLocked(
-		"hybrid",
-		decision.health,
-		observedAt,
-		SQLRoutingResultConclusive,
-	)
 	return decision
 }
 

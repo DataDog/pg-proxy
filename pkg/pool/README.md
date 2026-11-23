@@ -294,8 +294,15 @@ both took 1s, so the reduction is 0%. If hybrid selects B at 2s and Patroni find
 at 5s instead, their durations are 1s and 4s: a 75% reduction. A slower hybrid
 selection keeps its negative percentage.
 
-This measures the routing policy's observations, not successful client queries or
-PostgreSQL's actual promotion time. Missing outage starts, non-positive Patroni
+Hybrid timestamps are captured when the worker replaces the client routing
+snapshot, before notifying subscribers. Time spent waiting for flag evaluation
+or the publication lock is not counted as an outage while the old route remains
+healthy. Patroni timestamps remain probe observations, and the independent SQL
+comparison keeps its probe-completion timestamps. Small negative speedups are
+possible when hybrid publishes just after Patroni reports the same leader.
+
+This measures routing snapshots, not successful client queries or PostgreSQL's
+actual promotion time. Missing outage starts, non-positive Patroni
 durations, same-leader recoveries, and ambiguous publications do not produce
 downtime comparisons. Routing-mode changes clear unfinished comparisons.
 The existing independent SQL/Patroni snapshot comparison remains separate.

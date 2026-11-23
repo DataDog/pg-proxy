@@ -2643,7 +2643,7 @@ func TestPatroniPublishesNewLeaderWhileSQLUsesCachedFallback(t *testing.T) {
 	assert.True(t, health.IsHealthy(newPrimary), "new Patroni leader must publish during SQL fallback")
 
 	require.Len(t, comparisons, 1, "Patroni-owned hybrid routing must be timed on publication, without waiting for SQL")
-	assert.Equal(t, time.Duration(0), comparisons[0].Improvement)
+	assert.Negative(t, comparisons[0].Improvement, "publication follows the Patroni observation")
 	assert.Equal(t, SQLRoutingResultCachedFallback, comparisons[0].HybridSource)
 
 	// A subsequent timeout must copy the latest Patroni snapshot rather than restoring the old
@@ -2778,7 +2778,7 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 	require.True(t, health.IsHealthy(standby))
 	require.Len(t, comparisons, 1)
 	assert.Equal(t, SQLRoutingResultPatroniRecovery, comparisons[0].HybridSource)
-	assert.Zero(t, comparisons[0].Improvement)
+	assert.Negative(t, comparisons[0].Improvement, "publication follows the Patroni observation")
 
 	patroniProber.mu.Lock()
 	patroniProber.ipsByHost["primary.local"] = nil

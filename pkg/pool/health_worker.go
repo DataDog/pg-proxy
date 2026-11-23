@@ -803,9 +803,12 @@ func (s *PoolHealth) trackNewIPs(ips []string) []string {
 }
 
 // publishRoutingSnapshot requires routingMu. Discovery state is never replaced by publication.
-func (s *PoolHealth) publishRoutingSnapshot(health map[string]bool, resolved []string) {
+func (s *PoolHealth) publishRoutingSnapshot(health map[string]bool, resolved []string) time.Time {
 	s.state.ReplaceRoutingSnapshot(health, resolved)
+	// Capture publication before notification can wait on a subscriber lock.
+	publishedAt := time.Now()
 	s.notifySubscribers()
+	return publishedAt
 }
 
 // publishRoutingBanExclusionsLocked removes banned IPs from the current route
@@ -823,8 +826,8 @@ func (s *PoolHealth) publishRoutingBanExclusionsLocked(policy *hybridHealthPolic
 		}
 	}
 	if changed {
-		s.publishRoutingSnapshot(current.Health, current.Resolved)
-		decision.routingComparison = policy.observePublishedRouting(current.Health, time.Now(), decision.routingResult)
+		publishedAt := s.publishRoutingSnapshot(current.Health, current.Resolved)
+		decision.routingComparison = policy.observePublishedRouting(current.Health, publishedAt, decision.routingResult)
 	}
 }
 
@@ -890,9 +893,13 @@ func (w *HealthWorker) applyPatroniHealth(s *PoolHealth, health map[string]bool,
 	}
 	// A rejected stale observation has nil health and must not clear the published route.
 	if (policy == nil || decision.health != nil) && (!s.sqlRoutingActive || decision.publish) {
-		s.publishRoutingSnapshot(routingHealth, patroniHealth.Resolved)
-		if policy != nil && decision.routingResult != SQLRoutingResultPatroniRecovery {
-			if comparison := policy.observePublishedPatroniRouting(routingHealth, observedAt); comparison != nil {
+		publishedAt := s.publishRoutingSnapshot(routingHealth, patroniHealth.Resolved)
+		if policy != nil {
+			routingResult := SQLRoutingResultCachedFallback
+			if decision.publish {
+				routingResult = decision.routingResult
+			}
+			if comparison := policy.observePublishedRouting(routingHealth, publishedAt, routingResult); comparison != nil {
 				decision.routingComparison = comparison
 			}
 		}
@@ -1188,10 +1195,10 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			if poolHealth.sqlRoutingActive {
 				poolHealth.sqlRoutingActive = false
 				patroniHealth := poolHealth.patroniHealthState.Snapshot()
-				poolHealth.publishRoutingSnapshot(patroniHealth.Health, patroniHealth.Resolved)
+				publishedAt := poolHealth.publishRoutingSnapshot(patroniHealth.Health, patroniHealth.Resolved)
 				if policy := poolHealth.hybridPolicy; policy != nil {
 					decision.routingEnabled = policy.isRoutingEnabled()
-					decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth.Health, time.Now())
+					decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth.Health, publishedAt)
 				}
 			}
 			poolHealth.routingMu.Unlock()
@@ -1244,7 +1251,8 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			if !poolHealth.sqlRoutingActive {
 				resolved = poolHealth.patroniHealthState.Snapshot().Resolved
 			}
-			poolHealth.publishRoutingSnapshot(decision.health, resolved)
+			publishedAt := poolHealth.publishRoutingSnapshot(decision.health, resolved)
+			decision.routingComparison = policy.observePublishedRouting(decision.health, publishedAt, decision.routingResult)
 		}
 		return true
 	}()
