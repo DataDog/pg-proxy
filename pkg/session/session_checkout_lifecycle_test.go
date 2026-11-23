@@ -498,6 +498,10 @@ func TestRIFSlotHeldExactlyForCheckoutDuration_TerminateMidCheckout(t *testing.T
 // liveness probe, and the underlying conn subsequently returning an error/EOF)
 // causes handleTransaction's inner loop to close the session, releasing the slot.
 func TestRIFSlotHeldExactlyForCheckoutDuration_ClientDisconnectMidCheckout(t *testing.T) {
+	forEachDisconnectMonitor(t, testRIFSlotHeldExactlyForCheckoutDurationClientDisconnectMidCheckout)
+}
+
+func testRIFSlotHeldExactlyForCheckoutDurationClientDisconnectMidCheckout(t *testing.T, timer bool) {
 	assert := assert.New(t)
 	require := require.New(t)
 
@@ -509,6 +513,7 @@ func TestRIFSlotHeldExactlyForCheckoutDuration_ClientDisconnectMidCheckout(t *te
 	backend.loadShedder = shedder
 	session := newPortableSession(context.Background(), pgproto3.NewBackend(clientConn, clientConn), clientConn, backend, func(cfg *Config) {
 		cfg.LivenessProbe = probe
+		cfg.ClientDisconnectTimer = timer
 	})
 
 	done := make(chan error, 1)
@@ -563,8 +568,12 @@ func TestRIFSlotHeldExactlyForCheckoutDuration_ClientDisconnectMidCheckout(t *te
 // loop force-releases the link (ending the checkout without dispatching the
 // triggering message), releasing the slot on the *old* state's shedder.
 func TestRIFSlotHeldExactlyForCheckoutDuration_StateRemapMidCheckout(t *testing.T) {
+	forEachDisconnectMonitor(t, testRIFSlotHeldExactlyForCheckoutDurationStateRemapMidCheckout)
+}
+
+func testRIFSlotHeldExactlyForCheckoutDurationStateRemapMidCheckout(t *testing.T, timer bool) {
 	assert := assert.New(t)
-	session, fakeClient, fakePg, backend, closer := newRunningTestSessionWithBackend(t)
+	session, fakeClient, fakePg, backend, closer := newRunningTestSessionWithBackend(t, withDisconnectTimer(timer))
 	session.SetLivenessProbe(&fakeLivenessProbe{})
 	defer closer()
 	oldShedder := backend.loadShedder

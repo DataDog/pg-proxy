@@ -176,6 +176,8 @@ type Session struct {
 
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
+	clientDisconnectTimer              bool            // check for disconnects with timerMonitor; see Config.ClientDisconnectTimer
+	timerMonitor                       *timerMonitor   // created at the first checkout when clientDisconnectTimer is set
 	backendDestroyedOnClientDisconnect atomic.Bool     // true after recording that this session destroyed its backend because the client disconnected
 
 	mirroring Mirroring
@@ -305,6 +307,11 @@ type Config struct {
 	MetricTags            []string
 	Metrics               Metrics
 	ClientDisconnected    *atomic.Bool
+	// ClientDisconnectTimer selects how the session checks LivenessProbe during a
+	// checkout. False, the default, starts a goroutine and a ticker for each
+	// checkout. True keeps one timer and one acquire context for the session and
+	// arms the timer for each checkout.
+	ClientDisconnectTimer bool
 	Hooks                 Hooks
 	// DecorateLink requests decoration when the session checks out a routed link.
 	// The listener sets this explicitly; installing hooks does not enable it.
@@ -361,6 +368,7 @@ func New(cfg Config) *Session {
 		mirroring:                    cfg.Mirroring, mirrorBudget: cfg.MirrorBudget,
 		clientDisconnected: disconnected, hooks: cfg.Hooks, decorateLink: cfg.DecorateLink,
 		enableTraceParameters: cfg.EnableTraceParameters,
+		clientDisconnectTimer: cfg.ClientDisconnectTimer,
 	}
 	if cfg.TraceState != nil {
 		s.obsVals.traceState = cfg.TraceState
@@ -1594,6 +1602,9 @@ func (s *Session) close(err error) {
 		s.setLink(nil)
 	}
 	s.linkMu.Unlock()
+	if s.timerMonitor != nil {
+		s.timerMonitor.close()
+	}
 	if s.mirror != nil {
 		s.mirror.Close() // wakes the worker so it drops the tail and exits
 	}

@@ -513,8 +513,12 @@ func TestReadClustersRemappingToEmptyRoutesReadsToDefault(t *testing.T) {
 // teardown under s.linkMu so the client monitor goroutine cannot race with the
 // session goroutine. This test requires -race to catch violations.
 func TestStateRemapDuringHeldLink(t *testing.T) {
+	forEachDisconnectMonitor(t, testStateRemapDuringHeldLink)
+}
+
+func testStateRemapDuringHeldLink(t *testing.T, timer bool) {
 	assert := assert.New(t)
-	session, fakeClient, fakePg, backend, closer := newRunningTestSessionWithBackend(t)
+	session, fakeClient, fakePg, backend, closer := newRunningTestSessionWithBackend(t, withDisconnectTimer(timer))
 	session.SetLivenessProbe(&fakeLivenessProbe{})
 	defer closer()
 	oldShedder := backend.loadShedder
@@ -566,9 +570,13 @@ func TestStateRemapDuringHeldLink(t *testing.T) {
 // continues to handle messages correctly. The session remains responsive and
 // eventually releases the link.
 func TestClientDisconnectDuringHeldLink(t *testing.T) {
+	forEachDisconnectMonitor(t, testClientDisconnectDuringHeldLink)
+}
+
+func testClientDisconnectDuringHeldLink(t *testing.T, timer bool) {
 	assert := assert.New(t)
 	probe := &fakeLivenessProbe{}
-	session, fakeClient, fakePg, closer := newRunningTestSession(t)
+	session, fakeClient, fakePg, closer := newRunningTestSession(t, withDisconnectTimer(timer))
 	session.SetLivenessProbe(probe)
 	defer closer()
 

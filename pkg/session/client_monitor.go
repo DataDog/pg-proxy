@@ -10,6 +10,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 
@@ -102,22 +103,59 @@ func NewTCPLivenessProbe(conn net.Conn) ClientLivenessProbe {
 // distinguish client-driven cancellations from backend-driven ones.
 var ErrClientDisconnected = errors.New("client disconnected")
 
-// clientMonitor polls the client TCP connection to detect disconnection
-// without consuming any data from the socket buffer.
-type clientMonitor struct {
-	cancel context.CancelCauseFunc
-	done   chan struct{}
+// clientMonitorInterval is how often a monitor polls the client socket while a
+// checkout is in flight.
+const clientMonitorInterval = 100 * time.Millisecond
+
+// checkoutMonitor watches the client for disconnection during one checkout.
+type checkoutMonitor interface {
+	// stop ends the watch for the current checkout.
+	stop()
 }
 
 // startClientMonitor begins polling the client connection for disconnection.
-// It returns a clientMonitor handle and a context.Context that is cancelled
+// It returns a checkoutMonitor handle and a context.Context that is cancelled
 // when the client disconnects (useful for cancelling AcquireConnection).
 //
 // When disconnection is detected, the monitor:
 //  1. Sets s.clientDisconnected to true
 //  2. Cancels the returned context (aborts pending AcquireConnection)
 //  3. Calls s.link.ForceClose() if a link exists (unblocks pending Receive)
-func (s *Session) startClientMonitor() (*clientMonitor, context.Context) {
+//
+// Config.ClientDisconnectTimer selects the implementation: a goroutine for each
+// checkout (clientMonitor) or one timer for the session (timerMonitor).
+func (s *Session) startClientMonitor() (checkoutMonitor, context.Context) {
+	if s.clientDisconnectTimer {
+		return s.startTimerMonitor()
+	}
+	return s.startGoroutineMonitor()
+}
+
+// handleClientDisconnect runs the disconnect actions of both monitors.
+func (s *Session) handleClientDisconnect(cancel context.CancelCauseFunc) {
+	pgproxy.Logger().Info("client disconnection detected", "session_id", s.pid)
+	_ = pgproxy.Metrics().Count("pg_proxy.sessions.client_disconnected", 1, s.obsVals.metricTags, 1)
+
+	s.clientDisconnected.Store(true)
+	cancel(ErrClientDisconnected) // abort a pending AcquireConnection with an identifiable cause
+
+	s.linkMu.Lock()
+	link := s.link
+	s.linkMu.Unlock()
+	if link != nil {
+		s.forceCloseBackendOnClientDisconnect(link)
+	}
+}
+
+// clientMonitor polls the client TCP connection to detect disconnection
+// without consuming any data from the socket buffer. It starts a goroutine and
+// a ticker for each checkout.
+type clientMonitor struct {
+	cancel context.CancelCauseFunc
+	done   chan struct{}
+}
+
+func (s *Session) startGoroutineMonitor() (*clientMonitor, context.Context) {
 	// Use Background rather than s.ctx: when connection draining is disabled,
 	// Run() continues serving traffic after s.ctx is canceled. Deriving from
 	// s.ctx would make acquireCtx immediately canceled, failing every link
@@ -133,7 +171,7 @@ func (s *Session) startClientMonitor() (*clientMonitor, context.Context) {
 
 	go func() {
 		defer close(done)
-		ticker := time.NewTicker(100 * time.Millisecond)
+		ticker := time.NewTicker(clientMonitorInterval)
 		defer ticker.Stop()
 
 		for {
@@ -142,18 +180,7 @@ func (s *Session) startClientMonitor() (*clientMonitor, context.Context) {
 				return
 			case <-ticker.C:
 				if probe.IsDisconnected() {
-					pgproxy.Logger().Info("client disconnection detected", "session_id", s.pid)
-					_ = pgproxy.Metrics().Count("pg_proxy.sessions.client_disconnected", 1, s.obsVals.metricTags, 1)
-
-					s.clientDisconnected.Store(true)
-					cancel(ErrClientDisconnected) // abort a pending AcquireConnection with an identifiable cause
-
-					s.linkMu.Lock()
-					link := s.link
-					s.linkMu.Unlock()
-					if link != nil {
-						s.forceCloseBackendOnClientDisconnect(link)
-					}
+					s.handleClientDisconnect(cancel)
 					return
 				}
 			}
@@ -167,4 +194,89 @@ func (s *Session) startClientMonitor() (*clientMonitor, context.Context) {
 func (m *clientMonitor) stop() {
 	m.cancel(nil)
 	<-m.done
+}
+
+// timerMonitor is the client monitor that Config.ClientDisconnectTimer selects.
+// A session creates one and arms it for each checkout. Arming resets a timer
+// rather than starting a goroutine: most checkouts finish well inside
+// clientMonitorInterval, so they cost one timer reset and one stop. A timer that
+// fires runs one poll on its own goroutine and re-arms itself while the checkout
+// is still in flight.
+type timerMonitor struct {
+	s     *Session
+	probe ClientLivenessProbe
+	// ctx is the session's acquire context. A detected disconnect cancels it
+	// with ErrClientDisconnected as the cause, and close cancels it when the
+	// session ends, so one context serves every checkout of the session.
+	ctx    context.Context
+	cancel context.CancelCauseFunc
+
+	// mu serializes poll with startTimerMonitor and stop. Because stop waits for
+	// a poll that is running, the monitor does nothing after stop returns, as
+	// with clientMonitor. Without that wait, a poll could probe the socket after
+	// the listener closed it and report a disconnect that did not occur.
+	mu    sync.Mutex
+	timer *time.Timer
+	// active is true while a checkout is in flight.
+	active bool
+	// disconnected stops further polls once a disconnect has been handled.
+	disconnected bool
+}
+
+func (s *Session) startTimerMonitor() (*timerMonitor, context.Context) {
+	m := s.timerMonitor
+	if m == nil || m.probe != s.livenessProbe {
+		if m != nil {
+			m.close()
+		}
+		// Use Background rather than s.ctx, for the reason given in
+		// startGoroutineMonitor.
+		ctx, cancel := context.WithCancelCause(context.Background())
+		m = &timerMonitor{s: s, probe: s.livenessProbe, ctx: ctx, cancel: cancel}
+		s.timerMonitor = m
+	}
+	if m.probe == nil {
+		return m, m.ctx
+	}
+	m.mu.Lock()
+	m.active = true
+	if m.timer == nil {
+		m.timer = time.AfterFunc(clientMonitorInterval, m.poll)
+	} else {
+		m.timer.Reset(clientMonitorInterval)
+	}
+	m.mu.Unlock()
+	return m, m.ctx
+}
+
+// poll runs on the timer's goroutine.
+func (m *timerMonitor) poll() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if !m.active || m.disconnected {
+		return
+	}
+	if !m.probe.IsDisconnected() {
+		m.timer.Reset(clientMonitorInterval)
+		return
+	}
+	m.disconnected = true
+	m.s.handleClientDisconnect(m.cancel)
+}
+
+// stop disarms polling when the checkout ends. It waits for a poll that is
+// running, which can still handle a disconnect.
+func (m *timerMonitor) stop() {
+	m.mu.Lock()
+	m.active = false
+	if m.timer != nil {
+		m.timer.Stop()
+	}
+	m.mu.Unlock()
+}
+
+// close stops the monitor for good and releases its context.
+func (m *timerMonitor) close() {
+	m.stop()
+	m.cancel(nil)
 }

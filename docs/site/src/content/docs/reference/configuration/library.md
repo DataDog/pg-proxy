@@ -48,7 +48,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `server.RuntimeConfig` field | Purpose |
 | --- | --- |
 | `Inventory` | Required lookup of logical databases and backend state. |
-| `Settings` | `topology.RuntimeConfig`, including `PostgresMessageBufferSize`. |
+| `Settings` | `topology.RuntimeConfig`, including `PostgresMessageBufferSize` and `ClientDisconnectTimer`. |
 | `ParameterStatuses` | Optional callback to update a private copy of backend parameters. The callback must not retain the map. |
 | `SessionExtensions` | Optional hooks and link decoration for each authenticated session. |
 | `RandomInt` | Random-number function used by routing. |
@@ -59,6 +59,8 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 `topology.DefaultPostgresMessageBufferSize` is `10_240`. The `pg-proxy` binary sets it explicitly.
 
 `PostgresMessageBufferSize` controls when buffered replies are flushed to the client. It does not cap incoming message sizes; see [Client-message size limitations](../../limitations/#client-messages-have-no-configured-size-limit).
+
+`ClientDisconnectTimer` selects how each session checks for a client that disconnects during a backend checkout: `false`, the default, starts a goroutine and a ticker for each checkout, and `true` keeps one timer for the session. It is the library form of the `client_disconnect_timer` proxy setting.
 
 ## Logical databases
 
