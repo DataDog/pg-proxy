@@ -42,6 +42,7 @@ The binary does not accept positional arguments.
 | --- | --- |
 | Ready | Logs `proxy ready` with the listener address after all backend pools connect and the listener opens. |
 | `SIGINT` or `SIGTERM` | Stops accepting connections, drains sessions, and closes pools within `proxy.shutdown_grace_period`. See [Graceful shutdown](../../../explanation/graceful-shutdown/). |
+| `SIGHUP` | Not handled: the signal kills the process at once, without draining sessions, unless `SIGHUP` was already ignored at launch, for example under `nohup`. It does not reload the configuration. |
 | Clean shutdown | Exit status `0`. |
 | Invalid flags or configuration, a backend that cannot be reached at startup, or a shutdown that exceeds the grace period | Logs the error and exits with status `1`. |
 

@@ -53,7 +53,7 @@ See [Authentication and TLS](../explanation/authentication/) for authentication 
 
 ## Routing for database migrations
 
-Keep the client-facing database name while changing the PostgreSQL cluster behind it. The configuration can also move eligible reads between read clusters by adjusting their weights. This lets applications keep their connection strings while operators change routing during a migration.
+Keep the client-facing database name while changing the PostgreSQL cluster behind it. The configuration can also move eligible reads between read clusters by adjusting their weights. This lets applications keep their connection strings while operators change routing during a migration. In the `pg-proxy` binary, a routing change needs a restart; applications that embed the library can apply it at runtime.
 
 PG Proxy handles routing; copying data, keeping databases in sync, and deciding when to switch writes require a separate migration process. Main-cluster changes can interrupt active transactions. See the [configuration schema](https://github.com/DataDog/pg-proxy/blob/main/pkg/config/README.md), [Read routing](../explanation/read-routing/), and [Configuration changes and pool replacement](../reference/limitations/#configuration-changes-and-pool-replacement).
 
@@ -61,13 +61,13 @@ PG Proxy handles routing; copying data, keeping databases in sync, and deciding 
 
 Control client-session admission separately from backend pool capacity, with global and per-user caps.
 
-Applications can supply a load-shedding policy to reject new connections or backend work under load.
+Applications that embed the library can supply a load-shedding policy to reject new connections or backend work under load. The `pg-proxy` binary has no load-shedding policy. Apart from the session caps, it closes a new connection, without an error message, when 100 connections are already in TLS negotiation, startup, or authentication.
 
 See [Set connection and session limits](../how-to/set-pool-limits/), [Client connection options](../reference/configuration/client-connections/), and [Go library configuration](../reference/configuration/library/).
 
 ## Traffic mirroring
 
-Replay copies of forwarded messages on a separate database while clients continue using the source. Per-session queues and a shared byte budget limit replay memory. Copies can be dropped when capacity is exhausted; shadow execution does not hold up the client waiting for its results.
+Available only to applications that embed the library; the `pg-proxy` binary does not support it. Replay copies of forwarded messages on a separate database while clients continue using the source. Per-session queues and a shared byte budget limit replay memory. Copies can be dropped when capacity is exhausted; shadow execution does not hold up the client waiting for its results.
 
 Read [Traffic mirroring](../explanation/traffic-mirroring/) for replay behavior, application integration, and limits.
 

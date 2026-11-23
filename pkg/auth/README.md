@@ -11,8 +11,9 @@ stay stable per username and match configured salt lengths and iteration counts.
 Unknown names are never cached.
 
 Applications own TLS, credential loading, and rotation. Set `RequireTLS`,
-`StartupTimeout`, and `AuthenticationMessageLimit` on the server. The standalone
-command uses TLS, 10 seconds, and 16 KiB for password authentication. Established
+`StartupTimeout`, and `AuthenticationMessageLimit` on the server. The `pg-proxy`
+binary uses a 10-second startup timeout and a 16 KiB authentication message limit
+in every mode, and requires TLS for password authentication. Established
 sessions and SQL messages do not inherit startup limits.
 
 The listener rejects empty identities before admission. Applications own
