@@ -49,7 +49,7 @@ func (p *tcpLivenessProbe) IsDisconnected() bool {
 		}}
 		n, err := unix.Poll(fds, 0) // timeout=0: non-blocking
 		if err != nil {
-			if err == syscall.EINTR {
+			if errors.Is(err, syscall.EINTR) {
 				// Signal interrupted the call, not a disconnect.
 				return
 			}

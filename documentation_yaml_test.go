@@ -6,6 +6,7 @@
 package pgproxy
 
 import (
+	"errors"
 	"io"
 	"io/fs"
 	"os"
@@ -74,7 +75,7 @@ func inlineYAMLCollectionLines(text string) ([]int, error) {
 	for {
 		var document yaml.Node
 		if err := decoder.Decode(&document); err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				return lines, nil
 			}
 			return nil, err

@@ -370,7 +370,7 @@ func IsSQLHealthCheckPasswordAuthenticationError(err error) bool {
 func IsSQLHealthCheckRetriable(err error) bool {
 	// A joined connection error can contain several PostgreSQL causes. Any
 	// non-retriable cause must stop retries, regardless of its position.
-	switch wrapped := err.(type) {
+	switch wrapped := err.(type) { //nolint:errorlint // manual walk peels wrappers; the leaf check uses errors.As
 	case interface{ Unwrap() []error }:
 		for _, cause := range wrapped.Unwrap() {
 			if !IsSQLHealthCheckRetriable(cause) {

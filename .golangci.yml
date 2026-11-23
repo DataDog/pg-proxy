@@ -1,0 +1,27 @@
+# Unless explicitly stated otherwise all files in this repository are licensed
+# under the Apache-2.0 License.
+# This product includes software developed at Datadog (https://www.datadoghq.com/)
+# Copyright 2026-Present Datadog, Inc.
+
+# errorlint flags:
+#   - fmt.Errorf formatting an error with %v/%s/%q where %w keeps the chain
+#     inspectable (the bug class fixed in #86, #93, and #94)
+#   - err == sentinel comparisons that must use errors.Is
+#   - err.(*T) assertions that must use errors.As
+#
+# Wrapping with %w makes the cause part of the API. If a cause is hidden on
+# purpose (for example, so pgproto3 types do not leak from pkg/*), mark the
+# line with:
+#   //nolint:errorlint // <reason>
+# rather than reverting to %v.
+#
+# Linters are enabled deliberately and narrowly rather than sweeping in the
+# defaults, so new findings trace to a conscious decision. When adding a
+# linter, fix its findings in the same change.
+
+version: "2"
+
+linters:
+  default: none
+  enable:
+    - errorlint

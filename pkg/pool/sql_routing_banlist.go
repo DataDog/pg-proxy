@@ -104,7 +104,7 @@ func (b sqlRoutingBanlist) update(
 func isPostgresShutdownError(err error) bool {
 	// A connection failure may join several PostgreSQL errors. Any qualifying
 	// shutdown cause must win, regardless of its position in the error tree.
-	switch wrapped := err.(type) {
+	switch wrapped := err.(type) { //nolint:errorlint // manual walk peels wrappers; the leaf check below uses errors.As
 	case interface{ Unwrap() []error }:
 		for _, cause := range wrapped.Unwrap() {
 			if isPostgresShutdownError(cause) {

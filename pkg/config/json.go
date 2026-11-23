@@ -65,7 +65,7 @@ func readStrict[T any](r io.Reader, format string, newDecoder func(io.Reader) de
 	if err := d.Decode(&cfg); err != nil {
 		return zero, configurationError(data, format, err, reflect.TypeFor[T]())
 	}
-	if err := d.Decode(new(any)); err != io.EOF {
+	if err := d.Decode(new(any)); !errors.Is(err, io.EOF) {
 		return zero, errors.New("expected one configuration document")
 	}
 	return cfg, nil
