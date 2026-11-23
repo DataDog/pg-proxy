@@ -92,12 +92,7 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 			}
 			address = net.JoinHostPort("127.0.0.1", port)
 		}
-		// Aggregate distributions, histograms, and timings in the client, as the
-		// client already does for counts and gauges. At each flush, the client
-		// sends every metric context once with all of its samples, instead of one
-		// message for each sample, and it keeps every sample. This needs Datadog
-		// Agent 7.25.0 or later. StatsdOptions apply after this default, so a
-		// caller can change it.
+		// Needs Datadog Agent 7.25.0 or later. StatsdOptions can override it.
 		options := []statsd.Option{statsd.WithExtendedClientSideAggregation()}
 		if os.Getenv("DD_SERVICE") == "" {
 			options = append(options, statsd.WithTags([]string{"service:" + service}))

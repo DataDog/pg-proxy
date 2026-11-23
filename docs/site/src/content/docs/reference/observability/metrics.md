@@ -103,9 +103,9 @@ These are selected measurements, not an exhaustive count of all lost replay work
 Use `-telemetry datadog` for native DogStatsD export. The public StatsD client
 implements `MetricsClient` directly, preserving distributions, timing units,
 and sampling. `pkg/datadog.Start` can create it or reuse a supplied client.
-A client that `Start` creates also aggregates distributions and timings: at each
-flush, every 2 seconds by default, it sends each metric context once with all of
-its samples, instead of one message for each sample.
+When `Start` creates the client, it turns on client-side aggregation for
+distributions and timings. At each flush, every 2 seconds by default, the client
+sends each metric context once with all of its samples.
 
 Set `OTEL_METRICS_EXPORTER=otlp` to enable OTLP/HTTP metric export in the `pg-proxy`
 binary. `OTEL_METRIC_EXPORT_INTERVAL` controls the interval in milliseconds
