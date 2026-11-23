@@ -29,44 +29,39 @@ import (
 // the link checkout, the release reset, and the pool round trip, but not the
 // client liveness monitor or a backend adapter's own metric tags.
 
-// backendConn is the scripted Postgres: a fakepg server with no responder, so each
-// cycle queues Postgres's replies in advance. It sorts its writes into forwarded
-// flushes and the release reset.
+// backendConn is the scripted Postgres: a fakepg server whose responder only
+// counts, so each cycle queues Postgres's replies in advance. Every write outside
+// the release reset is a flush of forwarded messages; the pool's Terminate comes
+// only at cleanup, after the counts are read.
 type backendConn struct {
 	*fakepg.Conn
-	counting   bool // set once the startup handshake is done
 	inReset    bool // set by resetTracer while the release reset runs
-	flushes    int  // writes of forwarded messages
-	resets     int  // writes of the release reset
+	resets     int  // release reset queries, each one write
 	statements int  // forwarded simple Query and Execute messages
 }
 
-func (c *backendConn) Write(p []byte) (int, error) {
-	n, err := c.Conn.Write(p) // also rejects a write that ends inside a message
+func newBackendConn() *backendConn {
+	c := &backendConn{}
+	c.Conn = fakepg.NewServer(c.count)
+	return c
+}
+
+// count sees each message written after the startup handshake.
+func (c *backendConn) count(msg []byte) []byte {
 	switch {
-	case err != nil || !c.counting:
-		return n, err
 	case c.inReset:
 		c.resets++
-		return n, nil
+	case msg[0] == 'Q' || msg[0] == 'E':
+		c.statements++
 	}
-	statements := 0
-	for msg := p; len(msg) > 0; msg = msg[fakepg.MessageSize(msg):] {
-		switch msg[0] {
-		case 'X': // Terminate, sent when the pool closes the connection
-			return n, nil
-		case 'Q', 'E':
-			statements++
-		}
-	}
-	c.flushes++
-	c.statements += statements
-	return n, nil
+	return nil
 }
+
+func (c *backendConn) flushes() int { return c.Writes() - c.resets }
 
 func (c *backendConn) resetCounts() {
 	c.ResetWrites()
-	c.flushes, c.resets, c.statements = 0, 0, 0
+	c.resets, c.statements = 0, 0
 }
 
 // resetTracer marks the scripted Postgres's writes during a pgx query as the
@@ -109,7 +104,7 @@ type cycleHarness struct {
 // without one, it also resets the session authorization and role.
 func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 	tb.Helper()
-	h := &cycleHarness{postgres: &backendConn{Conn: fakepg.NewServer(nil)}}
+	h := &cycleHarness{postgres: newBackendConn()}
 	reset := &pgproto3.CommandComplete{CommandTag: []byte("RESET")}
 	// RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL
 	resetReplies := []pgproto3.BackendMessage{reset, reset, reset, cycleReadyForQuery()}
@@ -133,7 +128,7 @@ func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 		}
 		return backendLink, nil
 	}}
-	h.pool = fakepg.NewPool(tb, h.postgres, func(config *pgxpool.Config) {
+	h.pool = fakepg.NewPool(tb, h.postgres.Conn, func(config *pgxpool.Config) {
 		config.ConnConfig.Tracer = resetTracer{h.postgres}
 	})
 
@@ -142,7 +137,6 @@ func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 	require.NoError(tb, err)
 	conn.Release()
 	require.Zero(tb, h.postgres.Pending(), "startup handshake left bytes unread")
-	h.postgres.counting = true
 	h.postgres.resetCounts()
 	return h
 }
@@ -212,7 +206,7 @@ func (h *cycleHarness) resetCounts(client *cycleClient) {
 
 func (h *cycleHarness) counts(client *cycleClient) cycleCounts {
 	return cycleCounts{
-		backendWrites: h.postgres.Writes(), backendFlushes: h.postgres.flushes, backendStatements: h.postgres.statements,
+		backendWrites: h.postgres.Writes(), backendFlushes: h.postgres.flushes(), backendStatements: h.postgres.statements,
 		releaseResets: h.postgres.resets, clientWrites: client.conn.Writes(), checkouts: int(h.backend.acquisitions.Load()),
 		roleSets: h.role.sets, roleResets: h.role.resets,
 	}

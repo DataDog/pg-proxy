@@ -84,8 +84,8 @@ func TestQueueLeavesScriptIntact(t *testing.T) {
 	server.Queue(script)
 	_, err := server.Write(Encode[pgproto3.FrontendMessage](t, &pgproto3.Sync{}))
 	require.NoError(t, err)
-	require.Equal(t, want, script[:len(want)])
-	require.Equal(t, want, script[:cap(script)][:len(want)], "the spare capacity behind the script is untouched")
+	require.Equal(t, want, script)
+	require.Equal(t, make([]byte, cap(script)-len(script)), script[len(script):cap(script)], "the spare capacity behind the script is untouched")
 	require.Equal(t, len(want)+len(synced), server.Pending())
 }
 
@@ -120,4 +120,11 @@ func TestCloseWakesAWaitingRead(t *testing.T) {
 	time.Sleep(20 * time.Millisecond)
 	require.NoError(t, server.Close())
 	require.ErrorIs(t, <-got, io.EOF)
+}
+
+// A client end has no background reader to wait for, so a Read past its script
+// fails at once.
+func TestClientReadPastScriptFails(t *testing.T) {
+	_, err := (&Conn{}).Read(make([]byte, 8))
+	require.ErrorIs(t, err, ErrExhausted)
 }

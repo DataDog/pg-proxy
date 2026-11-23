@@ -147,10 +147,8 @@ func TestReleaseNonIdleCountsDestroyedConnection(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			sessionLinkTags := make([]string, 2, 4)
 			copy(sessionLinkTags, []string{"session:test-session", "database_cluster:test-cluster"})
-			conn := newSessionLinkTestPoolConn(t)
 			link := &SessionLink{
-				conn:                       conn,
-				connState:                  setUpConnMetaData(conn),
+				conn:                       newSessionLinkTestPoolConn(t),
 				txStatus:                   query.Idle,
 				readyForQuery:              true,
 				namedPreparedStmtThreshold: 0,
@@ -236,10 +234,8 @@ func TestReleaseNonIdleDestroysBeforeRoleReset(t *testing.T) {
 	restore := pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics})
 	t.Cleanup(restore)
 
-	conn := newSessionLinkTestPoolConn(t)
 	link := &SessionLink{
-		conn:                       conn,
-		connState:                  setUpConnMetaData(conn),
+		conn:                       newSessionLinkTestPoolConn(t),
 		txStatus:                   query.Idle,
 		readyForQuery:              false, // mid-COPY or an extended batch that ended in Flush
 		namedPreparedStmtThreshold: 0,
@@ -378,6 +374,7 @@ func newSessionLinkTestPoolConnServingVersion(t *testing.T, serverVersion string
 	server.ServerVersion = serverVersion
 	conn, err := fakepg.NewPool(t, server).Acquire(context.Background())
 	require.NoError(t, err)
+	t.Cleanup(conn.Release) // a no-op once the test releases it; keeps a failure from hanging the pool's cleanup
 	return conn
 }
 

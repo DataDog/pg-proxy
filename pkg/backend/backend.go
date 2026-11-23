@@ -46,10 +46,20 @@ var parameterStatusKeys = []string{
 // Returning nil disables role management for that checkout.
 type RoleSessionFactory func(roleName string) link.RoleSession
 
-// LinkFactory wraps an acquired connection as a session link. On error a custom
-// factory still owns conn and must close or release it, for example with
-// link.DiscardConn. Acquire discards it only for the default factory, link.New.
+// LinkFactory wraps an acquired connection as a session link. On error the factory
+// still owns conn and must close or release it, for example with link.DiscardConn,
+// as the default factory does.
 type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
+
+// newLinkOrDiscard is the default LinkFactory. It wraps conn with link.New and, if
+// that fails, discards conn, which link.New leaves to its caller.
+func newLinkOrDiscard(conn *pgxpool.Conn, opts link.Options) (link.Link, error) {
+	l, err := link.New(conn, opts)
+	if err != nil {
+		link.DiscardConn(conn)
+	}
+	return l, err
+}
 
 // LinkDecorator wraps a link after checkout with the pool that supplied the
 // connection. Callers that later need another connection to the same backend
@@ -90,12 +100,9 @@ type Runtime struct {
 	loadShedder         session.LoadShedder
 	roleSessionFactory  RoleSessionFactory
 	linkFactory         LinkFactory
-	// discardOnLinkError is set for the default factory, link.New, which leaves conn
-	// to its caller on error. A custom factory owns its conn on error.
-	discardOnLinkError bool
-	linkDecorator      LinkDecorator
-	primaryReset       link.ResetPolicy
-	replicaResets      []link.ResetPolicy
+	linkDecorator       LinkDecorator
+	primaryReset        link.ResetPolicy
+	replicaResets       []link.ResetPolicy
 }
 
 var _ session.Backend = (*Runtime)(nil)
@@ -116,7 +123,7 @@ func New(cfg Config) *Runtime {
 	}
 	linkFactory := cfg.LinkFactory
 	if linkFactory == nil {
-		linkFactory = link.New
+		linkFactory = newLinkOrDiscard
 	}
 	return &Runtime{
 		selector: &PoolSelector{
@@ -133,7 +140,6 @@ func New(cfg Config) *Runtime {
 		loadShedder:         loadShedder,
 		roleSessionFactory:  cfg.RoleSessionFactory,
 		linkFactory:         linkFactory,
-		discardOnLinkError:  cfg.LinkFactory == nil,
 		linkDecorator:       cfg.LinkDecorator,
 		primaryReset:        cfg.PrimaryReset,
 		replicaResets:       append([]link.ResetPolicy(nil), cfg.ReplicaResets...),
@@ -223,9 +229,6 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	}
 	backendLink, err := r.linkFactory(conn, opts)
 	if err != nil {
-		if r.discardOnLinkError {
-			link.DiscardConn(conn)
-		}
 		return nil, err
 	}
 	if r.linkDecorator != nil && request.DecorateLink {

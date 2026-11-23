@@ -285,58 +285,47 @@ func (failingRole) Set(context.Context, *pgxpool.Conn, []string) (string, error)
 	return "", errors.New("permission denied to set role")
 }
 
-// When the default factory, link.New, fails, no link holds the conn, so Acquire must
-// destroy it: released alone it would return to the pool in an unknown state, and kept
-// it would hold a pool slot forever. A custom factory owns its conn on error, so
-// Acquire must leave it alone, including one the factory has already released.
-func TestAcquireDiscardsConnOnlyForDefaultFactory(t *testing.T) {
-	sentinel := errors.New("link factory sentinel")
-	for _, tc := range []struct {
-		name          string
-		factory       LinkFactory // nil = link.New
-		role          link.RoleSession
-		wantDestroyed bool
-	}{
-		{name: "default factory, role set fails", role: failingRole{}, wantDestroyed: true},
-		{name: "custom factory releases its conn", factory: func(conn *pgxpool.Conn, _ link.Options) (link.Link, error) {
+// When link.New fails, no link holds the conn, so the default factory must destroy
+// it: released alone it would return to the pool in an unknown state, and kept it
+// would hold a pool slot forever. A custom factory owns its conn on error, so Acquire
+// must leave it alone, including one the factory has already released.
+func TestLinkFactoryOwnsConnOnError(t *testing.T) {
+	// acquire runs one Acquire against a single-conn fake Postgres and returns its
+	// pool and Acquire's error.
+	acquire := func(t *testing.T, cfg Config) (*pgxpool.Pool, error) {
+		pgPool := fakepg.NewPool(t, fakepg.NewServer(fakepg.Answer))
+		var acquired *pgxpool.Conn
+		t.Cleanup(func() {
+			if acquired != nil {
+				acquired.Release() // a no-op once released; keeps a leak from hanging the pool's cleanup
+			}
+		})
+		cfg.ClusterName, cfg.PrimaryDatabaseName = "cluster-a", "primary-a"
+		cfg.Primary = &fakePool{acquire: func(ctx context.Context) (*pgxpool.Conn, error) {
+			conn, err := pgPool.Acquire(ctx)
+			acquired = conn
+			return conn, err
+		}}
+		_, err := New(cfg).Acquire(context.Background(), session.LinkRequest{PassthroughRoleName: "app_user"})
+		require.Error(t, err)
+		return pgPool, err
+	}
+
+	t.Run("default factory destroys the conn", func(t *testing.T) {
+		pgPool, _ := acquire(t, Config{RoleSessionFactory: func(string) link.RoleSession { return failingRole{} }})
+		// pgxpool destroys a closed conn in the background, so wait for it to go.
+		require.Eventually(t, func() bool { return pgPool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
+			"the conn must be destroyed: not left checked out, and not pooled in an unknown state")
+	})
+	t.Run("custom factory releases its conn", func(t *testing.T) {
+		sentinel := errors.New("link factory sentinel")
+		pgPool, err := acquire(t, Config{LinkFactory: func(conn *pgxpool.Conn, _ link.Options) (link.Link, error) {
 			conn.Release()
 			return nil, sentinel
-		}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			pgPool := fakepg.NewPool(t, fakepg.NewServer(fakepg.Answer))
-			var acquired *pgxpool.Conn
-			t.Cleanup(func() {
-				if acquired != nil {
-					acquired.Release() // a no-op once released; keeps a leak from hanging the pool's cleanup
-				}
-			})
-			cfg := Config{
-				ClusterName:         "cluster-a",
-				PrimaryDatabaseName: "primary-a",
-				Primary: &fakePool{acquire: func(ctx context.Context) (*pgxpool.Conn, error) {
-					conn, err := pgPool.Acquire(ctx)
-					acquired = conn
-					return conn, err
-				}},
-				LinkFactory: tc.factory,
-			}
-			if tc.role != nil {
-				cfg.RoleSessionFactory = func(string) link.RoleSession { return tc.role }
-			}
-
-			_, err := New(cfg).Acquire(context.Background(), session.LinkRequest{PassthroughRoleName: "app_user"})
-			require.Error(t, err)
-			if !tc.wantDestroyed {
-				require.ErrorIs(t, err, sentinel)
-				require.Equal(t, int32(1), pgPool.Stat().IdleConns(), "a custom factory's released conn stays pooled")
-				return
-			}
-			// pgxpool destroys a closed conn in the background, so wait for it to go.
-			require.Eventually(t, func() bool { return pgPool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
-				"the conn must be destroyed: not left checked out, and not pooled in an unknown state")
-		})
-	}
+		}})
+		require.ErrorIs(t, err, sentinel)
+		require.Equal(t, int32(1), pgPool.Stat().IdleConns(), "a custom factory's released conn stays pooled")
+	})
 }
 
 func TestAcquireBuildsLinkWithInjectedDependencies(t *testing.T) {

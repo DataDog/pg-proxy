@@ -39,9 +39,9 @@ const DefaultReplyWait = 5 * time.Second
 const describedWrite = 4 << 10
 
 var (
-	// ErrExhausted is returned by a Read that found nothing queued within ReplyWait.
-	// A server Conn's error also names the messages of the last write, which got no
-	// reply.
+	// ErrExhausted is returned by a Read that finds nothing queued: at once on a
+	// client Conn, after ReplyWait on a server Conn. A server Conn's error also
+	// names the messages of the last write, which got no reply.
 	ErrExhausted = errors.New("fakepg: read with no reply queued")
 	// ErrPartialMessage is returned by a server Write that ends inside a message.
 	ErrPartialMessage = errors.New("fakepg: a write ends inside a message")
@@ -50,14 +50,15 @@ var (
 // Conn is an in-memory net.Conn. The zero value is a client end: it returns queued
 // bytes and counts writes. NewServer returns the Postgres end.
 type Conn struct {
-	// ReplyWait bounds how long a Read with nothing queued waits for bytes. Set it
-	// before first use; 0 means DefaultReplyWait.
+	// ReplyWait bounds how long a server Read with nothing queued waits for bytes.
+	// Set it before first use; 0 means DefaultReplyWait. A client Read with nothing
+	// queued fails at once.
 	//
 	// A Read normally finds its reply queued, since the Write that asked for it has
 	// already returned. But pgx starts a background reader when a write takes over
 	// 15 ms, as on a loaded machine, and that reader can call Read before the Write
 	// it awaits, or hold a Read open after the reply until the next request. Failing
-	// that Read would break the conn, so a Read waits instead.
+	// that Read would break the conn, so a server Read waits instead.
 	ReplyWait time.Duration
 	// ServerVersion, if set before first use, is reported to the client as the
 	// server_version parameter in the startup handshake.
@@ -67,6 +68,7 @@ type Conn struct {
 	mu        sync.Mutex
 	ready     sync.Cond // broadcast when bytes are queued or the Conn closes
 	in        []byte    // bytes the next Reads return
+	joined    []byte    // reused to join queued bytes, so no caller's slice is written
 	readFrame int       // bytes left in the message the last Read started
 	writes    int
 	server    bool
@@ -85,9 +87,9 @@ func NewServer(respond func(msg []byte) []byte) *Conn {
 	return &Conn{server: true, respond: respond}
 }
 
-// MessageSize returns the size of the message b starts with, or 0 if b is shorter
+// messageSize returns the size of the message b starts with, or 0 if b is shorter
 // than a message header.
-func MessageSize(b []byte) int {
+func messageSize(b []byte) int {
 	if len(b) < 5 {
 		return 0
 	}
@@ -104,13 +106,12 @@ func (c *Conn) Queue(b []byte) {
 
 func (c *Conn) queue(b []byte) {
 	if len(c.in) == 0 {
-		c.in = b[:len(b):len(b)] // a later append copies rather than writing into b
+		c.in = b
 	} else {
-		c.in = append(c.in, b...)
+		c.joined = append(append(c.joined[:0], c.in...), b...)
+		c.in = c.joined
 	}
-	if c.ready.L != nil {
-		c.ready.Broadcast()
-	}
+	c.ready.Broadcast()
 }
 
 // waitLocked waits, with mu held, until bytes are queued, the Conn closes, or
@@ -173,7 +174,7 @@ func (c *Conn) Err() error {
 func (c *Conn) Read(p []byte) (int, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.in) == 0 && !c.closed {
+	if len(c.in) == 0 && !c.closed && c.server {
 		c.waitLocked()
 	}
 	switch {
@@ -190,7 +191,7 @@ func (c *Conn) Read(p []byte) (int, error) {
 		return 0, err
 	}
 	if c.readFrame == 0 {
-		c.readFrame = MessageSize(c.in)
+		c.readFrame = messageSize(c.in)
 		if c.readFrame == 0 || c.readFrame > len(c.in) {
 			c.readFrame = len(c.in)
 		}
@@ -219,7 +220,7 @@ func (c *Conn) Write(p []byte) (int, error) {
 	}
 	c.lastWrite = append(c.lastWrite[:0], p[:min(len(p), describedWrite)]...)
 	for msg := p; len(msg) > 0; {
-		size := MessageSize(msg)
+		size := messageSize(msg)
 		if size == 0 || size > len(msg) {
 			return 0, ErrPartialMessage
 		}
@@ -238,9 +239,7 @@ func (c *Conn) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closed = true
-	if c.ready.L != nil {
-		c.ready.Broadcast()
-	}
+	c.ready.Broadcast()
 	return nil
 }
 
@@ -279,7 +278,7 @@ func Decode(msg []byte) (pgproto3.FrontendMessage, error) {
 func frontendMessages(b []byte) string {
 	var msgs []string
 	for len(b) > 0 {
-		if size := MessageSize(b); size > 0 && size <= len(b) {
+		if size := messageSize(b); size > 0 && size <= len(b) {
 			if msg, err := Decode(b[:size]); err == nil {
 				msgs = append(msgs, fmt.Sprintf("%#v", msg))
 				b = b[size:]
@@ -344,13 +343,12 @@ func Answer(msg []byte) []byte {
 	return nil // Flush and Terminate get no reply
 }
 
-// NewPool returns a pool of at most one connection, to server, usually a Conn from
-// NewServer or a type that wraps one. A second dial
-// fails, so a test whose conn is destroyed cannot silently get a fresh one.
-// configure, if set, adjusts the pool config first, for example to add a tracer.
-// The pool closes at cleanup, and Close waits for acquired conns, so a test must
-// release them in cleanups registered after NewPool.
-func NewPool(tb testing.TB, server net.Conn, configure ...func(*pgxpool.Config)) *pgxpool.Pool {
+// NewPool returns a pool of at most one connection, to server, a Conn from
+// NewServer. A second dial fails, so a test whose conn is destroyed cannot silently
+// get a fresh one. configure, if set, adjusts the pool config first, for example to
+// add a tracer. The pool closes at cleanup, and Close waits for acquired conns, so a
+// test must release them in cleanups registered after NewPool.
+func NewPool(tb testing.TB, server *Conn, configure ...func(*pgxpool.Config)) *pgxpool.Pool {
 	tb.Helper()
 	config, err := pgxpool.ParseConfig("postgres://app_user@127.0.0.1/app_db?sslmode=disable")
 	if err != nil {
