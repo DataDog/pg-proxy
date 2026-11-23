@@ -95,15 +95,15 @@ func verifyLiveRemaps(t *testing.T, adminURL string, admin *pgx.Conn) {
 	running := make(chan error, 1)
 	go func() { running <- proxy.Run() }()
 	t.Cleanup(func() {
-		require.NoError(t, proxy.Close())
-		require.NoError(t, <-running)
-		// Drain sessions before the backends close their pools.
-		drained := make(chan struct{})
-		go func() { runtime.Sessions().Wait(); close(drained) }()
+		// Cancelling the context closes the listener. Calling proxy.Close as well
+		// would race that close and can fail with net.ErrClosed. Run returns once
+		// the sessions finish, so the backends close their pools after it.
+		cancel()
 		select {
-		case <-drained:
+		case err := <-running:
+			require.NoError(t, err)
 		case <-time.After(10 * time.Second):
-			t.Error("sessions did not finish")
+			t.Error("proxy did not stop")
 		}
 	})
 
