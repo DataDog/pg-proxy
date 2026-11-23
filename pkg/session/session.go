@@ -282,14 +282,17 @@ type Hooks struct {
 	BackendMessage       func(pgproto3.BackendMessage)
 	ClientFlushSucceeded func()
 	Closed               func()
-	// BackendChanged and ReadStatesChanged report (current, pending) on the Remap*
-	// caller's goroutine when a remap is queued, and (applied, nil) on the session
-	// goroutine when it applies. A queued report's pending is never nil, so nil marks
-	// the applied report: RemapReadStates(nil) reports an empty slice, and
-	// RemapBackend(nil), which cancels a queued backend, reports the current one.
-	// One session's reports never overlap and arrive in that order. They must not
-	// call RemapBackend or RemapReadStates. Reports on the caller's goroutine may
-	// call Backend and PendingBackend, but not CurrentLink.
+	// BackendChanged and ReadStatesChanged report remaps:
+	//   - Queued: (current, pending) on the Remap* caller's goroutine. pending is
+	//     never nil: RemapReadStates(nil) reports an empty slice, and
+	//     RemapBackend(nil), which cancels a queued backend, reports the current one.
+	//   - Applied: (applied, nil) on the session goroutine, at a message boundary.
+	//   - Order: one session's reports never overlap and arrive in the order the
+	//     remaps take effect. Each report holds a lock the other goroutine needs, so
+	//     keep reports fast.
+	//   - Calls: reports must not call RemapBackend or RemapReadStates. Reports on
+	//     the caller's goroutine may call Backend and PendingBackend, but not
+	//     CurrentLink.
 	BackendChanged    func(current Backend, pending Backend)
 	ReadStatesChanged func(current []ReadStateConfig, pending []ReadStateConfig)
 	DiscardChanged    func(bool)
@@ -885,7 +888,7 @@ func (s *Session) drain() error {
 }
 
 // handleStateRemapping applies any pending warden config updates queued via
-// RemapReadStates / RemapState before the next client message. The read-cluster
+// RemapReadStates / RemapBackend before the next client message. The read-cluster
 // remap is link-safe (only affects future acquisitions). A primary-cluster
 // remap with a busy link force-releases the link (aborting any open tx) and
 // sends the client a fresh ReadyForQuery; returns true in that case to signal

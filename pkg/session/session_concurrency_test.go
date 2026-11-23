@@ -26,11 +26,14 @@ func newConcurrencyTestSession(hooks Hooks) *Session {
 		func(cfg *Config) { cfg.Hooks = hooks })
 }
 
-// checkOutAndIn sets and clears the session's link, as a checkout does.
-func checkOutAndIn(s *Session, backendLink link.Link) {
+// checkOut and checkIn set and clear the session's link, as a checkout does.
+func checkOut(s *Session, backendLink link.Link) {
 	s.linkMu.Lock()
 	s.setLink(backendLink)
 	s.linkMu.Unlock()
+}
+
+func checkIn(s *Session) {
 	s.linkMu.Lock()
 	s.setLink(nil)
 	s.linkMu.Unlock()
@@ -59,7 +62,8 @@ func runConcurrently(session, host func()) {
 // Hooks may read the session back through its getters while another goroutine
 // queues remaps: all of them on the session goroutine, and Backend and
 // PendingBackend in the pending reports on the Remap* caller's goroutine. Nil
-// remaps must not look like applied reports.
+// remaps must not look like applied reports. Remaps apply while a link is held, so
+// a backend remap also tears the link down.
 func TestHooksCanCallGetters(t *testing.T) {
 	var s *Session
 	readBack := func(onSessionGoroutine bool) {
@@ -82,8 +86,9 @@ func TestHooksCanCallGetters(t *testing.T) {
 		defer close(done)
 		runConcurrently(
 			func() {
+				checkOut(s, backendLink)
 				s.handleStateRemapping()
-				checkOutAndIn(s, backendLink)
+				checkIn(s)
 			},
 			func() {
 				s.RemapBackend(nil)
@@ -136,7 +141,7 @@ func TestCancelConcurrentWithCheckout(t *testing.T) {
 	s := newConcurrencyTestSession(Hooks{})
 	backendLink := &testLink{}
 	runConcurrently(
-		func() { checkOutAndIn(s, backendLink) },
+		func() { checkOut(s, backendLink); checkIn(s) },
 		func() { _ = s.Cancel() },
 	)
 }
