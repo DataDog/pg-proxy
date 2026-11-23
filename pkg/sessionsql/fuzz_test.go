@@ -50,8 +50,7 @@ const cursorOptHold = 0x0020
 // treeFlags applies the scanner's rules to a parse tree: a session-level SET
 // (not LOCAL, not a transaction form), SET SESSION CHARACTERISTICS, DO,
 // EXECUTE, CALL, a WITH HOLD cursor, a call to set_config or set_limit
-// anywhere, and an UPDATE of pg_settings change the session; a call to
-// currval or lastval reads sequence state.
+// anywhere, and an UPDATE of pg_settings change the session.
 func treeFlags(tree *pg_query.ParseResult) Flags {
 	var flags Flags
 	for _, raw := range tree.GetStmts() {
@@ -81,8 +80,6 @@ func treeFlags(tree *pg_query.ParseResult) Flags {
 				switch lastName(x) {
 				case "set_config", "set_limit":
 					flags |= MayChangeSession
-				case "currval", "lastval":
-					flags |= MayReadSequenceState
 				}
 			case *pg_query.UpdateStmt:
 				if x.GetRelation().GetRelname() == "pg_settings" {

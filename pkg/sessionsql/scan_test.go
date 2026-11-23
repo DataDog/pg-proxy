@@ -16,7 +16,6 @@ func TestScan(t *testing.T) {
 	const (
 		clean   = Flags(0)
 		changes = failClosed
-		reads   = MayReadSequenceState
 	)
 	cases := []struct {
 		sql  string
@@ -71,12 +70,7 @@ func TestScan(t *testing.T) {
 		{"SELECT 1 /* unterminated", changes},
 		{`SELECT "unterminated`, changes},
 		{"SELECT $q$ unterminated", changes},
-		{"SELECT currval('s')", reads},
-		{"SELECT pg_catalog.lastval()", reads},
-		{"INSERT INTO t VALUES (nextval('s')) RETURNING CURRVAL('s')", reads},
-		{`SELECT "currval"('s')`, reads},
-		{`SELECT "CurrVal"('s')`, reads},
-		{"SELECT 'currval'", clean},
+		{"SELECT currval('s')", clean},
 		{"SELECT currval('s'); SET work_mem = '1MB'", changes},
 	}
 	for _, c := range cases {
@@ -100,8 +94,7 @@ func TestScanStandardConformingStrings(t *testing.T) {
 
 func TestFlagsHas(t *testing.T) {
 	assert.True(t, failClosed.Has(MayChangeSession))
-	assert.True(t, failClosed.Has(MayChangeSession|MayReadSequenceState))
-	assert.False(t, MayReadSequenceState.Has(MayChangeSession))
+	assert.False(t, Flags(0).Has(MayChangeSession))
 }
 
 func TestScanAllocatesNothing(t *testing.T) {

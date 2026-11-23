@@ -14,17 +14,14 @@ const (
 	// MayChangeSession reports that the text may change session state that
 	// outlives the checkout: a setting, the role, or a held cursor.
 	MayChangeSession Flags = 1 << iota
-	// MayReadSequenceState reports that the text may call currval or lastval,
-	// which read the session's sequence state.
-	MayReadSequenceState
 )
 
 // Has reports whether f includes every flag in x.
 func (f Flags) Has(x Flags) bool { return f&x == x }
 
-// failClosed is the result when scanning stops early: the rest of the text is
-// not read, so it may also read sequence state.
-const failClosed = MayChangeSession | MayReadSequenceState
+// failClosed is the result when scanning stops early, at a session change or at
+// text the scanner cannot lex: the rest of the text is not read.
+const failClosed = MayChangeSession
 
 // Scan follows the Postgres scanner closely enough to know where comments,
 // literals and quoted identifiers start and end, and judges each statement by
@@ -42,16 +39,13 @@ const failClosed = MayChangeSession | MayReadSequenceState
 //   - The identifiers set_config, set_limit and pg_settings anywhere, in any
 //     case or quoted, may change the session, and so may any U&"..."
 //     identifier, whose spelling the scanner does not decode.
-//   - The identifiers currval and lastval anywhere may read sequence state.
 //   - Anything unterminated (a comment, literal, quoted identifier or dollar
 //     quote) may change the session: the scanner cannot tell where it ends.
 //
 // RESET and DISCARD never count: they can only return a session to its
-// baseline. Scan stops at the first sign of a session change and then also
-// reports MayReadSequenceState, because it did not read the rest.
+// baseline. Scan stops at the first sign of a session change.
 func Scan(sql string, scsOn bool) Flags {
 	n := len(sql)
-	var flags Flags
 	state := stStart
 	for i := 0; i < n; {
 		if state == stBody {
@@ -124,7 +118,6 @@ func Scan(sql string, scsOn bool) Flags {
 				// SET "search_path" = ...
 				return failClosed
 			}
-			flags |= bodyWordFlags(name) & MayReadSequenceState
 			state = stBody
 			i = j
 		case clsDollar:
@@ -145,14 +138,10 @@ func Scan(sql string, scsOn bool) Flags {
 				j++
 			}
 			if state == stBody && j-i > 1 {
-				// Past the first words only setter names, EXECUTE, currval
-				// and lastval matter, and their lengths are 7, 9, 10 and 11.
-				if l := j - i; l >= 7 && l <= 11 && l != 8 {
-					f := bodyWordFlags(sql[i:j])
-					if f == MayChangeSession {
-						return failClosed
-					}
-					flags |= f
+				// Past the first words only setter names and EXECUTE matter,
+				// and their lengths are 7, 9, 10 and 11.
+				if l := j - i; l >= 7 && l <= 11 && l != 8 && bodyWordChangesSession(sql[i:j]) {
+					return failClosed
 				}
 				i = j
 				continue
@@ -247,7 +236,7 @@ func Scan(sql string, scsOn bool) Flags {
 	if afterSet(state) {
 		return failClosed
 	}
-	return flags
+	return 0
 }
 
 // ScanEither returns the flags of sql under either value of
@@ -260,7 +249,7 @@ func ScanEither(sql string) Flags {
 	if flags == failClosed || strings.IndexByte(sql, '\\') < 0 {
 		return flags
 	}
-	return flags | Scan(sql, false)
+	return Scan(sql, false)
 }
 
 const (
@@ -334,15 +323,9 @@ const (
 	stBody                // past the first words
 )
 
-// bodyWordFlags judges an unquoted word past the start of a statement.
-func bodyWordFlags(w string) Flags {
-	switch {
-	case isSetterName(w) || eqFold(w, "execute"):
-		return MayChangeSession
-	case len(w) == 7 && (eqFold(w, "currval") || eqFold(w, "lastval")):
-		return MayReadSequenceState
-	}
-	return 0
+// bodyWordChangesSession judges an unquoted word past the start of a statement.
+func bodyWordChangesSession(w string) bool {
+	return isSetterName(w) || eqFold(w, "execute")
 }
 
 func leaveStart(state int) int {

@@ -22,8 +22,8 @@ const corpusPath = "testdata/corpus.jsonl.gz"
 
 // corpusCase is one Query or Parse text. Label and Category come from running
 // the text on PostgreSQL 14 and 16 (see the set-detection-bench branch), or
-// from hand labels for categories added since. Changes and Reads are the
-// scanner's recorded verdicts, so any change in behavior shows up as a diff.
+// from hand labels for categories added since. Changes is the scanner's
+// recorded verdict, so any change in behavior shows up as a diff.
 type corpusCase struct {
 	ID string `json:"id"`
 	// SQL may hold several statements.
@@ -37,7 +37,6 @@ type corpusCase struct {
 	// SCSOff marks text written for standard_conforming_strings = off.
 	SCSOff  bool `json:"scs_off,omitempty"`
 	Changes bool `json:"changes"`
-	Reads   bool `json:"reads"`
 }
 
 func loadCorpus(t testing.TB) []corpusCase {
@@ -85,7 +84,7 @@ func TestCorpus(t *testing.T) {
 	var clean, flaggedClean, outOfScope, missedOutOfScope int
 	for i, c := range cases {
 		got := Scan(c.SQL, !c.SCSOff)
-		changes, reads := got.Has(MayChangeSession), got.Has(MayReadSequenceState)
+		changes := got.Has(MayChangeSession)
 		if c.Label == "dirty" {
 			if c.Category == "P9" {
 				outOfScope++
@@ -103,11 +102,10 @@ func TestCorpus(t *testing.T) {
 			}
 		}
 		if *update {
-			cases[i].Changes, cases[i].Reads = changes, reads
+			cases[i].Changes = changes
 			continue
 		}
 		require.Equal(t, c.Changes, changes, "changes verdict moved for %s %q; rerun with -update if intended", c.ID, c.SQL)
-		require.Equal(t, c.Reads, reads, "reads verdict moved for %s %q; rerun with -update if intended", c.ID, c.SQL)
 	}
 	if *update {
 		writeCorpus(t, cases)
