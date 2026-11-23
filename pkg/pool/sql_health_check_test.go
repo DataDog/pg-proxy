@@ -165,7 +165,7 @@ func TestSQLHealthCheckerRetriesAndEventuallySucceeds(t *testing.T) {
 }
 
 func TestSQLHealthCheckerStopsAfterConclusivePostgresError(t *testing.T) {
-	for _, code := range []string{"57P01", sqlHealthCheckCrashShutdown} {
+	for _, code := range []string{sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow} {
 		t.Run(code, func(t *testing.T) {
 			shutdown := &sqlHealthProbeError{
 				stage: SQLHealthCheckAcquireStage,
@@ -243,8 +243,10 @@ func TestRegistrySQLHealthProberReportsPoolLookupFailure(t *testing.T) {
 
 func TestIsSQLHealthCheckRetriable(t *testing.T) {
 	assert.True(t, IsSQLHealthCheckRetriable(errors.New("temporary")))
-	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: "57P01"}))
+	assert.True(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: "57P01"}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCrashShutdown}))
+	assert.False(t, IsSQLHealthCheckRetriable(errors.Join(&pgconn.PgError{Code: "57P01"}, &pgconn.PgError{Code: "57P02"})))
+	assert.False(t, IsSQLHealthCheckRetriable(errors.Join(&pgconn.PgError{Code: "57P02"}, &pgconn.PgError{Code: "57P01"})))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckInvalidPassword}))
 }
@@ -424,5 +426,49 @@ func TestSQLHealthCheckerRecordsEachIPBeforeTheRoundCompletes(t *testing.T) {
 		assert.False(t, outcome.Results[1].CompletedAt.Before(unblockedAt))
 	case <-time.After(time.Second):
 		t.Fatal("round did not complete")
+	}
+}
+
+func TestSQLHealthCheckerRetriesAdministrativeTermination(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		retry  fakeSQLHealthProbeResponse
+		joined bool
+	}{
+		{name: "primary retry succeeds"},
+		{name: "standby retry succeeds", retry: fakeSQLHealthProbeResponse{inRecovery: true}},
+		{name: "retry times out", retry: fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}},
+		{name: "joined shutdown then timeout", retry: fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}, joined: true},
+		{name: "retry reports crash shutdown", retry: fakeSQLHealthProbeResponse{err: &pgconn.PgError{Code: "57P02"}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const ip = "10.0.0.1"
+			shutdown := &sqlHealthProbeError{stage: SQLHealthCheckQueryStage, err: &pgconn.PgError{Code: "57P01"}}
+			var initial error = shutdown
+			if tc.joined {
+				initial = errors.Join(&pgconn.PgError{Code: "XX000"}, shutdown)
+			}
+			prober := &fakeSQLHealthProber{
+				responses: map[string][]fakeSQLHealthProbeResponse{ip: {{err: initial}, tc.retry}},
+				calls:     make(map[string]int),
+			}
+			checker := newTestSQLHealthChecker(t, prober, 2, SQLHealthCheckHooks{})
+			outcome := checker.Check(context.Background(), []string{ip}, func(ip string) string { return ip }, nil, nil, nil)
+			require.Equal(t, 2, prober.callCount(ip))
+			require.Len(t, outcome.Results, 1)
+			result := outcome.Results[0]
+			if tc.retry.err == nil {
+				require.NoError(t, result.Err)
+				assert.Equal(t, tc.retry.inRecovery, result.InRecovery)
+				assert.Equal(t, !tc.retry.inRecovery, result.HealthyPrimary())
+			} else {
+				assert.ErrorIs(t, result.Err, tc.retry.err)
+				assert.ErrorIs(t, result.Err, shutdown, "failed retries must retain administrative shutdown evidence")
+			}
+			bans := make(sqlRoutingBanlist)
+			bans.update([]string{ip}, outcome, SQLHealthResultsSnapshot{ScheduledAt: outcome.StartedAt, ObservedAt: time.Now(), Results: outcome.Results})
+			_, banned := bans[ip]
+			assert.Equal(t, tc.retry.err != nil, banned)
+		})
 	}
 }
