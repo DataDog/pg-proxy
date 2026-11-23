@@ -124,6 +124,11 @@ func (l *mirroringLink) Flush() error {
 	return nil
 }
 
+// UsesSessionMarks reports true whatever the source needs: the shadow's release
+// reads the batch's marks, and its reset mode is not known until the worker
+// acquires it.
+func (l *mirroringLink) UsesSessionMarks() bool { return true }
+
 // MarkSession forwards the marks to the source and keeps them for the batch. The
 // worker sends the shadow the same messages without deciding their actions, so it
 // would otherwise see no marks but the shadow's own ParameterStatus.
@@ -138,14 +143,7 @@ func (l *mirroringLink) MarkSession(marks link.SessionMarks) {
 // admitted data (no data means no link was acquired).
 func (l *mirroringLink) Release() error {
 	if l.batchHasData {
-		marks := l.marks
-		if !l.Link.UsesSessionMarks() {
-			// The session judges nothing for a source that does not use the marks, so
-			// tell a shadow that might skip its reset that the batch may have changed
-			// the session.
-			marks = link.MarkClientSQL
-		}
-		l.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: marks})
+		l.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: l.marks})
 	}
 	return l.Link.Release()
 }

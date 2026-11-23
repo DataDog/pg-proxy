@@ -227,35 +227,26 @@ func TestReleaseByMode(t *testing.T) {
 }
 
 // TestReleaseClearsSkippedReset checks the mark that MayHoldForeignUnnamedStmt
-// reads: a reset in a mode that can skip clears it, and ResetAlways never touches
-// the connection's data.
+// reads: a release that runs the reset discards the unnamed statement, so it
+// clears the mark in every mode.
 func TestReleaseClearsSkippedReset(t *testing.T) {
-	for _, test := range []struct {
-		mode        config.ResetMode
-		wantSkipped bool
-	}{
-		{config.ResetDynamic, false},
-		{config.ResetAlways, true},
-	} {
-		t.Run(string(test.mode), func(t *testing.T) {
+	for _, mode := range []config.ResetMode{config.ResetDynamic, config.ResetAlways} {
+		t.Run(string(mode), func(t *testing.T) {
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: newRecordingMetrics()}))
 			received := make(chan pgproto3.FrontendMessage, 1)
 			conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
 			pgConn := conn.Conn().PgConn()
 			pgConn.CustomData()[customDataResetSkippedKey] = true
-			link, err := New(conn, Options{Reset: mustResetPolicy(t, test.mode)})
+			link, err := New(conn, Options{Reset: mustResetPolicy(t, mode)})
 			require.NoError(t, err)
-			assert.True(t, link.MayHoldForeignUnnamedStmt())
-			link.(*SessionLink).unnamedReplaced = true
-			assert.False(t, link.MayHoldForeignUnnamedStmt(), "a statement this checkout replaced is its own")
-			link.(*SessionLink).unnamedReplaced = false
+			assert.True(t, link.MayHoldForeignUnnamedStmt(), "New reads the mark the last release left")
 			link.MarkSession(MarkClientSQL)
 
 			require.NoError(t, link.Release())
 
 			require.Equal(t, &pgproto3.Query{String: testReset}, <-received)
 			_, skipped := pgConn.CustomData()[customDataResetSkippedKey]
-			assert.Equal(t, test.wantSkipped, skipped)
+			assert.False(t, skipped)
 		})
 	}
 }
@@ -275,8 +266,9 @@ func TestSendTracksUnnamedStmtReplacement(t *testing.T) {
 		{&pgproto3.Describe{ObjectType: 'S'}, false},
 	} {
 		link, _ := newTestSessionLink()
+		link.foreignUnnamed = true
 		link.Send(test.msg, query.NoReply)
-		assert.Equal(t, test.want, link.unnamedReplaced, "%#v", test.msg)
+		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v", test.msg)
 	}
 }
 

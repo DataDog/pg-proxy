@@ -1225,7 +1225,9 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	}
 
 	if s.link.UsesSessionMarks() {
-		s.link.MarkSession(action.SessionMarks(s.pStmtState, s.unnamedStmt))
+		if marks := action.SessionMarks(s.pStmtState, s.unnamedStmt); marks != 0 {
+			s.link.MarkSession(marks)
+		}
 	}
 	s.link.Send(action.ProxyMsgToPg, action.AddReplyExpectation)
 

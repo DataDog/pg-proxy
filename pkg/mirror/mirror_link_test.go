@@ -164,17 +164,9 @@ func TestMirroringLink_ReleaseCarriesSessionMarks(t *testing.T) {
 	assert.Equal(t, link.MarkClientSQL, q.items[2].marks)
 }
 
-// TestMirroringLink_ReleaseFailsClosedForSourceWithoutMarks: the session judges
-// nothing for a source that does not use the marks, so the sentinel tells the
-// shadow the batch may have changed the session.
-func TestMirroringLink_ReleaseFailsClosedForSourceWithoutMarks(t *testing.T) {
-	q := newMirrorQueue(queueCapRoomy, nil)
-	l := newMirroringLink(&fakeShadowLink{ignoreMarks: true}, q, nil)
-
-	l.Send(&pgproto3.Query{String: "SELECT 1"}, query.QueryReply)
-	assert.NoError(t, l.Flush())
-	assert.NoError(t, l.Release())
-
-	require.Equal(t, []mirrorItemType{mirrorMsg, mirrorFlush, mirrorRelease}, queuedTypes(q))
-	assert.Equal(t, link.MarkClientSQL, q.items[2].marks)
+// TestMirroringLink_UsesMarksForTheShadow: the shadow's release reads the batch's
+// marks, so the mirroring link asks for them even when its source does not.
+func TestMirroringLink_UsesMarksForTheShadow(t *testing.T) {
+	l := newMirroringLink(&fakeShadowLink{ignoreMarks: true}, newMirrorQueue(queueCapRoomy, nil), nil)
+	assert.True(t, l.UsesSessionMarks())
 }

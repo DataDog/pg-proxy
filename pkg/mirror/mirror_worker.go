@@ -140,9 +140,7 @@ func (w *mirrorWorker) run() {
 			// Parse, so a definition lost here is lost for the rest of the session.
 			var parsed prepared.PreparedStatement
 			if m, ok := it.msg.(*pgproto3.Parse); ok {
-				// Not scanned: the shadow takes its session marks from the source
-				// checkout, so this verdict only claims the worst.
-				parsed = prepared.CreateJudgedPreparedStatement("", m.Name, m.Query, m.ParameterOIDs, true)
+				parsed = prepared.CreatePreparedStatement("", m.Name, m.Query, m.ParameterOIDs)
 				if parsed.IsProxyNamedPreparedStmt() {
 					cat.put(parsed)
 				}
@@ -174,14 +172,6 @@ func (w *mirrorWorker) run() {
 					recorded = true
 				}
 			case *pgproto3.Bind:
-				if m.PreparedStatement == "" && link.MayHoldForeignUnnamedStmt() {
-					// The shadow connection skipped its last reset and may still hold another
-					// session's unnamed statement, which this Bind would run. A Describe only
-					// returns a description, which the worker discards.
-					w.count("mirror.replay_errors", "op:foreign_unnamed_stmt")
-					skipping = true
-					break
-				}
 				n, rec, admitted := w.reparseIfMissing(link, cat, m.PreparedStatement)
 				if !admitted {
 					skipping = true
@@ -245,7 +235,15 @@ func (w *mirrorWorker) run() {
 // must skip the batch, the same answer a dropped enqueue gives the producer.
 func (w *mirrorWorker) reparseIfMissing(link link.Link, cat *stmtCatalog, name string) (injected int, recorded, admitted bool) {
 	if !prepared.IsNamedPreparedStmt(name) {
-		return 0, false, true // the unnamed statement is re-parsed by the client every time
+		if link.MayHoldForeignUnnamedStmt() {
+			// The shadow connection skipped its last reset and may still hold another
+			// session's unnamed statement, which this Bind or Describe would reach. Drop
+			// it, so the shadow answers as the source did. A Close is a few bytes, so it
+			// is not charged to the budget.
+			link.Send(&pgproto3.Close{ObjectType: 'S'}, query.CloseReply)
+			w.count("mirror.shadow_unnamed_close")
+		}
+		return 0, false, true // otherwise the client re-parses the unnamed statement every time
 	}
 	st, ok := cat.get(name)
 	if !ok {

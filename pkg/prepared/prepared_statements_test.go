@@ -233,10 +233,6 @@ func TestVerdictJudgedOnFirstCall(t *testing.T) {
 	assert.False(t, clean.MayChangeSession())
 	assert.True(t, Judged(clean), "a clean verdict is cached too")
 
-	given := CreateJudgedPreparedStatement("", "", "SELECT 1", nil, true)
-	assert.True(t, Judged(given))
-	assert.True(t, given.MayChangeSession(), "a given verdict is not rescanned")
-
 	queued := createQueuedPreparedStmt(createQueuedPreparedStmt(stmt, true), false)
 	assert.Same(t, stmt, Unwrap(queued), "Unwrap removes every queue wrapper")
 	assert.True(t, Judged(queued))

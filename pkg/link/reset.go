@@ -161,12 +161,6 @@ func (p ResetPolicy) usesMarks() bool {
 	return mode == config.ResetAudit || mode == config.ResetDynamic
 }
 
-// maySkip reports whether a release can skip the reset.
-func (p ResetPolicy) maySkip() bool {
-	mode := p.Mode()
-	return mode == config.ResetDynamic || mode == config.ResetOff
-}
-
 // reports reports whether releases emit the reset metrics. ResetAlways emits
 // none, as before reset_mode existed.
 func (p ResetPolicy) reports() bool { return p.Mode() != config.ResetAlways }
@@ -197,13 +191,28 @@ func (p ResetPolicy) sampleAudit() resetAction {
 // Every mode sends the same statement, so ResetAudit changes nothing a client
 // sees and ResetDynamic differs from ResetAlways only in whether it is sent.
 // Closing held cursors and discarding sequence state (OSQQUERY-823, -826) would
-// change every mode at once.
+// change every mode at once. The slices are shared: callers must not modify them.
 func resetSQL(roleManaged bool) []string {
 	if roleManaged {
-		return []string{"RESET ALL"}
+		return roleResetSQL
 	}
-	return []string{"RESET SESSION AUTHORIZATION", "RESET ROLE", "RESET ALL"}
+	return identityResetSQL
 }
+
+// resetQuery returns resetSQL as the one simple query a plain reset sends.
+func resetQuery(roleManaged bool) string {
+	if roleManaged {
+		return roleResetQuery
+	}
+	return identityResetQuery
+}
+
+var (
+	roleResetSQL       = []string{"RESET ALL"}
+	identityResetSQL   = []string{"RESET SESSION AUTHORIZATION", "RESET ROLE", "RESET ALL"}
+	roleResetQuery     = strings.Join(roleResetSQL, "; ")
+	identityResetQuery = strings.Join(identityResetSQL, "; ")
+)
 
 // Reset reasons, the reason tag of the reset metric.
 const (

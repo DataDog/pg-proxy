@@ -56,9 +56,9 @@ type SessionLink struct {
 	role                       RoleSession
 	reset                      ResetPolicy
 	marks                      SessionMarks // what this checkout may have done to session state
-	// unnamedReplaced: this checkout sent a message that replaces or drops the
-	// connection's unnamed statement, so any one it holds now is this checkout's.
-	unnamedReplaced bool
+	// foreignUnnamed: the connection's last release skipped the reset, and nothing
+	// sent on this link since has replaced or dropped the unnamed statement.
+	foreignUnnamed bool
 }
 
 // MarkSession records what this checkout may have done to session state.
@@ -71,13 +71,7 @@ func (link *SessionLink) UsesSessionMarks() bool { return link.reset.usesMarks()
 // MayHoldForeignUnnamedStmt reports whether the connection's last release skipped
 // the reset, which only ResetDynamic and ResetOff do, and nothing sent on this
 // link since has replaced or dropped the unnamed statement.
-func (link *SessionLink) MayHoldForeignUnnamedStmt() bool {
-	if link.conn == nil || link.unnamedReplaced {
-		return false
-	}
-	_, skipped := link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey]
-	return skipped
-}
+func (link *SessionLink) MayHoldForeignUnnamedStmt() bool { return link.foreignUnnamed }
 
 // Conn returns the pooled Postgres connection associated with this link.
 func (link *SessionLink) Conn() *pgxpool.Conn {
@@ -97,8 +91,8 @@ func (link *SessionLink) SetRoleToken(token string) {
 // Send sends a message to the linked Postgres connection, and optionally (but typically) adds
 // a ReplyExpectation to the queue.
 func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
-	if !link.unnamedReplaced && replacesUnnamedStmt(msg) {
-		link.unnamedReplaced = true
+	if link.foreignUnnamed && ReplacesUnnamedStmt(msg) {
+		link.foreignUnnamed = false
 	}
 	link.pgConn.Send(msg)
 	if expectation != query.NoReply {
@@ -128,14 +122,15 @@ func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
 	return msg, err
 }
 
-// replacesUnnamedStmt reports whether msg replaces or drops the connection's
-// unnamed statement: a Parse or Close of it, or any simple Query.
-func replacesUnnamedStmt(msg pgproto3.FrontendMessage) bool {
+// ReplacesUnnamedStmt reports whether msg replaces or drops the connection's
+// unnamed statement: a Parse or Close of it, or any simple Query. Test doubles of
+// Link use it to track MayHoldForeignUnnamedStmt as SessionLink does.
+func ReplacesUnnamedStmt(msg pgproto3.FrontendMessage) bool {
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
-		return m.Name == ""
+		return !prepared.IsNamedPreparedStmt(m.Name)
 	case *pgproto3.Close:
-		return m.ObjectType == 'S' && m.Name == ""
+		return m.ObjectType == 'S' && !prepared.IsNamedPreparedStmt(m.Name)
 	case *pgproto3.Query:
 		return true
 	}
@@ -289,26 +284,24 @@ func (link *SessionLink) Release() error {
 	// and reports nothing, as before reset_mode existed.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
 		action, reason := link.reset.resetDecision(link.marks)
-		var tags []string
-		if link.reset.reports() {
-			tags = reasonTags(action, reason)
-			outcome := "outcome:reset"
-			if action == resetSkip {
-				outcome = "outcome:skipped"
-			}
-			_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(append([]string{outcome}, tags...)...), 1)
+		reports := link.reset.reports()
+		var start time.Time
+		if reports {
+			start = time.Now()
 		}
+		var err error
 		if action == resetSkip {
 			// The reset is what discards the unnamed statement; without it, the next
 			// checkout's client could run this one's.
 			link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey] = true
-		} else {
-			if err := link.runReset(action, tags); err != nil {
-				return err
-			}
-			if link.reset.maySkip() {
-				delete(link.conn.Conn().PgConn().CustomData(), customDataResetSkippedKey)
-			}
+		} else if err = link.runReset(action); err == nil {
+			delete(link.conn.Conn().PgConn().CustomData(), customDataResetSkippedKey)
+		}
+		if reports {
+			link.reportReset(action, reason, start, err)
+		}
+		if err != nil {
+			return err
 		}
 	}
 
@@ -326,30 +319,38 @@ func (link *SessionLink) Release() error {
 }
 
 // runReset sends the reset query (pgx sends a zero-argument Exec as one simple
-// query). An audited action wraps the reset in the audit check. tags are the
-// decision's reasonTags, nil when the policy reports nothing. A failure closes
+// query). An audited action wraps the reset in the audit check. A failure closes
 // the connection, so nothing it might have left behind reaches the pool.
-func (link *SessionLink) runReset(action resetAction, tags []string) error {
-	reset := resetSQL(link.role != nil)
+func (link *SessionLink) runReset(action resetAction) error {
+	roleManaged := link.role != nil
 	resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	start := time.Now()
 	var err error
 	if action == resetSend {
-		_, err = link.conn.Exec(resetCtx, strings.Join(reset, "; "))
+		_, err = link.conn.Exec(resetCtx, resetQuery(roleManaged))
 	} else {
-		err = link.runAuditedReset(resetCtx, reset, action == resetFullAudited)
+		err = link.runAuditedReset(resetCtx, resetSQL(roleManaged), action == resetFullAudited)
 	}
 	if err != nil {
 		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
 		link.conn.Conn().Close(context.Background())
-		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", strings.Join(reset, "; "), "error", err)
-		return err
+		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetQuery(roleManaged), "error", err)
 	}
-	if link.reset.reports() {
+	return err
+}
+
+// reportReset emits a release's reset count and, for a reset that ran without
+// error, its latency since start.
+func (link *SessionLink) reportReset(action resetAction, reason string, start time.Time, err error) {
+	tags := reasonTags(action, reason)
+	outcome := "outcome:reset"
+	if action == resetSkip {
+		outcome = "outcome:skipped"
+	}
+	_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(append([]string{outcome}, tags...)...), 1)
+	if action != resetSkip && err == nil {
 		_ = pgproxy.Metrics().Distribution(pgproxy.MetricResetLatency, float64(time.Since(start).Microseconds()), link.resetTags(tags...), 1)
 	}
-	return nil
 }
 
 // runAuditedReset runs the audit check and the reset in one simple query, and

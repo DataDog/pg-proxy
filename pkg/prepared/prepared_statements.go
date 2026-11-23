@@ -84,22 +84,6 @@ func CreatePreparedStatement(clientName string, proxyName string, sql string, pa
 	}
 }
 
-// CreateJudgedPreparedStatement is CreatePreparedStatement for a caller that
-// already has the statement's verdict, so its text is never scanned.
-func CreateJudgedPreparedStatement(clientName string, proxyName string, sql string, paramOIDs []uint32, mayChangeSession bool) PreparedStatement {
-	verdict := verdictClean
-	if mayChangeSession {
-		verdict = verdictChanges
-	}
-	return &proxyPreparedStmt{
-		clientName: clientName,
-		proxyName:  proxyName,
-		sql:        sql,
-		paramOIDs:  paramOIDs,
-		verdict:    verdict,
-	}
-}
-
 // Values of proxyPreparedStmt.verdict.
 const (
 	verdictUnjudged uint32 = iota
@@ -355,7 +339,8 @@ func (p *proxyPreparedStmtsState) AddConfirmedNamedStmt(preparedStmt PreparedSta
 }
 
 func (p *proxyPreparedStmtsState) EnqueuePendingStmt(pendingPreparedStmt PreparedStatement, existing bool) {
-	p.allPendingPreparedStmtsQueue = append(p.allPendingPreparedStmtsQueue, createQueuedPreparedStmt(pendingPreparedStmt, existing))
+	// Unwrap a statement that comes back from the queue, so wrappers do not nest.
+	p.allPendingPreparedStmtsQueue = append(p.allPendingPreparedStmtsQueue, createQueuedPreparedStmt(Unwrap(pendingPreparedStmt), existing))
 
 	tags := append(p.metricTags, pendingPreparedStmt.GetMetricTags()...)
 	tags = append(tags, preparedStmtExistingTag(existing))

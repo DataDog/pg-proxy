@@ -56,7 +56,7 @@ func (l *fakeShadowLink) Send(msg pgproto3.FrontendMessage, e query.ReplyExpecta
 		panic("shadow send blew up")
 	}
 	l.sent = append(l.sent, msg)
-	if parse, ok := msg.(*pgproto3.Parse); ok && parse.Name == "" {
+	if link.ReplacesUnnamedStmt(msg) {
 		l.foreignUnnamed = false
 	}
 	if e != query.NoReply {
@@ -954,18 +954,15 @@ func TestMirrorWorker_MarksShadowLinkBeforeRelease(t *testing.T) {
 	}
 }
 
-// TestMirrorWorker_SkipsBindOfForeignUnnamedStmt: on a shadow connection that may
-// still hold another session's unnamed statement, the worker drops a batch whose
-// Bind would run it, but replays one that parses its own unnamed statement first.
-func TestMirrorWorker_SkipsBindOfForeignUnnamedStmt(t *testing.T) {
+// TestMirrorWorker_ClosesForeignUnnamedStmt: on a shadow connection that may still
+// hold another session's unnamed statement, the worker drops it before a Bind that
+// would reach it, but not before a Bind of an unnamed statement the batch parsed.
+func TestMirrorWorker_ClosesForeignUnnamedStmt(t *testing.T) {
 	q := newMirrorQueue(queueCapRoomy, nil)
-	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Bind{}, expectation: query.BindReply, size: 10})
-	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
-	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
-	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Parse{Query: "SELECT 1"}, expectation: query.ParseReply, size: 10})
-	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Bind{}, expectation: query.BindReply, size: 10})
-	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
-	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
+	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{}, expectation: query.BindReply})
+	enqueueBatch(q,
+		mirrorItem{msg: &pgproto3.Parse{Query: "SELECT 1"}, expectation: query.ParseReply},
+		mirrorItem{msg: &pgproto3.Bind{}, expectation: query.BindReply})
 
 	f := newLinkFactory(func(l *fakeShadowLink) { l.foreignUnnamed = true })
 	drainClosed(q, f.acquire)
@@ -973,10 +970,10 @@ func TestMirrorWorker_SkipsBindOfForeignUnnamedStmt(t *testing.T) {
 	if len(f.links) != 2 {
 		t.Fatalf("acquired %d links, want 2 (one per batch)", len(f.links))
 	}
-	if len(f.links[0].sent) != 0 {
-		t.Errorf("first batch sent %v, want nothing: its Bind would run another session's statement", f.links[0].sent)
+	if got, want := sentKinds(f.links[0]), []string{"*pgproto3.Close", "Bind:"}; !slices.Equal(got, want) {
+		t.Errorf("first batch sent %v, want %v", got, want)
 	}
-	if len(f.links[1].sent) < 2 {
-		t.Errorf("second batch sent %v, want its Parse and Bind", f.links[1].sent)
+	if got, want := sentKinds(f.links[1]), []string{"Parse:", "Bind:"}; !slices.Equal(got, want) {
+		t.Errorf("second batch sent %v, want %v", got, want)
 	}
 }

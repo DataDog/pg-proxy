@@ -57,11 +57,12 @@ func showSetting(t *testing.T, ctx context.Context, conn *pgx.Conn, name string)
 	return value
 }
 
-func requirePgErrorCode(t *testing.T, err error, code string) {
+func requirePgErrorCode(t *testing.T, err error, code string) *pgconn.PgError {
 	t.Helper()
 	var pgErr *pgconn.PgError
 	require.ErrorAs(t, err, &pgErr, "want SQLSTATE %s", code)
 	require.Equal(t, code, pgErr.Code, pgErr.Message)
+	return pgErr
 }
 
 // TestResetModesIsolateSettings checks that each way a client's SQL can change a
@@ -270,9 +271,7 @@ func TestUnnamedStatementGuard(t *testing.T) {
 			})
 			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
 				result := conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
-				requirePgErrorCode(t, result.Err, "26000")
-				var pgErr *pgconn.PgError
-				require.ErrorAs(t, result.Err, &pgErr)
+				pgErr := requirePgErrorCode(t, result.Err, "26000")
 				// Client A's checkout changed nothing, so dynamic skipped its reset.
 				skipped := mode == pgconfig.ResetDynamic || mode == pgconfig.ResetOff
 				require.Equal(t, !skipped, pgErr.Routine != "", "Postgres names the routine that raised its error; the proxy names none")

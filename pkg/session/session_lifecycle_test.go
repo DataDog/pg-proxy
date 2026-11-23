@@ -67,10 +67,7 @@ func (l *testLink) assertCalls(t *testing.T, expected testLinkCalls) {
 }
 
 func (l *testLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
-	if parse, ok := msg.(*pgproto3.Parse); ok && parse.Name == "" {
-		l.mayHoldForeignUnnamed = false
-	}
-	if _, ok := msg.(*pgproto3.Query); ok {
+	if link.ReplacesUnnamedStmt(msg) {
 		l.mayHoldForeignUnnamed = false
 	}
 	l.calls.send++

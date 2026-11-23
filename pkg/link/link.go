@@ -56,14 +56,13 @@ type Link interface {
 	// Release uses the marks to decide whether to reset the connection.
 	// Wrappers must forward it, or a dynamic reset can skip a needed reset.
 	MarkSession(marks SessionMarks)
-	// UsesSessionMarks reports whether Release reads the marks. When it does not,
-	// the session skips judging its messages, which scans SQL text.
+	// UsesSessionMarks reports whether anything reads the marks. When nothing does,
+	// the session skips judging its messages, which scans SQL text. A wrapper that
+	// consumes marks itself must report its own need, not just the inner link's.
 	UsesSessionMarks() bool
 	// MayHoldForeignUnnamedStmt reports whether the connection's unnamed statement,
 	// if any, may belong to another client: its last release skipped the reset, and
-	// nothing sent on this link since has replaced or dropped the statement. A
-	// sender must not send a Bind or Describe of the unnamed statement while it
-	// reports true; the session answers the client itself.
+	// nothing sent on this link since has replaced or dropped the statement.
 	MayHoldForeignUnnamedStmt() bool
 }
 
@@ -95,6 +94,7 @@ type Options struct {
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	setUpConnMetaData(conn)
+	_, foreignUnnamed := conn.Conn().PgConn().CustomData()[customDataResetSkippedKey]
 
 	sl := &SessionLink{
 		conn:                       conn,
@@ -108,6 +108,7 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 		sessionLinkTags:            opts.MetricTags,
 		role:                       opts.Role,
 		reset:                      opts.Reset,
+		foreignUnnamed:             foreignUnnamed,
 	}
 	sl.exportStats()
 
