@@ -95,10 +95,11 @@ func (*flushPostgresTestLink) RecordNewNamedPreparedStmt(prepared.PreparedStatem
 
 type writeRecordingConn struct {
 	net.Conn
-	writes   int
-	written  []byte
-	writeErr error
-	events   *[]string
+	writes    int
+	written   []byte
+	writeLens []int // length of each successful write
+	writeErr  error
+	events    *[]string
 }
 
 func (c *writeRecordingConn) Write(p []byte) (int, error) {
@@ -110,6 +111,7 @@ func (c *writeRecordingConn) Write(p []byte) (int, error) {
 		return 0, c.writeErr
 	}
 	c.written = append(c.written, p...)
+	c.writeLens = append(c.writeLens, len(p))
 	return len(p), nil
 }
 
@@ -348,6 +350,59 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 		require.Zero(t, clientConn.writes)
 		require.Zero(t, flushSucceeded)
 	})
+}
+
+// flushPostgres writes the reply to the client as soon as it buffers
+// PostgresMsgBufferSize encoded bytes, and writes the rest when the reply ends.
+func TestFlushPostgresWritesAtBufferSize(t *testing.T) {
+	reply := []pgproto3.BackendMessage{
+		&pgproto3.RowDescription{Fields: []pgproto3.FieldDescription{{Name: []byte("id")}}},
+		&pgproto3.DataRow{Values: [][]byte{[]byte("1")}},
+		&pgproto3.DataRow{Values: [][]byte{[]byte("2")}},
+		&pgproto3.CommandComplete{CommandTag: []byte("SELECT 2")},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	}
+	var encoded []byte
+	var ends []int // ends[i] is the length of the encoded reply through reply[i]
+	for _, msg := range reply {
+		var err error
+		encoded, err = msg.Encode(encoded)
+		require.NoError(t, err)
+		ends = append(ends, len(encoded))
+	}
+	total := len(encoded)
+
+	for _, test := range []struct {
+		name       string
+		bufferSize int
+		wantWrites []int
+	}{
+		{name: "buffer reached", bufferSize: ends[1], wantWrites: []int{ends[1], total - ends[1]}},
+		{name: "buffer one byte short", bufferSize: ends[1] + 1, wantWrites: []int{ends[2], total - ends[2]}},
+		{name: "buffer larger than reply", bufferSize: total + 1, wantWrites: []int{total}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			next := 0
+			backendLink := &testLink{
+				nextExpectation: func() query.ReplyExpectation { return query.QueryReply },
+				receive: func() (pgproto3.BackendMessage, error) {
+					msg := reply[next]
+					next++
+					return msg, nil
+				},
+			}
+			clientConn := &writeRecordingConn{}
+			s := New(Config{
+				Client: &testClient{}, ClientConn: clientConn, InitialLink: backendLink,
+				PostgresMsgBufferSize: test.bufferSize,
+			})
+
+			_, err := s.flushPostgres()
+			require.NoError(t, err)
+			require.Equal(t, test.wantWrites, clientConn.writeLens)
+			require.Equal(t, encoded, clientConn.written)
+		})
+	}
 }
 
 func TestSessionDecorationIsIndependentOfRouteNotification(t *testing.T) {

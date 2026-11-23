@@ -71,6 +71,16 @@ func (t *TraceState) AddMessage(msg interface{}) {
 	}
 }
 
+// AddForwarded records msg, encoded as n bytes, as forwarded to the client.
+// Only DataRows count toward the trace's rowsReturned/Affected and
+// rowsTotalSize tags.
+func (t *TraceState) AddForwarded(msg pgproto3.BackendMessage, n int) {
+	if _, ok := msg.(*pgproto3.DataRow); ok {
+		t.rowsNumber++
+		t.rowsSize += n
+	}
+}
+
 func traceMessageType(msg interface{}) string {
 	switch msg.(type) {
 	case *pgproto3.AuthenticationCleartextPassword:
