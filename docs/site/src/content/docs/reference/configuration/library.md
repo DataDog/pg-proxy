@@ -88,7 +88,7 @@ Call `pkg/datadog.Start(Options{})` to create integrations from `DD_*` settings.
 | --- | --- |
 | `Dependencies` | Reuse existing integrations. The helper creates only missing ones and never starts or stops supplied clients. |
 | `TracerOptions` | Native Datadog tracer options. |
-| `StatsdOptions` | Native DogStatsD client options. |
+| `StatsdOptions` | Native DogStatsD client options. They apply after the default, `statsd.WithExtendedClientSideAggregation()`, so they can change it. |
 | `LogWriter` | JSON log destination; defaults to stderr. Ignored when a log handler is supplied. |
 | `LogLevel` | Minimum JSON log severity as a `slog.Level`; defaults to INFO. Ignored when a log handler is supplied. |
 
