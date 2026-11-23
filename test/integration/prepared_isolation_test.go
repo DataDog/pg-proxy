@@ -90,7 +90,7 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 	return protocolCase{
 		name:  name,
 		steps: steps,
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies, want...)
 		},
 	}
@@ -105,7 +105,7 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 // for over a second, so after a termination terminatePooledBackend waits that
 // long. Without the wait the proxy hands out the dead connection and the
 // client's session fails.
-func terminatePooledBackend(t *testing.T) {
+func terminatePooledBackend(t testing.TB) {
 	t.Helper()
 	ctx := t.Context()
 	conn, err := backend.Connect(ctx, "postgres")

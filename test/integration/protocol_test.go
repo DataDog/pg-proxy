@@ -14,8 +14,10 @@ import (
 	"maps"
 	"net"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -43,7 +45,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(parse, &pgproto3.Sync{}),
 			ready(&pgproto3.Describe{ObjectType: 'S'}, &pgproto3.Sync{}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireNoError(t, replies[1])
 			require.IsType(t, &pgproto3.ParameterDescription{}, replies[1][0])
 			require.IsType(t, &pgproto3.RowDescription{}, replies[1][1])
@@ -54,7 +56,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(parse, &pgproto3.Sync{}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireNoError(t, replies[1])
 			require.Equal(t, "7", dataRowValue(t, replies[1]))
 		},
@@ -65,7 +67,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(bindExecute...),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			require.Equal(t, "7", dataRowValue(t, replies[1]))
 			require.Equal(t, "7", dataRowValue(t, replies[2]))
 		},
@@ -76,7 +78,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(&pgproto3.Query{String: "SELECT 1"}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[2], "26000")
 		},
 	}, {
@@ -88,7 +90,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(&pgproto3.Query{String: "-- ping"}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[2], "26000")
 		},
 	}, {
@@ -98,7 +100,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(&pgproto3.Close{ObjectType: 'S'}, &pgproto3.Sync{}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireNoError(t, replies[1])
 			requireErrorCode(t, replies[2], "26000")
 		},
@@ -110,7 +112,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(parse, &pgproto3.Close{ObjectType: 'S'}, &pgproto3.Sync{}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireNoError(t, replies[0])
 			requireErrorCode(t, replies[1], "26000")
 		},
@@ -122,7 +124,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(parse, &pgproto3.Parse{Query: "SELEC 1"}, &pgproto3.Sync{}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[0], "42601")
 			requireErrorCode(t, replies[1], "26000")
 		},
@@ -133,7 +135,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(&pgproto3.Parse{Query: "SELEC 1"}, &pgproto3.Sync{}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[1], "42601")
 			requireErrorCode(t, replies[2], "26000")
 		},
@@ -144,7 +146,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(&pgproto3.Parse{Query: "SELECT 'replaced' WHERE $1::int IS NOT NULL"}, &pgproto3.Sync{}),
 			ready(bindExecute...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			require.Equal(t, "replaced", dataRowValue(t, replies[2]))
 		},
 	}, {
@@ -155,7 +157,7 @@ func TestUnnamedStatementAcrossSync(t *testing.T) {
 			ready(bindExecute...),
 			ready(&pgproto3.Query{String: "COMMIT"}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			require.Equal(t, "7", dataRowValue(t, replies[2]))
 		},
 	}})
@@ -182,7 +184,7 @@ func TestAbortedPipeline(t *testing.T) {
 				&pgproto3.Close{ObjectType: 'S', Name: "a"}, &pgproto3.Flush{})...)...),
 			ready(&pgproto3.Sync{}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[0], "08P01")
 			require.Empty(t, replies[1])
 			require.Len(t, replies[2], 1)
@@ -195,7 +197,7 @@ func TestAbortedPipeline(t *testing.T) {
 			ready(&pgproto3.Sync{}),
 			ready(append(useNamed, &pgproto3.Sync{})...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[3], "26000")
 		},
 	}, {
@@ -208,7 +210,7 @@ func TestAbortedPipeline(t *testing.T) {
 			ready(append(append([]pgproto3.FrontendMessage{parseNamed}, useNamed...),
 				&pgproto3.Close{ObjectType: 'S', Name: "a"}, &pgproto3.Sync{})...),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			require.Equal(t, "1", dataRowValue(t, replies[3]))
 		},
 	}, {
@@ -226,7 +228,7 @@ func TestAbortedPipeline(t *testing.T) {
 				&pgproto3.Close{ObjectType: 'S', Name: "a"}, &pgproto3.Flush{})...),
 			ready(&pgproto3.Sync{}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			require.Equal(t, "1", dataRowValue(t, replies[3]))
 			require.IsType(t, &pgproto3.CloseComplete{}, replies[3][len(replies[3])-1])
 		},
@@ -249,7 +251,7 @@ func TestCommitErrorAtSync(t *testing.T) {
 			ready(append(insertTwice, &pgproto3.Sync{})...),
 			ready(&pgproto3.Query{String: "SELECT count(*) FROM deferred_unique"}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[0], "23505")
 			require.Equal(t, &pgproto3.ReadyForQuery{TxStatus: 'I'}, replies[0][len(replies[0])-1])
 			require.Equal(t, "0", dataRowValue(t, replies[1]))
@@ -261,7 +263,7 @@ func TestCommitErrorAtSync(t *testing.T) {
 				&pgproto3.Parse{Query: "SELECT 'after sync'"}, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})...),
 			ready(),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireErrorCode(t, replies[0], "23505")
 			require.Equal(t, "after sync", dataRowValue(t, replies[1]))
 		},
@@ -274,13 +276,15 @@ func TestCommitErrorAtSync(t *testing.T) {
 type protocolCase struct {
 	name  string
 	steps []step
-	check func(t *testing.T, replies [][]pgproto3.BackendMessage)
+	check func(t testing.TB, replies [][]pgproto3.BackendMessage)
 	// setup runs on the backend before each run, for example to recreate a table.
 	setup []string
-	// proxySkip, if set, skips the proxy run: it names a known proxy bug.
+	// proxySkip, if set, names a known proxy bug that makes the proxy run
+	// fail. The proxy run must fail, and is then skipped (see requireKnownBug).
 	proxySkip string
-	// hygieneSkip, if set, skips the hygiene check after the proxy run: it
-	// names a known proxy bug that leaves state on the backend.
+	// hygieneSkip, if set, names a known proxy bug that leaves state on the
+	// backend. The hygiene check after the proxy run must fail, and is then
+	// skipped.
 	hygieneSkip string
 	// stepTimeout bounds the wait for each step's replies; zero means 20 seconds.
 	stepTimeout time.Duration
@@ -303,9 +307,6 @@ func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 		}
 		t.Run(tc.name+"/direct", func(t *testing.T) { tc.run(t, backend.URL("postgres")) })
 		t.Run(tc.name+"/proxy", func(t *testing.T) {
-			if tc.proxySkip != "" && !runKnownBugs {
-				t.Skip(tc.proxySkip)
-			}
 			defer func() {
 				// A known bug or a failure may leave state on the backend; keep it from later cases.
 				if t.Failed() || tc.proxySkip != "" || tc.hygieneSkip != "" {
@@ -313,11 +314,14 @@ func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 				}
 			}()
 			url := proxy.URL(dbPooled, itest.PostgresUser)
+			if tc.proxySkip != "" && !runKnownBugs {
+				requireKnownBug(t, "proxySkip", tc.proxySkip, func(t testing.TB) { tc.run(t, url) })
+			}
 			tc.run(t, url)
 			// A new direct session is always clean, so only the proxy run is checked.
 			t.Run("hygiene", func(t *testing.T) {
 				if tc.hygieneSkip != "" && !runKnownBugs {
-					t.Skip(tc.hygieneSkip)
+					requireKnownBug(t, "hygieneSkip", tc.hygieneSkip, func(t testing.TB) { requireCleanBackend(t, url, parsed) })
 				}
 				requireCleanBackend(t, url, parsed)
 			})
@@ -325,8 +329,50 @@ func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 	}
 }
 
+// requireKnownBug runs f, the part of a case that the known proxy bug reason
+// makes fail, and skips the test with reason. If f passes, the test fails
+// instead, so the change that fixes the bug also removes the case's field,
+// proxySkip or hygieneSkip. Any failure of f counts, not only the one reason
+// describes; PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 shows f's failures.
+func requireKnownBug(t *testing.T, field, reason string, f func(t testing.TB)) {
+	t.Helper()
+	if !fails(t, f) {
+		t.Fatalf("passes, so the bug its %s names looks fixed; remove the %s: %s", field, field, reason)
+	}
+	t.Skip(reason)
+}
+
+// fails runs f with a testing.TB that records the failures f reports instead
+// of failing t, and reports whether f failed.
+func fails(t *testing.T, f func(t testing.TB)) bool {
+	recorder := &failureRecorder{TB: t}
+	done := make(chan struct{})
+	// FailNow ends the goroutine that calls it, so f gets one of its own.
+	go func() {
+		defer close(done)
+		f(recorder)
+	}()
+	<-done
+	return recorder.Failed()
+}
+
+// failureRecorder records the failures reported to it and passes every other
+// call to the test it wraps.
+type failureRecorder struct {
+	testing.TB
+	failed atomic.Bool
+}
+
+func (r *failureRecorder) Fail()                 { r.failed.Store(true) }
+func (r *failureRecorder) Failed() bool          { return r.failed.Load() }
+func (r *failureRecorder) FailNow()              { r.Fail(); runtime.Goexit() }
+func (r *failureRecorder) Error(...any)          { r.Fail() }
+func (r *failureRecorder) Errorf(string, ...any) { r.Fail() }
+func (r *failureRecorder) Fatal(...any)          { r.FailNow() }
+func (r *failureRecorder) Fatalf(string, ...any) { r.FailNow() }
+
 // run runs the case's setup, sends its steps to url and checks the replies.
-func (tc protocolCase) run(t *testing.T, url string) {
+func (tc protocolCase) run(t testing.TB, url string) {
 	t.Helper()
 	if len(tc.setup) > 0 {
 		require.NoError(t, backend.Exec(t.Context(), tc.setup...))
@@ -356,7 +402,7 @@ type clientStatements struct {
 //   - find only prepared statements whose SQL a client parsed with a name,
 //     and none under a client's name;
 //   - see the server's value of every parameter ParameterStatus reported.
-func requireCleanBackend(t *testing.T, url string, parsed clientStatements) {
+func requireCleanBackend(t testing.TB, url string, parsed clientStatements) {
 	t.Helper()
 	c := connectRaw(t, url)
 	defer c.close()
@@ -405,7 +451,7 @@ func requireCleanBackend(t *testing.T, url string, parsed clientStatements) {
 
 // requireParameterView checks that each parameter ParameterStatus reported to
 // c has the value the server has.
-func requireParameterView(t *testing.T, c *rawClient) {
+func requireParameterView(t testing.TB, c *rawClient) {
 	t.Helper()
 	names := slices.Sorted(maps.Keys(c.parameters))
 	settings := make([]string, len(names))
@@ -443,7 +489,7 @@ type step struct {
 	// client is the connection that sends the step, for cases with several.
 	client int
 	// before, if set, runs before the step is sent.
-	before func(t *testing.T)
+	before func(t testing.TB)
 }
 
 func ready(msgs ...pgproto3.FrontendMessage) step   { return step{send: msgs, until: untilReady} }
@@ -464,7 +510,7 @@ func onClient(client int, s step) step {
 // step's messages on its client's connection and collects its replies. It
 // waits up to timeout for each step's replies; zero means 20 seconds. It
 // closes the connections before it returns.
-func exchange(t *testing.T, url string, steps []step, timeout time.Duration) [][]pgproto3.BackendMessage {
+func exchange(t testing.TB, url string, steps []step, timeout time.Duration) [][]pgproto3.BackendMessage {
 	t.Helper()
 	count := 1
 	for _, step := range steps {
@@ -506,7 +552,7 @@ type rawClient struct {
 
 // connectRaw opens a connection to url and takes it over from pgconn after
 // startup. Its steps wait up to 20 seconds for their replies.
-func connectRaw(t *testing.T, url string) *rawClient {
+func connectRaw(t testing.TB, url string) *rawClient {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
@@ -522,7 +568,7 @@ func connectRaw(t *testing.T, url string) *rawClient {
 // do sends the step's messages and reads their replies for up to c.timeout.
 // An error that ends the session ends the replies, and after it do sends
 // nothing and returns no replies.
-func (c *rawClient) do(t *testing.T, step step) []pgproto3.BackendMessage {
+func (c *rawClient) do(t testing.TB, step step) []pgproto3.BackendMessage {
 	t.Helper()
 	if c.closed {
 		return nil
@@ -588,7 +634,7 @@ func (c *rawClient) close() {
 
 // copyBackendMessage detaches msg from the frontend's reused messages and
 // buffers, such as the single ReadyForQuery it decodes every one into.
-func copyBackendMessage(t *testing.T, msg pgproto3.BackendMessage) pgproto3.BackendMessage {
+func copyBackendMessage(t testing.TB, msg pgproto3.BackendMessage) pgproto3.BackendMessage {
 	t.Helper()
 	encoded, err := msg.Encode(nil)
 	require.NoError(t, err)
@@ -633,7 +679,7 @@ func summarize(reply []pgproto3.BackendMessage) []string {
 
 // requireReplies checks the summary of each reply and reports every reply
 // that differs.
-func requireReplies(t *testing.T, replies [][]pgproto3.BackendMessage, want ...[]string) {
+func requireReplies(t testing.TB, replies [][]pgproto3.BackendMessage, want ...[]string) {
 	t.Helper()
 	require.Len(t, replies, len(want))
 	equal := true
@@ -645,7 +691,7 @@ func requireReplies(t *testing.T, replies [][]pgproto3.BackendMessage, want ...[
 	}
 }
 
-func requireNoError(t *testing.T, reply []pgproto3.BackendMessage) {
+func requireNoError(t testing.TB, reply []pgproto3.BackendMessage) {
 	t.Helper()
 	for _, msg := range reply {
 		if errorResponse, ok := msg.(*pgproto3.ErrorResponse); ok {
@@ -654,7 +700,7 @@ func requireNoError(t *testing.T, reply []pgproto3.BackendMessage) {
 	}
 }
 
-func requireErrorCode(t *testing.T, reply []pgproto3.BackendMessage, code string) {
+func requireErrorCode(t testing.TB, reply []pgproto3.BackendMessage, code string) {
 	t.Helper()
 	for _, msg := range reply {
 		if errorResponse, ok := msg.(*pgproto3.ErrorResponse); ok {
@@ -665,7 +711,7 @@ func requireErrorCode(t *testing.T, reply []pgproto3.BackendMessage, code string
 	t.Fatalf("expected error %s, got %#v", code, reply)
 }
 
-func dataRowValue(t *testing.T, reply []pgproto3.BackendMessage) string {
+func dataRowValue(t testing.TB, reply []pgproto3.BackendMessage) string {
 	t.Helper()
 	requireNoError(t, reply)
 	for _, msg := range reply {

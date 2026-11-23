@@ -16,8 +16,8 @@ import (
 )
 
 // Known bugs in the proxy's record of the prepared statements on a backend.
-// Each case that hits one still runs against PostgreSQL directly; set
-// PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to reproduce it through the proxy.
+// Each case that hits one passes against PostgreSQL directly and must fail
+// through the proxy; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to see how it fails.
 const (
 	staleAfterResultTypeChange = "TODO: after a result-type change, proxy answers a re-Parse of the same SQL " +
 		"with a local ParseComplete for the backend's stale statement, so 0A000 repeats on every retry " +
@@ -68,7 +68,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 				simpleQuery(statement),
 				onClient(1, parseBindExecute(&pgproto3.Parse{Name: "b", Query: plusOne}, "2")),
 			},
-			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
 					parsedAndSelected("2"),
 					[]string{"CommandComplete " + statement, "ReadyForQuery I"},
@@ -89,14 +89,14 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 		proxySkip: staleAfterResultTypeChange,
 		steps: []step{
 			parseBindExecute(parseUserByID("user_by_id"), "1"),
-			{send: bindExecute("user_by_id", "1"), until: untilReady, before: func(t *testing.T) {
+			{send: bindExecute("user_by_id", "1"), until: untilReady, before: func(t testing.TB) {
 				require.NoError(t, backend.Exec(t.Context(), "ALTER TABLE lifecycle_users ADD COLUMN email text"))
 			}},
 			ready(append([]pgproto3.FrontendMessage{&pgproto3.Close{ObjectType: 'S', Name: "user_by_id"}, parseUserByID("user_by_id")},
 				bindExecute("user_by_id", "1")...)...),
 			onClient(1, parseBindExecute(parseUserByID("user_by_id_2"), "1")),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				parsedAndSelected("1|alice"),
 				[]string{"ErrorResponse 0A000", "ReadyForQuery I"},
@@ -114,7 +114,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 				&pgproto3.Parse{Name: "first", Query: "SELECT 'one pipeline' AS label"},
 				&pgproto3.Parse{Name: "second", Query: "SELECT 'one pipeline' AS label"},
 			}, bindExecute("second")...)...)},
-			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies, append([]string{"ParseComplete"}, parsedAndSelected("one pipeline")...))
 			},
 		}, {
@@ -125,7 +125,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 				ready(bindExecute("second")...),
 				ready(bindExecute("first")...),
 			},
-			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
 					[]string{"ParseComplete", "ReadyForQuery I"},
 					[]string{"ParseComplete", "ReadyForQuery I"},
@@ -147,7 +147,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 				simpleQuery("COMMIT"),
 				simpleQuery("SELECT count(*) FROM lifecycle_events"),
 			},
-			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
 					[]string{"CommandComplete BEGIN", "ReadyForQuery T"},
 					[]string{"ParseComplete", "ReadyForQuery T"},
@@ -167,7 +167,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 				ready(&pgproto3.Parse{Name: "deallocated", Query: "SELECT 8"}, &pgproto3.Sync{}),
 				ready(bindExecute("deallocated")...),
 			},
-			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
 					[]string{"ParseComplete", "ReadyForQuery I"},
 					[]string{"CommandComplete DEALLOCATE", "ReadyForQuery I"},
@@ -184,7 +184,7 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 				ready(&pgproto3.Parse{Name: "closed", Query: "SELECT 10"}, &pgproto3.Sync{}),
 				ready(bindExecute("closed")...),
 			},
-			check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 				requireReplies(t, replies,
 					[]string{"ParseComplete", "ReadyForQuery I"},
 					[]string{"CloseComplete", "ReadyForQuery I"},

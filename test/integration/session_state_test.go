@@ -15,8 +15,8 @@ import (
 )
 
 // Known bugs: session state that the proxy leaves on a backend it releases.
-// The LISTEN case skips its proxy run, and the others skip the hygiene check
-// after it; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to reproduce them.
+// The LISTEN case's proxy run must fail, and so must the others' hygiene check
+// after it; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to see how they fail.
 const (
 	leakedListen = "TODO: proxy does not UNLISTEN when it releases a backend, and it closes the session " +
 		"with FATAL 08006 when that backend sends a NotificationResponse: client 1's COMMIT commits, " +
@@ -35,7 +35,7 @@ const (
 // for it on the backend; the LISTEN case also has later clients on that
 // backend. Each case runs against PostgreSQL directly and through the proxy.
 func TestSessionStateLeaks(t *testing.T) {
-	noErrors := func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+	noErrors := func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 		for _, reply := range replies {
 			requireNoError(t, reply)
 		}
@@ -51,12 +51,12 @@ func TestSessionStateLeaks(t *testing.T) {
 			onClient(1, simpleQuery("BEGIN")),
 			onClient(1, simpleQuery("INSERT INTO listen_users VALUES (1)")),
 			{send: []pgproto3.FrontendMessage{&pgproto3.Query{String: "COMMIT"}}, until: untilReady, client: 1,
-				before: func(t *testing.T) {
+				before: func(t testing.TB) {
 					require.NoError(t, backend.Exec(t.Context(), "NOTIFY users_changed, 'user 1'"))
 				}},
 			onClient(2, simpleQuery("SELECT count(*) FROM listen_users")),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"CommandComplete LISTEN", "ReadyForQuery I"},
 				[]string{"CommandComplete BEGIN", "ReadyForQuery T"},

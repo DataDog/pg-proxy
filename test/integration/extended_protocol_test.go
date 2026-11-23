@@ -39,7 +39,7 @@ func TestExtendedProtocol(t *testing.T) {
 			&pgproto3.Execute{Portal: "p"},
 			&pgproto3.Sync{},
 		)},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			require.Equal(t, []string{
 				"ParseComplete", "ParameterDescription", "RowDescription", "BindComplete", "RowDescription",
 				"DataRow", "CommandComplete SELECT 1", "ReadyForQuery I",
@@ -67,7 +67,7 @@ func TestExtendedProtocol(t *testing.T) {
 			),
 			ready(&pgproto3.Query{String: "COMMIT"}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"CommandComplete BEGIN", "ReadyForQuery T"},
 				[]string{"ParseComplete", "BindComplete", "RowDescription", "DataRow 1", "PortalSuspended"},
@@ -89,7 +89,7 @@ func TestExtendedProtocol(t *testing.T) {
 			ready(&pgproto3.Sync{}),
 			ready(&pgproto3.Close{ObjectType: 'S', Name: "s"}, &pgproto3.Sync{}),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"ParseComplete"},
 				[]string{"BindComplete", "RowDescription", "DataRow 10", "CommandComplete SELECT 1"},
@@ -104,7 +104,7 @@ func TestExtendedProtocol(t *testing.T) {
 			ready(),
 			ready(),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			segment := func(value string) []string {
 				return []string{"ParseComplete", "BindComplete", "RowDescription", "DataRow " + value, "CommandComplete SELECT 1", "ReadyForQuery I"}
 			}
@@ -113,9 +113,9 @@ func TestExtendedProtocol(t *testing.T) {
 	}})
 }
 
-// nulInParse is a known bug. The case that hits it still runs against
-// PostgreSQL directly; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to reproduce it
-// through the proxy.
+// nulInParse is a known bug. The case that hits it passes against PostgreSQL
+// directly and must fail through the proxy; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1
+// to see how it fails.
 const nulInParse = "TODO: proxy cannot decode a Parse whose query has an embedded NUL and closes the session " +
 	"with FATAL 08006; PostgreSQL returns ERROR 08P01 and keeps the session"
 
@@ -154,7 +154,7 @@ func TestExtendedErrors(t *testing.T) {
 			insertThree,
 			selectIDs,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"ParseComplete", "BindComplete", "CommandComplete INSERT 0 1", "ParseComplete", "ErrorResponse 22P02", "ReadyForQuery I"},
 				[]string{"CommandComplete INSERT 0 1", "ReadyForQuery I"},
@@ -175,7 +175,7 @@ func TestExtendedErrors(t *testing.T) {
 			insertThree,
 			selectIDs,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"CommandComplete BEGIN", "ReadyForQuery T"},
 				[]string{"ParseComplete", "BindComplete", "ErrorResponse 22012", "ReadyForQuery E"},
@@ -202,7 +202,7 @@ func TestExtendedErrors(t *testing.T) {
 			ready(&pgproto3.Query{String: "ROLLBACK"}),
 			selectIDs,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"ErrorResponse 34000", "ReadyForQuery I"},
 				[]string{"CommandComplete BEGIN", "ReadyForQuery T"},
@@ -223,7 +223,7 @@ func TestExtendedErrors(t *testing.T) {
 			}, insert("ignored", "2")...), &pgproto3.Sync{})...),
 			selectIDs,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"ErrorResponse 08P01", "ReadyForQuery I"},
 				[]string{"RowDescription", "CommandComplete SELECT 0", "ReadyForQuery I"},
