@@ -10,6 +10,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/suite"
+
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 type PreparedStatementsSuite struct {
@@ -221,4 +223,18 @@ func (p *PreparedStatementsSuite) TestFindKnownNamedStmtFromClientName_AutoCache
 	// For the auto-cached statement, it should find the pending one
 	foundStmt = p.pStmtState.FindKnownNamedStmtFromClientName("")
 	assert.True(p.T(), PreparedStatementEquivalent(autoCachedPStmt, foundStmt))
+}
+
+func TestSessionFlagsJudgedOnFirstCall(t *testing.T) {
+	stmt := CreatePreparedStatement("", "", "SET search_path = app", nil).(*proxyPreparedStmt)
+	assert.Zero(t, stmt.sessionFlags, "creating a statement scans nothing")
+	assert.True(t, stmt.SessionFlags().Has(sessionsql.MayChangeSession))
+	assert.NotZero(t, stmt.sessionFlags, "the verdict is cached")
+
+	clean := CreatePreparedStatement("", "", "SELECT 1", nil)
+	assert.Zero(t, clean.SessionFlags(), "a clean verdict is cached too")
+	assert.Equal(t, uint32(flagsJudged), clean.(*proxyPreparedStmt).sessionFlags)
+
+	given := CreatePreparedStatementWithFlags("", "", "SELECT 1", nil, sessionsql.MayChangeSession)
+	assert.Equal(t, sessionsql.MayChangeSession, given.SessionFlags(), "given flags are not rescanned")
 }

@@ -138,7 +138,14 @@ func (l *mirroringLink) MarkSession(marks link.SessionMarks) {
 // admitted data (no data means no link was acquired).
 func (l *mirroringLink) Release() error {
 	if l.batchHasData {
-		l.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: l.marks})
+		marks := l.marks
+		if !l.Link.UsesSessionMarks() {
+			// The session judges nothing for a source that does not use the marks, so
+			// tell a shadow that might skip its reset that the batch may have changed
+			// the session.
+			marks = link.MarkClientSQL
+		}
+		l.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: marks})
 	}
 	return l.Link.Release()
 }

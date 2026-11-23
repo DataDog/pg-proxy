@@ -255,6 +255,8 @@ func TestResetModesLeaveCursorsAndSequencesAsAlways(t *testing.T) {
 // TestUnnamedStatementGuard checks that a Bind of the unnamed statement from a
 // client that has none gets 26000 in every mode, even when the backend still holds
 // the previous client's unnamed statement because the release skipped the reset.
+// Where the release reset, as in always and audit, Postgres answers, as before
+// reset_mode; only after a skipped reset does the proxy answer.
 func TestUnnamedStatementGuard(t *testing.T) {
 	for _, mode := range append(resettingModes, pgconfig.ResetOff) {
 		t.Run(string(mode), func(t *testing.T) {
@@ -269,6 +271,11 @@ func TestUnnamedStatementGuard(t *testing.T) {
 			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
 				result := conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
 				requirePgErrorCode(t, result.Err, "26000")
+				var pgErr *pgconn.PgError
+				require.ErrorAs(t, result.Err, &pgErr)
+				// Client A's checkout changed nothing, so dynamic skipped its reset.
+				skipped := mode == pgconfig.ResetDynamic || mode == pgconfig.ResetOff
+				require.Equal(t, !skipped, pgErr.Routine != "", "Postgres names the routine that raised its error; the proxy names none")
 
 				// The client's own unnamed statement still works across checkouts.
 				_, err := conn.PgConn().Prepare(ctx, "", "SELECT 'from client B'", nil)

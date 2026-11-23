@@ -1204,6 +1204,10 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 		}
 	}
 
+	if s.runsForeignUnnamedStmt(action) {
+		return s.handleAction(NewFlushErrorAction(actions.BuildUnnamedStatementDoesNotExistErrorResponse(), nil))
+	}
+
 	if proxyMsgToPostgres, err := s.handleRecordNewPreparedStmt(action); err != nil {
 		return err
 	} else if !proxyMsgToPostgres {
@@ -1215,8 +1219,8 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	}
 	s.handleEnsureUnnamedPreparedStmt(action)
 
-	if action.SessionMarks != 0 {
-		s.link.MarkSession(action.SessionMarks)
+	if s.link.UsesSessionMarks() {
+		s.link.MarkSession(action.SessionMarks(s.pStmtState, s.unnamedStmt))
 	}
 	s.link.Send(action.ProxyMsgToPg, action.AddReplyExpectation)
 
@@ -1313,14 +1317,30 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 	return nil
 }
 
+// runsForeignUnnamedStmt reports whether action is a Bind or Describe of the unnamed
+// statement from a client that has none, on a connection whose last release skipped
+// the reset. Postgres would run or describe the statement the previous client left
+// there, so the session answers with the error Postgres gives a connection that has
+// none. Other connections, including every one in ResetAlways and ResetAudit, get
+// the message, and Postgres answers.
+func (s *Session) runsForeignUnnamedStmt(action ClientMessageAction) bool {
+	return action.EnsureUnnamedPreparedStmt && !s.hasUnnamedStmt() && s.link.MayHoldForeignUnnamedStmt()
+}
+
+// hasUnnamedStmt reports whether the client has an unnamed prepared statement,
+// confirmed or still pending in this pipeline.
+func (s *Session) hasUnnamedStmt() bool {
+	return s.unnamedStmt != nil || len(s.unnamedPendingGens) > 0
+}
+
 // handleEnsureUnnamedPreparedStmt re-creates the client's unnamed prepared statement
 // on the link's connection before a Bind or Describe that refers to it. The client
 // may have parsed it on a link that has since been released (for example psql's
 // \gdesc sends Parse+Sync, then Describe+Sync). The release reset is a simple Query,
 // and any simple Query discards the unnamed statement. A release that skips the
 // reset can leave another client's unnamed statement on the connection, which this
-// Parse replaces; when the client has none, actions answers the Bind or Describe
-// locally instead. The ParseComplete is not forwarded to the client.
+// Parse replaces; when the client has none, runsForeignUnnamedStmt answers instead.
+// The ParseComplete is not forwarded to the client.
 func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
 		return
@@ -1356,7 +1376,7 @@ func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 	if generation != s.unnamedGen {
 		return
 	}
-	s.unnamedStmt = prepared.CreatePreparedStatementWithFlags("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs(), confirmed.SessionFlags())
+	s.unnamedStmt = prepared.CreatePreparedStatement("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs())
 	s.unnamedStmtOnLink = true
 }
 

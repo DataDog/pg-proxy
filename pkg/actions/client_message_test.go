@@ -33,6 +33,7 @@ func TestDecideClientMessageAction(t *testing.T) {
 		FlushPostgres:                 true,
 		HandleReadQuery:               true,
 		InvalidateUnnamedPreparedStmt: true,
+		runsSQL:                       "SELECT 1",
 	}
 	if !reflect.DeepEqual(action, want) {
 		t.Fatalf("action mismatch:\n got: %#v\nwant: %#v", action, want)
@@ -309,10 +310,6 @@ func TestClientMessageActions(t *testing.T) {
 			DynamicRoutingEnabled:    test.dynamicRoutingEnabled,
 			AutoPreparedStmtsEnabled: test.autoCachedEnabled,
 			PreparedStatements:       pStmtState,
-			// The client has a clean unnamed statement, so unnamed Binds and Describes
-			// reach Postgres. TestUnnamedStatementGuard covers the case with none.
-			UnnamedStmt:    prepared.CreatePreparedStatement("", "", "SELECT 1", nil),
-			HasUnnamedStmt: true,
 		}
 
 		action, err := DecideClientMessageAction(test.msg, state, Hooks{})
@@ -348,6 +345,13 @@ func TestClientMessageActions(t *testing.T) {
 			wantAction.EnsureUnnamedPreparedStmt = test.wantEnsureUnnamed
 			wantAction.InvalidateUnnamedPreparedStmt = test.wantInvalidateUnnamed
 			wantAction.HandleReadQuery = test.wantHandleReadQuery
+			// What the message runs, kept for SessionMarks (session_marks_test.go).
+			if q, ok := test.msg.(*pgproto3.Query); ok && test.proxyMsgToPg != nil {
+				wantAction.runsSQL = q.String
+			}
+			if _, ok := test.msg.(*pgproto3.Bind); ok && test.wantEnsureUnnamed {
+				wantAction.runsUnnamed = true
+			}
 			assert.EqualValues(wantAction, action, "for test %s", test.name)
 		}
 	}

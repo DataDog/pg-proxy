@@ -70,8 +70,6 @@ func (s *Session) actionState() actions.State {
 		DynamicRoutingEnabled:    s.dynamicRoutingEnabled,
 		AutoPreparedStmtsEnabled: s.autoPreparedStatementsEnabled(),
 		PreparedStatements:       s.pStmtState,
-		UnnamedStmt:              s.unnamedStmt,
-		HasUnnamedStmt:           s.unnamedStmt != nil || len(s.unnamedPendingGens) > 0,
 	}
 }
 

@@ -15,9 +15,8 @@ import (
 )
 
 const (
-	metricReset             = "pg_proxy.sessions.connections.reset"
-	metricResetWouldLeak    = "pg_proxy.sessions.connections.reset.would_leak"
-	metricCrossCheckoutRead = "pg_proxy.sessions.sequence_state.cross_checkout_read"
+	metricReset          = "pg_proxy.sessions.connections.reset"
+	metricResetWouldLeak = "pg_proxy.sessions.connections.reset.would_leak"
 )
 
 // SessionMarks record what a checkout may have done to session state. Each
@@ -34,10 +33,6 @@ const (
 	MarkPreparedStmt
 	// MarkParameterStatus: the backend reported a changed setting.
 	MarkParameterStatus
-	// MarkReadsSequenceState: client SQL may have called currval or lastval.
-	// It does not make a checkout dirty; it scopes the cross-checkout read
-	// metric.
-	MarkReadsSequenceState
 )
 
 // ResetPolicy is how a SessionLink resets its connection when it returns to the
@@ -158,6 +153,23 @@ func NewResetPolicy(settings config.DatabaseSettings) (ResetPolicy, error) {
 
 // Mode returns the resolved mode: never config.ResetDefault.
 func (p ResetPolicy) Mode() config.ResetMode { return p.mode.Resolve() }
+
+// usesMarks reports whether releases read the checkout's session marks. Only
+// these modes need the session to scan SQL text.
+func (p ResetPolicy) usesMarks() bool {
+	mode := p.Mode()
+	return mode == config.ResetAudit || mode == config.ResetDynamic
+}
+
+// maySkip reports whether a release can skip the reset.
+func (p ResetPolicy) maySkip() bool {
+	mode := p.Mode()
+	return mode == config.ResetDynamic || mode == config.ResetOff
+}
+
+// reports reports whether releases emit the reset metrics. ResetAlways emits
+// none, as before reset_mode existed.
+func (p ResetPolicy) reports() bool { return p.Mode() != config.ResetAlways }
 
 // sampleAudit draws what ResetAudit does on a release that ResetDynamic would
 // skip: one draw picks the full check, the audit check alone, or the plain

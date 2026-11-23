@@ -38,6 +38,7 @@ type fakeShadowLink struct {
 	releases    int
 	forceCloses int
 	marks       link.SessionMarks // what the worker marked before releasing
+	ignoreMarks bool              // as a source link: reports that its release does not read marks
 
 	// blockUntilClose, when set, makes Receive block until ForceClose is called —
 	// used to exercise the stop() force-close path.
@@ -107,6 +108,8 @@ func (l *fakeShadowLink) DiscardUntilSync() {
 }
 func (l *fakeShadowLink) DiscardingUntilSync() bool           { return l.discarding }
 func (l *fakeShadowLink) MarkSession(marks link.SessionMarks) { l.marks |= marks }
+func (l *fakeShadowLink) UsesSessionMarks() bool              { return !l.ignoreMarks }
+func (l *fakeShadowLink) MayHoldForeignUnnamedStmt() bool     { return false }
 func (l *fakeShadowLink) Idle() bool                          { return len(l.expectations) == 0 }
 func (l *fakeShadowLink) Cancel() error                       { return nil }
 func (l *fakeShadowLink) Release() error                      { l.releases++; return nil }

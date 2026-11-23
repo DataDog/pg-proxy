@@ -143,8 +143,7 @@ func (w *mirrorWorker) run() {
 			if m, ok := it.msg.(*pgproto3.Parse); ok {
 				// Not scanned: the shadow takes its session marks from the source
 				// checkout, so these flags only claim the worst.
-				parsed = prepared.CreatePreparedStatementWithFlags("", m.Name, m.Query, m.ParameterOIDs,
-					sessionsql.MayChangeSession|sessionsql.MayReadSequenceState)
+				parsed = prepared.CreatePreparedStatementWithFlags("", m.Name, m.Query, m.ParameterOIDs, sessionsql.MayChangeSession)
 				if parsed.IsProxyNamedPreparedStmt() {
 					cat.put(parsed)
 				}

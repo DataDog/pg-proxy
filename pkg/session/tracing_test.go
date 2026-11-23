@@ -14,7 +14,6 @@ import (
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/bindparams"
 	proxyotel "github.com/DataDog/pg-proxy/pkg/otel"
-	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 	"github.com/dustin/go-humanize"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -132,7 +131,6 @@ func TestDefaultParametersDoNotReachDebugLogs(t *testing.T) {
 				LogHandler: slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}),
 			}))
 			s := New(Config{EnableTraceParameters: enable})
-			s.unnamedStmt = prepared.CreatePreparedStatement("", "", "SELECT $1", nil)
 			bind := &pgproto3.Bind{Parameters: [][]byte{[]byte(privateParameter)}}
 			action, err := s.DecideClientMessageAction(bind)
 			require.NoError(t, err)

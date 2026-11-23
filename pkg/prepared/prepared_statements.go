@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/sessionsql"
@@ -55,8 +56,9 @@ type PreparedStatement interface {
 	GetErrorTags() []string
 	GetMetricTags() []string
 	// SessionFlags reports what running the statement may do to session state,
-	// judged once from its text under either value of standard_conforming_strings,
-	// so the verdict holds on any later connection.
+	// judged from its text under either value of standard_conforming_strings, so
+	// the verdict holds on any later connection. The text is scanned on the first
+	// call, which only reset modes that use session marks make.
 	SessionFlags() sessionsql.Flags
 }
 
@@ -74,63 +76,79 @@ func PreparedStatementEquivalent(a, b PreparedStatement) bool {
 }
 
 func CreatePreparedStatement(clientName string, proxyName string, sql string, paramOIDs []uint32) PreparedStatement {
-	return CreatePreparedStatementWithFlags(clientName, proxyName, sql, paramOIDs, sessionsql.ScanEither(sql))
+	return &proxyPreparedStmt{
+		clientName: clientName,
+		proxyName:  proxyName,
+		sql:        sql,
+		paramOIDs:  paramOIDs,
+	}
 }
 
 // CreatePreparedStatementWithFlags is CreatePreparedStatement for a caller that
-// already has the statement's session flags, so its text is not scanned again.
+// already has the statement's session flags, so its text is never scanned.
 func CreatePreparedStatementWithFlags(clientName string, proxyName string, sql string, paramOIDs []uint32, flags sessionsql.Flags) PreparedStatement {
 	return &proxyPreparedStmt{
 		clientName:   clientName,
 		proxyName:    proxyName,
 		sql:          sql,
 		paramOIDs:    paramOIDs,
-		sessionFlags: flags,
+		sessionFlags: uint32(flags) | flagsJudged,
 	}
 }
 
+// flagsJudged marks proxyPreparedStmt.sessionFlags as holding a verdict.
+const flagsJudged = 1 << 8
+
 // contains the client name and the corresponding prepared statement created between the proxy and PG
 type proxyPreparedStmt struct {
-	clientName   string
-	proxyName    string
-	sql          string
-	paramOIDs    []uint32
-	sessionFlags sessionsql.Flags
+	clientName string
+	proxyName  string
+	sql        string
+	paramOIDs  []uint32
+	// sessionFlags caches SessionFlags with flagsJudged set, or is zero until the
+	// first call. It is read and written atomically: a mirror worker can hold the
+	// statement too. The methods take a pointer so that no copy reads it.
+	sessionFlags uint32
 }
 
-func (p proxyPreparedStmt) SessionFlags() sessionsql.Flags {
-	return p.sessionFlags
+func (p *proxyPreparedStmt) SessionFlags() sessionsql.Flags {
+	flags := atomic.LoadUint32(&p.sessionFlags)
+	if flags == 0 {
+		flags = uint32(sessionsql.ScanEither(p.sql)) | flagsJudged
+		atomic.StoreUint32(&p.sessionFlags, flags)
+	}
+	return sessionsql.Flags(flags &^ flagsJudged)
 }
 
-func (p proxyPreparedStmt) IsClientNamedPreparedStmt() bool {
+func (p *proxyPreparedStmt) IsClientNamedPreparedStmt() bool {
 	return IsNamedPreparedStmt(p.clientName)
 }
 
-func (p proxyPreparedStmt) IsProxyNamedPreparedStmt() bool {
+func (p *proxyPreparedStmt) IsProxyNamedPreparedStmt() bool {
 	return IsNamedPreparedStmt(p.proxyName)
 }
 
-func (p proxyPreparedStmt) IsAutoCachedStmt() bool {
+func (p *proxyPreparedStmt) IsAutoCachedStmt() bool {
 	return !IsNamedPreparedStmt(p.clientName) && IsNamedPreparedStmt(p.proxyName)
 }
 
-func (p proxyPreparedStmt) GetClientName() string {
+func (p *proxyPreparedStmt) GetClientName() string {
 	return p.clientName
 }
 
-func (p proxyPreparedStmt) GetProxyName() string {
+func (p *proxyPreparedStmt) GetProxyName() string {
 	return p.proxyName
 }
 
-func (p proxyPreparedStmt) GetSQLQuery() string {
+func (p *proxyPreparedStmt) GetSQLQuery() string {
 	return p.sql
 }
 
-func (p proxyPreparedStmt) GetParamOIDs() []uint32 {
+func (p *proxyPreparedStmt) GetParamOIDs() []uint32 {
 	return p.paramOIDs
 }
 
-func (p proxyPreparedStmt) GetErrorTags() []string {
+func (p *proxyPreparedStmt) GetErrorTags() []string {
 	return append(p.GetMetricTags(),
 		fmt.Sprintf("client_name:%s", p.clientName),
 		fmt.Sprintf("proxy_name:%s", p.proxyName),
@@ -139,7 +157,7 @@ func (p proxyPreparedStmt) GetErrorTags() []string {
 }
 
 // GetMetricTags gets non-high-cardinality tags intended for metrics.
-func (p proxyPreparedStmt) GetMetricTags() []string {
+func (p *proxyPreparedStmt) GetMetricTags() []string {
 	return []string{preparedStmtNamedTag(p.IsClientNamedPreparedStmt()), preparedStmtAutocachedTag(p.IsAutoCachedStmt())}
 }
 

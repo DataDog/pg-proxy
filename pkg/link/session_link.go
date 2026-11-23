@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -62,6 +61,20 @@ type SessionLink struct {
 // MarkSession records what this checkout may have done to session state.
 func (link *SessionLink) MarkSession(marks SessionMarks) { link.marks |= marks }
 
+// UsesSessionMarks reports whether Release reads the marks: only in the reset
+// modes that decide per checkout.
+func (link *SessionLink) UsesSessionMarks() bool { return link.reset.usesMarks() }
+
+// MayHoldForeignUnnamedStmt reports whether the connection's last release skipped
+// the reset. Only ResetDynamic and ResetOff skip it.
+func (link *SessionLink) MayHoldForeignUnnamedStmt() bool {
+	if link.conn == nil {
+		return false
+	}
+	_, skipped := link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey]
+	return skipped
+}
+
 // Conn returns the pooled Postgres connection associated with this link.
 func (link *SessionLink) Conn() *pgxpool.Conn {
 	return link.conn
@@ -102,17 +115,8 @@ func (link *SessionLink) Flush() error {
 // one changed inside a function.
 func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
 	msg, err := link.pgConn.Receive()
-	switch m := msg.(type) {
-	case *pgproto3.ParameterStatus:
+	if _, ok := msg.(*pgproto3.ParameterStatus); ok {
 		link.marks |= MarkParameterStatus
-	case *pgproto3.ErrorResponse:
-		if m.Code == pgerrcode.ObjectNotInPrerequisiteState && link.marks&MarkReadsSequenceState != 0 {
-			// The client read sequence state its checkout never set on this
-			// connection. No reset discards sequence state yet, so this is a lower
-			// bound on the clients that rely on another checkout's value: the ones
-			// a reset with DISCARD SEQUENCES (OSQQUERY-826) would break.
-			_ = pgproxy.Metrics().Count(metricCrossCheckoutRead, 1, link.resetTags(), 1)
-		}
 	}
 	return msg, err
 }
@@ -260,18 +264,29 @@ func (link *SessionLink) Release() error {
 	// The policy decides whether this release sends it: always, never, or only when the
 	// checkout's marks say something may have changed; and in audit mode, whether it
 	// also runs the check. resetSQL builds the statement, the same in every mode,
-	// including the identity reset when no RoleSession ran above.
+	// including the identity reset when no RoleSession ran above. ResetAlways sends it
+	// and reports nothing, as before reset_mode existed.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
 		action, reason := link.reset.resetDecision(link.marks)
-		tags := reasonTags(action, reason)
-		outcome := "outcome:reset"
-		if action == resetSkip {
-			outcome = "outcome:skipped"
+		var tags []string
+		if link.reset.reports() {
+			tags = reasonTags(action, reason)
+			outcome := "outcome:reset"
+			if action == resetSkip {
+				outcome = "outcome:skipped"
+			}
+			_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(append([]string{outcome}, tags...)...), 1)
 		}
-		_ = pgproxy.Metrics().Count(metricReset, 1, link.resetTags(append([]string{outcome}, tags...)...), 1)
-		if action != resetSkip {
+		if action == resetSkip {
+			// The reset is what discards the unnamed statement; without it, the next
+			// checkout's client could run this one's.
+			link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey] = true
+		} else {
 			if err := link.runReset(action, tags); err != nil {
 				return err
+			}
+			if link.reset.maySkip() {
+				delete(link.conn.Conn().PgConn().CustomData(), customDataResetSkippedKey)
 			}
 		}
 	}
@@ -291,8 +306,8 @@ func (link *SessionLink) Release() error {
 
 // runReset sends the reset query (pgx sends a zero-argument Exec as one simple
 // query). An audited action wraps the reset in the audit check. tags are the
-// decision's reasonTags. A failure closes the connection, so nothing it might
-// have left behind reaches the pool.
+// decision's reasonTags, nil when the policy reports nothing. A failure closes
+// the connection, so nothing it might have left behind reaches the pool.
 func (link *SessionLink) runReset(action resetAction, tags []string) error {
 	reset := resetSQL(link.role != nil)
 	resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -310,7 +325,9 @@ func (link *SessionLink) runReset(action resetAction, tags []string) error {
 		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", strings.Join(reset, "; "), "error", err)
 		return err
 	}
-	_ = pgproxy.Metrics().Distribution(pgproxy.MetricResetLatency, float64(time.Since(start).Microseconds()), link.resetTags(tags...), 1)
+	if link.reset.reports() {
+		_ = pgproxy.Metrics().Distribution(pgproxy.MetricResetLatency, float64(time.Since(start).Microseconds()), link.resetTags(tags...), 1)
+	}
 	return nil
 }
 

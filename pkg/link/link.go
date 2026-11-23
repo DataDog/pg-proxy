@@ -56,6 +56,14 @@ type Link interface {
 	// Release uses the marks to decide whether to reset the connection.
 	// Wrappers must forward it, or a dynamic reset can skip a needed reset.
 	MarkSession(marks SessionMarks)
+	// UsesSessionMarks reports whether Release reads the marks. When it does not,
+	// the session skips judging its messages, which scans SQL text.
+	UsesSessionMarks() bool
+	// MayHoldForeignUnnamedStmt reports whether the connection's last release
+	// skipped the reset, so its unnamed statement, if any, may belong to another
+	// client. The session answers a Bind or Describe of the unnamed statement
+	// itself when its client has none and this reports true.
+	MayHoldForeignUnnamedStmt() bool
 }
 
 // RoleSession changes the Postgres role after acquire and restores it before the

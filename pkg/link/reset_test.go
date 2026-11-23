@@ -46,7 +46,6 @@ func TestResetDecision(t *testing.T) {
 		{config.ResetAlways, MarkClientSQL, resetSend, "always"},
 		{config.ResetOff, MarkClientSQL, resetSkip, "off"},
 		{config.ResetDynamic, 0, resetSkip, "clean"},
-		{config.ResetDynamic, MarkReadsSequenceState, resetSkip, "clean"},
 		{config.ResetDynamic, MarkClientSQL, resetSend, "client_sql"},
 		{config.ResetDynamic, MarkPreparedStmt, resetSend, "prepared_stmt"},
 		{config.ResetDynamic, MarkParameterStatus, resetSend, "parameter_status"},
@@ -174,11 +173,11 @@ func TestReleaseByMode(t *testing.T) {
 		mode       config.ResetMode
 		marks      SessionMarks
 		wantQuery  string // empty: no reset sent
-		wantReason string
+		wantReason string // empty: no reset metrics
 	}{
-		{config.ResetAlways, 0, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL", "always"},
+		{config.ResetAlways, MarkClientSQL, testReset, ""},
 		{config.ResetDynamic, 0, "", "clean"},
-		{config.ResetDynamic, MarkClientSQL, "RESET SESSION AUTHORIZATION; RESET ROLE; RESET ALL", "client_sql"},
+		{config.ResetDynamic, MarkClientSQL, testReset, "client_sql"},
 		{config.ResetOff, MarkClientSQL, "", "off"},
 	}
 	for _, test := range tests {
@@ -187,6 +186,7 @@ func TestReleaseByMode(t *testing.T) {
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
 			received := make(chan pgproto3.FrontendMessage, 1)
 			conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
+			pgConn := conn.Conn().PgConn()
 			tags := []string{"database_cluster:test-cluster"}
 			link, err := New(conn, Options{MetricTags: tags, Reset: mustResetPolicy(t, test.mode)})
 			require.NoError(t, err)
@@ -201,6 +201,13 @@ func TestReleaseByMode(t *testing.T) {
 			default:
 				require.Empty(t, test.wantQuery, "Release sent no reset query")
 			}
+			_, skipped := pgConn.CustomData()[customDataResetSkippedKey]
+			assert.Equal(t, test.wantQuery == "", skipped, "a skipped reset marks the connection")
+			if test.wantReason == "" {
+				assert.Empty(t, metrics.counts, "always reports nothing, as before reset_mode")
+				assert.Empty(t, metrics.distributions)
+				return
+			}
 			outcome := "outcome:reset"
 			if test.wantQuery == "" {
 				outcome = "outcome:skipped"
@@ -209,8 +216,58 @@ func TestReleaseByMode(t *testing.T) {
 				append(tags, "reset_mode:"+string(test.mode), outcome, "reason:"+test.wantReason))
 			assert.True(t, emitted)
 			assert.Equal(t, []int64{1}, counts)
+			wantLatencies := 0
+			if test.wantQuery != "" {
+				wantLatencies = 1
+			}
+			assert.Equal(t, wantLatencies, metrics.distributions["datadog."+pgproxy.MetricResetLatency])
 		})
 	}
+}
+
+// TestReleaseClearsSkippedReset checks the mark that MayHoldForeignUnnamedStmt
+// reads: a reset in a mode that can skip clears it, and ResetAlways never touches
+// the connection's data.
+func TestReleaseClearsSkippedReset(t *testing.T) {
+	for _, test := range []struct {
+		mode        config.ResetMode
+		wantSkipped bool
+	}{
+		{config.ResetDynamic, false},
+		{config.ResetAlways, true},
+	} {
+		t.Run(string(test.mode), func(t *testing.T) {
+			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: newRecordingMetrics()}))
+			received := make(chan pgproto3.FrontendMessage, 1)
+			conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
+			pgConn := conn.Conn().PgConn()
+			pgConn.CustomData()[customDataResetSkippedKey] = true
+			link, err := New(conn, Options{Reset: mustResetPolicy(t, test.mode)})
+			require.NoError(t, err)
+			assert.True(t, link.MayHoldForeignUnnamedStmt())
+			link.MarkSession(MarkClientSQL)
+
+			require.NoError(t, link.Release())
+
+			require.Equal(t, &pgproto3.Query{String: testReset}, <-received)
+			_, skipped := pgConn.CustomData()[customDataResetSkippedKey]
+			assert.Equal(t, test.wantSkipped, skipped)
+		})
+	}
+}
+
+func TestUsesSessionMarks(t *testing.T) {
+	for mode, want := range map[config.ResetMode]bool{
+		config.ResetDefault: false,
+		config.ResetAlways:  false,
+		config.ResetAudit:   true,
+		config.ResetDynamic: true,
+		config.ResetOff:     false,
+	} {
+		link := &SessionLink{reset: mustResetPolicy(t, mode)}
+		assert.Equal(t, want, link.UsesSessionMarks(), "mode %q", mode)
+	}
+	assert.False(t, NewFrontendLink(nil).MayHoldForeignUnnamedStmt(), "a link without a connection holds nothing")
 }
 
 // auditRows returns two audit rows for policy, both "baseline" except for the
@@ -383,14 +440,8 @@ func TestReleaseAuditCheckFailureClosesConnection(t *testing.T) {
 	assert.True(t, pgxConn.IsClosed(), "the failed check rolled back the reset, so the connection must not return to the pool")
 }
 
-func TestReceiveMarksParameterStatusAndCountsCrossCheckoutReads(t *testing.T) {
-	metrics := newRecordingMetrics()
-	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+func TestReceiveMarksParameterStatus(t *testing.T) {
 	link, fakePg := newTestSessionLink()
-	crossCheckoutRead := func() []int64 {
-		counts, _ := metrics.getCount("datadog.pg_proxy.sessions.sequence_state.cross_checkout_read", []string{"reset_mode:always"})
-		return counts
-	}
 	receive := func(msg pgproto3.BackendMessage) {
 		fakePg.Send(msg)
 		require.NoError(t, fakePg.Flush())
@@ -398,14 +449,8 @@ func TestReceiveMarksParameterStatusAndCountsCrossCheckoutReads(t *testing.T) {
 		require.NoError(t, err)
 	}
 
+	receive(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+	assert.Zero(t, link.marks)
 	receive(&pgproto3.ParameterStatus{Name: "TimeZone", Value: "UTC"})
 	assert.Equal(t, MarkParameterStatus, link.marks)
-
-	sequenceError := &pgproto3.ErrorResponse{Severity: "ERROR", Code: "55000", Message: "lastval is not yet defined in this session"}
-	receive(sequenceError)
-	assert.Empty(t, crossCheckoutRead(), "only a checkout whose SQL may read sequence state counts")
-
-	link.MarkSession(MarkReadsSequenceState)
-	receive(sequenceError)
-	assert.Equal(t, []int64{1}, crossCheckoutRead())
 }

@@ -20,88 +20,87 @@ func TestQuerySessionMarks(t *testing.T) {
 	state := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil)}
 	for sql, want := range map[string]link.SessionMarks{
 		"SELECT 1":                        0,
-		"SET search_path = app":           link.MarkClientSQL | link.MarkReadsSequenceState,
-		"SELECT 1; SET work_mem = '1MB'":  link.MarkClientSQL | link.MarkReadsSequenceState,
-		"SELECT currval('s')":             link.MarkReadsSequenceState,
+		"SET search_path = app":           link.MarkClientSQL,
+		"SELECT 1; SET work_mem = '1MB'":  link.MarkClientSQL,
+		"SELECT currval('s')":             0,
 		"SET LOCAL statement_timeout = 0": 0,
 	} {
 		action, err := DecideClientMessageAction(&pgproto3.Query{String: sql}, state, Hooks{})
 		require.NoError(t, err)
-		assert.Equal(t, want, action.SessionMarks, "%q", sql)
+		assert.Equal(t, want, action.SessionMarks(state.PreparedStatements, nil), "%q", sql)
 	}
 }
 
 func TestBindSessionMarks(t *testing.T) {
 	clean := CreateProxyPreparedStmt("clean", "SELECT $1", nil, false)
 	setter := CreateProxyPreparedStmt("setter", "SELECT set_config('app.tenant_id', $1, false)", nil, false)
-	reader := CreateProxyPreparedStmt("reader", "SELECT currval('s')", nil, false)
 	pStmts := prepared.CreateProxyPreparedStmtsState(nil)
-	for _, stmt := range []prepared.PreparedStatement{clean, setter, reader} {
+	for _, stmt := range []prepared.PreparedStatement{clean, setter} {
 		require.NoError(t, pStmts.AddConfirmedNamedStmt(stmt))
 	}
 	state := State{PreparedStatements: pStmts}
 	for name, want := range map[string]link.SessionMarks{
 		"clean":  0,
-		"setter": link.MarkPreparedStmt | link.MarkReadsSequenceState,
-		"reader": link.MarkReadsSequenceState,
+		"setter": link.MarkPreparedStmt,
 	} {
 		action, err := DecideClientMessageAction(&pgproto3.Bind{PreparedStatement: name}, state, Hooks{})
 		require.NoError(t, err)
-		assert.Equal(t, want, action.SessionMarks, "Bind of %s", name)
+		assert.Equal(t, want, action.SessionMarks(pStmts, nil), "Bind of %s", name)
 	}
 
 	// A statement parsed earlier in the same pipeline is not confirmed yet. The
 	// Bind runs it, so its own verdict applies, not "unmatched".
 	pending := prepared.CreateProxyPreparedStmtsState(nil)
-	pending.EnqueuePendingStmt(CreateProxyPreparedStmt("fresh", "SELECT $1", nil, false), false)
+	pending.EnqueuePendingStmt(CreateProxyPreparedStmt("fresh", "SET search_path = app", nil, false), false)
 	action, err := DecideClientMessageAction(&pgproto3.Bind{PreparedStatement: "fresh"}, State{PreparedStatements: pending}, Hooks{})
 	require.NoError(t, err)
-	assert.Zero(t, action.SessionMarks)
+	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(pending, nil))
 }
 
 func TestUnnamedBindSessionMarks(t *testing.T) {
 	setter := prepared.CreatePreparedStatement("", "", "SET search_path = app", nil)
 	clean := prepared.CreatePreparedStatement("", "", "SELECT 1", nil)
-	state := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil), UnnamedStmt: setter, HasUnnamedStmt: true}
+	stmts := prepared.CreateProxyPreparedStmtsState(nil)
+	state := State{PreparedStatements: stmts}
 
 	action, err := DecideClientMessageAction(&pgproto3.Bind{}, state, Hooks{})
 	require.NoError(t, err)
 	assert.True(t, action.EnsureUnnamedPreparedStmt)
-	assert.Equal(t, link.MarkPreparedStmt|link.MarkReadsSequenceState, action.SessionMarks,
+	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(stmts, setter),
 		"the unnamed statement parsed in an earlier checkout carries its verdict")
+	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(stmts, nil), "a Bind of no known statement may run anything")
 
 	// A newer unnamed Parse in this pipeline replaces the confirmed one.
-	state.PreparedStatements.EnqueuePendingStmt(clean, false)
-	action, err = DecideClientMessageAction(&pgproto3.Bind{}, state, Hooks{})
-	require.NoError(t, err)
-	assert.Zero(t, action.SessionMarks)
+	stmts.EnqueuePendingStmt(clean, false)
+	assert.Zero(t, action.SessionMarks(stmts, setter))
 }
 
-func TestUnnamedStatementGuard(t *testing.T) {
-	none := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil)}
+// TestUnnamedStatementReachesPostgres: the decision forwards a Bind or Describe of
+// the unnamed statement even when the client has none. Only the session, which
+// knows whether the connection skipped its reset, may answer it instead.
+func TestUnnamedStatementReachesPostgres(t *testing.T) {
+	state := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil)}
 	for _, msg := range []pgproto3.FrontendMessage{
 		&pgproto3.Bind{},
 		&pgproto3.Describe{ObjectType: 'S'},
 	} {
-		action, err := DecideClientMessageAction(msg, none, Hooks{ErrorActionCreated: func(*pgproto3.ErrorResponse, error) {}})
+		action, err := DecideClientMessageAction(msg, state, Hooks{})
 		require.NoError(t, err)
-		assert.Equal(t, &pgproto3.Flush{}, action.ProxyMsgToPg, "%T must not reach Postgres", msg)
-		require.NotNil(t, action.AfterFlushAction)
-		assert.True(t, action.AfterFlushAction.DiscardUntilSync, "the client gets the extended-query error flow")
-		assert.Equal(t, []pgproto3.BackendMessage{BuildUnnamedStatementDoesNotExistErrorResponse()}, action.AfterFlushAction.ReplyMsgsToClient)
+		assert.Same(t, msg, action.ProxyMsgToPg)
+		assert.True(t, action.EnsureUnnamedPreparedStmt)
 	}
 	assert.Equal(t, "26000", BuildUnnamedStatementDoesNotExistErrorResponse().Code)
+}
 
-	// A portal is not a statement, and auto-cached statements take the named path.
-	action, err := DecideClientMessageAction(&pgproto3.Describe{ObjectType: 'P'}, none, Hooks{})
-	require.NoError(t, err)
-	assert.IsType(t, &pgproto3.Describe{}, action.ProxyMsgToPg)
-
-	// A Parse pending in the same pipeline counts as having one.
-	pending := none
-	pending.HasUnnamedStmt = true
-	action, err = DecideClientMessageAction(&pgproto3.Bind{}, pending, Hooks{})
-	require.NoError(t, err)
-	assert.IsType(t, &pgproto3.Bind{}, action.ProxyMsgToPg)
-	assert.True(t, action.EnsureUnnamedPreparedStmt)
+func TestSessionMarksOfOtherMessages(t *testing.T) {
+	state := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil)}
+	for _, msg := range []pgproto3.FrontendMessage{
+		&pgproto3.Describe{ObjectType: 'S'},
+		&pgproto3.Execute{},
+		&pgproto3.Sync{},
+	} {
+		action, err := DecideClientMessageAction(msg, state, Hooks{})
+		require.NoError(t, err)
+		assert.Zero(t, action.SessionMarks(state.PreparedStatements, nil), "%T runs nothing new", msg)
+	}
 }
