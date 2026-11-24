@@ -574,12 +574,14 @@ type sqlHealthTarget struct {
 	checker              *SQLHealthChecker
 	refcount             int
 
-	// sqlCheckMu serializes all operations that access or mutate checker state: SQL probes,
-	// independently discovered probe-pool reconciliation, feature-flag pool release, subscription
-	// setup, and shutdown. It also protects sqlClosed. Observation publication must happen after
-	// this lock is released so consumers cannot block checker cleanup.
-	sqlCheckMu sync.Mutex
-	sqlClosed  bool
+	// sqlCheckMu guards checker lifetime and sqlClosed. Routing and recovery probes hold
+	// read locks so they can run independently. Subscription setup also takes a read
+	// lock; pool release and shutdown take the write lock. Probe-pool retention
+	// separately protects in-flight IPs.
+	sqlCheckMu      sync.RWMutex
+	sqlClosed       bool
+	recoveryMu      sync.Mutex
+	recoveryRunning bool
 	// sqlComparisonRetired prevents a check that finishes after its last unsubscribe from restoring
 	// the target's raw result in the host-level comparison cache.
 	// Both fields are protected by PoolHealth.sqlComparisonMu. Disabling advances the generation
@@ -1161,6 +1163,9 @@ func (w *HealthWorker) runSQLHealthGroup(
 		go func(plan sqlHealthCheckPlan) {
 			defer wg.Done()
 			defer plan.target.finishSQLRound(scheduledAt)
+			if plan.enabled && w.checkSQLHealthWithRecovery(plan.target, plan.generation, scheduledAt, toProbe, resolvedSet, waitForStartedChecks) {
+				return
+			}
 			outcome, completed := w.checkSQLHealth(plan.target, toProbe, plan.enabled, scheduledAt)
 			if plan.enabled && completed {
 				w.completeSQLHealthCheck(plan.target, plan.generation, scheduledAt, toProbe, resolvedSet, outcome)
@@ -1427,8 +1432,13 @@ func (w *HealthWorker) checkSQLHealth(
 	var writablePublished atomic.Bool
 	var outcome SQLHealthCheckOutcome
 	observation, ok := func() (SQLHealthObservation, bool) {
-		target.sqlCheckMu.Lock()
-		defer target.sqlCheckMu.Unlock()
+		if !checksEnabled {
+			target.sqlCheckMu.Lock()
+			defer target.sqlCheckMu.Unlock()
+		} else {
+			target.sqlCheckMu.RLock()
+			defer target.sqlCheckMu.RUnlock()
+		}
 		if target.sqlClosed || target.checker == nil || target.connStringForIP == nil {
 			return SQLHealthObservation{}, false
 		}
@@ -1549,8 +1559,10 @@ func (s *PoolHealth) SubscribeSQLHealth(healthUpdates ...HealthUpdates) (SQLHeal
 	if target == nil {
 		return nil, ErrSQLHealthUpdatesUnsupported
 	}
-	target.sqlCheckMu.Lock()
-	defer target.sqlCheckMu.Unlock()
+	// Registration reads checker lifetime; subscriberMu protects the map update.
+	// An exclusive lock here would queue new routing probes behind slow recovery.
+	target.sqlCheckMu.RLock()
+	defer target.sqlCheckMu.RUnlock()
 	if target.sqlClosed || target.checker == nil {
 		return nil, ErrSQLHealthUpdatesUnsupported
 	}
