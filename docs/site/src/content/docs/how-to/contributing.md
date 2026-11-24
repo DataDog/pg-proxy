@@ -61,7 +61,15 @@ go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
 
 If you changed the documentation site, follow [Contribute to the documentation](../documentation-contributing/) and run its static build, which checks links.
 
-The `test/integration` suite runs the `pg-proxy` binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status.
+The `test/integration` suite runs the `pg-proxy` binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status. After each wire-protocol case, a new client on the same backend connection checks that the case left no session state behind. The suite runs against PostgreSQL 14 by default; to choose another version, see [Requirements](../../reference/requirements/#postgresql).
+
+Some cases record known proxy bugs. Each passes against PostgreSQL directly and skips its proxy run, or the hygiene check after it, with a `TODO:` reason that states how the proxy fails. To run what they skip and reproduce the bugs, set `PG_PROXY_ITEST_RUN_KNOWN_BUGS=1`:
+
+```sh
+PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 go test -tags=integration -count=1 ./test/integration
+```
+
+When you fix one of these bugs, remove the case's `proxySkip` or `hygieneSkip` in the same change.
 
 Detecting a client that disconnects while waiting for a backend connection relies on Linux `POLLRDHUP`, so that test is skipped on other platforms. From macOS, run the full suite in a Linux container that uses the host's Docker:
 

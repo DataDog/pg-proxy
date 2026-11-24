@@ -49,7 +49,7 @@ jobs:
     needs:
       - license-headers
       - go # Includes every toolchain in the matrix.
-      - integration
+      - integration # Includes every PostgreSQL major in the matrix.
       - docs
       - regress # Includes every PostgreSQL version in the matrix.
     steps:
@@ -134,9 +134,16 @@ jobs:
         run: go test -race -count=1 -timeout=10m ./...
 
   integration:
-    name: PostgreSQL integration
+    name: PostgreSQL ${{ matrix.major }} integration
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        # Each major needs a pinned image in internal/itest/images.go.
+        major: ['14', '18']
+    env:
+      PG_PROXY_TEST_POSTGRES_MAJOR: ${{ matrix.major }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

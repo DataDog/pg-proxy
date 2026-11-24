@@ -113,10 +113,16 @@ func TestExtendedProtocol(t *testing.T) {
 	}})
 }
 
-// TestExtendedErrors verifies that an error in Bind, Execute or a portal
-// lookup ends the batch: PostgreSQL skips every message up to Sync and rolls
-// back the implicit transaction, and the session stays usable. Each case runs
-// against PostgreSQL directly and through the proxy.
+// nulInParse is a known bug. The case that hits it still runs against
+// PostgreSQL directly; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to reproduce it
+// through the proxy.
+const nulInParse = "TODO: proxy cannot decode a Parse whose query has an embedded NUL and closes the session " +
+	"with FATAL 08006; PostgreSQL returns ERROR 08P01 and keeps the session"
+
+// TestExtendedErrors verifies that an error in Parse, Bind, Execute or a
+// portal lookup ends the batch: PostgreSQL skips every message up to Sync and
+// rolls back the implicit transaction, and the session stays usable. Each case
+// runs against PostgreSQL directly and through the proxy.
 func TestExtendedErrors(t *testing.T) {
 	setup := []string{
 		"DROP TABLE IF EXISTS extended_events",
@@ -202,6 +208,24 @@ func TestExtendedErrors(t *testing.T) {
 				[]string{"CommandComplete BEGIN", "ReadyForQuery T"},
 				[]string{"ParseComplete", "BindComplete", "ErrorResponse 42P03", "ReadyForQuery E"},
 				[]string{"CommandComplete ROLLBACK", "ReadyForQuery I"},
+				[]string{"RowDescription", "CommandComplete SELECT 0", "ReadyForQuery I"},
+			)
+		},
+	}, {
+		// PostgreSQL reads the query up to the NUL, takes the next bytes as the
+		// parameter count and runs out of message.
+		name:      "NUL in Parse",
+		setup:     setup,
+		proxySkip: nulInParse,
+		steps: []step{
+			ready(append(append([]pgproto3.FrontendMessage{
+				&pgproto3.Parse{Query: "SELECT 'a\x00b'"}, &pgproto3.Bind{}, &pgproto3.Execute{},
+			}, insert("ignored", "2")...), &pgproto3.Sync{})...),
+			selectIDs,
+		},
+		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			requireReplies(t, replies,
+				[]string{"ErrorResponse 08P01", "ReadyForQuery I"},
 				[]string{"RowDescription", "CommandComplete SELECT 0", "ReadyForQuery I"},
 			)
 		},

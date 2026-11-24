@@ -1,0 +1,87 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
+//go:build integration
+
+package integration
+
+import (
+	"maps"
+	"slices"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/DataDog/pg-proxy/internal/itest"
+)
+
+// postgresMajor holds the expectations that differ between PostgreSQL majors.
+type postgresMajor struct {
+	// startupParameters are the parameters PostgreSQL reports with
+	// ParameterStatus at startup.
+	startupParameters []string
+}
+
+// unproxiedStartupParameters is a known bug. The proxy run of
+// TestStartupParameterStatus expects only the parameters the proxy reports;
+// set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to expect all of PostgreSQL's.
+const unproxiedStartupParameters = "TODO: proxy reports a fixed list of startup parameters, " +
+	"which lacks those that PostgreSQL 16 and later add: %v"
+
+// Parameters PostgreSQL reports at startup, from the major that first does.
+// The proxy reports startupParameters14 on every major.
+var (
+	startupParameters14 = []string{
+		"DateStyle", "IntervalStyle", "TimeZone", "application_name", "client_encoding", "default_transaction_read_only",
+		"in_hot_standby", "integer_datetimes", "is_superuser", "server_encoding", "server_version", "session_authorization",
+		"standard_conforming_strings",
+	}
+	startupParameters16 = append(slices.Clone(startupParameters14), "scram_iterations")
+	startupParameters18 = append(slices.Clone(startupParameters16), "search_path")
+)
+
+// postgresMajors has an entry for each supported major. CI runs those with a
+// pinned image (see internal/itest/images.go); run the others with
+// PG_PROXY_TEST_POSTGRES_IMAGE. Record here anything a test expects only on
+// some majors, so that a new major, or a new difference, is added explicitly.
+var postgresMajors = map[int]postgresMajor{
+	14: {startupParameters: startupParameters14},
+	15: {startupParameters: startupParameters14},
+	16: {startupParameters: startupParameters16},
+	17: {startupParameters: startupParameters16},
+	18: {startupParameters: startupParameters18},
+}
+
+// expectedOfMajor returns the expectations for the backend's major.
+func expectedOfMajor(t *testing.T) postgresMajor {
+	t.Helper()
+	expected, ok := postgresMajors[backendMajor]
+	require.True(t, ok, "postgresMajors has no entry for PostgreSQL %d", backendMajor)
+	return expected
+}
+
+// TestStartupParameterStatus verifies the parameters reported with
+// ParameterStatus at startup, directly and through the proxy, and that each
+// reported value is the server's.
+func TestStartupParameterStatus(t *testing.T) {
+	expected := expectedOfMajor(t)
+	proxy := startProxy(t)
+	for target, url := range map[string]string{
+		"direct": backend.URL("postgres"),
+		"proxy":  proxy.URL(dbPooled, itest.PostgresUser),
+	} {
+		t.Run(target, func(t *testing.T) {
+			want := expected.startupParameters
+			if unproxied := want[len(startupParameters14):]; target == "proxy" && len(unproxied) > 0 && !runKnownBugs {
+				t.Logf(unproxiedStartupParameters, unproxied)
+				want = startupParameters14
+			}
+			c := connectRaw(t, url)
+			defer c.close()
+			require.ElementsMatch(t, want, slices.Collect(maps.Keys(c.parameters)))
+			requireParameterView(t, c)
+		})
+	}
+}
