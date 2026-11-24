@@ -189,3 +189,21 @@ func TestRetentionKeepsPoolsUsedByRecovery(t *testing.T) {
 	checker.RetainIPs(nil)
 	require.Zero(t, pools.Len(), "the next retention pass must close the departed IP's idle pool")
 }
+
+func TestRecoveryDoesNotEvaluateTheRoutingFlag(t *testing.T) {
+	const ip = "10.0.0.1"
+	health := newTestPoolHealth(ip)
+	health.sqlHealthState = NewHealthState()
+	health.sqlHealthState.Track([]string{ip})
+	health.hybridPolicy = newHybridHealthPolicy(true)
+	health.hybridPolicy.routingBannedIPs[ip] = time.Now().Add(-time.Second)
+	health.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation {
+		t.Error("recovery must not block routing through the flag evaluator")
+		return validSQLHealthFeatureFlag(true)
+	}
+	target := &sqlHealthTarget{poolHealth: health}
+	now := time.Now()
+	w := newTestWorker(nil)
+	w.completeSQLHealthCheckMode(target, 0, now, []string{ip}, map[string]struct{}{ip: {}}, SQLHealthCheckOutcome{StartedAt: now, Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}}, sqlRecoveryPoll)
+	require.Empty(t, health.hybridPolicy.routingBanSnapshot())
+}

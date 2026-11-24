@@ -1182,8 +1182,12 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 	// Preserve probe completion time even when routing-flag evaluation blocks.
 	observedAt := time.Now()
 	poolHealth := target.poolHealth
-	// External flag evaluation must not run under the snapshot/invalidation lock.
-	w.syncSQLRoutingKillSwitch(poolHealth)
+	// Routing evaluates the flag; recovery uses the accepted mode so its evaluator
+	// cannot stall routing through a shared client. Mode/generation guards below
+	// still reject recovery from before an observed disable.
+	if mode != sqlRecoveryPoll {
+		w.syncSQLRoutingKillSwitch(poolHealth)
+	}
 	var snapshot, rawSnapshot *sqlHealthComparisonSnapshot
 	var decision hybridRoutingDecision
 	applied := func() bool {
