@@ -14,9 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Known bugs: session state that the proxy leaves on a backend it releases.
-// The LISTEN case's proxy run must fail, and so must the others' hygiene check
-// after it; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to see how they fail.
+// Known bugs: session state that the proxy leaves on a backend it releases,
+// for protocolCase.proxySkip and hygieneSkip.
 const (
 	leakedListen = "TODO: proxy does not UNLISTEN when it releases a backend, and it closes the session " +
 		"with FATAL 08006 when that backend sends a NotificationResponse: client 1's COMMIT commits, " +

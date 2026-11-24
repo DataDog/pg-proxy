@@ -15,9 +15,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Known bugs in the proxy's record of the prepared statements on a backend.
-// Each case that hits one passes against PostgreSQL directly and must fail
-// through the proxy; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to see how it fails.
+// Known bugs in the proxy's record of the prepared statements on a backend,
+// for protocolCase.proxySkip.
 const (
 	staleAfterResultTypeChange = "TODO: after a result-type change, proxy answers a re-Parse of the same SQL " +
 		"with a local ParseComplete for the backend's stale statement, so 0A000 repeats on every retry " +

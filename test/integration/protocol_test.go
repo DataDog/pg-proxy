@@ -17,7 +17,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -279,8 +279,8 @@ type protocolCase struct {
 	check func(t testing.TB, replies [][]pgproto3.BackendMessage)
 	// setup runs on the backend before each run, for example to recreate a table.
 	setup []string
-	// proxySkip, if set, names a known proxy bug that makes the proxy run
-	// fail. The proxy run must fail, and is then skipped (see requireKnownBug).
+	// proxySkip, if set, names a known proxy bug. The proxy run must fail, and
+	// is then skipped (see requireKnownBug).
 	proxySkip string
 	// hygieneSkip, if set, names a known proxy bug that leaves state on the
 	// backend. The hygiene check after the proxy run must fail, and is then
@@ -314,28 +314,27 @@ func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 				}
 			}()
 			url := proxy.URL(dbPooled, itest.PostgresUser)
-			if tc.proxySkip != "" && !runKnownBugs {
-				requireKnownBug(t, "proxySkip", tc.proxySkip, func(t testing.TB) { tc.run(t, url) })
-			}
-			tc.run(t, url)
+			requireKnownBug(t, "proxySkip", tc.proxySkip, func(t testing.TB) { tc.run(t, url) })
 			// A new direct session is always clean, so only the proxy run is checked.
 			t.Run("hygiene", func(t *testing.T) {
-				if tc.hygieneSkip != "" && !runKnownBugs {
-					requireKnownBug(t, "hygieneSkip", tc.hygieneSkip, func(t testing.TB) { requireCleanBackend(t, url, parsed) })
-				}
-				requireCleanBackend(t, url, parsed)
+				requireKnownBug(t, "hygieneSkip", tc.hygieneSkip, func(t testing.TB) { requireCleanBackend(t, url, parsed) })
 			})
 		})
 	}
 }
 
-// requireKnownBug runs f, the part of a case that the known proxy bug reason
-// makes fail, and skips the test with reason. If f passes, the test fails
-// instead, so the change that fixes the bug also removes the case's field,
-// proxySkip or hygieneSkip. Any failure of f counts, not only the one reason
-// describes; PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 shows f's failures.
+// requireKnownBug runs f, a part of a case. If reason is empty, or
+// PG_PROXY_ITEST_RUN_KNOWN_BUGS is set, f runs as t. Otherwise reason names a
+// known proxy bug that makes f fail: if f fails, the test is skipped with
+// reason; if f passes, the test fails, so the change that fixes the bug also
+// removes the case's field, proxySkip or hygieneSkip. Any failure of f counts,
+// not only the one reason describes.
 func requireKnownBug(t *testing.T, field, reason string, f func(t testing.TB)) {
 	t.Helper()
+	if reason == "" || runKnownBugs {
+		f(t)
+		return
+	}
 	if !fails(t, f) {
 		t.Fatalf("passes, so the bug its %s names looks fixed; remove the %s: %s", field, field, reason)
 	}
@@ -346,25 +345,22 @@ func requireKnownBug(t *testing.T, field, reason string, f func(t testing.TB)) {
 // of failing t, and reports whether f failed.
 func fails(t *testing.T, f func(t testing.TB)) bool {
 	recorder := &failureRecorder{TB: t}
-	done := make(chan struct{})
+	var wg sync.WaitGroup
 	// FailNow ends the goroutine that calls it, so f gets one of its own.
-	go func() {
-		defer close(done)
-		f(recorder)
-	}()
-	<-done
-	return recorder.Failed()
+	wg.Go(func() { f(recorder) })
+	wg.Wait()
+	return recorder.failed
 }
 
 // failureRecorder records the failures reported to it and passes every other
 // call to the test it wraps.
 type failureRecorder struct {
 	testing.TB
-	failed atomic.Bool
+	failed bool
 }
 
-func (r *failureRecorder) Fail()                 { r.failed.Store(true) }
-func (r *failureRecorder) Failed() bool          { return r.failed.Load() }
+func (r *failureRecorder) Fail()                 { r.failed = true }
+func (r *failureRecorder) Failed() bool          { return r.failed }
 func (r *failureRecorder) FailNow()              { r.Fail(); runtime.Goexit() }
 func (r *failureRecorder) Error(...any)          { r.Fail() }
 func (r *failureRecorder) Errorf(string, ...any) { r.Fail() }

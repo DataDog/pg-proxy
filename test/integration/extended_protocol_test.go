@@ -113,9 +113,7 @@ func TestExtendedProtocol(t *testing.T) {
 	}})
 }
 
-// nulInParse is a known bug. The case that hits it passes against PostgreSQL
-// directly and must fail through the proxy; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1
-// to see how it fails.
+// nulInParse is a known bug, for protocolCase.proxySkip.
 const nulInParse = "TODO: proxy cannot decode a Parse whose query has an embedded NUL and closes the session " +
 	"with FATAL 08006; PostgreSQL returns ERROR 08P01 and keeps the session"
 

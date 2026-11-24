@@ -14,9 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// Known COPY bugs. Each case that hits one passes against PostgreSQL directly
-// and must fail through the proxy; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to see
-// how it fails.
+// Known COPY bugs, for protocolCase.proxySkip.
 const (
 	copyInUnderExecute = "TODO: proxy rejects CopyInResponse while it expects ExecuteReply " +
 		"and closes the client connection without an ErrorResponse (#12 reported 08006)"
