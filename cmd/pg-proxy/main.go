@@ -49,6 +49,7 @@ type config struct {
 	telemetryWarnings   []string
 	listenAddress       string
 	messageBufferSize   int
+	replyBufferPool     bool // see pgconfig.ProxySettings.ReplyBufferPool
 	shutdownGracePeriod time.Duration
 	sessionLimits       limiter.Params
 	tlsConfig           *tls.Config
@@ -309,6 +310,7 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 			Settings: topology.RuntimeConfig{
 				PostgresMessageBufferSize: cfg.messageBufferSize,
 				ClientDisconnectTimer:     cfg.clientDisconnectTimer,
+				ReplyBufferPool:           cfg.replyBufferPool,
 			},
 		},
 	})

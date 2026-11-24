@@ -40,6 +40,9 @@ type RuntimeConfig struct {
 	// ClientDisconnectTimer selects session.Config.ClientDisconnectTimer for
 	// every session.
 	ClientDisconnectTimer bool
+	// ReplyBufferPool lends pooled buffers to replies that outgrow a session's
+	// reply buffer. See session.Config.ReplyBufferPool.
+	ReplyBufferPool bool
 }
 
 // NormalizedWeight returns weight, applying the default for an unset value.

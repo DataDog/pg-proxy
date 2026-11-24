@@ -108,6 +108,10 @@ type ProxySettings struct {
 	// during a backend checkout with one reusable timer, instead of a goroutine
 	// and a ticker for each checkout. False keeps the goroutine.
 	ClientDisconnectTimer bool `mapstructure:"client_disconnect_timer" json:"clientDisconnectTimer,omitempty" yaml:"client_disconnect_timer,omitempty"`
+	// ReplyBufferPool lets a reply of 512 bytes or more continue in a buffer from
+	// a pool that all sessions share, so that replies of many rows do not grow a
+	// new buffer each time. Off by default.
+	ReplyBufferPool bool `mapstructure:"reply_buffer_pool" json:"replyBufferPool,omitempty" yaml:"reply_buffer_pool,omitempty"`
 }
 
 // Proxy contains listener settings and TLS certificate file paths.

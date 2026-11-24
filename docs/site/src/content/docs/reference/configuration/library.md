@@ -62,6 +62,8 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 
 `ClientDisconnectTimer` selects how each session checks for a client that disconnects during a backend checkout: `false`, the default, starts a goroutine and a ticker for each checkout, and `true` keeps one timer for the session. It is the library form of the `client_disconnect_timer` proxy setting.
 
+`ReplyBufferPool` is the library form of the `reply_buffer_pool` proxy setting, and it is off by default. With `true`, a reply of 512 bytes or more continues in a buffer from a pool that all sessions share, and the buffer goes back to the pool after the reply's last write to the client. Thus the client connection must not keep the slice that `Write` receives, as `io.Writer` requires.
+
 ## Logical databases
 
 `topology.LogicalDatabase.Cluster` selects the primary cluster. `ReadClusters` maps read-cluster names to their runtime weights. The application supplies configuration and backend discovery through the inventory interfaces.
