@@ -27,8 +27,8 @@ const (
 )
 
 // runKnownBugs runs the proxy runs and hygiene checks that proxySkip and
-// hygieneSkip would skip, to reproduce the bugs they name. Set
-// PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to enable it.
+// hygieneSkip expect to fail as ordinary tests, so that their failures show.
+// Set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to enable it.
 var runKnownBugs = os.Getenv("PG_PROXY_ITEST_RUN_KNOWN_BUGS") != ""
 
 // backend is the PostgreSQL container shared by every test in the package.

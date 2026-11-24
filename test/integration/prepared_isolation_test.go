@@ -90,7 +90,7 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 	return protocolCase{
 		name:  name,
 		steps: steps,
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies, want...)
 		},
 	}
@@ -105,23 +105,36 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 // for over a second, so after a termination terminatePooledBackend waits that
 // long. Without the wait the proxy hands out the dead connection and the
 // client's session fails.
-func terminatePooledBackend(t *testing.T) {
+func terminatePooledBackend(t testing.TB) {
 	t.Helper()
 	ctx := t.Context()
 	conn, err := backend.Connect(ctx, "postgres")
 	require.NoError(t, err)
 	defer conn.Close(context.Background())
 	rows, err := conn.Query(ctx,
-		"SELECT pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = $1", pooledApplicationName)
+		"SELECT pid, pg_terminate_backend(pid, 5000) FROM pg_stat_activity WHERE application_name = $1", pooledApplicationName)
 	require.NoError(t, err)
 	found := false
+	var notTerminated []int32
 	for rows.Next() {
+		var pid int32
 		var terminated bool
-		require.NoError(t, rows.Scan(&terminated))
-		require.True(t, terminated, "pooled backend did not exit within 5s")
+		require.NoError(t, rows.Scan(&pid, &terminated))
+		if !terminated {
+			notTerminated = append(notTerminated, pid)
+		}
 		found = true
 	}
 	require.NoError(t, rows.Err())
+	// pg_terminate_backend also returns false for a backend that exited after
+	// pg_stat_activity listed it, as one the proxy discards can. pg_stat_activity
+	// keeps its snapshot for the transaction, so a new query checks again.
+	for _, pid := range notTerminated {
+		var running bool
+		require.NoError(t, conn.QueryRow(ctx,
+			"SELECT EXISTS (SELECT FROM pg_stat_activity WHERE pid = $1)", pid).Scan(&running))
+		require.False(t, running, "pooled backend %d did not exit within 5s", pid)
+	}
 	if found {
 		time.Sleep(1100 * time.Millisecond)
 	}

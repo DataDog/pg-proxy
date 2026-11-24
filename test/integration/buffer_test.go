@@ -49,7 +49,7 @@ func TestBufferBoundaries(t *testing.T) {
 						ready(&pgproto3.Query{String: fmt.Sprintf("SELECT repeat('x', %d)", payload)}),
 						ready(&pgproto3.Query{String: "SELECT 1"}),
 					},
-					check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+					check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 						row, ok := replies[0][1].(*pgproto3.DataRow)
 						require.True(t, ok, "%v", summarize(replies[0]))
 						encoded, err := row.Encode(nil)
