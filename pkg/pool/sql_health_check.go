@@ -55,6 +55,9 @@ func (r SQLHealthCheckResult) HealthyPrimary() bool {
 
 // SQLHealthCheckOutcome is one complete concurrent cluster snapshot.
 type SQLHealthCheckOutcome struct {
+	// The worker stamps the routing period reserved before discovery/probing. Raw
+	// comparison results remain useful even if routing changes before completion.
+	routingGeneration uint64
 	// StartedAt is captured before probing. When combining credential snapshots,
 	// retain the earliest start time of all included evidence. A zero value cannot
 	// establish freshness after Patroni restores a hybrid route.

@@ -43,9 +43,10 @@ func (p *hybridHealthPolicy) observeSQLRecovery(ips []string, outcome SQLHealthC
 // sqlBanEvidence keeps one credential's latest observation of one IP. It is
 // used only for ban eligibility, never for choosing a routing role.
 type sqlBanEvidence struct {
-	result      SQLHealthCheckResult
-	scheduledAt time.Time
-	observedAt  time.Time
+	routingGeneration uint64
+	result            SQLHealthCheckResult
+	scheduledAt       time.Time
+	observedAt        time.Time
 }
 
 // recordSQLPollEvidenceLocked records ban evidence from either kind of probe,
@@ -68,7 +69,7 @@ func (s *PoolHealth) recordSQLPollEvidenceLocked(target *sqlHealthTarget, schedu
 	}
 	for _, result := range results {
 		previous, exists := s.sqlBanLatest[target][result.IP]
-		if exists && !isPostgresShutdownError(result.Err) {
+		if exists && previous.routingGeneration == outcome.routingGeneration && !isPostgresShutdownError(result.Err) {
 			// An older recovery completion cannot replace a newer poll or
 			// erase shutdown evidence observed while that recovery was running.
 			if scheduledAt.Before(previous.scheduledAt) ||
@@ -76,16 +77,17 @@ func (s *PoolHealth) recordSQLPollEvidenceLocked(target *sqlHealthTarget, schedu
 				continue
 			}
 		}
-		s.sqlBanLatest[target][result.IP] = sqlBanEvidence{result: result, scheduledAt: scheduledAt, observedAt: observedAt}
+		s.sqlBanLatest[target][result.IP] = sqlBanEvidence{routingGeneration: outcome.routingGeneration, result: result, scheduledAt: scheduledAt, observedAt: observedAt}
 	}
 
 	if mode != sqlRecoveryPoll {
 		if s.sqlRoutingLatest == nil {
 			s.sqlRoutingLatest = make(map[*sqlHealthTarget]SQLHealthResultsSnapshot)
 		}
-		if previous := s.sqlRoutingLatest[target]; !scheduledAt.Before(previous.ScheduledAt) {
+		if previous := s.sqlRoutingLatest[target]; previous.routingGeneration != outcome.routingGeneration || !scheduledAt.Before(previous.ScheduledAt) {
 			s.sqlRoutingLatest[target] = SQLHealthResultsSnapshot{
-				StartedAt: outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt,
+				routingGeneration: outcome.routingGeneration,
+				StartedAt:         outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt,
 				CandidateIPs: slices.Collect(maps.Keys(retained)),
 				BannedIPs:    slices.Clone(bannedIPs), Tags: slices.Clone(target.tags),
 				Results: results,
@@ -98,11 +100,12 @@ func (s *PoolHealth) recordSQLPollEvidenceLocked(target *sqlHealthTarget, schedu
 
 // sqlBanOutcomeLocked includes cached shutdowns from every credential, including
 // IPs omitted by routing polls. Recovery replaces only its own ban evidence.
+// The caller holds sqlComparisonMu and routingMu; older routing periods are diagnostic only.
 func (s *PoolHealth) sqlBanOutcomeLocked(retained []string) SQLHealthCheckOutcome {
 	var results []SQLHealthCheckResult
 	for _, byIP := range s.sqlBanLatest {
 		for ip, evidence := range byIP {
-			if slices.Contains(retained, ip) {
+			if evidence.routingGeneration == s.routingGeneration && slices.Contains(retained, ip) {
 				results = append(results, evidence.result)
 			}
 		}

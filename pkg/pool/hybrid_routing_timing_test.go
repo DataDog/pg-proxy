@@ -94,6 +94,10 @@ func TestHybridRoutingDowntimeWindowBoundaries(t *testing.T) {
 				p.recordRoutingLeaderLocked("hybrid", map[string]bool{"C": true}, at.Add(3*time.Second), SQLRoutingResultConclusive)
 				comparison = p.recordRoutingLeaderLocked("patroni", map[string]bool{"C": true}, at.Add(tc.patroniAt), "")
 			}
+			if tc.reset {
+				require.Nil(t, comparison, "re-enable waits for fresh SQL/Patroni agreement before timing")
+				return
+			}
 			require.NotNil(t, comparison)
 			assert.Equal(t, tc.wantComparison, comparison.HasDowntimeComparison)
 			assert.Equal(t, tc.wantReduction, comparison.DowntimeReductionPercent)

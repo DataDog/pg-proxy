@@ -16,9 +16,10 @@ import (
 )
 
 const (
-	SQLRoutingBanReasonPostgresShutdown   = "postgres_shutdown"
-	SQLRoutingUnbanReasonConclusiveResult = "conclusive_result"
-	SQLRoutingUnbanReasonDNSRemoved       = "dns_removed"
+	SQLRoutingBanReasonPostgresShutdown     = "postgres_shutdown"
+	SQLRoutingUnbanReasonConclusiveResult   = "conclusive_result"
+	SQLRoutingUnbanReasonDNSRemoved         = "dns_removed"
+	SQLRoutingUnbanReasonRoutingModeChanged = "routing_mode_changed"
 )
 
 // SQLRoutingBanChange reports one IP entering or leaving the SQL routing banlist.

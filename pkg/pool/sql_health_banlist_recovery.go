@@ -15,7 +15,7 @@ import (
 // checkSQLHealthWithRecovery lets routing wait only for eligible candidates. Each credential
 // has at most one independent recovery poll. Raw comparisons still wait for both halves of
 // their original poll, and a late raw completion never publishes an older routing decision.
-func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, generation uint64, scheduledAt time.Time, ips []string, resolvedSet map[string]struct{}, waitForRecovery bool) bool {
+func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, generation, routingGeneration uint64, scheduledAt time.Time, ips []string, resolvedSet map[string]struct{}, waitForRecovery bool) bool {
 	policy, _ := target.poolHealth.routingPolicy()
 	if policy == nil {
 		return false
@@ -70,6 +70,7 @@ func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, gener
 		}
 		target.checker.RetainIPs(ips)
 		outcome := target.checker.Check(context.Background(), candidates, target.connStringForIP, target.poolHealth.patroniHealthState.Snapshot().Health, target.tags, onResult)
+		outcome.routingGeneration = routingGeneration
 		return outcome, time.Now(), true
 	}
 	type completedPoll struct {
@@ -107,6 +108,7 @@ func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, gener
 			defer func() { target.recoveryMu.Lock(); target.recoveryRunning = false; target.recoveryMu.Unlock() }()
 			recovered := <-recoveryDone
 			combined := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{routingOutcome, recovered.outcome}).Outcome
+			combined.routingGeneration = routingGeneration
 			// Each half already reports its own multiple primaries. Report the
 			// combined anomaly only when it was visible in neither half alone.
 			if multiplePrimaries != nil && len(combined.PrimaryIPs) > 1 &&
