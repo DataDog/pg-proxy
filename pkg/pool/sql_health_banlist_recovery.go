@@ -156,36 +156,47 @@ func mergeSQLRoutingResults(old, incoming []SQLHealthCheckResult, replace bool) 
 	// For each role, the latest start can supersede an older opposite role;
 	// the latest finish prevents an overlapping opposite role from being lost.
 	// One unknown interval per role preserves uncertainty without keeping history.
-	type bounds struct{ start, finish, unknown int }
-	roles := [2]bounds{{-1, -1, -1}, {-1, -1, -1}}
+	type roleEvidence struct {
+		latestStartIndex  int
+		latestFinishIndex int
+		unknownTimeIndex  int
+	}
+	primary := roleEvidence{
+		latestStartIndex:  -1,
+		latestFinishIndex: -1,
+		unknownTimeIndex:  -1,
+	}
+	standby := roleEvidence{
+		latestStartIndex:  -1,
+		latestFinishIndex: -1,
+		unknownTimeIndex:  -1,
+	}
 	for i, result := range combined {
 		if result.Err != nil {
 			continue
 		}
-		role := 0
+		evidence := &primary
 		if result.InRecovery {
-			role = 1
+			evidence = &standby
 		}
-		r := &roles[role]
 		if !result.hasProbeInterval() {
-			r.unknown = i
+			evidence.unknownTimeIndex = i
 			continue
 		}
-		if r.start < 0 || result.StartedAt.After(combined[r.start].StartedAt) {
-			r.start = i
+		if evidence.latestStartIndex == -1 || result.StartedAt.After(combined[evidence.latestStartIndex].StartedAt) {
+			evidence.latestStartIndex = i
 		}
-		if r.finish < 0 || result.CompletedAt.After(combined[r.finish].CompletedAt) {
-			r.finish = i
+		if evidence.latestFinishIndex == -1 || result.CompletedAt.After(combined[evidence.latestFinishIndex].CompletedAt) {
+			evidence.latestFinishIndex = i
 		}
 	}
 	for i, result := range combined {
 		if result.Err == nil {
-			role := 0
+			evidence := &primary
 			if result.InRecovery {
-				role = 1
+				evidence = &standby
 			}
-			r := roles[role]
-			if i == r.start || i == r.finish || i == r.unknown {
+			if i == evidence.latestStartIndex || i == evidence.latestFinishIndex || i == evidence.unknownTimeIndex {
 				merged = append(merged, result)
 			}
 		}
@@ -247,6 +258,16 @@ func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, gener
 	}
 	target.recoveryMu.Unlock()
 
+	// Keep the callback without accessing checker lifetime after the probes finish.
+	var multiplePrimaries func([]string, []string)
+	if startRecovery {
+		target.sqlCheckMu.RLock()
+		if !target.sqlClosed && target.checker != nil {
+			multiplePrimaries = target.checker.hooks.MultiplePrimaries
+		}
+		target.sqlCheckMu.RUnlock()
+	}
+
 	var writable atomic.Bool
 	onResult := func(result SQLHealthCheckResult) {
 		if !result.HealthyPrimary() || !writable.CompareAndSwap(false, true) {
@@ -305,6 +326,13 @@ func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, gener
 			defer func() { target.recoveryMu.Lock(); target.recoveryRunning = false; target.recoveryMu.Unlock() }()
 			recovered := <-recoveryDone
 			combined := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{routingOutcome, recovered.outcome}).Outcome
+			// Each half already reports its own multiple primaries. Report the
+			// combined anomaly only when it was visible in neither half alone.
+			if multiplePrimaries != nil && len(combined.PrimaryIPs) > 1 &&
+				len(routingOutcome.PrimaryIPs) < 2 && len(recovered.outcome.PrimaryIPs) < 2 {
+				tags := append(slices.Clone(target.tags), "pool_role:primary")
+				multiplePrimaries(combined.PrimaryIPs, tags)
+			}
 			if recovered.observedAt.After(observedAt) {
 				observedAt = recovered.observedAt
 			}

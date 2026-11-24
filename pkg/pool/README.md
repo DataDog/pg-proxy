@@ -31,14 +31,22 @@ subscription, probing, and cleanup tests live in `health_worker_test.go`.
 ## SQL health decision flow
 
 SQL checks tell us which IP is primary. Patroni supplies a separate view that we
-can use as a backup. A **snapshot** is the saved result of a completed check across
-all IPs for one credential. **Fallback** means using Patroni's results instead
+can use as a backup. A **complete snapshot** contains one credential's results
+across all IPs. Raw comparisons use these complete snapshots. Routing keeps
+separate evidence that can be updated as eligible probes finish, without waiting
+for banned-IP recovery. **Fallback** means using filtered Patroni results instead
 of choosing a route from SQL results.
 
 The main path is:
 
-`scheduleSQLRefresh` -> `SQLHealthChecker.Check` -> `completeSQLHealthCheck` ->
-`aggregateSQLHealthCheckOutcomes` -> `hybridHealthPolicy.observeSQLRound`.
+`scheduleSQLRefresh` -> `runSQLHealthGroup` -> `SQLHealthChecker.Check` ->
+`completeSQLHealthCheckMode` -> `aggregateSQLHealthCheckOutcomes` ->
+`hybridHealthPolicy.observeSQLRoundWithRoutingEvidence`.
+
+When there are banned IPs, `checkSQLHealthWithRecovery` splits the work into
+routing and recovery probes. Recovery goes through `observeSQLRecovery`, which
+updates bans without selecting a replacement route. `recordSQLCompletePoll`
+reports the original complete snapshot after both parts finish.
 
 Patroni updates arrive separately through `applyPatroniHealth` -> `observePatroni`.
 The policy chooses a result, and the worker publishes it for client routing.
@@ -52,22 +60,26 @@ Each credential checks all retained IPs in parallel using
 `SELECT pg_is_in_recovery()`. Different credentials can check the same IP at the
 same time through separate pools. Subscribers with the same target share checks.
 
-One slow credential does not hold up the others. If its previous check is still
-running at the next tick, the worker skips starting another check for that
-credential. It keeps that credential's last completed snapshot until the running
-check finishes. Each credential still waits for all of its own IP checks and
-retries before saving a new snapshot.
+One slow credential does not hold up the others. If its routing check is still
+running at the next tick, the worker skips starting another routing check for
+that credential. With hybrid routing enabled, banned IPs are probed separately
+for recovery. Each credential waits for all eligible IPs before evaluating its
+routing result, but neither that decision nor the next routing tick waits for
+the banned IPs. At most one recovery poll runs per credential.
 
-When a credential finishes, its new snapshot replaces its old one, including
-old successes becoming errors. The worker combines the latest completed
-snapshots from the active credentials. They do not all have to finish together.
-So the one-second tick schedules work; it does not mean every saved result is
-exactly one second old.
+For raw comparisons, a completed poll replaces the credential's previous complete
+snapshot, including old successes becoming errors. The routing cache instead
+updates the IPs checked by each part of the poll and preserves unresolved
+overlapping role observations. The worker combines the active credentials'
+evidence whenever an eligible poll finishes; credentials do not have to finish
+together. The one-second tick schedules work, rather than setting the age of
+every saved result. See [Background recovery](#background-recovery) for the
+separate routing, availability, and raw-comparison behavior.
 
 These results feed SQL/Patroni comparison metrics and, when SQL routing is enabled,
 routing decisions. Availability subscribers can hear about a successful primary
-earlier, as soon as that probe finishes. Routing still waits for the full checks
-and the decision rules below.
+earlier, as soon as that probe finishes. Routing still requires complete coverage
+of the eligible IPs and the decision rules below.
 
 ### Combining results
 
@@ -86,8 +98,23 @@ slow IP can delay that round after this IP's probe has finished.
 
 Overlapping probes, missing timestamps, and invalid intervals cannot establish
 which role is newer, so their conflicting successful results still require
-Patroni fallback. Errors do not replace successful roles. Raw per-credential
-snapshots remain available for diagnosis.
+Patroni fallback. One credential's error does not erase another credential's
+successful role. A newer error normally replaces the same credential's previous
+answer, but it cannot resolve an existing primary/standby conflict in the routing
+cache. Raw per-credential snapshots remain available for diagnosis.
+
+For example, these are two successful observations of the same IP:
+
+```text
+Probe A: starts at 0s, finishes at 5s, reports primary.
+Probe B: starts at 3s, finishes at 4s, reports standby.
+```
+
+The intervals overlap, so keep both in `Results` and use `conflicting_roles`
+fallback. Finishing at 5s does not make A's role newer than B's. If probe C starts
+at 6s and successfully reports standby, it started after both earlier probes
+finished: those older observations can be removed. Only C remains, so this IP no
+longer has conflicting roles. A timeout from C cannot establish that ordering.
 
 Shutdown-banlist exclusions take precedence over this table for routing; see
 [SQL shutdown banlist](#sql-shutdown-banlist). Raw comparison results are unchanged.
@@ -133,7 +160,7 @@ uses Patroni, with the old-leader protections below.
 Retries happen before the policy sees a result. The library makes one attempt
 unless the application supplies `RunWithRetry`. Each adapter picks its own retry
 policy. For example, an adapter can allow two attempts total, but not retry
-`57P02`, `57P03`, or `28P01`.
+`57P01`, `57P02`, `57P03`, or `28P01`.
 Not retrying an error does not make it proof of instance failure: `28P01` only
 says those credentials were rejected.
 
@@ -158,7 +185,9 @@ it again; the old-leader list is not a permanent ban.
 ### Decision table: SQL finishes
 
 Before calling the policy, the worker checks that the credential is still active,
-the poll was not invalidated, and it covered every currently retained IP. A poll
+the poll was not invalidated, and it covered every currently eligible retained
+IP. A routing poll can omit banned IPs; newly discovered or newly unbanned IPs
+must actually be checked rather than filled in from cached results. A poll
 scheduled before a routing-mode change cannot publish a route in the new mode.
 Rejected polls leave the route unchanged. If no SQL candidates remain and SQL
 owned routing, the worker restores the saved Patroni snapshot instead.
@@ -173,16 +202,17 @@ For a snapshot that reaches `observeSQL`, use the following order:
 | Order and condition | Result | History changes |
 | --- | --- | --- |
 | 1. SQL routing is off | `shadow`: SQL does not publish a route. | Do not establish SQL leader history. |
-| 2. Patroni restored a route at T, but any included SQL snapshot started at or before T (or has no start time) | Keep the current route: `patroni_recovery`. | Keep history unchanged. A late finish does not make an old check new. |
+| 2. Patroni restored a route at T, but any included SQL probe started at or before T (or has no start time) | Keep the current route: `patroni_recovery`. | Keep history unchanged. A late finish does not make an old check new. |
 | 3. The snapshot passes that time check | Continue below. | Stop active Patroni recovery. Remove replaced SQL leaders no longer in the candidate set. Reset `sqlNoPrimaryAt`, setting it again if SQL finds no primary. Keep the recovery time so another old completion cannot undo the route later. |
 | 4. SQL is uncertain, but we can keep the awaiting SQL leader | `retained_sql`: keep B. | Keep B and the old-leader list. Apply the checks described above before keeping B. |
 | 5. SQL is uncertain and we cannot keep that leader | `cached_fallback`: use saved Patroni results, with replaced leaders marked unhealthy. There may be no healthy leader left. | Add the previous awaiting leader to history if it is still a candidate, then clear awaiting. Keep older exclusions. If those exclusions leave no healthy IP, set `sqlNoPrimaryAt` to allow later Patroni recovery. |
 | 6. SQL definitely selects B | `conclusive_sql`: use B. | If Patroni uniquely agrees on B, clear awaiting and the old-leader lists. Otherwise set awaiting B and its selection time, remember leaders it replaced, and exclude Patroni's different unique leader. SQL can select a previously excluded IP again. |
 | 7. SQL definitely finds no primary | `conclusive_sql`: publish no healthy leader. | Clear awaiting, remembering the previous leader if it is still a candidate. Keep older exclusions and set `sqlNoPrimaryAt`. |
 
-`StartedAt` is captured before probes start. When combining credential snapshots,
-use the earliest included start time, including an unknown/zero time. One new
-credential result must not make another credential's old answer pass row 2.
+Each result's `StartedAt` is captured before that IP's probe starts. Routing uses
+the earliest included probe start, including an unknown/zero time. A newer
+credential result, or a partial refresh of other IPs, must not give an old answer
+a newer timestamp and let it pass row 2.
 
 ### Decision table: Patroni reports a result
 
@@ -222,13 +252,18 @@ turn SQL routing back on for that same instance.
 Keeping a previous SQL leader favors availability during unknown results. Keeping
 old leaders excluded can instead leave no route; this avoids returning to a
 leader we already replaced. There is no general age limit on kept SQL leaders or
-cached credential results. The start-time check protects a **Patroni recovery**;
-it does not run against every ordinary Patroni leader change. Repeated polls
-rejected for missing IP coverage also keep the old route rather than automatically
-falling back. Probe timeouts do not cover these cases.
+cached credential results. The start-time check protects a **Patroni recovery**.
+A conclusive SQL answer that contradicts a newer eligible Patroni leader is also
+checked against `patroniLeaderChangedAt` before establishing new SQL leadership
+history. These checks do not create an automatic handoff when SQL stops producing
+accepted decisions. Repeated polls rejected for missing IP coverage keep the old
+route rather than automatically falling back. Probe timeouts do not cover those
+rejections.
 
 See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 [health_worker_test.go](health_worker_test.go) for scheduling and publication tests.
+[sql_health_banlist_recovery_test.go](sql_health_banlist_recovery_test.go) covers independent
+recovery, overlapping results, availability updates, and probe-pool retention.
 
 ## SQL shutdown banlist
 
@@ -255,12 +290,25 @@ If older SQL evidence cannot replace a Patroni recovery route, shutdown bans
 still mark those IPs unhealthy in the published route. This does not select a
 replacement leader or change the recovery freshness boundary.
 
+### Background recovery
+
 Banned IPs remain discovery candidates and continue to be probed. With hybrid
 routing enabled, each SQL tick checks eligible IPs separately from banned-IP
 recovery. A credential has at most one recovery poll in flight. Routing waits
 for every eligible IP, but neither the current decision nor its next tick waits
 for banned-IP probes. Raw snapshot comparisons still wait for both parts of
 their original scheduled poll; a late raw comparison cannot replace routing.
+If the two parts each report one primary, their combined result still triggers
+the multiple-primary notification. A notification already emitted by either
+part is not repeated for the combined result.
+
+`SQLHealthChecker.RetainIPs` keeps dedicated probe pools for the retained IPs
+plus any IP in `activeIPs`. The higher-level checker lock protects setup and
+shutdown of the whole checker; it allows routing and recovery to run concurrently
+and does not prevent per-IP pool cleanup. If discovery removes an IP while its
+probe is still running, keep its pool until the probe finishes. A later retention
+pass closes it if it remains absent. This protects the in-flight probe without
+keeping the IP eligible for routing or clearing its ban.
 
 If an earlier recovery is still running and this tick's eligible probes find no
 primary, subscribers receive a missed SQL availability observation for this tick.

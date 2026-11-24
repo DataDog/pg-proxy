@@ -37,6 +37,62 @@ func newSQLRecoveryWorker(t *testing.T, ips ...string) (*HealthWorker, *PoolHeal
 	return w, health, probe, updates
 }
 
+func TestSplitSQLPollReportsMultiplePrimariesWithoutDuplicates(t *testing.T) {
+	const a, b, c, d = "10.0.0.1", "10.0.0.2", "10.0.0.3", "10.0.0.4"
+	for _, tt := range []struct {
+		name      string
+		banned    []string
+		primaries []string
+		reports   [][]string
+	}{
+		{"one primary in each half", []string{a}, []string{a, b}, [][]string{{a, b}}},
+		{"routing already reported", []string{a}, []string{a, b, c}, [][]string{{b, c}}},
+		{"recovery already reported", []string{a, b}, []string{a, b, c}, [][]string{{a, b}}},
+		{"both halves already reported", []string{a, b}, []string{a, b, c, d}, [][]string{{a, b}, {c, d}}},
+		{"only one primary", []string{a}, []string{b}, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			w, health, probe, _ := newSQLRecoveryWorker(t, a, b, c, d)
+			probe.mu.Lock()
+			for _, ip := range tt.banned {
+				probe.responses[ip] = fakeSQLHealthProbeResponse{err: &pgconn.PgError{Code: "57P01"}}
+			}
+			probe.mu.Unlock()
+			w.RefreshSQL()
+			for _, ip := range tt.banned {
+				require.Contains(t, health.hybridPolicy.routingBanSnapshot(), ip)
+			}
+
+			var mu sync.Mutex
+			var reports [][]string
+			var reportTags [][]string
+			target := health.sqlTargetValues()[0]
+			target.checker.hooks.MultiplePrimaries = func(ips, tags []string) {
+				mu.Lock()
+				defer mu.Unlock()
+				reports = append(reports, append([]string(nil), ips...))
+				reportTags = append(reportTags, append([]string(nil), tags...))
+			}
+			probe.mu.Lock()
+			for _, ip := range []string{a, b, c, d} {
+				probe.responses[ip] = fakeSQLHealthProbeResponse{inRecovery: true}
+			}
+			for _, ip := range tt.primaries {
+				probe.responses[ip] = fakeSQLHealthProbeResponse{}
+			}
+			probe.mu.Unlock()
+			w.RefreshSQL()
+
+			mu.Lock()
+			defer mu.Unlock()
+			require.ElementsMatch(t, tt.reports, reports)
+			for _, tags := range reportTags {
+				require.ElementsMatch(t, append(append([]string(nil), target.tags...), "pool_role:primary"), tags)
+			}
+		})
+	}
+}
+
 func TestBannedRecoveryDoesNotBlockRoutingOrAvailability(t *testing.T) {
 	const a, b, c = "10.0.0.1", "10.0.0.2", "10.0.0.3"
 	w, health, probe, updates := newSQLRecoveryWorker(t, a, b, c)
@@ -82,6 +138,23 @@ func TestBannedRecoveryDoesNotBlockRoutingOrAvailability(t *testing.T) {
 	require.Eventually(t, func() bool { return health.IsHealthy(b) && !target.sqlRoundRunning() }, time.Second, time.Millisecond)
 	require.Zero(t, raw.Load(), "raw comparisons wait for the original complete poll")
 
+	// Registering another subscriber must not queue a writer behind recovery
+	// and prevent the following routing tick from taking its read lock.
+	subscribed := make(chan error, 1)
+	go func() {
+		another, err := health.SubscribeSQLHealth(updates)
+		if err == nil {
+			another.Close()
+		}
+		subscribed <- err
+	}()
+	select {
+	case err := <-subscribed:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("subscriber waited for banned-IP recovery")
+	}
+
 	// A second routing tick must run while the original recovery is blocked.
 	probe.mu.Lock()
 	probe.responses[b] = fakeSQLHealthProbeResponse{inRecovery: true}
@@ -117,12 +190,43 @@ func TestBannedRecoveryDoesNotBlockRoutingOrAvailability(t *testing.T) {
 	default:
 	}
 	require.Equal(t, before+1, probe.callCount(a), "do not start duplicate recovery probes")
+
+	// Shutdown still needs exclusive access and must wait for the active probe.
+	closed := make(chan struct{})
+	go func() {
+		target.closeSQL()
+		close(closed)
+	}()
+	require.Eventually(t, func() bool {
+		if target.sqlCheckMu.TryRLock() {
+			target.sqlCheckMu.RUnlock()
+			return false
+		}
+		return true
+	}, time.Second, time.Millisecond, "shutdown did not queue its exclusive lock")
+	select {
+	case <-closed:
+		t.Fatal("checker closed while recovery was still probing")
+	default:
+	}
 	unblock()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("old recovery poll did not finish")
 	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("checker did not close after recovery finished")
+	}
+	select {
+	case <-subscriber.Done():
+	default:
+		t.Fatal("shutdown left its subscriber open")
+	}
+	_, err = health.SubscribeSQLHealth(updates)
+	require.ErrorIs(t, err, ErrSQLHealthUpdatesUnsupported)
 	require.EqualValues(t, 1, raw.Load())
 	require.True(t, health.IsHealthy(c), "the older raw completion must not restore B")
 	require.Contains(t, health.hybridPolicy.routingBanSnapshot(), a)

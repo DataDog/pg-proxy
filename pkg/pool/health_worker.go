@@ -1556,8 +1556,10 @@ func (s *PoolHealth) SubscribeSQLHealth(healthUpdates ...HealthUpdates) (SQLHeal
 	if target == nil {
 		return nil, ErrSQLHealthUpdatesUnsupported
 	}
-	target.sqlCheckMu.Lock()
-	defer target.sqlCheckMu.Unlock()
+	// Registration reads checker lifetime; subscriberMu protects the map update.
+	// An exclusive lock here would queue new routing probes behind slow recovery.
+	target.sqlCheckMu.RLock()
+	defer target.sqlCheckMu.RUnlock()
 	if target.sqlClosed || target.checker == nil {
 		return nil, ErrSQLHealthUpdatesUnsupported
 	}
