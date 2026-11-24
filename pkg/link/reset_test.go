@@ -253,23 +253,80 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 
 func TestSendTracksUnnamedStmtReplacement(t *testing.T) {
 	for _, test := range []struct {
-		msg  pgproto3.FrontendMessage
-		want bool
+		msg         pgproto3.FrontendMessage
+		expectation query.ReplyExpectation
+		want        bool
 	}{
-		{&pgproto3.Parse{Query: "SELECT 1"}, true},
-		{&pgproto3.Parse{Name: "named", Query: "SELECT 1"}, false},
-		{&pgproto3.Query{String: "SELECT 1"}, true},
-		{&pgproto3.Close{ObjectType: 'S'}, true},
-		{&pgproto3.Close{ObjectType: 'P'}, false},
-		{&pgproto3.Close{ObjectType: 'S', Name: "named"}, false},
-		{&pgproto3.Bind{}, false},
-		{&pgproto3.Describe{ObjectType: 'S'}, false},
+		{&pgproto3.Parse{Query: "SELECT 1"}, query.ParseReply, true},
+		{&pgproto3.Parse{Name: "named", Query: "SELECT 1"}, query.ParseReply, false},
+		{&pgproto3.Query{String: "SELECT 1"}, query.QueryReply, true},
+		{&pgproto3.Close{ObjectType: 'S'}, query.CloseReply, true},
+		{&pgproto3.Close{ObjectType: 'P'}, query.CloseReply, false},
+		{&pgproto3.Close{ObjectType: 'S', Name: "named"}, query.CloseReply, false},
+		{&pgproto3.Bind{}, query.BindReply, false},
+		{&pgproto3.Describe{ObjectType: 'S'}, query.DescribeReply, false},
 	} {
 		link, _ := newTestSessionLink()
 		link.foreignUnnamed = true
-		link.Send(test.msg, query.NoReply)
-		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v", test.msg)
+		link.Send(test.msg, test.expectation)
+		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v in flight", test.msg)
+		link.ResolveNextExpectation()
+		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v answered", test.msg)
+		assert.Equal(t, !test.want, link.foreignUnnamed, "%#v answered", test.msg)
 	}
+}
+
+// TestUnnamedStmtReplacementNeedsAnAnswer: Postgres skips what follows a failed
+// message until the Sync, so a replacement counts once it is answered. Until
+// then a Bind after it in the same pipeline goes through, because it runs only
+// if the replacement did.
+func TestUnnamedStmtReplacementNeedsAnAnswer(t *testing.T) {
+	bad := &pgproto3.Parse{Name: "bad", Query: "SELEC 1"}
+	unnamed := &pgproto3.Parse{Query: "SELECT 1"}
+	sendAll := func(link *SessionLink, msgs ...pgproto3.FrontendMessage) {
+		for _, msg := range msgs {
+			switch msg.(type) {
+			case *pgproto3.Parse:
+				link.Send(msg, query.ParseReply)
+			case *pgproto3.Bind:
+				link.Send(msg, query.BindReply)
+			case *pgproto3.Sync:
+				link.Send(msg, query.SyncReply)
+			}
+		}
+	}
+	newForeignLink := func() *SessionLink {
+		link, _ := newTestSessionLink()
+		link.foreignUnnamed = true
+		return link
+	}
+
+	link := newForeignLink()
+	sendAll(link, bad, unnamed, &pgproto3.Bind{}, &pgproto3.Sync{})
+	assert.False(t, link.MayHoldForeignUnnamedStmt(), "the Bind follows the replacement")
+	link.DiscardUntilSync() // the bad Parse failed, so Postgres skipped the rest
+	assert.True(t, link.MayHoldForeignUnnamedStmt(), "a skipped replacement replaced nothing")
+	link.ResolveNextExpectation() // ReadyForQuery
+	assert.True(t, link.MayHoldForeignUnnamedStmt())
+
+	link = newForeignLink()
+	sendAll(link, unnamed, &pgproto3.Sync{})
+	link.DiscardUntilSync() // the replacement itself failed
+	assert.True(t, link.MayHoldForeignUnnamedStmt(), "Postgres holds no unnamed statement of the client's")
+
+	link = newForeignLink()
+	sendAll(link, unnamed, &pgproto3.Bind{}, &pgproto3.Sync{})
+	link.ResolveNextExpectation() // ParseComplete
+	link.DiscardUntilSync()       // the Bind failed
+	assert.False(t, link.MayHoldForeignUnnamedStmt(), "an answered replacement stays")
+
+	link = newForeignLink()
+	sendAll(link, bad) // and a Flush, so no Sync is queued when the error arrives
+	link.DiscardUntilSync()
+	sendAll(link, unnamed)
+	assert.True(t, link.MayHoldForeignUnnamedStmt(), "a Parse sent while Postgres discards is skipped")
+	sendAll(link, &pgproto3.Sync{}, unnamed)
+	assert.False(t, link.MayHoldForeignUnnamedStmt(), "a Parse after the Sync runs")
 }
 
 func TestUsesSessionMarks(t *testing.T) {

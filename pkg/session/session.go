@@ -1372,9 +1372,13 @@ func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 }
 
 // invalidatePendingStmts drops the pending statement queue and the unnamed
-// generations recorded alongside it.
+// generations recorded alongside it. An unnamed Parse still pending did not
+// create the statement, so the next Bind or Describe of it re-creates it.
 func (s *Session) invalidatePendingStmts(fromError bool) {
 	s.pStmtState.InvalidatePendingStmts(fromError)
+	if len(s.unnamedPendingGens) > 0 {
+		s.unnamedStmtOnLink = false
+	}
 	s.unnamedPendingGens = nil
 }
 

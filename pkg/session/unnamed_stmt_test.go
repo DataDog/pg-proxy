@@ -54,6 +54,32 @@ func TestSupersededParseCompleteDoesNotRestoreUnnamedStmt(t *testing.T) {
 	require.Empty(t, s.unnamedPendingGens)
 }
 
+// TestDiscardedReparseIsSentAgain: when an earlier error makes Postgres skip the
+// Parse that re-creates the client's unnamed statement, the next Bind sends it
+// again, rather than reach whatever unnamed statement the connection holds.
+func TestDiscardedReparseIsSentAgain(t *testing.T) {
+	var sent []pgproto3.FrontendMessage
+	s := &Session{
+		pStmtState:  prepared.CreateProxyPreparedStmtsState(nil),
+		unnamedStmt: prepared.CreatePreparedStatement("", "", "SELECT 1", nil),
+		link: &testLink{send: func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) {
+			sent = append(sent, msg)
+		}},
+	}
+	bind := actions.ClientMessageAction{ProxyMsgToPg: &pgproto3.Bind{}, EnsureUnnamedPreparedStmt: true}
+
+	s.handleEnsureUnnamedPreparedStmt(bind)
+	s.invalidatePendingStmts(true)
+	s.handleEnsureUnnamedPreparedStmt(bind)
+	require.Len(t, sent, 2)
+	assert.Equal(t, sent[0], sent[1])
+
+	s.confirmUnnamedStmt(s.pStmtState.ConfirmPendingStmt())
+	s.invalidatePendingStmts(true)
+	s.handleEnsureUnnamedPreparedStmt(bind)
+	assert.Len(t, sent, 2, "an answered Parse left the statement on the connection")
+}
+
 // sendThroughSession has a session holding backendLink handle msgs in order until
 // it starts discarding, and returns the session, what the link was sent and what
 // the client received.

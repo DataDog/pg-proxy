@@ -56,9 +56,13 @@ type SessionLink struct {
 	role                       RoleSession
 	reset                      ResetPolicy
 	marks                      SessionMarks // what this checkout may have done to session state
-	// foreignUnnamed: the connection's last release skipped the reset, and nothing
-	// sent on this link since has replaced or dropped the unnamed statement.
+	// foreignUnnamed: the connection's last release skipped the reset, and
+	// Postgres has not yet answered a message on this link that replaces or drops
+	// the unnamed statement.
 	foreignUnnamed bool
+	// replacing is the queue position, from 1, of the first such message still
+	// unanswered, or 0. Postgres skips it if an earlier message before the Sync fails.
+	replacing int
 }
 
 // MarkSession records what this checkout may have done to session state.
@@ -70,8 +74,11 @@ func (link *SessionLink) UsesSessionMarks() bool { return link.reset.usesMarks()
 
 // MayHoldForeignUnnamedStmt reports whether the connection's last release skipped
 // the reset, which only ResetDynamic and ResetOff do, and nothing sent on this
-// link since has replaced or dropped the unnamed statement.
-func (link *SessionLink) MayHoldForeignUnnamedStmt() bool { return link.foreignUnnamed }
+// link since has replaced or dropped the unnamed statement. A replacement still
+// unanswered counts: what follows it in its pipeline runs only if it did.
+func (link *SessionLink) MayHoldForeignUnnamedStmt() bool {
+	return link.foreignUnnamed && link.replacing == 0
+}
 
 // Conn returns the pooled Postgres connection associated with this link.
 func (link *SessionLink) Conn() *pgxpool.Conn {
@@ -91,9 +98,6 @@ func (link *SessionLink) SetRoleToken(token string) {
 // Send sends a message to the linked Postgres connection, and optionally (but typically) adds
 // a ReplyExpectation to the queue.
 func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
-	if link.foreignUnnamed && ReplacesUnnamedStmt(msg) {
-		link.foreignUnnamed = false
-	}
 	link.pgConn.Send(msg)
 	if expectation != query.NoReply {
 		link.readyForQuery = false
@@ -102,6 +106,9 @@ func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.Re
 		}
 		if !link.discardingUntilSync {
 			link.replyExpectations = append(link.replyExpectations, expectation)
+			if link.foreignUnnamed && link.replacing == 0 && ReplacesUnnamedStmt(msg) {
+				link.replacing = len(link.replyExpectations)
+			}
 		}
 	}
 }
@@ -123,8 +130,8 @@ func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
 }
 
 // ReplacesUnnamedStmt reports whether msg replaces or drops the connection's
-// unnamed statement: a Parse or Close of it, or any simple Query. Test doubles of
-// Link use it to track MayHoldForeignUnnamedStmt as SessionLink does.
+// unnamed statement once Postgres runs it: a Parse or Close of it, or any simple
+// Query. Test doubles of Link use it to track MayHoldForeignUnnamedStmt.
 func ReplacesUnnamedStmt(msg pgproto3.FrontendMessage) bool {
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
@@ -156,6 +163,12 @@ func (link *SessionLink) NextExpectation() query.ReplyExpectation {
 
 func (link *SessionLink) ResolveNextExpectation() {
 	link.replyExpectations = link.replyExpectations[1:]
+	if link.replacing > 0 {
+		link.replacing--
+		if link.replacing == 0 {
+			link.foreignUnnamed = false // Postgres ran the replacement
+		}
+	}
 }
 
 // DiscardUntilSync drops all expectations until the next Sync call. This is the
@@ -182,6 +195,14 @@ func (link *SessionLink) DiscardUntilSync() {
 	}
 	link.replyExpectations = link.replyExpectations[nDrop:]
 	link.discardingUntilSync = len(link.replyExpectations) == 0 // we still have more in the future to discard
+	// The failed message heads the queue, so a replacement among the dropped ones
+	// either failed or was skipped, and the next Bind of the unnamed statement is
+	// refused again. One that follows the Sync still runs.
+	if link.replacing > nDrop {
+		link.replacing -= nDrop
+	} else {
+		link.replacing = 0
+	}
 }
 
 const (

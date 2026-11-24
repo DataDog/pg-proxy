@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/DataDog/pg-proxy/internal/itest"
@@ -282,6 +283,63 @@ func TestUnnamedStatementGuard(t *testing.T) {
 				result = conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
 				require.Equal(t, "from client B", scalarResult(t, result))
 			})
+		})
+	}
+}
+
+// TestUnnamedStatementGuardAfterSkippedParse checks the guard when an earlier
+// failure makes Postgres skip the Parse that would replace the previous client's
+// unnamed statement. The client keeps its checkout through the failure with a
+// savepoint, never sending a simple Query or unnamed Parse that would drop the
+// statement, then binds the unnamed statement: it must get 26000 when it never
+// had one, and its own statement when it did.
+func TestUnnamedStatementGuardAfterSkippedParse(t *testing.T) {
+	const clientA, clientB = 0, 1
+	named := func(name, sql string) []pgproto3.FrontendMessage {
+		return []pgproto3.FrontendMessage{
+			&pgproto3.Parse{Name: name, Query: sql},
+			&pgproto3.Bind{PreparedStatement: name},
+			&pgproto3.Execute{},
+		}
+	}
+	at := func(client int, s step) step { s.client = client; return s }
+	leaveUnnamed := func(client int, sql string) step {
+		return at(client, ready(&pgproto3.Parse{Query: sql}, &pgproto3.Sync{}))
+	}
+	begin := at(clientB, ready(append(append(named("begin", "BEGIN"), named("sp", "SAVEPOINT sp")...), &pgproto3.Sync{})...))
+	rollback := at(clientB, ready(append(named("rollback", "ROLLBACK TO SAVEPOINT sp"), &pgproto3.Sync{})...))
+	bindUnnamed := at(clientB, ready(&pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{}))
+	badParse := &pgproto3.Parse{Name: "bad", Query: "SELEC 1"}
+
+	for _, mode := range append(resettingModes, pgconfig.ResetOff) {
+		t.Run(string(mode), func(t *testing.T) {
+			proxy := startResetModeProxy(t, mode)
+			url := proxy.URL(dbPooled, itest.PostgresUser)
+
+			replies := exchange(t, url, []step{
+				leaveUnnamed(clientA, "SELECT 'from client A'"),
+				begin,
+				at(clientB, ready(badParse, &pgproto3.Parse{Query: "SELECT 'from client B'"}, &pgproto3.Sync{})),
+				rollback,
+				bindUnnamed,
+			}, 0)
+			// Postgres's own 26000 aborts the transaction; the proxy's leaves it open.
+			last := summarize(replies[len(replies)-1])
+			require.Len(t, last, 2, "%v", last)
+			require.Equal(t, "ErrorResponse 26000", last[0], "client B's own Parse was skipped, so it has no unnamed statement")
+
+			replies = exchange(t, url, []step{
+				leaveUnnamed(clientB, "SELECT 'from client B'"),
+				leaveUnnamed(clientA, "SELECT 'from client A'"),
+				begin,
+				// The proxy re-creates client B's statement before the Bind, and
+				// Postgres skips both.
+				at(clientB, ready(badParse, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})),
+				rollback,
+				bindUnnamed,
+			}, 0)
+			require.Equal(t, []string{"BindComplete", "DataRow from client B", "CommandComplete SELECT 1", "ReadyForQuery T"},
+				summarize(replies[len(replies)-1]))
 		})
 	}
 }
