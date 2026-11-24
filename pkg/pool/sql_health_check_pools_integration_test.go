@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/jackc/puddle/v2"
 	"github.com/stretchr/testify/assert"
@@ -325,4 +326,54 @@ func TestSQLHealthWorkerIndependentCredentialsHandleDNSReplacement(t *testing.T)
 		assert.False(t, inRecovery)
 		conn.Release()
 	}
+}
+
+// Terminate one real backend while leaving the PostgreSQL server available.
+type terminatingIntegrationSQLHealthProber struct {
+	admin      *pgx.Conn
+	attempts   int
+	firstError error
+}
+
+func (p *terminatingIntegrationSQLHealthProber) Probe(ctx context.Context, _ string, connString string, _ []string) (bool, error) {
+	p.attempts++
+	conn, err := pgx.Connect(ctx, connString)
+	if err != nil {
+		return false, err
+	}
+	defer conn.Close(ctx)
+	if p.attempts == 1 {
+		if _, err := p.admin.Exec(ctx, "SELECT pg_terminate_backend($1, 1000)", conn.PgConn().PID()); err != nil {
+			return false, err
+		}
+	}
+	var inRecovery bool
+	err = conn.QueryRow(ctx, SQLHealthCheckQuery).Scan(&inRecovery)
+	if p.attempts == 1 {
+		p.firstError = err
+	}
+	return inRecovery, err
+}
+
+func TestSQLHealthCheckDoesNotRetryTerminatedSessionAgainstPostgres(t *testing.T) {
+	ctx, connString, config := startSQLHealthCheckIntegrationPostgres(t)
+	admin, err := pgx.Connect(ctx, connString)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, admin.Close(context.Background())) })
+	prober := &terminatingIntegrationSQLHealthProber{admin: admin}
+	checker := newTestSQLHealthChecker(t, prober, 2, SQLHealthCheckHooks{})
+	outcome := checker.Check(ctx, []string{config.Host}, func(string) string { return connString }, nil, nil, nil)
+	var postgresErr *pgconn.PgError
+	require.ErrorAs(t, prober.firstError, &postgresErr)
+	assert.Equal(t, "57P01", postgresErr.Code)
+	assert.Equal(t, 1, prober.attempts)
+	require.Len(t, outcome.Results, 1)
+	assert.ErrorIs(t, outcome.Results[0].Err, prober.firstError)
+	assert.False(t, outcome.Results[0].HealthyPrimary())
+	var inRecovery bool
+	require.NoError(t, admin.QueryRow(ctx, SQLHealthCheckQuery).Scan(&inRecovery))
+	assert.False(t, inRecovery, "the server remains primary; banning session termination is intentional")
+	bans := make(sqlRoutingBanlist)
+	bans.update([]string{config.Host}, outcome, SQLHealthResultsSnapshot{ScheduledAt: outcome.StartedAt, ObservedAt: time.Now(), Results: outcome.Results})
+	assert.Contains(t, bans, config.Host)
 }

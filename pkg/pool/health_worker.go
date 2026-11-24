@@ -236,6 +236,8 @@ type SQLHealthWorkerHooks struct {
 	CachedFallback          func(SQLFallback, []string)
 	LeaderDetectionCompared func(LeaderDetectionComparison, []string)
 	LeaderRoutingCompared   func(LeaderRoutingComparison, []string)
+	// RoutingBanChanged reports transitions, including during shadow evaluation.
+	RoutingBanChanged func(SQLRoutingBanChange, []string)
 }
 
 // HealthWorkerConfig supplies the application policy for a shared worker.
@@ -802,9 +804,32 @@ func (s *PoolHealth) trackNewIPs(ips []string) []string {
 }
 
 // publishRoutingSnapshot requires routingMu. Discovery state is never replaced by publication.
-func (s *PoolHealth) publishRoutingSnapshot(health map[string]bool, resolved []string) {
+func (s *PoolHealth) publishRoutingSnapshot(health map[string]bool, resolved []string) time.Time {
 	s.state.ReplaceRoutingSnapshot(health, resolved)
+	// Capture publication before notification can wait on a subscriber lock.
+	publishedAt := time.Now()
 	s.notifySubscribers()
+	return publishedAt
+}
+
+// publishRoutingBanExclusionsLocked removes banned IPs from the current route
+// without selecting a replacement or changing routing ownership. The caller holds routingMu.
+func (s *PoolHealth) publishRoutingBanExclusionsLocked(policy *hybridHealthPolicy, decision *hybridRoutingDecision) {
+	if !decision.routingEnabled || len(decision.routingBannedIPs) == 0 {
+		return
+	}
+	current := s.state.Snapshot()
+	changed := false
+	for ip := range decision.routingBannedIPs {
+		if current.Health[ip] {
+			current.Health[ip] = false
+			changed = true
+		}
+	}
+	if changed {
+		publishedAt := s.publishRoutingSnapshot(current.Health, current.Resolved)
+		decision.routingComparison = policy.observePublishedRouting(current.Health, publishedAt, decision.routingResult)
+	}
 }
 
 func (s *PoolHealth) routingPolicy() (*hybridHealthPolicy, func(context.Context) SQLHealthFeatureFlagEvaluation) {
@@ -869,9 +894,13 @@ func (w *HealthWorker) applyPatroniHealth(s *PoolHealth, health map[string]bool,
 	}
 	// A rejected stale observation has nil health and must not clear the published route.
 	if (policy == nil || decision.health != nil) && (!s.sqlRoutingActive || decision.publish) {
-		s.publishRoutingSnapshot(routingHealth, patroniHealth.Resolved)
-		if policy != nil && decision.routingResult != SQLRoutingResultPatroniRecovery {
-			if comparison := policy.observePublishedPatroniRouting(routingHealth, observedAt); comparison != nil {
+		publishedAt := s.publishRoutingSnapshot(routingHealth, patroniHealth.Resolved)
+		if policy != nil {
+			routingResult := SQLRoutingResultCachedFallback
+			if decision.publish {
+				routingResult = decision.routingResult
+			}
+			if comparison := policy.observePublishedRouting(routingHealth, publishedAt, routingResult); comparison != nil {
 				decision.routingComparison = comparison
 			}
 		}
@@ -1161,17 +1190,29 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		snapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		if len(snapshot.retainedIPs) == 0 {
 			poolHealth.routingMu.Lock()
-			if poolHealth.sqlRoutingActive {
+			if policy := poolHealth.hybridPolicy; policy != nil && !scheduledAt.Before(poolHealth.routingChangedAt) {
+				decision = policy.clearRoutingBansForEmptyDiscovery()
+			}
+			if poolHealth.sqlRoutingActive || decision.routingEnabled && len(decision.routingBanChanges) != 0 {
 				poolHealth.sqlRoutingActive = false
 				patroniHealth := poolHealth.patroniHealthState.Snapshot()
-				poolHealth.publishRoutingSnapshot(patroniHealth.Health, patroniHealth.Resolved)
+				publishedAt := poolHealth.publishRoutingSnapshot(patroniHealth.Health, patroniHealth.Resolved)
 				if policy := poolHealth.hybridPolicy; policy != nil {
 					decision.routingEnabled = policy.isRoutingEnabled()
-					decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth.Health, time.Now())
+					decision.routingComparison = policy.observePublishedPatroniRouting(patroniHealth.Health, publishedAt)
 				}
 			}
 			poolHealth.routingMu.Unlock()
 			return false
+		}
+		poolHealth.routingMu.Lock()
+		defer poolHealth.routingMu.Unlock()
+		policy := poolHealth.hybridPolicy
+		if policy == nil || scheduledAt.Before(poolHealth.routingChangedAt) {
+			return false // A poll spanning a mode transition cannot affect the new mode.
+		}
+		fresh := SQLHealthResultsSnapshot{
+			StartedAt: outcome.StartedAt, ScheduledAt: scheduledAt, ObservedAt: observedAt, Results: outcome.Results,
 		}
 		// DNS can discover another IP while this credential is running. An older poll
 		// must not evaluate a partial IP set using cached data to fill that new address.
@@ -1181,6 +1222,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		}
 		for _, ip := range snapshot.retainedIPs {
 			if !completedIPs[ip] {
+				// A shutdown is useful per-IP evidence even without a complete topology.
+				decision = policy.observeSQLShutdowns(snapshot.retainedIPs, fresh)
+				poolHealth.publishRoutingBanExclusionsLocked(policy, &decision)
 				return false
 			}
 		}
@@ -1196,20 +1240,20 @@ func (w *HealthWorker) completeSQLHealthCheck(
 				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: credential.StartedAt, Results: results})
 			}
 		}
-		poolHealth.routingMu.Lock()
-		defer poolHealth.routingMu.Unlock()
-		policy := poolHealth.hybridPolicy
-		if policy == nil || scheduledAt.Before(poolHealth.routingChangedAt) {
-			return false // A poll spanning a mode transition cannot publish under the new mode.
+		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, fresh, time.Now())
+		if !decision.publish && decision.routingResult == SQLRoutingResultPatroniRecovery {
+			// Old SQL evidence cannot replace the recovery route, but shutdown bans
+			// must still remove IPs from the route clients currently read.
+			poolHealth.publishRoutingBanExclusionsLocked(policy, &decision)
 		}
-		decision = policy.observeSQL(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, time.Now())
 		if decision.publish {
 			poolHealth.sqlRoutingActive = decision.routingResult == SQLRoutingResultConclusive || decision.routingResult == SQLRoutingResultRetainedSQL
 			resolved := snapshot.retainedIPs
 			if !poolHealth.sqlRoutingActive {
 				resolved = poolHealth.patroniHealthState.Snapshot().Resolved
 			}
-			poolHealth.publishRoutingSnapshot(decision.health, resolved)
+			publishedAt := poolHealth.publishRoutingSnapshot(decision.health, resolved)
+			decision.routingComparison = policy.observePublishedRouting(decision.health, publishedAt, decision.routingResult)
 		}
 		return true
 	}()
@@ -1221,8 +1265,9 @@ func (w *HealthWorker) completeSQLHealthCheck(
 		// Cached errors remain evidence for the decision, but are not new probe events.
 		w.reportConclusiveErrors([]completedSQLHealthCheck{{target: target, outcome: outcome}}, decision)
 	}
-	// Empty discovery can publish a Patroni route without evaluating a SQL iteration.
-	if applied || decision.routingComparison != nil {
+	// Empty discovery can publish a Patroni route, and a partial poll can record bans,
+	// without evaluating a SQL iteration.
+	if applied || decision.routingComparison != nil || len(decision.routingBanChanges) != 0 {
 		w.reportHybridDecision(poolHealth, decision, applied)
 	}
 }
@@ -1263,6 +1308,9 @@ func (w *HealthWorker) reportConclusiveErrors(
 			if !isConclusiveSQLUnroutableError(result.Err) {
 				continue
 			}
+			if _, banned := decision.routingBannedIPs[result.IP]; banned {
+				continue
+			}
 			w.sqlHooks.ConclusiveError(result, w.sqlRoutingTags(check.target.tags, decision.routingEnabled))
 		}
 	}
@@ -1281,7 +1329,7 @@ func (w *HealthWorker) reportHybridDecision(
 			TimeoutType:    decision.timeoutType,
 		}, tags)
 	}
-	if decision.routingResult == SQLRoutingResultCachedFallback && w.sqlHooks.CachedFallback != nil {
+	if reportIteration && decision.routingResult == SQLRoutingResultCachedFallback && w.sqlHooks.CachedFallback != nil {
 		w.sqlHooks.CachedFallback(SQLFallback{
 			Reason:           decision.fallbackReason,
 			TimeoutType:      decision.timeoutType,
@@ -1294,6 +1342,11 @@ func (w *HealthWorker) reportHybridDecision(
 	}
 	if decision.routingComparison != nil && w.sqlHooks.LeaderRoutingCompared != nil {
 		w.sqlHooks.LeaderRoutingCompared(*decision.routingComparison, tags)
+	}
+	if w.sqlHooks.RoutingBanChanged != nil {
+		for _, change := range decision.routingBanChanges {
+			w.sqlHooks.RoutingBanChanged(change, tags)
+		}
 	}
 }
 

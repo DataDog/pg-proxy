@@ -430,7 +430,7 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 		flagEvaluatedAt = time.Now()
 		// Patroni finishes while the completed SQL poll is evaluating its routing flag.
 		w.observePatroniPotential(s, leaderTimingIPs(newIP), time.Now())
-		w.reportHybridDecision(s, s.hybridPolicy.observePatroni(leaderTimingIPs(newIP), time.Now()), false)
+		w.reportHybridDecision(s, s.hybridPolicy.observeAndPublishPatroni(leaderTimingIPs(newIP), time.Now()), false)
 		return validSQLHealthFeatureFlag(true)
 	}
 	w.completeSQLHealthCheck(target, 0, time.Now(), []string{oldIP, newIP},

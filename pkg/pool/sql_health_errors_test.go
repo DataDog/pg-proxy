@@ -51,11 +51,12 @@ func TestHybridHealthClassifiesDriverCombinedConnectionErrors(t *testing.T) {
 		name              string
 		last              error
 		fallback, timeout string
+		wantBan           bool
 	}{
-		{"refusal then timeout", context.DeadlineExceeded, SQLHealthFallbackTimeout, SQLHealthTimeoutContext},
-		{"refusal then password", &pgconn.PgError{Code: "28P01"}, SQLHealthFallbackIndeterminate, SQLHealthTimeoutNone},
-		{"all refusals", syscall.ECONNREFUSED, "", ""},
-		{"refusal then shutdown", &pgconn.PgError{Code: "57P01"}, "", ""},
+		{"refusal then timeout", context.DeadlineExceeded, SQLHealthFallbackTimeout, SQLHealthTimeoutContext, false},
+		{"refusal then password", &pgconn.PgError{Code: "28P01"}, SQLHealthFallbackIndeterminate, SQLHealthTimeoutNone, false},
+		{"all refusals", syscall.ECONNREFUSED, "", "", false},
+		{"refusal then shutdown", &pgconn.PgError{Code: "57P01"}, "", "", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Exercise pgx's real ConnectError / per-attempt / joined wrappers without network I/O.
@@ -113,10 +114,16 @@ func TestHybridHealthClassifiesDriverCombinedConnectionErrors(t *testing.T) {
 				assert.Empty(t, conclusiveErrors)
 			} else {
 				assert.Empty(t, fallbacks)
-				require.Len(t, conclusiveErrors, 1)
+				if tc.wantBan {
+					assert.Contains(t, decision.routingBannedIPs, uncertainIP)
+					assert.Empty(t, conclusiveErrors, "ban transitions replace repeated conclusive-error callbacks")
+				} else {
+					require.Len(t, conclusiveErrors, 1)
+				}
 			}
 
-			// A successful role from another credential still resolves this same IP.
+			// A successful role still resolves the raw role aggregate. A shutdown ban
+			// continues excluding this IP while shutdown evidence is also present.
 			resolved := aggregateSQLHealthCheckResults([]SQLHealthCheckResult{
 				{IP: primaryIP}, {IP: uncertainIP, Err: err}, {IP: uncertainIP, InRecovery: true},
 			})
@@ -125,8 +132,8 @@ func TestHybridHealthClassifiesDriverCombinedConnectionErrors(t *testing.T) {
 			assert.Equal(t, map[string]bool{primaryIP: true, uncertainIP: false}, decision.health)
 			conclusiveErrors = nil
 			worker.reportConclusiveErrors([]completedSQLHealthCheck{{target: &sqlHealthTarget{}, outcome: resolved.Outcome}}, decision)
-			if tc.fallback != "" {
-				assert.Empty(t, conclusiveErrors, "resolving the role does not make a mixed error conclusive")
+			if tc.fallback != "" || tc.wantBan {
+				assert.Empty(t, conclusiveErrors, "mixed errors and banned IPs do not report conclusive-error callbacks")
 			} else {
 				require.Len(t, conclusiveErrors, 1)
 			}
