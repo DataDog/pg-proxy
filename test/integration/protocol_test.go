@@ -342,12 +342,21 @@ func requireKnownBug(t *testing.T, field, reason string, f func(t testing.TB)) {
 }
 
 // fails runs f with a testing.TB that records the failures f reports instead
-// of failing t, and reports whether f failed.
+// of failing t, and reports whether f failed. A panic in f counts as a failure.
 func fails(t *testing.T, f func(t testing.TB)) bool {
 	recorder := &failureRecorder{TB: t}
 	var wg sync.WaitGroup
 	// FailNow ends the goroutine that calls it, so f gets one of its own.
-	wg.Go(func() { f(recorder) })
+	wg.Go(func() {
+		// A panic on a goroutine other than the test's ends the test binary.
+		// FailNow's runtime.Goexit is not a panic, so recover returns nil for it.
+		defer func() {
+			if recover() != nil {
+				recorder.failed = true
+			}
+		}()
+		f(recorder)
+	})
 	wg.Wait()
 	return recorder.failed
 }
