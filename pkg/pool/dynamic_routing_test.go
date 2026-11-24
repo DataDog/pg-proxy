@@ -136,9 +136,10 @@ func TestDynamicRoutingFiltersCachedAndInFlightEvidence(t *testing.T) {
 	old := &sqlHealthTarget{poolHealth: s}
 	late := &sqlHealthTarget{poolHealth: s}
 	fresh := &sqlHealthTarget{poolHealth: s}
-	oldRoles := []SQLHealthCheckResult{{IP: "A", InRecovery: true}, {IP: "B"}}
-	at := time.Now()
-	s.recordSQLComparisonPoll(false, old, 0, at, at, []string{"A", "B"}, SQLHealthCheckOutcome{Results: oldRoles})
+	oldRoles := []SQLHealthCheckResult{{IP: "A", Err: &pgconn.PgError{Code: "57P02"}}, {IP: "B"}}
+	at := time.Now().Add(time.Hour)
+	w.completeSQLHealthCheck(old, 0, at, []string{"A", "B"}, map[string]struct{}{"A": {}, "B": {}}, SQLHealthCheckOutcome{StartedAt: at, Results: oldRoles})
+	require.Contains(t, s.hybridPolicy.routingBannedIPs, "A")
 	for range 2 { // Include rapid on/off/on, not only one transition.
 		flag.Store(false)
 		w.syncSQLRoutingMode(s)
@@ -153,13 +154,24 @@ func TestDynamicRoutingFiltersCachedAndInFlightEvidence(t *testing.T) {
 	})
 	require.True(t, s.IsHealthy("A"))
 	require.Empty(t, s.hybridPolicy.routingBannedIPs, "a previous period cannot create a ban")
+	_, recorded := s.sqlBanLatest[late]
+	require.False(t, recorded, "old completions cannot refresh ban evidence")
 	w.completeSQLHealthCheck(fresh, 0, time.Now(), []string{"A", "B"}, map[string]struct{}{"A": {}, "B": {}}, SQLHealthCheckOutcome{
 		routingGeneration: s.routingGeneration,
 		StartedAt:         time.Now(), Results: []SQLHealthCheckResult{{IP: "A"}, {IP: "B", InRecovery: true}},
 	})
 	assert.True(t, s.sqlRoutingActive, "old cached B must not conflict with fresh A")
 	assert.True(t, s.IsHealthy("A"))
+	assert.Empty(t, s.hybridPolicy.routingBannedIPs, "cached shutdowns from a previous period cannot re-ban A")
 	assert.Len(t, s.sqlComparisonLatest, 3, "raw shadow evidence remains available")
+	// A clock regression must not let this credential's old-period timestamps
+	// prevent its first current-period poll from replacing routing and ban evidence.
+	w.completeSQLHealthCheck(old, 0, time.Now(), []string{"A", "B"}, map[string]struct{}{"A": {}, "B": {}}, SQLHealthCheckOutcome{
+		routingGeneration: s.routingGeneration,
+		StartedAt:         time.Now(), Results: []SQLHealthCheckResult{{IP: "A"}, {IP: "B", InRecovery: true}},
+	})
+	assert.Equal(t, s.routingGeneration, s.sqlRoutingLatest[old].routingGeneration)
+	assert.Equal(t, s.routingGeneration, s.sqlBanLatest[old]["A"].routingGeneration)
 
 	// An obsolete empty completion cannot restore Patroni over a newer SQL route.
 	s.publishRoutingSnapshot(map[string]bool{"B": true}, []string{"B"})
@@ -167,6 +179,86 @@ func TestDynamicRoutingFiltersCachedAndInFlightEvidence(t *testing.T) {
 	w.completeSQLHealthCheck(late, 0, time.Now(), nil, nil, SQLHealthCheckOutcome{})
 	assert.True(t, s.IsHealthy("B"))
 	assert.True(t, s.sqlRoutingActive)
+}
+
+func TestDynamicRoutingRejectsRecoveryFromPreviousMode(t *testing.T) {
+	const a, b, c = "10.0.0.1", "10.0.0.2", "10.0.0.3"
+	w, health, probe, _ := newSQLRecoveryWorker(t, a, b, c)
+	var enabled atomic.Bool
+	enabled.Store(true)
+	health.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation {
+		return validSQLHealthFeatureFlag(enabled.Load())
+	}
+	shutdown := &pgconn.PgError{Code: "57P01"}
+	probe.mu.Lock()
+	probe.responses[a] = fakeSQLHealthProbeResponse{err: shutdown}
+	probe.responses[b] = fakeSQLHealthProbeResponse{}
+	probe.mu.Unlock()
+	w.RefreshSQL()
+	require.Contains(t, health.hybridPolicy.routingBanSnapshot(), a)
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(func() {
+		unblock()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Error("recovery did not finish after release")
+		}
+	})
+	probe.mu.Lock()
+	probe.started = map[string]chan struct{}{a: started}
+	probe.release = map[string]chan struct{}{a: release}
+	probe.startOnce = map[string]*sync.Once{a: {}}
+	probe.mu.Unlock()
+	go func() { defer close(done); w.RefreshSQL() }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("recovery did not start")
+	}
+	target := health.sqlTargetValues()[0]
+	require.Eventually(t, func() bool { return !target.sqlRoundRunning() && health.IsHealthy(b) }, time.Second, time.Millisecond)
+	enabled.Store(false)
+	w.syncSQLRoutingMode(health)
+	enabled.Store(true)
+	w.syncSQLRoutingMode(health)
+	require.Equal(t, uint64(2), health.routingGeneration)
+	require.True(t, health.IsHealthy(a), "Patroni remains authoritative after re-enable")
+	unblock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("old recovery did not finish")
+	}
+	require.Empty(t, health.hybridPolicy.routingBanSnapshot(), "old recovery cannot recreate a cleared ban")
+	require.Equal(t, uint64(0), health.sqlComparisonLatest[target].routingGeneration, "raw comparisons retain the original period")
+	require.Equal(t, uint64(0), health.sqlBanLatest[target][a].routingGeneration, "old recovery cannot enter the new period")
+	probe.mu.Lock()
+	probe.responses[a] = fakeSQLHealthProbeResponse{inRecovery: true}
+	probe.mu.Unlock()
+	w.RefreshSQL()
+	require.True(t, health.IsHealthy(b), "fresh split-era checks can take ownership after re-enable")
+	require.Equal(t, uint64(2), health.sqlRoutingLatest[target].routingGeneration)
+	require.Equal(t, uint64(2), health.sqlBanLatest[target][a].routingGeneration)
+
+	// Start a genuinely split poll in the new period. Both halves, including
+	// their eventual raw comparison, must keep the newly captured generation.
+	probe.mu.Lock()
+	probe.responses[a] = fakeSQLHealthProbeResponse{err: shutdown}
+	probe.mu.Unlock()
+	w.RefreshSQL()
+	require.Contains(t, health.hybridPolicy.routingBanSnapshot(), a)
+	probe.mu.Lock()
+	probe.responses[b] = fakeSQLHealthProbeResponse{inRecovery: true}
+	probe.responses[c] = fakeSQLHealthProbeResponse{}
+	probe.mu.Unlock()
+	w.RefreshSQL()
+	require.True(t, health.IsHealthy(c))
+	require.False(t, health.IsHealthy(b))
+	require.Equal(t, uint64(2), health.sqlRoutingLatest[target].routingGeneration)
+	require.Equal(t, uint64(2), health.sqlComparisonLatest[target].routingGeneration)
 }
 
 func TestDynamicRoutingClearsHistoryBansAndQueuedTiming(t *testing.T) {

@@ -6,6 +6,8 @@
 package pool
 
 import (
+	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,12 +25,12 @@ func TestHybridRoutingDowntimeUsesSelectedSource(t *testing.T) {
 			p := newHybridHealthPolicy(true)
 			at := time.Now()
 			ips := []string{"A", "B"}
-			p.observePatroni(map[string]bool{"A": true}, at)
+			p.observeAndPublishPatroni(map[string]bool{"A": true}, at)
 			p.observeSQL(ips, SQLHealthCheckOutcome{PrimaryIPs: []string{"A"}}, at)
 			p.observeSQL(ips, SQLHealthCheckOutcome{}, at.Add(time.Second))
 			var comparison *LeaderRoutingComparison
 			if patroniFirst {
-				decision := p.observePatroni(map[string]bool{"B": true}, at.Add(2*time.Second))
+				decision := p.observeAndPublishPatroni(map[string]bool{"B": true}, at.Add(2*time.Second))
 				require.True(t, decision.publish)
 				comparison = decision.routingComparison
 				// A later SQL completion must not add another recovery sample.
@@ -36,7 +38,7 @@ func TestHybridRoutingDowntimeUsesSelectedSource(t *testing.T) {
 				assert.Nil(t, lateSQL.routingComparison)
 			} else {
 				p.observeSQL(ips, SQLHealthCheckOutcome{PrimaryIPs: []string{"B"}}, at.Add(2*time.Second))
-				comparison = p.observePatroni(map[string]bool{"B": true}, at.Add(5*time.Second)).routingComparison
+				comparison = p.observeAndPublishPatroni(map[string]bool{"B": true}, at.Add(5*time.Second)).routingComparison
 			}
 			require.NotNil(t, comparison)
 			require.True(t, comparison.HasDowntimeComparison)
@@ -100,6 +102,90 @@ func TestHybridRoutingDowntimeWindowBoundaries(t *testing.T) {
 			assert.Equal(t, tc.wantComparison, comparison.HasDowntimeComparison)
 			assert.Equal(t, tc.wantReduction, comparison.DowntimeReductionPercent)
 			assert.Equal(t, tc.patroniAt-3*time.Second, comparison.Improvement)
+		})
+	}
+}
+
+// Block after probe completion while the previous route is still published.
+func TestHybridTimingUsesWorkerPublication(t *testing.T) {
+	for _, transition := range []string{"SQL removes leader", "SQL selects replacement", "Patroni selects replacement"} {
+		t.Run(transition, func(t *testing.T) {
+			const oldIP, newIP = "10.0.0.1", "10.0.0.2"
+			ips := []string{oldIP, newIP}
+			resolved := map[string]struct{}{oldIP: {}, newIP: {}}
+			s := &PoolHealth{
+				state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: NewHealthState(),
+				hybridPolicy: newHybridHealthPolicy(true),
+			}
+			s.refreshSQLResolved(true, ips, 1)
+			target := &sqlHealthTarget{poolHealth: s}
+			var comparisons []LeaderRoutingComparison
+			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
+				LeaderRoutingCompared: func(c LeaderRoutingComparison, _ []string) { comparisons = append(comparisons, c) },
+			}}
+			completeSQL := func(primary string) {
+				startedAt := time.Now()
+				w.completeSQLHealthCheck(target, 0, startedAt, ips, resolved, SQLHealthCheckOutcome{
+					StartedAt: startedAt,
+					Results: []SQLHealthCheckResult{
+						{IP: oldIP, InRecovery: primary != oldIP, StartedAt: startedAt, CompletedAt: startedAt},
+						{IP: newIP, InRecovery: primary != newIP, StartedAt: startedAt, CompletedAt: startedAt},
+					},
+				})
+			}
+			w.applyPatroniHealth(s, map[string]bool{oldIP: true, newIP: false}, nil, ips, time.Now())
+			completeSQL(oldIP)
+			if transition != "SQL removes leader" {
+				completeSQL("")
+			}
+			outageStartedAt := s.hybridPolicy.routingDowntimeStartedAt
+			flagEntered, releaseFlag, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var releaseOnce sync.Once
+			release := func() { releaseOnce.Do(func() { close(releaseFlag) }) }
+			t.Cleanup(release)
+			s.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation {
+				close(flagEntered)
+				<-releaseFlag
+				return validSQLHealthFeatureFlag(true)
+			}
+			go func() {
+				defer close(done)
+				switch transition {
+				case "SQL removes leader":
+					completeSQL("")
+				case "SQL selects replacement":
+					completeSQL(newIP)
+				default:
+					w.applyPatroniHealth(s, map[string]bool{oldIP: false, newIP: true}, nil, ips, time.Now())
+				}
+			}()
+			select {
+			case <-flagEntered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("routing flag evaluation did not start")
+			}
+			assert.Equal(t, transition == "SQL removes leader", s.IsHealthy(oldIP))
+			boundary := time.Now()
+			release()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("routing publication did not finish")
+			}
+			s.routingEnabledFn = nil
+			if transition == "SQL removes leader" {
+				assert.False(t, s.hybridPolicy.routingDowntimeStartedAt.Before(boundary), "downtime cannot start while the old route is still healthy")
+				assert.True(t, s.sqlComparisonLatest[target].ObservedAt.Before(boundary), "raw SQL must retain probe completion time")
+				completeSQL(newIP)
+			}
+			if transition != "Patroni selects replacement" {
+				w.applyPatroniHealth(s, map[string]bool{oldIP: false, newIP: true}, nil, ips, time.Now())
+			}
+			require.Len(t, comparisons, 1)
+			require.True(t, comparisons[0].HasDowntimeComparison)
+			if transition != "SQL removes leader" {
+				assert.GreaterOrEqual(t, comparisons[0].HybridDowntime, boundary.Sub(outageStartedAt), "recovery cannot predate publication")
+			}
 		})
 	}
 }

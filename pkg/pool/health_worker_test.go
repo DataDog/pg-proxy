@@ -2643,7 +2643,7 @@ func TestPatroniPublishesNewLeaderWhileSQLUsesCachedFallback(t *testing.T) {
 	assert.True(t, health.IsHealthy(newPrimary), "new Patroni leader must publish during SQL fallback")
 
 	require.Len(t, comparisons, 1, "Patroni-owned hybrid routing must be timed on publication, without waiting for SQL")
-	assert.Equal(t, time.Duration(0), comparisons[0].Improvement)
+	assert.Negative(t, comparisons[0].Improvement, "publication follows the Patroni observation")
 	assert.Equal(t, SQLRoutingResultCachedFallback, comparisons[0].HybridSource)
 
 	// A subsequent timeout must copy the latest Patroni snapshot rather than restoring the old
@@ -2724,6 +2724,7 @@ func TestEmptySQLDiscoveryClearsRoutingBans(t *testing.T) {
 			require.Empty(t, health.sqlHealthState.Snapshot().Resolved)
 			require.Empty(t, health.hybridPolicy.routingBannedIPs)
 			assert.False(t, health.sqlRoutingActive)
+			assert.True(t, health.IsHealthy(a), "clearing the final ban must restore cached Patroni immediately")
 			assert.Equal(t, []SQLRoutingBanChange{
 				{IP: a, Banned: true, Reason: SQLRoutingBanReasonPostgresShutdown},
 				{IP: a, Reason: SQLRoutingUnbanReasonDNSRemoved},
@@ -2778,7 +2779,7 @@ func TestHybridRoutingRestoresPatroniWhenAllSQLCandidatesAreEvicted(t *testing.T
 	require.True(t, health.IsHealthy(standby))
 	require.Len(t, comparisons, 1)
 	assert.Equal(t, SQLRoutingResultPatroniRecovery, comparisons[0].HybridSource)
-	assert.Zero(t, comparisons[0].Improvement)
+	assert.Negative(t, comparisons[0].Improvement, "publication follows the Patroni observation")
 
 	patroniProber.mu.Lock()
 	patroniProber.ipsByHost["primary.local"] = nil
@@ -3333,7 +3334,8 @@ func TestAggregatedSQLDecisionsControlPublishedRouting(t *testing.T) {
 			w.applyPatroniHealth(health, map[string]bool{a: true, b: false}, nil, []string{a, b}, time.Now())
 			now := time.Now()
 			if len(tc.other) > 0 {
-				health.recordSQLComparisonPoll(false, &sqlHealthTarget{poolHealth: health}, 0, now, now, []string{a, b}, SQLHealthCheckOutcome{Results: tc.other})
+				// Seed a normal credential completion, not telemetry-only raw evidence.
+				w.completeSQLHealthCheck(&sqlHealthTarget{poolHealth: health}, 0, now, []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{Results: tc.other})
 			}
 			w.completeSQLHealthCheck(&sqlHealthTarget{poolHealth: health}, 0, now, []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{Results: tc.results})
 			assert.Equal(t, tc.wantSQL, health.sqlRoutingActive)
@@ -3402,6 +3404,9 @@ func TestSQLComparisonPrunesEvictedResultsAndRejectsLateCompletion(t *testing.T)
 			var published *sqlHealthComparisonSnapshot
 			for _, target := range []*sqlHealthTarget{first, second} {
 				published = s.recordSQLComparisonPoll(trackPotential, target, 0, at, at, candidates, SQLHealthCheckOutcome{Results: results})
+				s.sqlComparisonMu.Lock()
+				s.recordSQLPollEvidenceLocked(target, at, at, SQLHealthCheckOutcome{Results: results}, sqlCompletePoll, nil)
+				s.sqlComparisonMu.Unlock()
 			}
 			// A single missing DNS response must not bypass the normal retention threshold.
 			require.ElementsMatch(t, candidates, s.refreshSQLResolved(trackPotential, []string{"A"}, 2))
@@ -3412,6 +3417,8 @@ func TestSQLComparisonPrunesEvictedResultsAndRejectsLateCompletion(t *testing.T)
 				require.Equal(t, []string{"A"}, cached.CandidateIPs)
 				require.Equal(t, results[:1], cached.Results)
 				require.Equal(t, at, cached.ObservedAt)
+				require.Equal(t, results[:1], s.sqlRoutingLatest[target].Results)
+				require.NotContains(t, s.sqlBanLatest[target], "B")
 			}
 			// Snapshots already handed to hooks must remain independent of cache pruning.
 			for _, snapshot := range published.results {
@@ -3884,7 +3891,7 @@ func TestReportConclusiveErrorsSkipsRoutingBannedIPs(t *testing.T) {
 	checks := []completedSQLHealthCheck{{
 		target: &sqlHealthTarget{tags: []string{"database:test"}},
 		outcome: SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{
-			{IP: bannedIP, Err: context.DeadlineExceeded},
+			{IP: bannedIP, Err: &pgconn.PgError{Code: "57P03", Message: "the database system is starting up"}},
 			{IP: eligibleIP, Err: &pgconn.PgError{Code: "57P01"}},
 		}},
 	}}
@@ -3969,4 +3976,69 @@ func TestHybridEvaluationReconcilesOrderedCredentialRoles(t *testing.T) {
 	assert.False(t, health.IsHealthy(ip))
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[2].RoutingResult)
 	assert.Empty(t, iterations[2].FallbackReason)
+}
+
+func TestSQLRoutingTimestampFollowsFlagEvaluation(t *testing.T) {
+	for _, replacement := range []bool{false, true} {
+		t.Run(fmt.Sprintf("replacement_%t", replacement), func(t *testing.T) {
+			const a, b = "10.0.0.1", "10.0.0.2"
+			ips := []string{a, b}
+			s := &PoolHealth{
+				state: NewHealthState(), patroniHealthState: NewHealthState(), sqlHealthState: NewHealthState(),
+				hybridPolicy: newHybridHealthPolicy(true),
+			}
+			s.refreshSQLResolved(true, ips, 1)
+			target := &sqlHealthTarget{poolHealth: s}
+			w := &HealthWorker{}
+			complete := func(primary string) {
+				at := time.Now()
+				w.completeSQLHealthCheck(target, 0, at, ips, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
+					StartedAt: at, Results: []SQLHealthCheckResult{
+						{IP: a, InRecovery: primary != a, StartedAt: at, CompletedAt: at},
+						{IP: b, InRecovery: primary != b, StartedAt: at, CompletedAt: at},
+					},
+				})
+			}
+			w.applyPatroniHealth(s, map[string]bool{a: true, b: false}, nil, ips, time.Now())
+			complete(a)
+			entered, resume, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			var once sync.Once
+			release := func() { once.Do(func() { close(resume) }) }
+			t.Cleanup(release)
+			s.routingEnabledFn = func(context.Context) SQLHealthFeatureFlagEvaluation {
+				close(entered)
+				<-resume
+				return validSQLHealthFeatureFlag(true)
+			}
+			go func() {
+				defer close(done)
+				primary := ""
+				if replacement {
+					primary = b
+				}
+				complete(primary)
+			}()
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("flag evaluation did not start")
+			}
+			require.True(t, s.IsHealthy(a), "the old route remains published while flag evaluation waits")
+			boundary := time.Now()
+			release()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Fatal("SQL completion did not finish")
+			}
+			completedAt := s.sqlComparisonLatest[target].ObservedAt
+			assert.True(t, completedAt.Before(boundary), "raw SQL keeps probe completion time")
+			if replacement {
+				assert.False(t, s.hybridPolicy.routingTiming.pending[b].candidateAt.Before(boundary), "hybrid timing starts at actual publication")
+			} else {
+				assert.False(t, s.hybridPolicy.sqlNoPrimaryAt.Before(boundary), "routing history starts after evaluation waits")
+				assert.False(t, s.hybridPolicy.routingDowntimeStartedAt.Before(boundary), "hybrid downtime starts at actual publication")
+			}
+		})
+	}
 }
