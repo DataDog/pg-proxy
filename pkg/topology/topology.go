@@ -37,6 +37,9 @@ type LogicalDatabase struct {
 // runtime.
 type RuntimeConfig struct {
 	PostgresMessageBufferSize int
+	// ClientDisconnectTimer selects session.Config.ClientDisconnectTimer for
+	// every session.
+	ClientDisconnectTimer bool
 }
 
 // NormalizedWeight returns weight, applying the default for an unset value.

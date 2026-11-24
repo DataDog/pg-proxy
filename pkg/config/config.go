@@ -104,6 +104,10 @@ type ProxySettings struct {
 	JWTAuthEnabled        bool   `mapstructure:"jwt_auth_enabled" json:"jwtAuthEnabled" yaml:"jwt_auth_enabled"`
 	TLSRequired           bool   `mapstructure:"tls_required" json:"tlsRequired" yaml:"tls_required"`
 	PostgresMsgBufferSize int32  `mapstructure:"postgres_msg_pg_size" json:"postgresMsgBufferSize" yaml:"postgres_msg_buffer_size"`
+	// ClientDisconnectTimer makes each session check for a client disconnect
+	// during a backend checkout with one reusable timer, instead of a goroutine
+	// and a ticker for each checkout. False keeps the goroutine.
+	ClientDisconnectTimer bool `mapstructure:"client_disconnect_timer" json:"clientDisconnectTimer,omitempty" yaml:"client_disconnect_timer,omitempty"`
 }
 
 // Proxy contains listener settings and TLS certificate file paths.

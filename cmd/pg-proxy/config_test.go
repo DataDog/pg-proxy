@@ -53,7 +53,7 @@ func TestReadSharedConfigFiles(t *testing.T) {
 	}
 	t.Setenv("PG_PROXY_BACKEND_URL", "invalid-and-must-be-ignored")
 	for extension, contents := range map[string]string{
-		"json": `{"databases":[{"name":"primary","host":"localhost","dbName":"postgres","username":"postgres","password":"test-password","maxConns":2,"connectionOptions":{"statement_timeout":"5s"}}],"clusters":{"orders":{"primary":"primary"}},"logicalDatabases":{"client-db":{"cluster":"orders"}},"proxy":{"listenerAddress":"127.0.0.1:0","postgresMsgBufferSize":4096}}`,
+		"json": `{"databases":[{"name":"primary","host":"localhost","dbName":"postgres","username":"postgres","password":"test-password","maxConns":2,"connectionOptions":{"statement_timeout":"5s"}}],"clusters":{"orders":{"primary":"primary"}},"logicalDatabases":{"client-db":{"cluster":"orders"}},"proxy":{"listenerAddress":"127.0.0.1:0","postgresMsgBufferSize":4096,"clientDisconnectTimer":true}}`,
 		"yaml": `databases:
 - name: primary
   host: localhost
@@ -69,6 +69,7 @@ logical_databases:
 proxy:
   listener_address: '127.0.0.1:0'
   postgres_msg_buffer_size: 4096
+  client_disconnect_timer: true
 `,
 	} {
 		t.Run(extension, func(t *testing.T) {
@@ -85,6 +86,7 @@ proxy:
 			require.Equal(t, "primary", cfg.clusters["orders"].Primary)
 			require.Equal(t, "127.0.0.1:0", cfg.listenAddress)
 			require.Equal(t, 4096, cfg.messageBufferSize)
+			require.True(t, cfg.clientDisconnectTimer)
 			require.Equal(t, "test-password", cfg.databases["primary"].ConnConfig.Password)
 			require.Equal(t, int32(2), cfg.databases["primary"].MaxConns)
 			require.Equal(t, "-c statement_timeout=5s", cfg.databases["primary"].ConnConfig.RuntimeParams["options"])
@@ -94,6 +96,17 @@ proxy:
 			}
 		})
 	}
+}
+
+func TestClientDisconnectTimerDefaultsOff(t *testing.T) {
+	for _, signal := range []string{"TRACES", "METRICS", "LOGS"} {
+		t.Setenv("OTEL_"+signal+"_EXPORTER", "")
+	}
+	data, err := json.Marshal(ossConfig())
+	require.NoError(t, err)
+	cfg, err := parseConfig([]string{"-config", writeConfig(t, "json", string(data))})
+	require.NoError(t, err)
+	require.False(t, cfg.clientDisconnectTimer)
 }
 
 func TestTelemetryEnvironmentConfig(t *testing.T) {
