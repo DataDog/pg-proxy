@@ -128,15 +128,20 @@ func diffSections(diffs string) map[string]string {
 	return sections
 }
 
-// changedLines counts the removed and added lines of a unified diff section,
-// without its file headers.
+// changedLines counts the removed and added lines of a unified diff section.
+// A section covers one file, so its "---" and "+++" file headers come before
+// the first hunk. Inside hunks every line starts with " ", "-", "+" or "\",
+// so a line starting with "@@" is always a hunk header. Removed or added lines
+// that look like file headers, such as an echoed "-- comment", are counted.
 func changedLines(section string) int {
 	count := 0
+	inHunks := false
 	for _, line := range strings.Split(section, "\n") {
-		if strings.HasPrefix(line, "--- ") || strings.HasPrefix(line, "+++ ") {
+		if strings.HasPrefix(line, "@@") {
+			inHunks = true
 			continue
 		}
-		if strings.HasPrefix(line, "-") || strings.HasPrefix(line, "+") {
+		if inHunks && (strings.HasPrefix(line, "-") || strings.HasPrefix(line, "+")) {
 			count++
 		}
 	}
@@ -263,6 +268,25 @@ func TestFingerprintChanges(t *testing.T) {
 	worse, _ = fingerprintChanges(b, []string{"insert"}, diffs)
 	require.Equal(t, []string{"insert (1 -> 2 lines)"}, worse)
 	require.Equal(t, []string{"insert"}, changedNames(worse))
+}
+
+// TestChangedLinesInsideHunks checks that removed and added lines that look
+// like file headers are counted. Echoed SQL comments start with "--", so
+// removing one produces a hunk line starting with "--- ".
+func TestChangedLinesInsideHunks(t *testing.T) {
+	const section = `diff -U3 /regress/expected/comments.out /regress/results/comments.out
+--- /regress/expected/comments.out	2026-08-10 20:59:18 +0000
++++ /regress/results/comments.out	2026-11-18 12:18:41 +0000
+@@ -1,3 +1,2 @@
+ context
+--- Test comment
+-SELECT 1;
++++ added output
+@@ -9,1 +8,1 @@
+--- second hunk
+++++ second hunk
+`
+	require.Equal(t, 5, changedLines(section))
 }
 
 func TestFormatBaselineRoundTrips(t *testing.T) {
