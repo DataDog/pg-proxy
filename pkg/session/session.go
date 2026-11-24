@@ -161,11 +161,13 @@ type Session struct {
 	unnamedGen         uint64
 	unnamedPendingGens []uint64
 
-	// Non-nil when the session has been remapped to a different state.
-	// Think of it as a peek-able channel.
-	remappedBackend Backend
-	// Non-nil when the session's read cluster routing has been updated by the warden.
-	remappedReadStates *[]ReadStateConfig
+	// reportMu orders remaps and their hook reports. Remap* callers hold it to queue
+	// and report; the session goroutine holds it to apply and report, and is the only
+	// writer of backend and readStates. Other goroutines read those under it.
+	reportMu sync.Mutex
+	// pending holds the remaps queued for the next message boundary, or nil. It is
+	// replaced under reportMu and read without a lock.
+	pending atomic.Pointer[pendingRemap]
 
 	obsVals               *SessionObservabilityValues
 	metrics               Metrics
@@ -189,6 +191,20 @@ type Session struct {
 }
 
 var _ SessionHandle = (*Session)(nil)
+
+// pendingRemap is a snapshot of the queued remaps. A nil field has nothing queued.
+type pendingRemap struct {
+	backend    Backend
+	readStates *[]ReadStateConfig
+}
+
+// pendingRemaps returns a copy of the queued remaps.
+func (s *Session) pendingRemaps() pendingRemap {
+	if pending := s.pending.Load(); pending != nil {
+		return *pending
+	}
+	return pendingRemap{}
+}
 
 // ClientTransport is the post-authentication PostgreSQL frontend transport.
 type ClientTransport interface {
@@ -259,9 +275,9 @@ type Mirroring struct {
 }
 
 // Hooks expose optional session state transition notifications. Callbacks run
-// synchronously on the session goroutine and must return promptly. They must not
-// mutate message values. A callback that retains message data after it returns
-// must copy that data first.
+// synchronously on the session goroutine, except where noted, and must return
+// promptly. They must not mutate message values. A callback that retains message
+// data after it returns must copy that data first.
 type Hooks struct {
 	LinkChanged          func(link.Link)
 	RoutedLinkChanged    func(link.Link)
@@ -269,9 +285,20 @@ type Hooks struct {
 	BackendMessage       func(pgproto3.BackendMessage)
 	ClientFlushSucceeded func()
 	Closed               func()
-	BackendChanged       func(current Backend, pending Backend)
-	ReadStatesChanged    func(current []ReadStateConfig, pending []ReadStateConfig)
-	DiscardChanged       func(bool)
+	// BackendChanged and ReadStatesChanged report remaps:
+	//   - Queued: (current, pending) on the Remap* caller's goroutine. pending is
+	//     never nil: RemapReadStates(nil) reports an empty slice, and
+	//     RemapBackend(nil), which cancels a queued backend, reports the current one.
+	//   - Applied: (applied, nil) on the session goroutine, at a message boundary.
+	//   - Order: one session's reports never overlap and arrive in the order the
+	//     remaps take effect. Each report holds a lock the other goroutine needs, so
+	//     keep reports fast.
+	//   - Calls: reports must not call RemapBackend or RemapReadStates. Reports on
+	//     the caller's goroutine may call Backend and PendingBackend, but not
+	//     CurrentLink.
+	BackendChanged    func(current Backend, pending Backend)
+	ReadStatesChanged func(current []ReadStateConfig, pending []ReadStateConfig)
+	DiscardChanged    func(bool)
 }
 
 // Config contains only portable session inputs.
@@ -521,6 +548,9 @@ func (s *Session) MetricTags() []string        { return s.obsVals.metricTags }
 func (s *Session) TraceState() *query.TraceState {
 	return s.obsVals.traceState
 }
+
+// CurrentLink and Backend take no lock. Call them on the session goroutine, or
+// from a hook as Hooks allows.
 func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
@@ -530,7 +560,7 @@ func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 }
 func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
 func (s *Session) Backend() Backend        { return s.backend }
-func (s *Session) PendingBackend() Backend { return s.remappedBackend }
+func (s *Session) PendingBackend() Backend { return s.pendingRemaps().backend }
 func (s *Session) SetLivenessProbe(probe ClientLivenessProbe) {
 	s.livenessProbe = probe
 }
@@ -578,17 +608,20 @@ func (s *Session) setDiscardUntilSync(discard bool) {
 		s.hooks.DiscardChanged(discard)
 	}
 }
+
+// Cancel runs on the listener's cancel-request goroutine. It does not hold linkMu
+// while contacting Postgres; link.Link makes Cancel on a released link safe.
 func (s *Session) Cancel() error {
-	// TODO: this reads s.link without holding s.linkMu,
-	// which races with the session goroutine's synchronized writes. Pre-existing
-	// issue; should be fixed by holding linkMu here.
-	if s.link == nil {
+	s.linkMu.Lock()
+	backendLink := s.link
+	s.linkMu.Unlock()
+	if backendLink == nil {
 		// Nothing to cancel: the session is currently idle with no link.
 		// This is not necessarily an error; the cancel request might have arrived after the query completed.
 		// TODO(enhancement): if the session is currently waiting to acquire a link, we should definitely cancel that!
 		return nil
 	}
-	return s.link.Cancel()
+	return backendLink.Cancel()
 }
 
 func (s *Session) Idle() bool {
@@ -864,44 +897,18 @@ func (s *Session) drain() error {
 }
 
 // handleStateRemapping applies any pending warden config updates queued via
-// RemapReadStates / RemapState before the next client message. The read-cluster
+// RemapReadStates / RemapBackend before the next client message. The read-cluster
 // remap is link-safe (only affects future acquisitions). A primary-cluster
 // remap with a busy link force-releases the link (aborting any open tx) and
 // sends the client a fresh ReadyForQuery; returns true in that case to signal
 // the caller to skip the current message.
 func (s *Session) handleStateRemapping() bool {
-	if s.remappedBackend == nil && s.remappedReadStates == nil {
+	if s.pending.Load() == nil {
 		// Nothing to do here, business as usual
 		return false
 	}
-
-	// Apply read states update first — no link disruption needed since this only
-	// affects routing decisions for future link acquisitions.
-	if s.remappedReadStates != nil {
-		newReadStates := make([]*ReadState, 0, len(*s.remappedReadStates))
-		for _, rs := range *s.remappedReadStates {
-			newReadStates = append(newReadStates, &ReadState{backend: rs.Backend, weight: rs.Weight})
-		}
-		s.readStates = newReadStates
-		if len(newReadStates) > 0 {
-			s.dynamicRoutingEnabled = true
-		}
-		s.remappedReadStates = nil
-		if s.hooks.ReadStatesChanged != nil {
-			s.hooks.ReadStatesChanged(readStatesToConfig(newReadStates), nil)
-		}
-	}
-
-	if s.remappedBackend == nil {
+	if !s.applyPendingRemaps() {
 		return false
-	}
-
-	// Remap the session's state
-	s.backend = s.remappedBackend
-	// Clear the remapped state signal
-	s.remappedBackend = nil
-	if s.hooks.BackendChanged != nil {
-		s.hooks.BackendChanged(s.backend, nil)
 	}
 
 	// Guard link teardown under linkMu so the client monitor goroutine
@@ -952,8 +959,48 @@ func (s *Session) handleStateRemapping() bool {
 	return true
 }
 
+// applyPendingRemaps applies and reports the queued remaps, and returns whether the
+// backend changed. Only the session goroutine calls it, after seeing a pending remap.
+func (s *Session) applyPendingRemaps() bool {
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	remap := s.pending.Swap(nil)
+
+	// Apply read states update first — no link disruption needed since this only
+	// affects routing decisions for future link acquisitions.
+	if remap.readStates != nil {
+		newReadStates := make([]*ReadState, 0, len(*remap.readStates))
+		for _, rs := range *remap.readStates {
+			newReadStates = append(newReadStates, &ReadState{backend: rs.Backend, weight: rs.Weight})
+		}
+		s.readStates = newReadStates
+		if len(newReadStates) > 0 {
+			s.dynamicRoutingEnabled = true
+		}
+		if s.hooks.ReadStatesChanged != nil {
+			s.hooks.ReadStatesChanged(readStatesToConfig(newReadStates), nil)
+		}
+	}
+	if remap.backend == nil {
+		return false
+	}
+	s.backend = remap.backend
+	if s.hooks.BackendChanged != nil {
+		s.hooks.BackendChanged(s.backend, nil)
+	}
+	return true
+}
+
+// RemapReadStates queues read routing for the next message boundary; the last call wins.
 func (s *Session) RemapReadStates(readStates []ReadStateConfig) {
-	s.remappedReadStates = &readStates
+	if readStates == nil {
+		readStates = []ReadStateConfig{} // a nil pending value marks the applied report
+	}
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	next := s.pendingRemaps()
+	next.readStates = &readStates
+	s.pending.Store(&next)
 	if s.hooks.ReadStatesChanged != nil {
 		s.hooks.ReadStatesChanged(readStatesToConfig(s.readStates), readStates)
 	}
@@ -1503,10 +1550,20 @@ func (s *Session) flushPostgres() (bool, error) {
 	return discardedUntilSync, nil
 }
 
+// RemapBackend queues a backend for the next message boundary; the last call wins.
 func (s *Session) RemapBackend(backend Backend) {
-	s.remappedBackend = backend
+	s.reportMu.Lock()
+	defer s.reportMu.Unlock()
+	next := s.pendingRemaps()
+	next.backend = backend
+	s.pending.Store(&next)
 	if s.hooks.BackendChanged != nil {
-		s.hooks.BackendChanged(s.backend, s.remappedBackend)
+		if backend == nil {
+			// Cancelled: the next boundary keeps the current backend. A nil pending
+			// value marks the applied report.
+			backend = s.backend
+		}
+		s.hooks.BackendChanged(s.backend, backend)
 	}
 }
 

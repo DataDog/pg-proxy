@@ -165,25 +165,33 @@ func TestSQLHealthCheckerRetriesAndEventuallySucceeds(t *testing.T) {
 }
 
 func TestSQLHealthCheckerStopsAfterConclusivePostgresError(t *testing.T) {
-	prober := &fakeSQLHealthProber{
-		responses: map[string][]fakeSQLHealthProbeResponse{
-			"conn-10.0.0.1": {{err: &pgconn.PgError{Code: sqlHealthCheckCrashShutdown}}},
-		},
-		calls: make(map[string]int),
-	}
-	checker := newTestSQLHealthChecker(t, prober, 3, SQLHealthCheckHooks{})
-	outcome := checker.Check(
-		context.Background(),
-		[]string{"10.0.0.1"},
-		func(ip string) string { return "conn-" + ip },
-		nil,
-		nil,
-		nil,
-	)
+	for _, code := range []string{sqlHealthCheckAdminShutdown, sqlHealthCheckCrashShutdown, sqlHealthCheckCannotConnectNow} {
+		t.Run(code, func(t *testing.T) {
+			shutdown := &sqlHealthProbeError{
+				stage: SQLHealthCheckAcquireStage,
+				err:   &pgconn.PgError{Code: code},
+			}
+			prober := &fakeSQLHealthProber{
+				responses: map[string][]fakeSQLHealthProbeResponse{
+					"conn-10.0.0.1": {{err: shutdown}, {err: context.DeadlineExceeded}},
+				},
+				calls: make(map[string]int),
+			}
+			checker := newTestSQLHealthChecker(t, prober, 3, SQLHealthCheckHooks{})
+			outcome := checker.Check(
+				context.Background(),
+				[]string{"10.0.0.1"},
+				func(ip string) string { return "conn-" + ip },
+				nil,
+				nil,
+				nil,
+			)
 
-	require.Len(t, outcome.Results, 1)
-	assert.Error(t, outcome.Results[0].Err)
-	assert.Equal(t, 1, prober.callCount("conn-10.0.0.1"))
+			require.Len(t, outcome.Results, 1)
+			assert.ErrorIs(t, outcome.Results[0].Err, shutdown, "a later timeout must not replace shutdown evidence")
+			assert.Equal(t, 1, prober.callCount("conn-10.0.0.1"))
+		})
+	}
 }
 
 func TestSQLHealthCheckerReportsMultiplePrimaries(t *testing.T) {
@@ -235,7 +243,10 @@ func TestRegistrySQLHealthProberReportsPoolLookupFailure(t *testing.T) {
 
 func TestIsSQLHealthCheckRetriable(t *testing.T) {
 	assert.True(t, IsSQLHealthCheckRetriable(errors.New("temporary")))
+	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: "57P01"}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCrashShutdown}))
+	assert.False(t, IsSQLHealthCheckRetriable(errors.Join(&pgconn.PgError{Code: "57P01"}, &pgconn.PgError{Code: "57P02"})))
+	assert.False(t, IsSQLHealthCheckRetriable(errors.Join(&pgconn.PgError{Code: "57P02"}, &pgconn.PgError{Code: "57P01"})))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckCannotConnectNow}))
 	assert.False(t, IsSQLHealthCheckRetriable(&pgconn.PgError{Code: sqlHealthCheckInvalidPassword}))
 }
@@ -415,5 +426,40 @@ func TestSQLHealthCheckerRecordsEachIPBeforeTheRoundCompletes(t *testing.T) {
 		assert.False(t, outcome.Results[1].CompletedAt.Before(unblockedAt))
 	case <-time.After(time.Second):
 		t.Fatal("round did not complete")
+	}
+}
+
+func TestSQLHealthCheckerDoesNotRetryAdministrativeTermination(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		next   fakeSQLHealthProbeResponse
+		joined bool
+	}{
+		{name: "later primary cannot replace shutdown"},
+		{name: "later standby cannot replace shutdown", next: fakeSQLHealthProbeResponse{inRecovery: true}},
+		{name: "later timeout cannot replace shutdown", next: fakeSQLHealthProbeResponse{err: context.DeadlineExceeded}},
+		{name: "joined shutdown is not retried", joined: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const ip = "10.0.0.1"
+			shutdown := &sqlHealthProbeError{stage: SQLHealthCheckQueryStage, err: &pgconn.PgError{Code: "57P01"}}
+			var initial error = shutdown
+			if tc.joined {
+				initial = errors.Join(&pgconn.PgError{Code: "XX000"}, shutdown)
+			}
+			prober := &fakeSQLHealthProber{
+				responses: map[string][]fakeSQLHealthProbeResponse{ip: {{err: initial}, tc.next}},
+				calls:     make(map[string]int),
+			}
+			checker := newTestSQLHealthChecker(t, prober, 3, SQLHealthCheckHooks{})
+			outcome := checker.Check(context.Background(), []string{ip}, func(ip string) string { return ip }, nil, nil, nil)
+			require.Equal(t, 1, prober.callCount(ip))
+			require.Len(t, outcome.Results, 1)
+			assert.ErrorIs(t, outcome.Results[0].Err, shutdown)
+			assert.False(t, outcome.Results[0].HealthyPrimary())
+			bans := make(sqlRoutingBanlist)
+			bans.update([]string{ip}, outcome, SQLHealthResultsSnapshot{ScheduledAt: outcome.StartedAt, ObservedAt: time.Now(), Results: outcome.Results})
+			assert.Contains(t, bans, ip)
+		})
 	}
 }

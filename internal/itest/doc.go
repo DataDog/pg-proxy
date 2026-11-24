@@ -16,7 +16,10 @@
 //
 // Environment variables:
 //
-//   - PG_PROXY_TEST_POSTGRES_IMAGE overrides PostgresImage.
+//   - PG_PROXY_TEST_POSTGRES_MAJOR selects the pinned image of another
+//     PostgreSQL major, such as 18 (see images.go).
+//   - PG_PROXY_TEST_POSTGRES_IMAGE overrides PostgresImage, including the
+//     major's pinned image.
 //   - TESTCONTAINERS_HUB_IMAGE_NAME_PREFIX, Testcontainers' standard setting,
 //     pulls images through a Docker Hub mirror (see images.go).
 //   - PG_PROXY_ITEST_BINARY uses a prebuilt pg-proxy binary, given as an

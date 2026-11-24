@@ -469,7 +469,7 @@ func TestReadClustersRemappingEnablesDynamicRouting(t *testing.T) {
 
 	assert.True(t, s.dynamicRoutingEnabled, "dynamic routing should be enabled after applying non-empty read states")
 	assert.Len(t, s.readStates, 1)
-	assert.Nil(t, s.remappedReadStates, "pending update should be cleared after applying")
+	assert.Nil(t, s.pending.Load(), "pending update should be cleared after applying")
 }
 
 // TestReadClustersRemappingToEmptyRoutesReadsToDefault verifies that when a session's
@@ -506,7 +506,7 @@ func TestReadClustersRemappingToEmptyRoutesReadsToDefault(t *testing.T) {
 	assert.NoError(t, err)
 
 	assert.Empty(t, s.readStates, "read states should be cleared after applying empty remapping")
-	assert.Nil(t, s.remappedReadStates, "pending update should be cleared after applying")
+	assert.Nil(t, s.pending.Load(), "pending update should be cleared after applying")
 }
 
 // TestStateRemapDuringHeldLink verifies that handleStateRemapping guards link
@@ -563,6 +563,105 @@ func testStateRemapDuringHeldLink(t *testing.T, timer bool) {
 	// The old shedder's fn was called exactly once (for BEGIN); the remap
 	// happened inside the inner loop and did NOT call Run again.
 	assert.Equal(int64(1), oldShedder.getRunCount())
+}
+
+// queryInHeldTransaction sends query inside an open transaction and checks that the
+// held link answers it, rather than a remap aborting the transaction.
+func queryInHeldTransaction(t *testing.T, fakeClient *pgproto3.Frontend, fakePg *pgproto3.Backend, query string) {
+	t.Helper()
+	fakeClient.Send(&pgproto3.Query{String: query})
+	require.NoError(t, fakeClient.Flush())
+	forwarded := make(chan pgproto3.FrontendMessage, 1)
+	go func() {
+		msg, _ := fakePg.Receive()
+		forwarded <- msg
+	}()
+	select {
+	case msg := <-forwarded:
+		require.Equal(t, &pgproto3.Query{String: query}, msg)
+	case <-time.After(5 * time.Second):
+		t.Fatal("the held link did not receive the query")
+	}
+	fakePg.Send(&pgproto3.EmptyQueryResponse{})
+	fakePg.Send(&pgproto3.ReadyForQuery{TxStatus: 'T'})
+	require.NoError(t, fakePg.Flush())
+	for _, want := range []pgproto3.BackendMessage{&pgproto3.EmptyQueryResponse{}, &pgproto3.ReadyForQuery{TxStatus: 'T'}} {
+		reply, err := fakeClient.Receive()
+		require.NoError(t, err)
+		require.Equal(t, want, reply)
+	}
+}
+
+// A read-states remap only affects later link acquisitions, so it applies at the
+// next boundary without aborting the transaction that holds a link.
+func TestReadStatesRemapKeepsHeldTransaction(t *testing.T) {
+	session, fakeClient, fakePg, backend, closer := newRunningTestSessionWithBackend(t)
+	defer closer()
+	beginHeldTransaction(t, session, fakeClient, fakePg)
+	heldLink := session.CurrentLink()
+
+	readBackend := &fixedBackend{backendLink: &testLink{}, loadShedder: &passthroughLoadShedder{}}
+	session.RemapReadStates([]ReadStateConfig{{Backend: readBackend, Weight: 1}})
+	queryInHeldTransaction(t, fakeClient, fakePg, "SELECT 1")
+
+	assert.Same(t, heldLink, session.CurrentLink())
+	assert.Same(t, backend, session.Backend())
+	assert.Len(t, session.readStates, 1)
+}
+
+// RemapBackend(nil) cancels a queued backend: the next boundary keeps the current
+// backend and the transaction that holds a link.
+func TestRemapBackendNilCancelsQueuedBackend(t *testing.T) {
+	session, fakeClient, fakePg, backend, closer := newRunningTestSessionWithBackend(t)
+	defer closer()
+	beginHeldTransaction(t, session, fakeClient, fakePg)
+	heldLink := session.CurrentLink()
+
+	session.RemapBackend(&fixedBackend{backendLink: &testLink{}, loadShedder: &passthroughLoadShedder{}})
+	session.RemapBackend(nil)
+	assert.Nil(t, session.PendingBackend())
+	queryInHeldTransaction(t, fakeClient, fakePg, "SELECT 1")
+
+	assert.Same(t, backend, session.Backend())
+	assert.Same(t, heldLink, session.CurrentLink())
+}
+
+// Read-states and backend remaps queued before one boundary apply together: read
+// states first, then the backend, which aborts the held transaction once.
+func TestQueuedRemapsApplyTogether(t *testing.T) {
+	var reports []string
+	report := func(kind string, applied bool) {
+		state := "queued"
+		if applied {
+			state = "applied"
+		}
+		reports = append(reports, kind+" "+state)
+	}
+	session, fakeClient, fakePg, _, closer := newRunningTestSessionWithBackend(t, func(cfg *Config) {
+		cfg.Hooks = Hooks{
+			BackendChanged:    func(_, pending Backend) { report("backend", pending == nil) },
+			ReadStatesChanged: func(_, pending []ReadStateConfig) { report("read states", pending == nil) },
+		}
+	})
+	defer closer()
+	beginHeldTransaction(t, session, fakeClient, fakePg)
+
+	readBackend := &fixedBackend{backendLink: &testLink{}, loadShedder: &passthroughLoadShedder{}}
+	nextBackend := &fixedBackend{backendLink: &testLink{}, loadShedder: &passthroughLoadShedder{}}
+	session.RemapReadStates([]ReadStateConfig{{Backend: readBackend, Weight: 1}})
+	session.RemapBackend(nextBackend)
+	fakeClient.Send(&pgproto3.Query{String: "SELECT 1"})
+	require.NoError(t, fakeClient.Flush())
+	for _, want := range []pgproto3.BackendMessage{buildTransactionRollbackErrorResponse(), buildReadyForQueryIdleMessage()} {
+		reply, err := fakeClient.Receive()
+		require.NoError(t, err)
+		require.Equal(t, want, reply)
+	}
+
+	assert.Equal(t, []string{"read states queued", "backend queued", "read states applied", "backend applied"}, reports)
+	assert.Same(t, nextBackend, session.Backend())
+	assert.Len(t, session.readStates, 1)
+	assert.Nil(t, session.CurrentLink())
 }
 
 // TestClientDisconnectDuringHeldLink verifies that when the client disconnects

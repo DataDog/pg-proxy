@@ -11,15 +11,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/DataDog/pg-proxy/internal/itest"
@@ -267,41 +269,160 @@ func TestCommitErrorAtSync(t *testing.T) {
 }
 
 // protocolCase is a message exchange checked against PostgreSQL directly and
-// through the proxy.
+// through the proxy's dbPooled. After the proxy run, a new client checks that
+// the case left the backend clean (see requireCleanBackend).
 type protocolCase struct {
 	name  string
 	steps []step
 	check func(t *testing.T, replies [][]pgproto3.BackendMessage)
-	// database is the logical database the proxy run connects to; empty means dbDefault.
-	database string
 	// setup runs on the backend before each run, for example to recreate a table.
 	setup []string
 	// proxySkip, if set, skips the proxy run: it names a known proxy bug.
 	proxySkip string
+	// hygieneSkip, if set, skips the hygiene check after the proxy run: it
+	// names a known proxy bug that leaves state on the backend.
+	hygieneSkip string
+	// stepTimeout bounds the wait for each step's replies; zero means 20 seconds.
+	stepTimeout time.Duration
 }
 
+// runProtocolCases runs each case against PostgreSQL directly and through
+// proxy's dbPooled, whose single backend connection every client of the proxy
+// run and its hygiene check share.
 func runProtocolCases(t *testing.T, proxy *itest.Proxy, cases []protocolCase) {
 	t.Helper()
+	parsed := clientStatements{sql: map[string]bool{}, names: map[string]bool{}}
 	for _, tc := range cases {
-		database := tc.database
-		if database == "" {
-			database = dbDefault
-		}
-		targets := map[string]string{
-			"direct": backend.URL("postgres"),
-			"proxy":  proxy.URL(database, itest.PostgresUser),
-		}
-		for target, url := range targets {
-			t.Run(tc.name+"/"+target, func(t *testing.T) {
-				if target == "proxy" && tc.proxySkip != "" {
-					t.Skip(tc.proxySkip)
+		for _, step := range tc.steps {
+			for _, msg := range step.send {
+				if parse, ok := msg.(*pgproto3.Parse); ok && parse.Name != "" {
+					parsed.sql[parse.Query] = true
+					parsed.names[parse.Name] = true
 				}
-				if len(tc.setup) > 0 {
-					require.NoError(t, backend.Exec(t.Context(), tc.setup...))
+			}
+		}
+		t.Run(tc.name+"/direct", func(t *testing.T) { tc.run(t, backend.URL("postgres")) })
+		t.Run(tc.name+"/proxy", func(t *testing.T) {
+			if tc.proxySkip != "" && !runKnownBugs {
+				t.Skip(tc.proxySkip)
+			}
+			defer func() {
+				// A known bug or a failure may leave state on the backend; keep it from later cases.
+				if t.Failed() || tc.proxySkip != "" || tc.hygieneSkip != "" {
+					terminatePooledBackend(t)
 				}
-				tc.check(t, exchange(t, url, tc.steps))
+			}()
+			url := proxy.URL(dbPooled, itest.PostgresUser)
+			tc.run(t, url)
+			// A new direct session is always clean, so only the proxy run is checked.
+			t.Run("hygiene", func(t *testing.T) {
+				if tc.hygieneSkip != "" && !runKnownBugs {
+					t.Skip(tc.hygieneSkip)
+				}
+				requireCleanBackend(t, url, parsed)
 			})
+		})
+	}
+}
+
+// run runs the case's setup, sends its steps to url and checks the replies.
+func (tc protocolCase) run(t *testing.T, url string) {
+	t.Helper()
+	if len(tc.setup) > 0 {
+		require.NoError(t, backend.Exec(t.Context(), tc.setup...))
+	}
+	tc.check(t, exchange(t, url, tc.steps, tc.stepTimeout))
+}
+
+// clientStatements are the statements the clients of a series of cases parse
+// with a name.
+type clientStatements struct {
+	// sql holds their SQL. The proxy keeps each such statement on the backend
+	// under a name of its own, for reuse by any client.
+	sql map[string]bool
+	// names holds the names the clients give them, which belong to the
+	// clients' sessions and must not outlive them on the backend.
+	names map[string]bool
+}
+
+// requireCleanBackend connects a new client to url, the proxy's dbPooled, and
+// checks that its backend holds nothing a previous client left behind. The
+// client lands on the backend the case used, because dbPooled has a single
+// backend connection; if the proxy replaced that connection, the state on it
+// is gone with it. The client must:
+//   - get its own replies in the simple and the extended protocol, so no
+//     reply to a previous client is left over;
+//   - find no LISTEN, session advisory lock, temporary relation or cursor;
+//   - find only prepared statements whose SQL a client parsed with a name,
+//     and none under a client's name;
+//   - see the server's value of every parameter ParameterStatus reported.
+func requireCleanBackend(t *testing.T, url string, parsed clientStatements) {
+	t.Helper()
+	c := connectRaw(t, url)
+	defer c.close()
+
+	requireReplies(t, [][]pgproto3.BackendMessage{
+		c.do(t, simpleQuery("SELECT 'hygiene marker'")),
+		c.do(t, ready(
+			&pgproto3.Parse{Query: "SELECT $1::text"}, &pgproto3.Bind{Parameters: [][]byte{[]byte("hygiene marker 2")}},
+			&pgproto3.Execute{}, &pgproto3.Sync{},
+		)),
+	},
+		[]string{"RowDescription", "DataRow hygiene marker", "CommandComplete SELECT 1", "ReadyForQuery I"},
+		[]string{"ParseComplete", "BindComplete", "DataRow hygiene marker 2", "CommandComplete SELECT 1", "ReadyForQuery I"},
+	)
+
+	// Each probe counts session state that outlives the transactions that
+	// created it, and so must not reach another client.
+	for _, probe := range []struct{ query, state string }{
+		{"SELECT count(*) FROM pg_listening_channels()", "LISTEN channels"},
+		{"SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND pid = pg_backend_pid()", "session advisory locks"},
+		{"SELECT count(*) FROM pg_class WHERE relnamespace = pg_my_temp_schema()", "temporary relations"},
+		{"SELECT count(*) FROM pg_cursors", "cursors"},
+	} {
+		assert.Equal(t, "0", dataRowValue(t, c.do(t, simpleQuery(probe.query))),
+			"the backend holds %s", probe.state)
+	}
+
+	reply := c.do(t, simpleQuery("SELECT name, statement, from_sql FROM pg_prepared_statements"))
+	requireNoError(t, reply)
+	for _, msg := range reply {
+		if row, ok := msg.(*pgproto3.DataRow); ok {
+			name, statement := string(row.Values[0]), string(row.Values[1])
+			switch {
+			case string(row.Values[2]) == "t":
+				t.Errorf("the backend holds a statement prepared with SQL PREPARE: %s", statement)
+			case parsed.names[name]:
+				t.Errorf("the backend holds a statement under a client's name %q: %s", name, statement)
+			case !parsed.sql[statement]:
+				t.Errorf("the backend holds a statement no client parsed with a name: %s", statement)
+			}
 		}
+	}
+
+	requireParameterView(t, c)
+}
+
+// requireParameterView checks that each parameter ParameterStatus reported to
+// c has the value the server has.
+func requireParameterView(t *testing.T, c *rawClient) {
+	t.Helper()
+	names := slices.Sorted(maps.Keys(c.parameters))
+	settings := make([]string, len(names))
+	for i, name := range names {
+		settings[i] = "current_setting('" + strings.ReplaceAll(name, "'", "''") + "')"
+	}
+	reply := c.do(t, simpleQuery("SELECT "+strings.Join(settings, ", ")))
+	requireNoError(t, reply)
+	var values [][]byte
+	for _, msg := range reply {
+		if row, ok := msg.(*pgproto3.DataRow); ok {
+			values = row.Values
+		}
+	}
+	require.Len(t, values, len(names), "%v", summarize(reply))
+	for i, name := range names {
+		assert.Equal(t, string(values[i]), c.parameters[name], "the client's view of %s", name)
 	}
 }
 
@@ -330,23 +451,32 @@ func failing(msgs ...pgproto3.FrontendMessage) step { return step{send: msgs, un
 func quiet(msgs ...pgproto3.FrontendMessage) step   { return step{send: msgs, until: untilQuiet} }
 func copyIn(msgs ...pgproto3.FrontendMessage) step  { return step{send: msgs, until: untilCopyIn} }
 
+// simpleQuery returns a step that sends sql as a simple Query.
+func simpleQuery(sql string) step { return ready(&pgproto3.Query{String: sql}) }
+
+// onClient returns s sent by client instead of client 0.
+func onClient(client int, s step) step {
+	s.client = client
+	return s
+}
+
 // exchange opens one connection to url per client the steps name, sends each
-// step's messages on its client's connection and collects its replies.
-func exchange(t *testing.T, url string, steps []step) [][]pgproto3.BackendMessage {
+// step's messages on its client's connection and collects its replies. It
+// waits up to timeout for each step's replies; zero means 20 seconds. It
+// closes the connections before it returns.
+func exchange(t *testing.T, url string, steps []step, timeout time.Duration) [][]pgproto3.BackendMessage {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-	defer cancel()
-	clients := 1
+	count := 1
 	for _, step := range steps {
-		clients = max(clients, step.client+1)
+		count = max(count, step.client+1)
 	}
-	pgConns := make([]*pgconn.PgConn, clients)
-	for i := range pgConns {
-		conn, err := pgx.Connect(ctx, url)
-		require.NoError(t, err)
-		defer conn.Close(context.Background())
-		pgConns[i] = conn.PgConn()
-		require.NoError(t, pgConns[i].Conn().SetDeadline(time.Now().Add(20*time.Second)))
+	clients := make([]*rawClient, count)
+	for i := range clients {
+		clients[i] = connectRaw(t, url)
+		defer clients[i].close()
+		if timeout != 0 {
+			clients[i].timeout = timeout
+		}
 	}
 
 	var replies [][]pgproto3.BackendMessage
@@ -354,36 +484,106 @@ func exchange(t *testing.T, url string, steps []step) [][]pgproto3.BackendMessag
 		if step.before != nil {
 			step.before(t)
 		}
-		pgConn := pgConns[step.client]
-		frontend := pgConn.Frontend()
-		for _, msg := range step.send {
-			frontend.Send(msg)
-		}
-		require.NoError(t, frontend.Flush())
-		var reply []pgproto3.BackendMessage
-		if step.until == untilQuiet {
-			require.NoError(t, pgConn.Conn().SetReadDeadline(time.Now().Add(500*time.Millisecond)))
-		}
-		for {
-			msg, err := frontend.Receive()
-			var netErr net.Error
-			if step.until == untilQuiet && errors.As(err, &netErr) && netErr.Timeout() {
-				require.NoError(t, pgConn.Conn().SetDeadline(time.Now().Add(20*time.Second)))
-				break
-			}
-			require.NoError(t, err)
-			reply = append(reply, copyBackendMessage(t, msg))
-			_, isReady := msg.(*pgproto3.ReadyForQuery)
-			_, isError := msg.(*pgproto3.ErrorResponse)
-			_, isCopyIn := msg.(*pgproto3.CopyInResponse)
-			if (step.until == untilReady && isReady) || (step.until == untilError && isError) ||
-				(step.until == untilCopyIn && (isCopyIn || isError)) {
-				break
-			}
-		}
-		replies = append(replies, reply)
+		replies = append(replies, clients[step.client].do(t, step))
 	}
 	return replies
+}
+
+// rawClient is a connection on which the test sends and reads protocol
+// messages itself.
+type rawClient struct {
+	conn     net.Conn
+	frontend *pgproto3.Frontend
+	// parameters is the client's view of the server parameters: the last
+	// value ParameterStatus reported for each.
+	parameters map[string]string
+	// closed is set once the server has sent an error that ends the session
+	// and closed the connection.
+	closed bool
+	// timeout bounds the wait for each step's replies.
+	timeout time.Duration
+}
+
+// connectRaw opens a connection to url and takes it over from pgconn after
+// startup. Its steps wait up to 20 seconds for their replies.
+func connectRaw(t *testing.T, url string) *rawClient {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+	pgConn, err := pgconn.Connect(ctx, url)
+	require.NoError(t, err)
+	hijacked, err := pgConn.Hijack()
+	require.NoError(t, err)
+	return &rawClient{
+		conn: hijacked.Conn, frontend: hijacked.Frontend, parameters: hijacked.ParameterStatuses, timeout: 20 * time.Second,
+	}
+}
+
+// do sends the step's messages and reads their replies for up to c.timeout.
+// An error that ends the session ends the replies, and after it do sends
+// nothing and returns no replies.
+func (c *rawClient) do(t *testing.T, step step) []pgproto3.BackendMessage {
+	t.Helper()
+	if c.closed {
+		return nil
+	}
+	require.NoError(t, c.conn.SetDeadline(time.Now().Add(c.timeout)))
+	for _, msg := range step.send {
+		c.frontend.Send(msg)
+	}
+	require.NoError(t, c.frontend.Flush())
+	if step.until == untilQuiet {
+		require.NoError(t, c.conn.SetReadDeadline(time.Now().Add(500*time.Millisecond)))
+	}
+	var reply []pgproto3.BackendMessage
+	for {
+		msg, err := c.frontend.Receive()
+		var netErr net.Error
+		if step.until == untilQuiet && errors.As(err, &netErr) && netErr.Timeout() {
+			break
+		}
+		require.NoError(t, err, "replies so far: %v", summarize(reply))
+		msg = copyBackendMessage(t, msg)
+		if status, ok := msg.(*pgproto3.ParameterStatus); ok {
+			c.parameters[status.Name] = status.Value
+		}
+		reply = append(reply, msg)
+		if errorResponse, ok := msg.(*pgproto3.ErrorResponse); ok && endsSession(errorResponse) {
+			// The server closes the connection after it.
+			c.closed = true
+			break
+		}
+		_, isReady := msg.(*pgproto3.ReadyForQuery)
+		_, isError := msg.(*pgproto3.ErrorResponse)
+		_, isCopyIn := msg.(*pgproto3.CopyInResponse)
+		if (step.until == untilReady && isReady) || (step.until == untilError && isError) ||
+			(step.until == untilCopyIn && (isCopyIn || isError)) {
+			break
+		}
+	}
+	return reply
+}
+
+// endsSession reports whether the server closes the connection after
+// errorResponse: its severity is FATAL or PANIC.
+func endsSession(errorResponse *pgproto3.ErrorResponse) bool {
+	// The localized severity depends on lc_messages. The proxy's own errors,
+	// and servers before PostgreSQL 9.6, send no other.
+	severity := errorResponse.SeverityUnlocalized
+	if severity == "" {
+		severity = errorResponse.Severity
+	}
+	return severity == "FATAL" || severity == "PANIC"
+}
+
+// close sends Terminate and closes the connection.
+func (c *rawClient) close() {
+	if !c.closed {
+		_ = c.conn.SetDeadline(time.Now().Add(time.Second))
+		c.frontend.Send(&pgproto3.Terminate{})
+		_ = c.frontend.Flush()
+	}
+	_ = c.conn.Close()
 }
 
 // copyBackendMessage detaches msg from the frontend's reused messages and
@@ -431,12 +631,17 @@ func summarize(reply []pgproto3.BackendMessage) []string {
 	return lines
 }
 
-// requireReplies checks the summary of each reply in order.
+// requireReplies checks the summary of each reply and reports every reply
+// that differs.
 func requireReplies(t *testing.T, replies [][]pgproto3.BackendMessage, want ...[]string) {
 	t.Helper()
 	require.Len(t, replies, len(want))
+	equal := true
 	for i := range want {
-		require.Equal(t, want[i], summarize(replies[i]), "reply %d", i)
+		equal = assert.Equal(t, want[i], summarize(replies[i]), "reply %d", i) && equal
+	}
+	if !equal {
+		t.FailNow()
 	}
 }
 

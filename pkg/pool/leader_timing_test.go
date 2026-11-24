@@ -167,7 +167,7 @@ func leaderTimingCase(sqlFirst bool, next string) string {
 }
 
 func TestLeaderTimingEligibilityAndMetadata(t *testing.T) {
-	for _, mode := range []leaderTimingMode{everyNewLeader, oneNewLeader, oneHealthyLeader} {
+	for _, mode := range []leaderTimingMode{everyNewLeader, oneHealthyLeader} {
 		p := &leaderTiming[string]{}
 		require.Empty(t, p.observe(candidateLeaderSource, leaderTimingIPs("A"), leaderTimingAt(0), "baseline", mode))
 		require.Empty(t, p.observe(referenceLeaderSource, leaderTimingIPs("A"), leaderTimingAt(0), "baseline", mode))

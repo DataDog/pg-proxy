@@ -75,8 +75,7 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 				&pgproto3.Execute{Portal: "same_portal"},
 				&pgproto3.Sync{},
 			)
-			s := ready(send...)
-			s.client = i
+			s := onClient(i, ready(send...))
 			if reassign && i == 0 && segment == 1 {
 				s.before = terminatePooledBackend
 			}
@@ -85,15 +84,12 @@ func preparedIsolation(name string, reassign, sameSQL bool) protocolCase {
 		}
 	}
 	for i := range clients {
-		s := ready(&pgproto3.Query{String: "SELECT 1 AS recovery"})
-		s.client = i
-		steps = append(steps, s)
+		steps = append(steps, onClient(i, ready(&pgproto3.Query{String: "SELECT 1 AS recovery"})))
 		want = append(want, []string{"RowDescription", "DataRow 1", "CommandComplete SELECT 1", "ReadyForQuery I"})
 	}
 	return protocolCase{
-		name:     name,
-		database: dbPooled,
-		steps:    steps,
+		name:  name,
+		steps: steps,
 		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies, want...)
 		},

@@ -14,7 +14,6 @@ import (
 	"maps"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -33,11 +32,6 @@ const regressDir = "/usr/local/pgsql/regress"
 
 // scheduleFile is where the runner receives the (filtered) schedule.
 const scheduleFile = "/tmp/pg-proxy-schedule"
-
-var (
-	// diffHeader starts the section of regression.diffs for one test.
-	diffHeader = regexp.MustCompile(`^diff .* \S*/results/(\S+)\.out$`)
-)
 
 // installcheck is the outcome of one pg_regress run.
 type installcheck struct {
@@ -198,29 +192,6 @@ func artifactsDir(t *testing.T) string {
 	return dir
 }
 
-// diffSections splits regression.diffs into each test's section.
-func diffSections(diffs string) map[string]string {
-	sections := map[string]string{}
-	var name string
-	var section strings.Builder
-	flush := func() {
-		if name != "" {
-			sections[name] = section.String()
-		}
-		section.Reset()
-	}
-	for _, line := range strings.Split(diffs, "\n") {
-		if match := diffHeader.FindStringSubmatch(line); match != nil {
-			flush()
-			name = match[1]
-		}
-		section.WriteString(line)
-		section.WriteByte('\n')
-	}
-	flush()
-	return sections
-}
-
 // logDiffs logs the start of each named test's diff.
 func logDiffs(t *testing.T, names []string, diffs map[string]string) {
 	t.Helper()
@@ -237,70 +208,20 @@ func truncateLines(text string, limit int) string {
 	return strings.Join(lines[:limit], "\n") + fmt.Sprintf("\n... %d more lines", len(lines)-limit)
 }
 
-// baseline is a parsed baseline/pg<major>.txt. Each entry is one of:
-//   - "skip <test> # reason": left out of the schedule because pg-proxy cannot
-//     pass it by design.
-//   - "isolate <test> # reason": left out of the schedule because its failure
-//     would break later tests. Not established as by design; worth re-checking
-//     as pg-proxy improves.
-//   - "fail <test> # reason": runs and is expected to fail.
-//
-// Comment lines at the top form the header.
-type baseline struct {
-	header   string
-	skipped  map[string]string
-	isolated map[string]string
-	failing  map[string]string
-}
-
-// excluded returns the tests left out of the schedule: skipped and isolated.
-func (b baseline) excluded() map[string]string {
-	excluded := maps.Clone(b.skipped)
-	maps.Copy(excluded, b.isolated)
-	return excluded
-}
-
 func readBaseline(t *testing.T, path string) baseline {
 	t.Helper()
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	b := baseline{skipped: map[string]string{}, isolated: map[string]string{}, failing: map[string]string{}}
-	inHeader := true
-	for number, line := range strings.Split(string(data), "\n") {
-		entry, reason, _ := strings.Cut(line, "#")
-		fields := strings.Fields(entry)
-		if len(fields) == 0 {
-			if inHeader && strings.TrimSpace(line) != "" {
-				b.header += line + "\n"
-			}
-			continue
-		}
-		inHeader = false
-		require.Len(t, fields, 2, "%s:%d: want \"skip|isolate|fail <test> # reason\"", path, number+1)
-		_, excluded := b.excluded()[fields[1]]
-		_, failing := b.failing[fields[1]]
-		if excluded || failing {
-			t.Fatalf("%s:%d: %s is listed twice", path, number+1, fields[1])
-		}
-		switch fields[0] {
-		case "skip":
-			b.skipped[fields[1]] = strings.TrimSpace(reason)
-		case "isolate":
-			b.isolated[fields[1]] = strings.TrimSpace(reason)
-		case "fail":
-			b.failing[fields[1]] = strings.TrimSpace(reason)
-		default:
-			t.Fatalf("%s:%d: unknown entry kind %q", path, number+1, fields[0])
-		}
-	}
+	b, err := parseBaseline(path, string(data))
+	require.NoError(t, err)
 	return b
 }
 
-// checkBaseline fails t when run differs from the expected failures: a test
-// failing that is not listed, or a listed test that passes or no longer exists.
-// With PG_PROXY_REGRESS_UPDATE set it rewrites the fail entries of path from
-// run instead, keeping the header, the skip and isolate entries and existing
-// reasons.
+// checkBaseline fails t when run differs from the baseline: a test failing that
+// is not listed, a listed test that passes or no longer exists, or a listed
+// test whose diff changed size. With PG_PROXY_REGRESS_UPDATE set it rewrites
+// the fail entries of path from run instead, keeping the header, the skip and
+// isolate entries and existing reasons.
 func checkBaseline(t *testing.T, path string, b baseline, run installcheck) {
 	t.Helper()
 	var newFailures, newPasses, unknown []string
@@ -320,24 +241,12 @@ func checkBaseline(t *testing.T, path string, b baseline, run installcheck) {
 	}
 	slices.Sort(newPasses)
 	slices.Sort(unknown)
+	worse, better := fingerprintChanges(b, run.results.failed(), run.diffs)
 
 	if os.Getenv("PG_PROXY_REGRESS_UPDATE") != "" {
-		var out strings.Builder
-		out.WriteString(b.header)
-		writeEntries := func(kind string, names []string, reasons map[string]string) {
-			for _, name := range names {
-				reason := reasons[name]
-				if reason == "" {
-					reason = "not triaged"
-				}
-				fmt.Fprintf(&out, "%s %-28s # %s\n", kind, name, reason)
-			}
-		}
-		writeEntries("skip", slices.Sorted(maps.Keys(b.skipped)), b.skipped)
-		writeEntries("isolate", slices.Sorted(maps.Keys(b.isolated)), b.isolated)
-		writeEntries("fail", run.results.failed(), b.failing)
-		require.NoError(t, os.WriteFile(path, []byte(out.String()), 0o644))
-		t.Logf("updated %s: %d new failures, %d new passes, %d removed", path, len(newFailures), len(newPasses), len(unknown))
+		require.NoError(t, os.WriteFile(path, []byte(formatBaseline(b, run.results.failed(), run.diffs)), 0o644))
+		t.Logf("updated %s: %d new failures, %d new passes, %d removed, %d grew, %d shrank",
+			path, len(newFailures), len(newPasses), len(unknown), len(worse), len(better))
 		return
 	}
 	if len(newFailures) > 0 {
@@ -351,7 +260,15 @@ func checkBaseline(t *testing.T, path string, b baseline, run installcheck) {
 	if len(unknown) > 0 {
 		t.Errorf("tests that %s lists as failing did not run; remove them: %s", path, strings.Join(unknown, ", "))
 	}
+	if len(worse) > 0 {
+		logDiffs(t, changedNames(worse), run.diffs)
+		t.Errorf("tests that %s lists as failing now differ from PostgreSQL in more lines: %s", path, strings.Join(worse, ", "))
+	}
+	if len(better) > 0 {
+		t.Errorf("tests that %s lists as failing now differ from PostgreSQL in fewer lines; lower their diff counts: %s",
+			path, strings.Join(better, ", "))
+	}
 	if t.Failed() {
-		t.Log("PG_PROXY_REGRESS_UPDATE=1 rewrites the fail entries from this run's results")
+		t.Log("PG_PROXY_REGRESS_UPDATE=1 rewrites the fail entries and their diff counts from this run's results")
 	}
 }

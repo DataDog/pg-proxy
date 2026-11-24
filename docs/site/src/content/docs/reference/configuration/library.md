@@ -56,7 +56,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `Metrics` | Optional session metric implementation; otherwise sessions use the global metric client. |
 | `EnableTraceParameters` | Set to `true` to capture raw bind values in sampled Datadog and OTel query traces. Defaults to `false`; SQL text is unaffected. Also available in `session.Config`. |
 
-`topology.DefaultPostgresMessageBufferSize` is `10_240`. The `pg-proxy` binary sets it explicitly.
+`topology.DefaultPostgresMessageBufferSize` is `10_240`. The library does not apply it for you: with `PostgresMessageBufferSize` left at `0`, the session flushes to the client after every reply message. Set it to `topology.DefaultPostgresMessageBufferSize` unless you have a reason not to. The `pg-proxy` binary uses the default unless `proxy.postgres_msg_buffer_size` (JSON: `postgresMsgBufferSize`) is set to a positive value. Negative values fail at startup.
 
 `PostgresMessageBufferSize` controls when buffered replies are flushed to the client. It does not cap incoming message sizes; see [Client-message size limitations](../../limitations/#client-messages-have-no-configured-size-limit).
 
@@ -90,7 +90,7 @@ Call `pkg/datadog.Start(Options{})` to create integrations from `DD_*` settings.
 | --- | --- |
 | `Dependencies` | Reuse existing integrations. The helper creates only missing ones and never starts or stops supplied clients. |
 | `TracerOptions` | Native Datadog tracer options. |
-| `StatsdOptions` | Native DogStatsD client options. |
+| `StatsdOptions` | Native DogStatsD client options. They apply after the default, `statsd.WithExtendedClientSideAggregation()`, so they can change it. |
 | `LogWriter` | JSON log destination; defaults to stderr. Ignored when a log handler is supplied. |
 | `LogLevel` | Minimum JSON log severity as a `slog.Level`; defaults to INFO. Ignored when a log handler is supplied. |
 

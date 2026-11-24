@@ -43,7 +43,7 @@ func NewPGXWithConfig(ctx context.Context, cfg *pgxpool.Config) (*pgxpool.Pool, 
 	}
 	if err := pool.Ping(ctx); err != nil {
 		pool.Close()
-		return nil, fmt.Errorf("error pinging pool: %s", err.Error())
+		return nil, fmt.Errorf("error pinging pool: %w", err)
 	}
 	return pool, nil
 }

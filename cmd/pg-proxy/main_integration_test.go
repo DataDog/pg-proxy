@@ -36,6 +36,7 @@ func TestProxyAgainstPostgres(t *testing.T) {
 	t.Run("session admission limits", func(t *testing.T) { verifySessionAdmission(t, adminURL) })
 	t.Run("client authentication", func(t *testing.T) { verifyProxyAuthentication(t, adminURL, admin) })
 	t.Run("pool statistics", func(t *testing.T) { verifyProxyPoolStats(t, adminURL) })
+	t.Run("live remaps", func(t *testing.T) { verifyLiveRemaps(t, adminURL, admin) })
 
 	// Minimum connections must open during startup, before the periodic health check.
 	for _, minimum := range []string{"pool_min_conns=3", "pool_min_idle_conns=3"} {

@@ -21,6 +21,7 @@ require (
 	github.com/vmihailenco/msgpack/v5 v5.4.1
 	github.com/xdg-go/scram v1.4.0
 	github.com/xdg-go/stringprep v1.0.4
+	go.uber.org/goleak v1.3.0
 	golang.org/x/sys v0.50.0
 	golang.org/x/text v0.43.0
 	golang.org/x/time v0.16.0

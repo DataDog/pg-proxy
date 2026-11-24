@@ -20,7 +20,7 @@ PG Proxy records query and protocol spans with either Datadog or OpenTelemetry. 
 | `Batch execution and proxying` | Grouped batch execution. |
 | `Returning rows to client` | Returning results. |
 
-The OpenTelemetry adapter marks the incoming request span as `SERVER` and its processing child spans as `INTERNAL`. The native Datadog adapter preserves its existing `server` kind for both root and child spans. Both adapters set the database system to `postgres`. The exact query `-- ping` does not start a root trace.
+The OpenTelemetry adapter marks the incoming request span as `SERVER` and its processing child spans as `INTERNAL`. The native Datadog adapter marks both root and child spans as `server`. Both adapters set the database system to `postgres`. The exact query `-- ping` does not start a root trace.
 
 ## Propagation
 
@@ -75,11 +75,11 @@ For batches, use `Batch execution and proxying` rather than assuming every query
 
 ## Recorded data
 
-The root span receives the query text as `db.statement`. The trace state tracks up to 15 protocol-message types; `DataRow` and `CopyData` messages are excluded from that list. Additional messages set `messages_truncated`.
+The root span receives the query text as `db.statement`.
 
 For OTel export, SQL containing invalid UTF-8 is quoted with byte escapes, such as `\xe9`. Valid UTF-8 stays unchanged. This prevents one query from causing the entire export batch to fail; the SQL and parameters sent to PostgreSQL stay unchanged.
 
-Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
+Completed child spans can include `messages`, `rowsReturned/Affected`, and `rowsTotalSize`. `messages` lists the type names of the first 15 protocol messages the span handled; `DataRow` and `CopyData` messages are not counted, and if there are more, the span gets `messages_truncated`. `rowsTotalSize` is a human-readable string such as `1.2 kB`, not a number. The row fields are added when the tracked total size is positive. Non-EOF errors are attached when a span finishes; EOF-only finishes are not marked as errors by this code.
 
 The `pg-proxy` binary omits bind parameter values by default in both Datadog and OTel
 modes. Set `-trace-parameters=true` to capture actual values, without obfuscation.
@@ -122,10 +122,10 @@ and `pgproxy.bind.rendered` describe only the proxy's own limits. They are set
 before the positions, so the SDK keeps them.
 
 Values are recorded only when the root span's head sampling decision keeps the
-trace: a Datadog sampling priority above zero, or an OTel span that is recording
+trace: a Datadog sampling priority above zero or not yet set, or an OTel span that is recording
 and sampled. Traces kept later, for example because they contain errors, omit
-the parameter tags. Tracers that do not implement `pgproxy.SamplingReporter` are
-treated as keeping every trace.
+`db.parameters`. Root spans that do not implement `pgproxy.SamplingReporter`
+are treated as sampled.
 
 Disabling capture skips parameter formatting and trace tagging; it does not change
 the values forwarded to PostgreSQL. SQL text in `db.statement`, including literal

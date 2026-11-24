@@ -251,6 +251,11 @@ func (noopRoleSession) Reset(context.Context, *pgxpool.Conn, string, []string) e
 // RoleSession, a client's SET ROLE or SET SESSION AUTHORIZATION must not reach the
 // next client, and RESET ALL does not cover either. With one, the RoleSession owns
 // the role, so only GUCs are reset.
+//
+// It also pins the cost: releasing a link with no excess prepared statements to
+// deallocate sends one reset query and nothing else, so a client statement costs
+// at most one reset round trip. The session package's
+// TestProtocolCycleRoundTripBudgets counts one release per protocol cycle.
 func TestReleaseResetSQL(t *testing.T) {
 	tests := []struct {
 		name string
@@ -263,35 +268,45 @@ func TestReleaseResetSQL(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			received := make(chan pgproto3.FrontendMessage, 1)
-			conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
-				msg, err := backend.Receive()
-				if err != nil {
-					return
+			var sent []pgproto3.FrontendMessage
+			conn, closeAndWait := newSessionLinkTestPoolServing(t, func(backend *pgproto3.Backend) {
+				// Answer every Query and Sync until the pool closes the connection, so a
+				// second query, or one sent with the extended protocol, is recorded
+				// instead of holding Release until its reset times out.
+				for {
+					msg, err := backend.Receive()
+					if err != nil {
+						return
+					}
+					switch msg := msg.(type) {
+					case *pgproto3.Terminate:
+						return
+					case *pgproto3.Query:
+						copied := *msg // Receive reuses message values.
+						sent = append(sent, &copied)
+						// pgx reads results until ReadyForQuery, so one CommandComplete suffices.
+						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
+						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+						_ = backend.Flush()
+					case *pgproto3.Sync:
+						sent = append(sent, msg)
+						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+						_ = backend.Flush()
+					default:
+						sent = append(sent, msg)
+					}
 				}
-				received <- msg
-				if _, ok := msg.(*pgproto3.Query); ok {
-					// pgx reads results until ReadyForQuery, so one CommandComplete suffices.
-					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-					backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-					_ = backend.Flush()
-				}
-				// Read the Terminate sent when the pool closes the connection.
-				_, _ = backend.Receive()
 			})
 			link, err := New(conn, Options{Role: test.role})
 			require.NoError(t, err)
 
-			require.NoError(t, link.Release())
-
-			// One simple query: the whole reset costs a single round trip. The backend
-			// buffers the query before replying, so a successful reset has already sent it.
-			select {
-			case msg := <-received:
-				require.Equal(t, &pgproto3.Query{String: test.want}, msg)
-			default:
-				t.Fatal("Release sent no reset query")
-			}
+			releaseErr := link.Release()
+			// Once the backend has seen the connection close, sent also holds any
+			// message Release did not wait on.
+			closeAndWait()
+			require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
+				"Release must reset the connection with exactly one simple query")
+			require.NoError(t, releaseErr)
 		})
 	}
 }
@@ -336,6 +351,14 @@ func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
 // the startup handshake and then hands the connection to serve.
 func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backend)) *pgxpool.Conn {
 	t.Helper()
+	conn, _ := newSessionLinkTestPoolServing(t, serve)
+	return conn
+}
+
+// newSessionLinkTestPoolServing is newSessionLinkTestPoolConnServing that also
+// returns closeAndWait, which closes the pool and returns once serve has.
+func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
+	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
 	t.Cleanup(func() {
@@ -344,7 +367,9 @@ func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backen
 	})
 
 	handshakeResult := make(chan error, 1)
+	served := make(chan struct{})
 	go func() {
+		defer close(served)
 		backend := pgproto3.NewBackend(serverConn, serverConn)
 		if _, err := backend.ReceiveStartupMessage(); err != nil {
 			handshakeResult <- err
@@ -373,11 +398,14 @@ func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backen
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	conn, err := pool.Acquire(context.Background())
+	conn, err = pool.Acquire(context.Background())
 	require.NoError(t, err)
 	require.NoError(t, <-handshakeResult)
 	setUpConnMetaData(conn)
-	return conn
+	return conn, func() {
+		pool.Close()
+		<-served
+	}
 }
 
 func TestSendSimple(t *testing.T) {
@@ -574,4 +602,59 @@ func (bb *blockingBuffer) Write(p []byte) (int, error) {
 	copy(cp, p)
 	bb.ch <- cp
 	return len(p), nil
+}
+
+// TestCancelAndForceCloseDoNothingOnceReleaseStarts pins the Link contract that
+// lets sessions call Cancel and ForceClose without a lock: once Release starts,
+// neither may touch the connection, which is back in the pool afterwards.
+func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
+	resetReceived := make(chan struct{})
+	replyToReset := make(chan struct{})
+	conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
+		if _, err := backend.Receive(); err != nil {
+			return
+		}
+		close(resetReceived)
+		<-replyToReset
+		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
+		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+		_ = backend.Flush()
+		// Read the Terminate sent when the pool closes the connection.
+		_, _ = backend.Receive()
+	})
+	pooled := conn.Conn()
+	link, err := New(conn, Options{})
+	require.NoError(t, err)
+
+	released := make(chan error, 1)
+	go func() { released <- link.Release() }()
+	<-resetReceived
+
+	// ForceClose and Cancel overlap Release, so they must wait for Release and then
+	// do nothing.
+	forceClosed := make(chan bool, 1)
+	go func() { forceClosed <- link.ForceClose() }()
+	cancelled := make(chan error, 1)
+	go func() { cancelled <- link.Cancel() }()
+	select {
+	case <-forceClosed:
+		t.Fatal("ForceClose did not wait for Release")
+	case <-cancelled:
+		t.Fatal("Cancel did not wait for Release")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(replyToReset)
+	require.NoError(t, <-released)
+	assert.False(t, <-forceClosed)
+	select {
+	case err := <-cancelled:
+		assert.NoError(t, err)
+	case <-time.After(time.Second):
+		// A cancel request on the released connection blocks on the test pipe.
+		t.Fatal("Cancel used the connection after Release started")
+	}
+
+	assert.False(t, link.ForceClose())
+	assert.NoError(t, link.Cancel())
+	assert.False(t, pooled.IsClosed(), "the pooled connection must stay open")
 }

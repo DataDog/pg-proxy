@@ -9,12 +9,14 @@ package integration
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
 // Known COPY bugs. Each case that hits one still runs against PostgreSQL
-// directly; remove proxySkip to reproduce it through the proxy.
+// directly; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to reproduce it through the
+// proxy.
 const (
 	copyInUnderExecute = "TODO: proxy rejects CopyInResponse while it expects ExecuteReply " +
 		"and closes the client connection without an ErrorResponse (#12 reported 08006)"
@@ -102,16 +104,29 @@ func TestCopy(t *testing.T) {
 			)
 		},
 	}, {
-		// Each error ends the COPY and the rows it copied, and the CopyData and
-		// CopyDone the client still sends are ignored.
-		name:      "simple errors",
-		setup:     setup,
-		proxySkip: copyFailNotFlushed,
+		// CopyFail ends the COPY and the rows it copied, and the CopyData and
+		// CopyDone the client still sends are ignored. A short step timeout
+		// turns a missing reply into a failure rather than a long wait.
+		name:        "simple CopyFail",
+		setup:       setup,
+		proxySkip:   copyFailNotFlushed,
+		stepTimeout: 2 * time.Second,
 		steps: []step{
 			copyIn(&pgproto3.Query{String: copyFrom}),
 			ready(clientFail...),
 			ready(&pgproto3.CopyData{Data: []byte("leftover\n")}, &pgproto3.CopyDone{},
 				countQuery),
+		},
+		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+			requireReplies(t, replies,
+				textCopyIn, []string{"ErrorResponse 57014", "ReadyForQuery I"}, zeroCount,
+			)
+		},
+	}, {
+		// Each data error ends the COPY and the rows it copied.
+		name:  "simple data errors",
+		setup: setup,
+		steps: []step{
 			copyIn(&pgproto3.Query{String: copyFrom}),
 			ready(badInt, &pgproto3.CopyDone{}),
 			countRows,
@@ -121,7 +136,6 @@ func TestCopy(t *testing.T) {
 		},
 		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
-				textCopyIn, []string{"ErrorResponse 57014", "ReadyForQuery I"}, zeroCount,
 				textCopyIn, []string{"ErrorResponse 22P02", "ReadyForQuery I"}, zeroCount,
 				textCopyIn, []string{"ErrorResponse 23505", "ReadyForQuery I"}, zeroCount,
 			)

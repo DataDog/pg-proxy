@@ -54,6 +54,7 @@ gofmt -l .                     # must print nothing; fix with gofmt -w
 go mod tidy -diff              # must print nothing
 go build ./...
 go vet -tags=integration ./...
+go test -count=1 ./...         # runs the performance budgets, which -race skips
 go test -race -count=1 ./...
 go test -tags=integration -race -count=1 ./...   # requires Docker
 go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
@@ -61,7 +62,15 @@ go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
 
 If you changed the documentation site, follow [Contribute to the documentation](../documentation-contributing/) and run its static build, which checks links.
 
-The `test/integration` suite runs the `pg-proxy` binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status.
+The `test/integration` suite runs the `pg-proxy` binary as a black box against PostgreSQL. It covers transaction pooling, backend reuse, session-state isolation, transaction status, client disconnects, and process startup/shutdown. Assertions use query results, wire responses, connection state, and process exit status. After each wire-protocol case, a new client on the same backend connection checks that the case left no session state behind. The suite runs against PostgreSQL 14 by default; to choose another version, see [Requirements](../../reference/requirements/#postgresql).
+
+Some cases record known proxy bugs. Each passes against PostgreSQL directly and skips its proxy run, or the hygiene check after it, with a `TODO:` reason that states how the proxy fails. To run what they skip and reproduce the bugs, set `PG_PROXY_ITEST_RUN_KNOWN_BUGS=1`:
+
+```sh
+PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 go test -tags=integration -count=1 ./test/integration
+```
+
+When you fix one of these bugs, remove the case's `proxySkip` or `hygieneSkip` in the same change.
 
 Detecting a client that disconnects while waiting for a backend connection relies on Linux `POLLRDHUP`, so that test is skipped on other platforms. From macOS, run the full suite in a Linux container that uses the host's Docker:
 
@@ -105,19 +114,50 @@ By default only the newest version runs. Set `PG_PROXY_REGRESS_PG_MAJORS=14,17`,
 
 - `skip`: left out of the schedule because PG Proxy cannot pass it by design, such as large-object functions or `SET ROLE` across transactions.
 - `isolate`: left out of the schedule because its failure would break later tests. These are not established as by design and are worth re-checking as PG Proxy improves.
-- `fail`: runs and is expected to fail.
+- `fail`: runs and is expected to fail. Its `diff=<lines>` field records how many lines of its output differ from PostgreSQL's expected output.
 
-The run fails when a test fails without a `fail` entry, when a `fail` entry passes, or when a scheduled test reports no result. Update the baseline in the same change that fixes or breaks compatibility. `PG_PROXY_REGRESS_UPDATE=1` rewrites the `fail` entries from a run and keeps the other entries and their reasons.
+The run fails when a test fails without a `fail` entry, when a `fail` entry passes, when a scheduled test reports no result, or when a `fail` entry's diff size changes. A larger diff means the test got worse; a smaller one means it improved, and its count should be lowered so a later regression is caught. Update the baseline in the same change that fixes or breaks compatibility. `PG_PROXY_REGRESS_UPDATE=1` rewrites the `fail` entries and their counts from a run and keeps the other entries and their reasons.
 
 | Variable | Effect |
 | --- | --- |
 | `PG_PROXY_REGRESS_PG_MAJORS` | Comma-separated major versions from `versions.json`, or `all` (default: the newest) |
-| `PG_PROXY_REGRESS_UPDATE` | Rewrite the `fail` entries of each baseline from this run |
+| `PG_PROXY_REGRESS_UPDATE` | Rewrite the `fail` entries of each baseline and their diff counts from this run |
 | `PG_PROXY_REGRESS_ARTIFACTS` | Directory for `pg_regress` output and `regression.diffs` (default: a new temporary directory, logged) |
 | `PG_PROXY_REGRESS_BUILD_LOG` | Print the image build log |
 | `PG_PROXY_REGRESS_PREBUILT` | `true` uses an image already built under `pg-proxy.localhost/regress:<version>` instead of building it; CI builds it beforehand with a layer cache |
 
 PG Proxy does not forward client startup parameters to backend connections, so the suite sets the time zone, date style, and options that `pg_regress` sends at startup as database defaults instead.
+
+### Performance budgets
+
+These unit tests fail when a change makes the proxy do more work per query:
+
+- `TestProtocolCycleAllocationBudgets` in `pkg/session` counts heap allocations per query cycle.
+- `TestProtocolCycleRoundTripBudgets` in `pkg/session` and `TestReleaseResetSQL` in `pkg/link` count writes to PostgreSQL and to the client, and reset queries.
+- `TestLargeBindAmplification` in `pkg/session` bounds the memory used to forward a 64 MiB parameter.
+- The `goleak` check in each package's `main_test.go` fails a package whose tests leave a goroutine running.
+
+The race detector changes allocation counts, so the allocation and large-parameter tests skip themselves under `-race`. CI runs them in the Go (minimum) job, with the Go version in `go.mod`. Run them without `-race` to print the current counts:
+
+```sh
+go test -count=1 -run 'ProtocolCycle|RoundTrips|LargeBind' -v ./pkg/session
+```
+
+Counts can change between Go releases. If yours differ from CI's, run the tests with the version on the `go` line of `go.mod`, for example with `GOTOOLCHAIN=go<version>`.
+
+To find which allocation changed, profile the same number of cycles on `main` and on your branch, then compare the profiles:
+
+```sh
+go test -run '^$' -bench 'BenchmarkProtocolCycle/one_shot_extended' -benchtime=10000x -memprofilerate=1 -memprofile base.out ./pkg/session   # on main
+go test -run '^$' -bench 'BenchmarkProtocolCycle/one_shot_extended' -benchtime=10000x -memprofilerate=1 -memprofile new.out ./pkg/session    # on your branch
+go tool pprof -sample_index=alloc_objects -diff_base base.out -top new.out
+```
+
+Keep the budgets exact:
+
+- When a change lowers a count, lower its budget in the same change. The tests fail until you do, so the gain is kept.
+- Raise a budget only when the extra work is intended, and give the reason in the commit message.
+- A dependency update, such as a Dependabot bump of pgx or OpenTelemetry, can change a count. Compare profiles from before and after the update to see whether it is a real regression before you change the budget.
 
 ## Guidelines
 

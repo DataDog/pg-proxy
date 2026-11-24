@@ -24,7 +24,7 @@ With no flags or exporter variables set, PG Proxy exports no telemetry and write
 
 `-telemetry` selects all three backends instead of using the `OTEL_*_EXPORTER` selectors. In Datadog mode, the native SDK also reads `OTEL_TRACES_EXPORTER`, so conflicting values can still fail startup; see [Conflicting OTel settings](#conflicting-otel-settings).
 
-At startup, PG Proxy warns when a preset overrides a conflicting exporter selector, naming the ignored variable and selected backend. Unset, empty, and matching settings are quiet. Native Datadog trace conflicts retain the startup checks below rather than being reported as ignored. These warnings follow `-log-level`.
+At startup, PG Proxy warns when a preset overrides a conflicting exporter selector, naming the ignored variable and selected backend. Unset, empty, and matching settings are quiet, except that with `-telemetry datadog` any non-blank `OTEL_METRICS_EXPORTER`, including `none`, is reported. Native Datadog trace conflicts retain the startup checks below rather than being reported as ignored. These warnings follow `-log-level`.
 
 **`-telemetry` and `-tracing` cannot be used together**: startup fails even if `-tracing` is `none`. Without `-telemetry`, `-tracing otel` or `-tracing none` overrides only the trace selector.
 
@@ -110,7 +110,7 @@ If your Collector exports to Datadog, use [Send OTel metrics to Datadog](../../h
 
 ## Native Datadog
 
-The Datadog Agent must accept traces and DogStatsD metrics. To collect logs, configure it to read the process's stderr or container logs. PG Proxy writes JSON logs but does not upload them directly.
+The Datadog Agent must accept traces and DogStatsD metrics. Use Agent 7.25.0 or later, because PG Proxy aggregates DogStatsD distributions and timings in the client. To collect logs, configure it to read the process's stderr or container logs. PG Proxy writes JSON logs but does not upload them directly.
 
 Set the Agent address and service tags, and remove any previous OTel trace selection for this command. This `env` command works in Fish, Bash, and Zsh:
 

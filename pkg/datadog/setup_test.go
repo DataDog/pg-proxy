@@ -9,10 +9,14 @@ import (
 	"bytes"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/DataDog/datadog-go/v5/statsd"
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/mocktracer"
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
 	"github.com/stretchr/testify/require"
@@ -137,4 +141,57 @@ func TestFailedTracerStartStopsOwnedTracer(t *testing.T) {
 	span.Finish()
 	require.NoError(t, shutdown())
 	require.False(t, metrics.closed)
+}
+
+func TestNativeMetricsAggregateDistributionSamples(t *testing.T) {
+	const samples = 100
+	for _, tc := range []struct {
+		name  string
+		opts  []statsd.Option
+		lines int // lines for the metric context
+	}{
+		{name: "default aggregates in the client", lines: 1},
+		{name: "StatsdOptions can turn it off", opts: []statsd.Option{statsd.WithoutClientSideAggregation()}, lines: samples},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			agent, err := net.ListenPacket("udp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = agent.Close() })
+			_, port, err := net.SplitHostPort(agent.LocalAddr().String())
+			require.NoError(t, err)
+			t.Setenv("DD_AGENT_HOST", "")
+			t.Setenv("DD_DOGSTATSD_URL", "")
+			t.Setenv("DD_DOGSTATSD_PORT", port)
+
+			deps, shutdown, err := proxydatadog.Start(proxydatadog.Options{
+				Dependencies:  pgproxy.Dependencies{Tracer: pgproxy.NoopTracer{}, LogHandler: slog.NewTextHandler(io.Discard, nil)},
+				StatsdOptions: tc.opts,
+			})
+			require.NoError(t, err)
+			for i := range samples {
+				require.NoError(t, deps.Metrics.Distribution("test.latency", float64(i), []string{"db:app_db"}, 1))
+			}
+			require.NoError(t, shutdown(), "closing the client flushes its aggregator")
+
+			var lines, values int
+			buf := make([]byte, 65536)
+			for {
+				require.NoError(t, agent.SetReadDeadline(time.Now().Add(200*time.Millisecond)))
+				n, _, err := agent.ReadFrom(buf)
+				if err != nil {
+					break // nothing more arrived
+				}
+				for _, line := range strings.Split(strings.TrimSpace(string(buf[:n])), "\n") {
+					head, _, found := strings.Cut(line, "|")
+					if !found || !strings.HasPrefix(head, "test.latency:") {
+						continue
+					}
+					lines++
+					values += strings.Count(head, ":")
+				}
+			}
+			require.Equal(t, tc.lines, lines)
+			require.Equal(t, samples, values, "every sample must reach the agent")
+		})
+	}
 }

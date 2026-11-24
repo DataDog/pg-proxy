@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/require"
 
 	"github.com/DataDog/pg-proxy/internal/itest"
@@ -19,11 +20,14 @@ import (
 
 // TestSelectOne is the end-to-end smoke test through the default pool.
 func TestSelectOne(t *testing.T) {
-	proxy := startProxy(t)
+	forEachExecMode(t, startProxy(t).URL(dbDefault, itest.PostgresUser), testSelectOne)
+}
+
+func testSelectOne(t *testing.T, connStr string) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	conn, err := proxy.Connect(ctx, dbDefault, itest.PostgresUser)
+	conn, err := pgx.Connect(ctx, connStr)
 	require.NoError(t, err, "connect")
 	defer conn.Close(context.Background())
 
