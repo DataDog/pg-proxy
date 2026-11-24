@@ -219,16 +219,23 @@ type timerMonitor struct {
 	timer *time.Timer
 	// active is true while a checkout is in flight.
 	active bool
+	// skipPoll is set when stop could not stop a timer callback that had
+	// already started. That callback belongs to the checkout that ended, so it
+	// must not poll the next one.
+	skipPoll bool
 	// disconnected stops further polls once a disconnect has been handled.
 	disconnected bool
 }
 
 func (s *Session) startTimerMonitor() (*timerMonitor, context.Context) {
 	m := s.timerMonitor
-	if m == nil || m.probe != s.livenessProbe {
+	// The probe is not compared with m.probe: an interface comparison panics
+	// when the probe's dynamic type is not comparable.
+	if m == nil || s.livenessProbeChanged {
 		if m != nil {
 			m.close()
 		}
+		s.livenessProbeChanged = false
 		// Use Background rather than s.ctx, for the reason given in
 		// startGoroutineMonitor.
 		ctx, cancel := context.WithCancelCause(context.Background())
@@ -239,21 +246,32 @@ func (s *Session) startTimerMonitor() (*timerMonitor, context.Context) {
 		return m, m.ctx
 	}
 	m.mu.Lock()
+	m.armLocked()
+	m.mu.Unlock()
+	return m, m.ctx
+}
+
+// armLocked starts polling for a checkout. m.mu must be held.
+func (m *timerMonitor) armLocked() {
 	m.active = true
 	if m.timer == nil {
 		m.timer = time.AfterFunc(clientMonitorInterval, m.poll)
 	} else {
 		m.timer.Reset(clientMonitorInterval)
 	}
-	m.mu.Unlock()
-	return m, m.ctx
 }
 
 // poll runs on the timer's goroutine.
 func (m *timerMonitor) poll() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if !m.active || m.disconnected {
+	if m.skipPoll || !m.active {
+		// A callback that runs between checkouts also consumes skipPoll, so
+		// the flag never outlives the callback it was set for.
+		m.skipPoll = false
+		return
+	}
+	if m.disconnected {
 		return
 	}
 	if !m.probe.IsDisconnected() {
@@ -268,11 +286,19 @@ func (m *timerMonitor) poll() {
 // running, which can still handle a disconnect.
 func (m *timerMonitor) stop() {
 	m.mu.Lock()
-	m.active = false
-	if m.timer != nil {
-		m.timer.Stop()
-	}
+	m.stopLocked()
 	m.mu.Unlock()
+}
+
+// stopLocked disarms polling. m.mu must be held.
+func (m *timerMonitor) stopLocked() {
+	if m.active && m.timer != nil && !m.timer.Stop() && !m.disconnected {
+		// While a checkout is active, the timer is pending or its callback has
+		// started. Stop returned false, so the callback has started and waits
+		// for m.mu.
+		m.skipPoll = true
+	}
+	m.active = false
 }
 
 // close stops the monitor for good and releases its context.

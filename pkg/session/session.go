@@ -180,6 +180,7 @@ type Session struct {
 	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
 	clientDisconnectTimer              bool            // check for disconnects with timerMonitor; see Config.ClientDisconnectTimer
 	timerMonitor                       *timerMonitor   // created at the first checkout when clientDisconnectTimer is set
+	livenessProbeChanged               bool            // set by SetLivenessProbe so the next checkout rebuilds timerMonitor
 	backendDestroyedOnClientDisconnect atomic.Bool     // true after recording that this session destroyed its backend because the client disconnected
 
 	mirroring Mirroring
@@ -561,8 +562,12 @@ func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
 func (s *Session) Backend() Backend        { return s.backend }
 func (s *Session) PendingBackend() Backend { return s.pendingRemaps().backend }
+
+// SetLivenessProbe replaces the client liveness probe. The next checkout uses
+// it. Call it from the goroutine that runs the session.
 func (s *Session) SetLivenessProbe(probe ClientLivenessProbe) {
 	s.livenessProbe = probe
+	s.livenessProbeChanged = true
 }
 func (s *Session) SetAutoPreparedStatementsEnabled(enabled bool) {
 	s.AutoPreparedStmtsEnabled = enabled

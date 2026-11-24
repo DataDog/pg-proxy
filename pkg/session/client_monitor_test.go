@@ -237,3 +237,83 @@ func TestSessionCloseReleasesTimerMonitor(t *testing.T) {
 	require.NotNil(t, s.timerMonitor)
 	assert.ErrorIs(t, s.timerMonitor.ctx.Err(), context.Canceled)
 }
+
+// sliceProbe has a value receiver and a slice field, so its dynamic type is not
+// comparable: an interface comparison of two sliceProbe values panics.
+type sliceProbe struct{ disconnected []bool }
+
+func (p sliceProbe) IsDisconnected() bool { return len(p.disconnected) > 0 && p.disconnected[0] }
+
+// TestTimerMonitorNonComparableProbe verifies that timer mode accepts a probe
+// whose type is not comparable, including after SetLivenessProbe replaces it.
+func TestTimerMonitorNonComparableProbe(t *testing.T) {
+	s := newMonitorTestSession(true, sliceProbe{disconnected: []bool{false}})
+
+	for range 2 {
+		monitor, _ := s.startClientMonitor()
+		monitor.stop()
+	}
+
+	first := s.timerMonitor
+	disconnected := []bool{false}
+	s.SetLivenessProbe(sliceProbe{disconnected: disconnected})
+	monitor, acquireCtx := s.startClientMonitor()
+	defer monitor.stop()
+	assert.NotSame(t, first, s.timerMonitor, "a new probe must get a new monitor")
+	assert.ErrorIs(t, first.ctx.Err(), context.Canceled, "the replaced monitor must be closed")
+
+	disconnected[0] = true
+	assert.Eventually(t, func() bool { return acquireCtx.Err() != nil }, 2*time.Second, 10*time.Millisecond)
+	assert.ErrorIs(t, context.Cause(acquireCtx), ErrClientDisconnected)
+}
+
+// TestTimerMonitorStartedCallbackSkipsNextCheckout covers a timer callback that
+// starts as its checkout ends and gets the lock only after the next checkout
+// started. It must not poll the next checkout before that checkout's interval.
+func TestTimerMonitorStartedCallbackSkipsNextCheckout(t *testing.T) {
+	probe := &fakeProbe{}
+	s := newMonitorTestSession(true, probe)
+	_, _ = s.startClientMonitor()
+	m := s.timerMonitor
+
+	// Hold the lock while the timer fires, so its callback waits for it.
+	m.mu.Lock()
+	time.Sleep(clientMonitorInterval + clientMonitorInterval/2)
+	// End the checkout and start the next one before the callback runs.
+	m.stopLocked()
+	require.True(t, m.skipPoll, "stop must see that the callback already started")
+	m.armLocked()
+	probe.triggerDisconnect()
+	armed := time.Now()
+	m.mu.Unlock()
+
+	// The old callback runs now. It must not handle the disconnect early.
+	time.Sleep(clientMonitorInterval / 4)
+	if time.Since(armed) < clientMonitorInterval {
+		assert.False(t, s.ClientDisconnected(), "the old callback polled the next checkout")
+		assert.NoError(t, m.ctx.Err())
+	}
+
+	// The next checkout's own poll still finds the disconnect.
+	assert.Eventually(t, s.ClientDisconnected, 2*time.Second, 10*time.Millisecond)
+	assert.ErrorIs(t, context.Cause(m.ctx), ErrClientDisconnected)
+	m.stop()
+}
+
+// BenchmarkClientMonitorCheckout measures arming and stopping the client
+// monitor for one checkout that ends before the first poll, the common case.
+func BenchmarkClientMonitorCheckout(b *testing.B) {
+	for _, mode := range []struct {
+		name  string
+		timer bool
+	}{{"goroutine", false}, {"timer", true}} {
+		b.Run(mode.name, func(b *testing.B) {
+			s := newMonitorTestSession(mode.timer, &fakeProbe{})
+			b.ReportAllocs()
+			for b.Loop() {
+				monitor, _ := s.startClientMonitor()
+				monitor.stop()
+			}
+		})
+	}
+}
