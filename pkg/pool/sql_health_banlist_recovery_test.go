@@ -582,6 +582,58 @@ func TestRecoveryDoesNotRefreshRoutingTimestamp(t *testing.T) {
 	require.False(t, decision.publish)
 }
 
+func TestRoutingFreshnessIgnoresOnlyEmptyCredentialOutcomes(t *testing.T) {
+	const a, b, c = "10.0.0.1", "10.0.0.2", "10.0.0.3"
+	for _, keepTimeout := range []bool{false, true} {
+		name := "empty_after_eviction"
+		if keepTimeout {
+			name = "nonempty_timeout_still_checks_freshness"
+		}
+		t.Run(name, func(t *testing.T) {
+			base := time.Now().Add(-time.Minute)
+			at := func(n int) time.Time { return base.Add(time.Duration(n) * time.Second) }
+			health := newTestPoolHealth(a, b, c)
+			health.sqlHealthState = NewHealthState()
+			health.sqlHealthState.Track([]string{a, b, c})
+			health.hybridPolicy = newHybridHealthPolicy(true)
+			old, fresh := &sqlHealthTarget{poolHealth: health}, &sqlHealthTarget{poolHealth: health}
+			results := []SQLHealthCheckResult{{IP: a, StartedAt: at(1), CompletedAt: at(2)}}
+			banned := []string{b, c}
+			if keepTimeout {
+				results = append(results, SQLHealthCheckResult{IP: b, Err: context.DeadlineExceeded})
+				banned = []string{c}
+			}
+			health.recordSQLPollEvidenceLocked(old, at(1), at(2), SQLHealthCheckOutcome{StartedAt: at(1), Results: results}, sqlRoutingPoll, banned)
+
+			// Last-known-healthy protection survives five DNS misses. Only after
+			// another IP is confirmed healthy can discovery evict the old leader.
+			health.sqlHealthState.RecordHealthAt(at(1), map[string]bool{a: true})
+			for range 5 {
+				require.Contains(t, health.refreshSQLResolved(false, []string{b, c}, 5), a)
+			}
+			health.sqlHealthState.RecordHealthAt(at(2), map[string]bool{b: true})
+			require.NotContains(t, health.refreshSQLResolved(false, []string{b, c}, 5), a)
+			if !keepTimeout {
+				require.Empty(t, health.sqlRoutingLatest[old].Results)
+			}
+			require.Equal(t, at(1), health.sqlRoutingLatest[old].StartedAt)
+
+			w := newTestWorker(nil)
+			w.applyPatroniHealth(health, map[string]bool{b: true, c: false}, nil, []string{b, c}, at(3))
+			health.hybridPolicy.patroniRecoveryAt = at(3)
+			w.completeSQLHealthCheck(fresh, 0, at(4), []string{b, c}, map[string]struct{}{b: {}, c: {}}, SQLHealthCheckOutcome{
+				StartedAt: at(4), Results: []SQLHealthCheckResult{
+					{IP: b, InRecovery: true, StartedAt: at(4), CompletedAt: at(5)},
+					{IP: c, StartedAt: at(4), CompletedAt: at(5)},
+				},
+			})
+			require.Equal(t, !keepTimeout, health.sqlRoutingActive)
+			require.Equal(t, !keepTimeout, health.IsHealthy(c))
+			require.Equal(t, keepTimeout, health.IsHealthy(b))
+		})
+	}
+}
+
 func TestOldRecoveryCannotEraseShutdownEvidence(t *testing.T) {
 	const ip = "10.0.0.1"
 	for _, shutdownScheduled := range []int{1, 3} {

@@ -1283,7 +1283,10 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 		}
 		routingOutcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
 		for _, credential := range snapshot.results {
-			routingOutcomes = append(routingOutcomes, credential.routingOutcome(snapshot.retainedIPs))
+			// A credential with no included results must not age the other evidence.
+			if outcome := credential.routingOutcome(snapshot.retainedIPs); len(outcome.Results) != 0 {
+				routingOutcomes = append(routingOutcomes, outcome)
+			}
 		}
 		routingAggregate := aggregateSQLHealthCheckOutcomes(routingOutcomes).Outcome
 		decision = policy.observeSQLRoundWithRoutingEvidence(snapshot.retainedIPs, aggregate, &routingAggregate, fresh, time.Now())
