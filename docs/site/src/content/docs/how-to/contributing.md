@@ -54,6 +54,7 @@ gofmt -l .                     # must print nothing; fix with gofmt -w
 go mod tidy -diff              # must print nothing
 go build ./...
 go vet -tags=integration ./...
+go test -count=1 ./...         # runs the performance budgets, which -race skips
 go test -race -count=1 ./...
 go test -tags=integration -race -count=1 ./...   # requires Docker
 go run github.com/apache/skywalking-eyes/cmd/license-eye@v0.9.0 header check
@@ -126,6 +127,37 @@ The run fails when a test fails without a `fail` entry, when a `fail` entry pass
 | `PG_PROXY_REGRESS_PREBUILT` | `true` uses an image already built under `pg-proxy.localhost/regress:<version>` instead of building it; CI builds it beforehand with a layer cache |
 
 PG Proxy does not forward client startup parameters to backend connections, so the suite sets the time zone, date style, and options that `pg_regress` sends at startup as database defaults instead.
+
+### Performance budgets
+
+These unit tests fail when a change makes the proxy do more work per query:
+
+- `TestProtocolCycleAllocationBudgets` in `pkg/session` counts heap allocations per query cycle.
+- `TestProtocolCycleRoundTripBudgets` in `pkg/session` and `TestReleaseResetSQL` in `pkg/link` count writes to PostgreSQL and to the client, and reset queries.
+- `TestLargeBindAmplification` in `pkg/session` bounds the memory used to forward a 64 MiB parameter.
+- The `goleak` check in each package's `main_test.go` fails a package whose tests leave a goroutine running.
+
+The race detector changes allocation counts, so the allocation and large-parameter tests skip themselves under `-race`. CI runs them in the Go (minimum) job, with the Go version in `go.mod`. Run them without `-race` to print the current counts:
+
+```sh
+go test -count=1 -run 'ProtocolCycle|RoundTrips|LargeBind' -v ./pkg/session
+```
+
+Counts can change between Go releases. If yours differ from CI's, run the tests with the version on the `go` line of `go.mod`, for example with `GOTOOLCHAIN=go<version>`.
+
+To find which allocation changed, profile the same number of cycles on `main` and on your branch, then compare the profiles:
+
+```sh
+go test -run '^$' -bench 'BenchmarkProtocolCycle/one_shot_extended' -benchtime=10000x -memprofilerate=1 -memprofile base.out ./pkg/session   # on main
+go test -run '^$' -bench 'BenchmarkProtocolCycle/one_shot_extended' -benchtime=10000x -memprofilerate=1 -memprofile new.out ./pkg/session    # on your branch
+go tool pprof -sample_index=alloc_objects -diff_base base.out -top new.out
+```
+
+Keep the budgets exact:
+
+- When a change lowers a count, lower its budget in the same change. The tests fail until you do, so the gain is kept.
+- Raise a budget only when the extra work is intended, and give the reason in the commit message.
+- A dependency update, such as a Dependabot bump of pgx or OpenTelemetry, can change a count. Compare profiles from before and after the update to see whether it is a real regression before you change the budget.
 
 ## Guidelines
 
