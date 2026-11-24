@@ -112,6 +112,8 @@ type hybridHealthPolicy struct {
 	routingTiming            leaderTiming[routingTimingData]
 	routingDowntimeStartedAt time.Time
 	routingBannedIPs         sqlRoutingBanlist
+	// The source of the last worker publication, including empty/ambiguous routes.
+	publishedRoutingResult string
 }
 
 func newHybridHealthPolicy(routingEnabled bool) *hybridHealthPolicy {
@@ -142,6 +144,7 @@ func (p *hybridHealthPolicy) setRoutingEnabled(enabled bool) {
 		// baselines so the next observations establish a fresh pair under the new flag state.
 		p.routingTiming = leaderTiming[routingTimingData]{}
 		p.routingDowntimeStartedAt = time.Time{}
+		p.publishedRoutingResult = ""
 		// Leadership history belongs to one uninterrupted routing mode. Keep the
 		// latest Patroni snapshot for fallback, but do not carry retention,
 		// exclusions, or recovery decisions across a flag transition.
@@ -205,6 +208,7 @@ func (p *hybridHealthPolicy) observePublishedRouting(health map[string]bool, obs
 	if !p.routingEnabled {
 		return nil
 	}
+	p.publishedRoutingResult = routingResult
 	return p.recordRoutingLeaderLocked("hybrid", health, observedAt, routingResult)
 }
 
@@ -273,7 +277,10 @@ func (p *hybridHealthPolicy) clearRoutingBansForEmptyDiscovery() hybridRoutingDe
 func (p *hybridHealthPolicy) observeSQLShutdowns(candidateIPs []string, fresh SQLHealthResultsSnapshot) hybridRoutingDecision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	decision := hybridRoutingDecision{routingEnabled: p.routingEnabled}
+	decision := hybridRoutingDecision{routingEnabled: p.routingEnabled, routingResult: p.publishedRoutingResult}
+	if decision.routingResult == "" {
+		decision.routingResult = SQLRoutingResultCachedFallback
+	}
 	var shutdowns []SQLHealthCheckResult
 	for _, result := range fresh.Results {
 		if isPostgresShutdownError(result.Err) {
@@ -288,15 +295,15 @@ func (p *hybridHealthPolicy) observeSQLShutdowns(candidateIPs []string, fresh SQ
 	return decision
 }
 
-// observeSQLRound evaluates complete SQL evidence separately from route publication.
-// Only a successful poll started after a ban may clear it; an older success is not
-// recovery evidence. The worker records hybrid timing only after publishing a route.
+// observeSQLRound separates probe completion (raw detection and bans), evaluation
+// (routing history and cache age), and worker publication (hybrid timing). Only a
+// successful poll scheduled after a ban may clear it.
 func (p *hybridHealthPolicy) observeSQLRound(
 	candidateIPs []string,
 	outcome SQLHealthCheckOutcome,
 	fresh SQLHealthResultsSnapshot,
+	evaluatedAt time.Time,
 ) hybridRoutingDecision {
-	observedAt := fresh.ObservedAt
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -320,7 +327,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		decision.routingResult = SQLRoutingResultPatroniRecovery
 		return decision
 	}
-	if fallbackReason == "" && p.sqlPredatesPatroniLeaderLocked(outcome) {
+	if fallbackReason == "" && p.sqlPredatesPatroniLeaderLocked(routingOutcome) {
 		// An old cached success must not establish new SQL retention or mark the
 		// newer Patroni leader superseded. Publish eligible Patroni fallback instead.
 		fallbackReason, timeoutType = SQLHealthFallbackStaleEvidence, SQLHealthTimeoutNone
@@ -333,7 +340,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	}
 	p.sqlNoPrimaryAt = time.Time{}
 	if fallbackReason == "" && len(routingOutcome.PrimaryIPs) == 0 {
-		p.sqlNoPrimaryAt = observedAt
+		p.sqlNoPrimaryAt = evaluatedAt
 	}
 	decision.publish = true
 	decision.fallbackReason = fallbackReason
@@ -359,10 +366,10 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		if (p.supersededPatroniLeader != "" || len(p.supersededSQLLeaders) > 0) && len(healthyIPs(decision.health)) == 0 {
 			// Superseded leaders remain excluded, but a different Patroni leader can
 			// restore routing immediately through the case-2 recovery path.
-			p.sqlNoPrimaryAt = observedAt
+			p.sqlNoPrimaryAt = evaluatedAt
 		}
 		if !p.patroniUpdatedAt.IsZero() {
-			decision.cachedAge = observedAt.Sub(p.patroniUpdatedAt)
+			decision.cachedAge = evaluatedAt.Sub(p.patroniUpdatedAt)
 			if decision.cachedAge < 0 {
 				decision.cachedAge = 0
 			}
@@ -371,7 +378,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 		return decision
 	}
 
-	p.updateSQLLeaderHistoryLocked(candidateIPs, routingOutcome.PrimaryIPs, observedAt)
+	p.updateSQLLeaderHistoryLocked(candidateIPs, routingOutcome.PrimaryIPs, evaluatedAt)
 	decision.routingResult = SQLRoutingResultConclusive
 	decision.health = make(map[string]bool, len(candidateIPs))
 	for _, ip := range candidateIPs {

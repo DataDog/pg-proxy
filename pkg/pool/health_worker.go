@@ -1192,7 +1192,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 			if policy := poolHealth.hybridPolicy; policy != nil && !scheduledAt.Before(poolHealth.routingChangedAt) {
 				decision = policy.clearRoutingBansForEmptyDiscovery()
 			}
-			if poolHealth.sqlRoutingActive {
+			if poolHealth.sqlRoutingActive || decision.routingEnabled && len(decision.routingBanChanges) != 0 {
 				poolHealth.sqlRoutingActive = false
 				patroniHealth := poolHealth.patroniHealthState.Snapshot()
 				publishedAt := poolHealth.publishRoutingSnapshot(patroniHealth.Health, patroniHealth.Resolved)
@@ -1239,7 +1239,7 @@ func (w *HealthWorker) completeSQLHealthCheck(
 				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: credential.StartedAt, Results: results})
 			}
 		}
-		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, fresh)
+		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregateSQLHealthCheckOutcomes(outcomes).Outcome, fresh, time.Now())
 		if !decision.publish && decision.routingResult == SQLRoutingResultPatroniRecovery {
 			// Old SQL evidence cannot replace the recovery route, but shutdown bans
 			// must still remove IPs from the route clients currently read.
@@ -1328,7 +1328,7 @@ func (w *HealthWorker) reportHybridDecision(
 			TimeoutType:    decision.timeoutType,
 		}, tags)
 	}
-	if decision.routingResult == SQLRoutingResultCachedFallback && w.sqlHooks.CachedFallback != nil {
+	if reportIteration && decision.routingResult == SQLRoutingResultCachedFallback && w.sqlHooks.CachedFallback != nil {
 		w.sqlHooks.CachedFallback(SQLFallback{
 			Reason:           decision.fallbackReason,
 			TimeoutType:      decision.timeoutType,

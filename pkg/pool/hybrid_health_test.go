@@ -1414,7 +1414,7 @@ func TestHybridHealthBannedPatroniLeaderDoesNotInvalidateSQLLeader(t *testing.T)
 func (p *hybridHealthPolicy) observeSQL(candidateIPs []string, outcome SQLHealthCheckOutcome, observedAt time.Time) hybridRoutingDecision {
 	decision := p.observeSQLRound(candidateIPs, outcome, SQLHealthResultsSnapshot{
 		ScheduledAt: observedAt, ObservedAt: observedAt, Results: outcome.Results,
-	})
+	}, observedAt)
 	if decision.publish {
 		decision.routingComparison = p.observePublishedRouting(decision.health, observedAt, decision.routingResult)
 	}
@@ -1430,4 +1430,82 @@ func (p *hybridHealthPolicy) observeAndPublishPatroni(health map[string]bool, ob
 		}
 	}
 	return decision
+}
+
+func TestHybridHealthBannedPrimaryDoesNotMakeAgreementStale(t *testing.T) {
+	p := newHybridHealthPolicy(true)
+	at := time.Now()
+	ips := []string{"A", "L", "X"}
+	p.observePatroni(map[string]bool{"A": true}, at)
+	p.observeSQL(ips, SQLHealthCheckOutcome{PrimaryIPs: []string{"A"}}, at)
+	p.observePatroni(map[string]bool{"L": true}, at.Add(2*time.Second))
+	p.routingBannedIPs["X"] = at
+	outcome := SQLHealthCheckOutcome{
+		StartedAt: at.Add(time.Second), PrimaryIPs: []string{"L", "X"},
+		Results: []SQLHealthCheckResult{{IP: "L"}, {IP: "X"}},
+	}
+	fresh := SQLHealthResultsSnapshot{
+		ScheduledAt: at.Add(3 * time.Second), ObservedAt: at.Add(3 * time.Second),
+		Results: []SQLHealthCheckResult{{IP: "L"}},
+	}
+	decision := p.observeSQLRound(ips, outcome, fresh, fresh.ObservedAt)
+	assert.Contains(t, p.routingBannedIPs, "X", "cached success cannot clear X's ban")
+	assert.Equal(t, SQLRoutingResultConclusive, decision.routingResult)
+	assert.Empty(t, decision.fallbackReason)
+	assert.Equal(t, []string{"L"}, healthyIPs(decision.health))
+}
+
+func TestHybridHealthSeparatesProbeAndEvaluationTimes(t *testing.T) {
+	p := newHybridHealthPolicy(true)
+	at := time.Now()
+	p.observePatroni(map[string]bool{"A": true}, at)
+	p.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: []string{"A"}}, at)
+	p.observePatroni(map[string]bool{"A": true}, at.Add(2*time.Second))
+	fresh := SQLHealthResultsSnapshot{ObservedAt: at.Add(time.Second)}
+	p.observeSQLRound([]string{"A", "B"}, SQLHealthCheckOutcome{}, fresh, at.Add(3*time.Second))
+	assert.Equal(t, at.Add(3*time.Second), p.sqlNoPrimaryAt, "routing history uses evaluation time")
+	fallback := p.observeSQLRound([]string{"A", "B"}, SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: "B", Err: context.DeadlineExceeded}}}, fresh, at.Add(4*time.Second))
+	require.True(t, fallback.hasCachedAge)
+	assert.Equal(t, 2*time.Second, fallback.cachedAge, "cache age includes the wait after SQL completion")
+	p.observeSQLRound([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: []string{"B"}}, fresh, at.Add(5*time.Second))
+	assert.Equal(t, at.Add(5*time.Second), p.sqlLeaderSelectedAt)
+}
+
+func TestPartialShutdownBanPreservesPublishedSource(t *testing.T) {
+	for _, source := range []string{SQLRoutingResultConclusive, SQLRoutingResultRetainedSQL, SQLRoutingResultCachedFallback, SQLRoutingResultPatroniRecovery} {
+		t.Run(source, func(t *testing.T) {
+			p := newHybridHealthPolicy(true)
+			at := time.Now()
+			p.observePublishedRouting(map[string]bool{"A": true}, at, source)
+			decision := p.observeSQLShutdowns([]string{"A", "B"}, SQLHealthResultsSnapshot{
+				ObservedAt: at.Add(time.Second), Results: []SQLHealthCheckResult{{IP: "A", Err: &pgconn.PgError{Code: "57P02"}}},
+			})
+			assert.Equal(t, source, decision.routingResult)
+			w := &HealthWorker{sqlHooks: SQLHealthWorkerHooks{
+				CachedFallback: func(SQLFallback, []string) { t.Error("partial bans must not report a new fallback iteration") },
+			}}
+			w.reportHybridDecision(&PoolHealth{}, decision, false)
+		})
+	}
+	// A fallback route can contain two healthy Patroni addresses. Excluding one
+	// makes the other unique; a later Patroni confirmation must retain its source.
+	p := newHybridHealthPolicy(true)
+	at := time.Now()
+	p.observePatroni(map[string]bool{"A": true}, at)
+	p.observeSQL([]string{"A", "B"}, SQLHealthCheckOutcome{PrimaryIPs: []string{"A"}}, at)
+	both := map[string]bool{"A": true, "B": true}
+	p.observePatroni(both, at.Add(time.Second))
+	p.observePublishedRouting(both, at.Add(time.Second), SQLRoutingResultCachedFallback)
+	s := &PoolHealth{state: NewHealthState()}
+	s.state.ReplaceRoutingSnapshot(both, []string{"A", "B"})
+	decision := p.observeSQLShutdowns([]string{"A", "B"}, SQLHealthResultsSnapshot{
+		ObservedAt: at.Add(2 * time.Second), Results: []SQLHealthCheckResult{{IP: "A", Err: &pgconn.PgError{Code: "57P02"}}},
+	})
+	s.routingMu.Lock()
+	s.publishRoutingBanExclusionsLocked(p, &decision)
+	s.routingMu.Unlock()
+	require.Nil(t, decision.routingComparison)
+	confirmed := p.observePatroni(map[string]bool{"B": true}, at.Add(3*time.Second))
+	require.NotNil(t, confirmed.routingComparison)
+	assert.Equal(t, SQLRoutingResultCachedFallback, confirmed.routingComparison.HybridSource)
 }

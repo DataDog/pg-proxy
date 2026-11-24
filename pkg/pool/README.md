@@ -236,8 +236,12 @@ The hybrid policy remembers an IP after PostgreSQL `57P01` administrative
 termination, `57P02` crash shutdown, or `57P03` containing
 `the database system is shutting down`. Timeouts, connection refusal,
 authentication failures, and startup responses do not create a ban.
-`57P01` can also mean an individual session was terminated; banning its IP until
-a fresh successful role probe is an intentional policy choice.
+`57P01` can also mean an individual session was terminated. Treating it as
+shutdown evidence and banning its IP immediately is an intentional policy choice.
+Do not retry it within the poll: a later timeout or success must not hide the
+shutdown observation. Recovery requires a qualifying later poll, and cached
+shutdown evidence from another credential still vetoes recovery until that
+credential's snapshot is replaced or removed.
 Wrapped and joined errors are checked cause by cause. Any qualifying shutdown
 cause creates a ban, regardless of other causes or their order.
 
@@ -258,7 +262,9 @@ clears it, provided the current credential evidence contains neither shutdown
 nor conflicting roles for that IP. Cached successes and polls already in flight
 when the ban was observed cannot clear it. Removing an IP from the retained SQL
 candidate set also removes its ban, including when the last candidate is evicted
-and routing returns to Patroni. Raw DNS misses alone do not clear retained bans.
+and routing returns to Patroni. Clearing bans after the final candidate is
+evicted immediately republishes Patroni even if it already owned routing. Raw
+DNS misses alone do not clear retained bans.
 The map is bounded by the retained set, rather than growing with every historical
 address. There is no time-based expiry.
 
@@ -306,3 +312,8 @@ actual promotion time. Missing outage starts, non-positive Patroni
 durations, same-leader recoveries, and ambiguous publications do not produce
 downtime comparisons. Routing-mode changes clear unfinished comparisons.
 The existing independent SQL/Patroni snapshot comparison remains separate.
+
+Routing history and cached-Patroni age use evaluation time after acquiring the
+routing lock. Shutdown observations and independent raw snapshot timing retain
+probe-completion timestamps. A partial shutdown exclusion keeps the source label
+of the last publication without changing routing ownership.

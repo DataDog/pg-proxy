@@ -364,10 +364,24 @@ func IsSQLHealthCheckPasswordAuthenticationError(err error) bool {
 }
 
 // IsSQLHealthCheckRetriable reports whether retrying an error can provide new information.
-// PostgreSQL administrative/crash-shutdown, cannot-connect-now, and invalid-password responses
-// are conclusive for the iteration. Retrying shutdown evidence could replace it with a timeout
-// before the routing banlist sees it.
+// Administrative/crash-shutdown, cannot-connect-now, and invalid-password responses
+// stop retries. Preserve shutdown evidence for the banlist instead of allowing a
+// later attempt to replace it with a timeout or successful role.
 func IsSQLHealthCheckRetriable(err error) bool {
+	// A joined connection error can contain several PostgreSQL causes. Any
+	// non-retriable cause must stop retries, regardless of its position.
+	switch wrapped := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, cause := range wrapped.Unwrap() {
+			if !IsSQLHealthCheckRetriable(cause) {
+				return false
+			}
+		}
+	case interface{ Unwrap() error }:
+		if !IsSQLHealthCheckRetriable(wrapped.Unwrap()) {
+			return false
+		}
+	}
 	var sqlStateErr sqlHealthCheckSQLStateError
 	if errors.As(err, &sqlStateErr) {
 		switch sqlStateErr.SQLState() {
