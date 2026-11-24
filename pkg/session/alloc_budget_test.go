@@ -18,10 +18,10 @@ import (
 // protocolCycleAllocBudgets are the heap allocations per protocol cycle, with
 // tracing off and no-op metrics, measured on the protocolCycles harness with
 // Go 1.26 and 1.27, which agree. Each budget is a ratchet set to the measured
-// count: a change that allocates more fails TestProtocolCycleAllocationBudgets.
-// A change that allocates less should lower the budget in the same change, so
-// the gain is kept; the test logs the new count. Raise a budget only with the
-// reason in the commit message. To print the current counts, run:
+// count: TestProtocolCycleAllocationBudgets fails when a change allocates more,
+// and when it removes a whole allocation, until the budget is lowered in the
+// same change, so the gain is kept. Raise a budget only with the reason in the
+// commit message. To print the current counts, run:
 //
 //	go test -run TestProtocolCycleAllocationBudgets -v ./pkg/session
 //
@@ -48,16 +48,15 @@ func TestProtocolCycleAllocationBudgets(t *testing.T) {
 			t.Logf("%s allocates %v times per cycle; its budget is %v", pc.name, allocs, budget)
 			require.LessOrEqualf(t, allocs, budget,
 				"a %s cycle allocates more than its budget; find the new allocation with BenchmarkProtocolCycle and -memprofile", pc.name)
-			if allocs <= budget-1 {
-				t.Logf("a whole allocation is gone: lower the %s budget", pc.name)
-			}
+			require.Greaterf(t, allocs, budget-1,
+				"a whole allocation is gone from the %s cycle: lower its budget to %v", pc.name, math.Ceil(allocs))
 		})
 	}
 }
 
 // allocWindow is the number of cycles in one measurement. pgxpool allocates its
-// Conn wrappers this many at a time, so each window holds exactly one of those
-// allocations.
+// Conn wrappers this many at a time (connResource.getConn makes a []Conn of 128
+// when it runs out), so each window holds exactly one of those allocations.
 const allocWindow = 128
 
 // cycleAllocsPerRun returns the heap allocations per cycle of run, without
@@ -87,7 +86,7 @@ func cycleAllocsPerRun(run func()) float64 {
 		runtime.ReadMemStats(&after)
 		fewest = min(fewest, after.Mallocs-before.Mallocs)
 	}
-	return float64(fewest-1) / allocWindow
+	return float64(fewest-1) / allocWindow // less connResource.getConn's one allocation
 }
 
 func BenchmarkProtocolCycle(b *testing.B) {

@@ -45,8 +45,10 @@ func TestLargeBindAmplification(t *testing.T) {
 
 	require.NoError(t, client.run(small)) // first-cycle session state
 	untraced := cycleHeapBytes(t, client, large)
-	t.Logf("forwarding a %d MiB Bind allocated %.2fx the payload", largeBindPayload>>20, float64(untraced)/largeBindPayload)
-	require.LessOrEqual(t, float64(untraced), largeBindAmplificationBudget*largeBindPayload)
+	ratio := float64(untraced) / largeBindPayload
+	t.Logf("forwarding a %d MiB Bind allocated %.2fx the payload", largeBindPayload>>20, ratio)
+	require.LessOrEqualf(t, ratio, largeBindAmplificationBudget,
+		"forwarding used %.2fx the payload; the budget is %vx", ratio, largeBindAmplificationBudget)
 
 	t.Run("sampled trace with parameters", func(t *testing.T) {
 		recorder := tracetest.NewSpanRecorder()
@@ -57,8 +59,9 @@ func TestLargeBindAmplification(t *testing.T) {
 		require.NoError(t, client.run(small)) // first traced cycle
 		warmUpSpans := len(recorder.Ended())
 		traced := cycleHeapBytes(t, client, large)
+		added := int64(traced) - int64(untraced)
 		t.Logf("with a sampled trace and trace parameters, it allocated %.2fx the payload, %d bytes more",
-			float64(traced)/largeBindPayload, int64(traced)-int64(untraced))
+			float64(traced)/largeBindPayload, added)
 		foundParameters := false
 		for _, span := range recorder.Ended()[warmUpSpans:] {
 			for _, attr := range span.Attributes() {
@@ -66,7 +69,8 @@ func TestLargeBindAmplification(t *testing.T) {
 			}
 		}
 		require.True(t, foundParameters, "the measured cycle's trace must carry the Bind parameters")
-		require.LessOrEqual(t, traced, untraced+largeBindTraceBudget)
+		require.LessOrEqualf(t, added, int64(largeBindTraceBudget),
+			"tracing added %d bytes; the budget is %d", added, largeBindTraceBudget)
 	})
 }
 

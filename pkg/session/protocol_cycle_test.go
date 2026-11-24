@@ -10,6 +10,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -44,10 +46,12 @@ type cycleConn struct {
 	writes    int
 	// Postgres side only, counted once frames is set after the startup handshake:
 	frames     bool
-	inReset    bool // set by resetTracer while the release reset runs
-	flushes    int  // writes of forwarded messages
-	resets     int  // writes of the release reset
-	statements int  // forwarded simple Query and Execute messages
+	inReset    bool   // set by resetTracer while the release reset runs
+	flushes    int    // writes of forwarded messages
+	resets     int    // writes of the release reset
+	statements int    // forwarded simple Query and Execute messages
+	lastWrite  []byte // aliases the writer's buffer, which holds it until the next write
+	err        error  // the first read past the script
 }
 
 // messageSize returns the size of the message that b starts with, or 0 if b
@@ -64,7 +68,14 @@ func messageSize(b []byte) int {
 // bytes a cycle does not consume stay in in, where run finds them.
 func (c *cycleConn) Read(p []byte) (int, error) {
 	if len(c.in) == 0 {
-		return 0, errScriptExhausted
+		if !c.frames {
+			return 0, errScriptExhausted
+		}
+		if c.err == nil {
+			c.err = fmt.Errorf("%w: the script has no reply to the last write to Postgres: %s",
+				errScriptExhausted, frontendMessages(c.lastWrite))
+		}
+		return 0, c.err
 	}
 	if c.readFrame == 0 {
 		c.readFrame = messageSize(c.in)
@@ -79,10 +90,11 @@ func (c *cycleConn) Read(p []byte) (int, error) {
 
 func (c *cycleConn) Write(p []byte) (int, error) {
 	c.writes++
-	switch {
-	case !c.frames:
+	if !c.frames {
 		return len(p), nil
-	case c.inReset:
+	}
+	c.lastWrite = p
+	if c.inReset {
 		c.resets++
 		return len(p), nil
 	}
@@ -111,6 +123,19 @@ func (*cycleConn) RemoteAddr() net.Addr             { return dummyAddr{} }
 func (*cycleConn) SetDeadline(time.Time) error      { return nil }
 func (*cycleConn) SetReadDeadline(time.Time) error  { return nil }
 func (*cycleConn) SetWriteDeadline(time.Time) error { return nil }
+
+// frontendMessages formats the messages that b encodes.
+func frontendMessages(b []byte) string {
+	backend := pgproto3.NewBackend(bytes.NewReader(b), io.Discard)
+	var msgs []string
+	for {
+		msg, err := backend.Receive()
+		if err != nil {
+			return strings.Join(msgs, ", ")
+		}
+		msgs = append(msgs, fmt.Sprintf("%#v", msg))
+	}
+}
 
 func (c *cycleConn) resetCounts() {
 	c.writes, c.flushes, c.resets, c.statements = 0, 0, 0, 0
@@ -254,6 +279,8 @@ func (c *cycleClient) run(script cycleScript) error {
 		return err
 	}
 	switch {
+	case c.h.postgres.err != nil:
+		return c.h.postgres.err // the session logs a failed release instead of returning it
 	case c.session.link != nil:
 		return errors.New("cycle ended with the link still checked out")
 	case len(c.conn.in) > 0 || len(c.h.postgres.in) > 0:

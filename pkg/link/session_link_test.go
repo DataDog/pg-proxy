@@ -270,8 +270,9 @@ func TestReleaseResetSQL(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			var sent []pgproto3.FrontendMessage
 			conn, closeAndWait := newSessionLinkTestPoolServing(t, func(backend *pgproto3.Backend) {
-				// Answer every query until the pool closes the connection, so a second
-				// query is recorded instead of hanging Release.
+				// Answer every Query and Sync until the pool closes the connection, so a
+				// second query, or one sent with the extended protocol, is recorded
+				// instead of holding Release until its reset times out.
 				for {
 					msg, err := backend.Receive()
 					if err != nil {
@@ -287,6 +288,10 @@ func TestReleaseResetSQL(t *testing.T) {
 						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
 						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 						_ = backend.Flush()
+					case *pgproto3.Sync:
+						sent = append(sent, msg)
+						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+						_ = backend.Flush()
 					default:
 						sent = append(sent, msg)
 					}
@@ -295,12 +300,13 @@ func TestReleaseResetSQL(t *testing.T) {
 			link, err := New(conn, Options{Role: test.role})
 			require.NoError(t, err)
 
-			require.NoError(t, link.Release())
+			releaseErr := link.Release()
 			// Once the backend has seen the connection close, sent also holds any
 			// message Release did not wait on.
 			closeAndWait()
 			require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
 				"Release must reset the connection with exactly one simple query")
+			require.NoError(t, releaseErr)
 		})
 	}
 }
