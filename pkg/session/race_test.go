@@ -7,5 +7,6 @@
 
 package session
 
-// raceEnabled reports whether the tests run with the race detector.
+// raceEnabled reports whether the race detector is on. It changes allocation
+// counts: sync.Pool drops entries at random, and instrumentation allocates.
 const raceEnabled = true
