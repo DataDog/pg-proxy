@@ -89,6 +89,8 @@ func (action *ClientMessageAction) SessionMarks(stmts prepared.PreparedStatement
 		if action.EnsureUnnamedPreparedStmt {
 			return bindSessionMarks(stmts, unnamed)
 		}
+		// Not built by DecideClientMessageAction, so its statement is unknown.
+		return link.MarkPreparedStmt
 	}
 	return 0
 }
@@ -359,12 +361,11 @@ func sessionMarks(mayChangeSession bool, source link.SessionMarks) link.SessionM
 // proxy does not keep in the prepared statement state once confirmed. One still
 // pending in this pipeline, including the copy the session re-creates on a new link,
 // is the one the Bind refers to, so it wins over unnamed, the client's confirmed
-// one. A Bind the proxy cannot match to a Parse may run anything.
+// one. A confirmed entry for "" is one auto-caching left before it was turned
+// off, which this Bind does not run. A Bind the proxy cannot match to a Parse may
+// run anything.
 func bindSessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
 	stmt := stmts.FindPendingNamedStmtFromClientName("")
-	if stmt == nil {
-		stmt = stmts.FindConfirmedNamedStmtFromClientName("")
-	}
 	if stmt == nil {
 		stmt = unnamed
 	}

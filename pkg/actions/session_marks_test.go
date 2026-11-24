@@ -70,9 +70,21 @@ func TestUnnamedBindSessionMarks(t *testing.T) {
 		"the unnamed statement parsed in an earlier checkout carries its verdict")
 	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(stmts, nil), "a Bind of no known statement may run anything")
 
+	// A statement auto-caching kept for "" before it was turned off is not the
+	// one the Bind runs.
+	require.NoError(t, stmts.AddConfirmedNamedStmt(CreateProxyPreparedStmt("", "SELECT 1", nil, true)))
+	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(stmts, setter))
+
 	// A newer unnamed Parse in this pipeline replaces the confirmed one.
 	stmts.EnqueuePendingStmt(clean, false)
 	assert.Zero(t, action.SessionMarks(stmts, setter))
+}
+
+// TestHandBuiltBindIsMarked: a Bind whose action did not come from
+// DecideClientMessageAction may run any statement.
+func TestHandBuiltBindIsMarked(t *testing.T) {
+	action := ClientMessageAction{ProxyMsgToPg: &pgproto3.Bind{PreparedStatement: "named"}}
+	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(prepared.CreateProxyPreparedStmtsState(nil), nil))
 }
 
 // TestUnnamedStatementReachesPostgres: the decision forwards a Bind or Describe of
