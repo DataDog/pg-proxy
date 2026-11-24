@@ -72,6 +72,10 @@ func TestScan(t *testing.T) {
 		{"SELECT $q$ unterminated", changes},
 		{"SELECT currval('s')", clean},
 		{"SELECT currval('s'); SET work_mem = '1MB'", changes},
+		// A number ends before a $, which may open a dollar quote.
+		{"SELECT 1$$a'$$; SET work_mem = '1MB'; --'", changes},
+		{"SELECT x FROM t WHERE y = 1 AND z = 1$$a'$$; SET work_mem = '1MB'; --'", changes},
+		{"SELECT a1$ FROM t", clean},
 	}
 	for _, c := range cases {
 		assert.Equal(t, c.want, Scan(c.sql, true), "%q", c.sql)
@@ -92,6 +96,35 @@ func TestScanStandardConformingStrings(t *testing.T) {
 	assert.False(t, ScanEither("SELECT 1"))
 }
 
+func TestScanContinuedLiterals(t *testing.T) {
+	// A literal continued after a newline keeps its first part's escape rule:
+	// backslash escapes for E'', none for U&'', whatever the setting says.
+	for _, scsOn := range []bool{true, false} {
+		for _, c := range []struct {
+			sql  string
+			want bool
+		}{
+			{"SELECT E'a'\n'\\'' ; SET search_path = x; --'", true},
+			{"SELECT E'a' \t\r\n\f\v'\\'' ; SET search_path = x; --'", true},
+			{"SELECT U&'b'\n'\\' UESCAPE '!'; SET search_path = x; --'", true},
+			// Found in review: each part fools one setting value, so together
+			// they hid the SET from ScanEither.
+			{"SELECT E'a'\n'\\'', U&'b'\n'\\' UESCAPE '!'; SET search_path = x; --'", true},
+			// The continuation holds the SET text, so it does not run.
+			{"SELECT E'a'\n'\\'; SET search_path = x; --'", false},
+			{"SELECT E'a'\n''", false},
+			{"SELECT E'a'\nFROM t", false},
+			{"SELECT E'a'\n-- comment\nFROM t", false},
+			// PostgreSQL 17 does not continue a literal across a comment, but
+			// the scanner cannot tell, so it counts the text.
+			{"SELECT E'a'\n-- comment\n'b'", true},
+			{"SELECT E'a' -- comment\n'b'", true},
+		} {
+			assert.Equal(t, c.want, Scan(c.sql, scsOn), "scsOn=%v %q", scsOn, c.sql)
+		}
+	}
+}
+
 func TestScanAllocatesNothing(t *testing.T) {
 	sql := "SELECT a, b FROM t WHERE id = $1 AND name = 'x' -- trailing\n; SELECT currval('s')"
 	allocs := testing.AllocsPerRun(100, func() { _ = Scan(sql, true) })
@@ -103,6 +136,8 @@ func BenchmarkScan(b *testing.B) {
 		{"select1", "SELECT 1"},
 		{"oltp", "SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.tenant_id = $1 AND o.created_at > $2 ORDER BY o.created_at DESC LIMIT 50"},
 		{"in_list_10KB", "SELECT * FROM t WHERE id IN (" + strings.Repeat("123456, ", 1250) + "1)"},
+		{"escape_literals", `SELECT * FROM t WHERE a = E'x\ty' AND b = U&'d\0061t' AND c IN (E'a', E'b', E'c')`},
+		{"dollar_quote_10KB", "SELECT $fn$" + strings.Repeat("x = $1 ", 1430) + "$fn$"},
 	} {
 		b.Run(bc.name, func(b *testing.B) {
 			b.SetBytes(int64(len(bc.sql)))

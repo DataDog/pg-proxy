@@ -43,9 +43,9 @@ func Scan(sql string, scsOn bool) bool {
 					continue
 				}
 				if lexClass[c] == clsDigit {
-					// A number runs on through identifier bytes, as in the
-					// digit case below.
-					for i++; i < n && identCont[sql[i]]; i++ {
+					// A number runs on through identifier bytes other than $,
+					// as in the digit case below.
+					for i++; i < n && numCont[sql[i]]; i++ {
 					}
 					continue
 				}
@@ -140,7 +140,7 @@ func Scan(sql string, scsOn bool) bool {
 					if afterSet(state) {
 						return true
 					}
-					k, ok := skipString(sql, j, true)
+					k, ok := skipContinuedString(sql, j, true)
 					if !ok {
 						return true
 					}
@@ -155,7 +155,7 @@ func Scan(sql string, scsOn bool) bool {
 						if afterSet(state) {
 							return true
 						}
-						k, ok := skipString(sql, j+1, false)
+						k, ok := skipContinuedString(sql, j+1, false)
 						if !ok {
 							return true
 						}
@@ -201,8 +201,9 @@ func Scan(sql string, scsOn bool) bool {
 			}
 			i = j
 		case clsDigit:
+			// Postgres ends a number before a $, which may open a dollar quote.
 			j := i + 1
-			for j < n && identCont[sql[j]] {
+			for j < n && numCont[sql[j]] {
 				j++
 			}
 			state = leaveStart(state)
@@ -278,6 +279,13 @@ var identCont = func() (t [256]bool) {
 		k := lexClass[c]
 		t[c] = k == clsIdentStart || k == clsDigit || c == '$'
 	}
+	return t
+}()
+
+// numCont marks bytes that continue a number: identifier bytes other than $.
+var numCont = func() (t [256]bool) {
+	t = identCont
+	t['$'] = false
 	return t
 }()
 
@@ -375,8 +383,8 @@ func skipBlockComment(sql string, i int) (int, bool) {
 // skipString returns the index after the literal whose opening quote is at
 // i. backslash says whether \ escapes the next byte (E-prefixed strings, and plain
 // strings when standard_conforming_strings is off). Adjacent literals
-// separated by a newline continue in Postgres; they are lexed as separate
-// literals, which ends at the same place.
+// separated by a newline continue in Postgres; for plain ones, lexing them as
+// separate literals ends at the same place.
 func skipString(sql string, i int, backslash bool) (int, bool) {
 	n := len(sql)
 	for i++; i < n; i++ {
@@ -394,6 +402,56 @@ func skipString(sql string, i int, backslash bool) (int, bool) {
 		}
 	}
 	return n, false
+}
+
+// skipContinuedString is skipString for E-prefixed and U& strings. A literal
+// continued after a newline keeps its first part's escape rule, which for these
+// is not the rule a separate plain literal gets.
+func skipContinuedString(sql string, i int, backslash bool) (int, bool) {
+	for {
+		j, ok := skipString(sql, i, backslash)
+		if !ok {
+			return j, false
+		}
+		k, continues, unsure := quoteContinues(sql, j)
+		if unsure {
+			return len(sql), false
+		}
+		if !continues {
+			return j, true
+		}
+		i = k
+	}
+}
+
+// quoteContinues reports whether the literal that closed just before i goes on
+// at the quote at j: only whitespace holding a newline lies between them.
+// unsure means a -- comment lies there too. PostgreSQL 17 does not continue
+// the literal across one, but the scanner does not rely on every version
+// agreeing.
+func quoteContinues(sql string, i int) (j int, ok, unsure bool) {
+	n := len(sql)
+	newline, comment := false, false
+	for i < n {
+		switch c := sql[i]; {
+		case c == '\n' || c == '\r':
+			newline = true
+			i++
+		case c == ' ' || c == '\t' || c == '\f' || c == '\v':
+			i++
+		case c == '-' && i+1 < n && sql[i+1] == '-':
+			comment = true
+			for i < n && sql[i] != '\n' && sql[i] != '\r' {
+				i++
+			}
+		default:
+			if c != '\'' || !newline {
+				return i, false, false
+			}
+			return i, !comment, comment
+		}
+	}
+	return n, false, false
 }
 
 func skipQuotedIdent(sql string, i int) (int, bool) {
@@ -432,11 +490,8 @@ func skipDollar(sql string, i int) (end int, ok, isQuote bool) {
 		return i + 1, true, false
 	}
 	tag := sql[i : j+1] // $tag$
-	body := j + 1
-	for k := body; k+len(tag) <= n; k++ {
-		if sql[k] == '$' && sql[k:k+len(tag)] == tag {
-			return k + len(tag), true, true
-		}
+	if k := strings.Index(sql[j+1:], tag); k >= 0 {
+		return j + 1 + k + len(tag), true, true
 	}
 	return n, false, true
 }
