@@ -1222,6 +1222,14 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 				retainedHealth[ip] = healthy
 			}
 		}
+		// Unlikely retention edge: the old leader rejoins as an async standby on its
+		// still-banned IP, then is promoted again while a split poll is outstanding.
+		// If both halves report a primary for the same scheduledAt, a late recovery
+		// completion can replace lastKnownHealthy and drop the routing primary's
+		// retention protection. A following normal poll can repair it, but sustained
+		// DNS absence may evict that IP first once the absence threshold is reached.
+		// Short probe timeouts and intervening newer healthy polls limit this window;
+		// the one-second scheduling interval itself is not a poll deadline.
 		poolHealth.sqlHealthState.RecordHealthAt(scheduledAt, retainedHealth)
 		// A delayed success can restore an IP evicted by DNS while the probe was running.
 		// Capture membership and roles only after that retention update.
