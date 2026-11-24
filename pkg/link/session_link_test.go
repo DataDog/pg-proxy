@@ -21,15 +21,24 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
-// recordingMetrics is a minimal pgproxy.MetricsClient that records Count calls.
+// recordingMetrics is a minimal pgproxy.MetricsClient that records Count and
+// Distribution calls.
 type recordingMetrics struct {
 	pgproxy.NoopMetrics
-	mu     sync.Mutex
-	counts map[string]map[string][]int64 // metric -> tagsKey -> values
+	mu            sync.Mutex
+	counts        map[string]map[string][]int64 // metric -> tagsKey -> values
+	distributions map[string]int                // metric -> number of values
 }
 
 func newRecordingMetrics() *recordingMetrics {
-	return &recordingMetrics{counts: make(map[string]map[string][]int64)}
+	return &recordingMetrics{counts: make(map[string]map[string][]int64), distributions: make(map[string]int)}
+}
+
+func (m *recordingMetrics) Distribution(name string, _ float64, _ []string, _ float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.distributions[name]++
+	return nil
 }
 
 func tagsKey(tags []string) string {

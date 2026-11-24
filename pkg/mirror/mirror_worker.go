@@ -223,7 +223,7 @@ func (w *mirrorWorker) run() {
 		case mirrorRelease:
 			recorded = false
 			release() // free budget before the (possibly slow) shadow RESET
-			w.releaseLink()
+			w.releaseLink(it.marks)
 			skipping = false // next batch starts clean
 		}
 	}
@@ -235,7 +235,16 @@ func (w *mirrorWorker) run() {
 // must skip the batch, the same answer a dropped enqueue gives the producer.
 func (w *mirrorWorker) reparseIfMissing(link link.Link, cat *stmtCatalog, name string) (injected int, recorded, admitted bool) {
 	if !prepared.IsNamedPreparedStmt(name) {
-		return 0, false, true // the unnamed statement is re-parsed by the client every time
+		if link.MayHoldForeignUnnamedStmt() && !link.DiscardingUntilSync() {
+			// The shadow connection skipped its last reset and may still hold another
+			// session's unnamed statement, which this Bind or Describe would reach. Drop
+			// it, so the shadow answers as the source did. A Close is a few bytes, so it
+			// is not charged to the budget. While Postgres discards until Sync, it would
+			// drop the Close and this Bind or Describe alike.
+			link.Send(&pgproto3.Close{ObjectType: 'S'}, query.CloseReply)
+			w.count("mirror.shadow_unnamed_close")
+		}
+		return 0, false, true // otherwise the client re-parses the unnamed statement every time
 	}
 	st, ok := cat.get(name)
 	if !ok {
@@ -363,12 +372,15 @@ func (w *mirrorWorker) discardLink() {
 	w.count("mirror.shadow_link.discarded")
 }
 
-// releaseLink returns the borrowed shadow link to the pool. No-op if none is held.
-func (w *mirrorWorker) releaseLink() {
+// releaseLink returns the shadow link to its pool, marked first with the source
+// checkout's session marks: the shadow replayed what that checkout ran. No-op if
+// none is held.
+func (w *mirrorWorker) releaseLink(marks link.SessionMarks) {
 	link := w.take()
 	if link == nil {
 		return
 	}
+	link.MarkSession(marks)
 	if err := link.Release(); err != nil {
 		pgproxy.Logger().Warn("mirror worker failed to release shadow link", "err", err)
 	}

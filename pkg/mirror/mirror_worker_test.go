@@ -15,6 +15,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
@@ -33,9 +34,12 @@ type fakeShadowLink struct {
 
 	receiveDelay time.Duration // per-Receive delay — models a slow-but-progressing shadow
 
-	flushes     int
-	releases    int
-	forceCloses int
+	flushes        int
+	releases       int
+	forceCloses    int
+	marks          link.SessionMarks // what the worker marked before releasing
+	ignoreMarks    bool              // as a source link: reports that its release does not read marks
+	foreignUnnamed bool              // MayHoldForeignUnnamedStmt, cleared when a replacement is sent
 
 	// blockUntilClose, when set, makes Receive block until ForceClose is called —
 	// used to exercise the stop() force-close path.
@@ -52,6 +56,9 @@ func (l *fakeShadowLink) Send(msg pgproto3.FrontendMessage, e query.ReplyExpecta
 		panic("shadow send blew up")
 	}
 	l.sent = append(l.sent, msg)
+	if link.ReplacesUnnamedStmt(msg) {
+		l.foreignUnnamed = false
+	}
 	if e != query.NoReply {
 		// Mirror SessionLink: a Sync clears the error state, and while it is set
 		// the message still goes out but no reply is expected for it.
@@ -103,10 +110,13 @@ func (l *fakeShadowLink) DiscardUntilSync() {
 	l.expectations = l.expectations[n:]
 	l.discarding = len(l.expectations) == 0
 }
-func (l *fakeShadowLink) DiscardingUntilSync() bool { return l.discarding }
-func (l *fakeShadowLink) Idle() bool                { return len(l.expectations) == 0 }
-func (l *fakeShadowLink) Cancel() error             { return nil }
-func (l *fakeShadowLink) Release() error            { l.releases++; return nil }
+func (l *fakeShadowLink) DiscardingUntilSync() bool           { return l.discarding }
+func (l *fakeShadowLink) MarkSession(marks link.SessionMarks) { l.marks |= marks }
+func (l *fakeShadowLink) UsesSessionMarks() bool              { return !l.ignoreMarks }
+func (l *fakeShadowLink) MayHoldForeignUnnamedStmt() bool     { return l.foreignUnnamed }
+func (l *fakeShadowLink) Idle() bool                          { return len(l.expectations) == 0 }
+func (l *fakeShadowLink) Cancel() error                       { return nil }
+func (l *fakeShadowLink) Release() error                      { l.releases++; return nil }
 func (l *fakeShadowLink) ForceClose() bool {
 	l.forceCloses++
 	if l.blockUntilClose != nil {
@@ -916,5 +926,54 @@ func TestMirrorWorker_PanicAfterReparseReservationReleasesBudget(t *testing.T) {
 
 	if used := b.UsedBytes(); used != 0 {
 		t.Errorf("UsedBytes = %d after a panic, want 0: the raw reservation leaked", used)
+	}
+}
+
+// TestMirrorWorker_MarksShadowLinkBeforeRelease: the shadow replays what the source
+// checkout ran, so a release that the source would reset must reset the shadow too.
+func TestMirrorWorker_MarksShadowLinkBeforeRelease(t *testing.T) {
+	q := newMirrorQueue(queueCapRoomy, nil)
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "SET search_path = app"}, expectation: query.QueryReply, size: 10})
+	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
+	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: link.MarkClientSQL})
+	q.tryEnqueue(mirrorItem{typ: mirrorMsg, msg: &pgproto3.Query{String: "SELECT 1"}, expectation: query.QueryReply, size: 10})
+	q.tryEnqueue(mirrorItem{typ: mirrorFlush, size: mirrorItemOverhead})
+	q.tryEnqueue(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
+
+	f := newLinkFactory(nil)
+	drainClosed(q, f.acquire)
+
+	if len(f.links) != 2 {
+		t.Fatalf("acquired %d links, want 2 (one per batch)", len(f.links))
+	}
+	if f.links[0].marks != link.MarkClientSQL || f.links[0].releases != 1 {
+		t.Errorf("first batch: marks=%b releases=%d, want the source's marks before one release", f.links[0].marks, f.links[0].releases)
+	}
+	if f.links[1].marks != 0 {
+		t.Errorf("second batch: marks=%b, want none", f.links[1].marks)
+	}
+}
+
+// TestMirrorWorker_ClosesForeignUnnamedStmt: on a shadow connection that may still
+// hold another session's unnamed statement, the worker drops it before a Bind that
+// would reach it, but not before a Bind of an unnamed statement the batch parsed.
+func TestMirrorWorker_ClosesForeignUnnamedStmt(t *testing.T) {
+	q := newMirrorQueue(queueCapRoomy, nil)
+	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{}, expectation: query.BindReply})
+	enqueueBatch(q,
+		mirrorItem{msg: &pgproto3.Parse{Query: "SELECT 1"}, expectation: query.ParseReply},
+		mirrorItem{msg: &pgproto3.Bind{}, expectation: query.BindReply})
+
+	f := newLinkFactory(func(l *fakeShadowLink) { l.foreignUnnamed = true })
+	drainClosed(q, f.acquire)
+
+	if len(f.links) != 2 {
+		t.Fatalf("acquired %d links, want 2 (one per batch)", len(f.links))
+	}
+	if got, want := sentKinds(f.links[0]), []string{"*pgproto3.Close", "Bind:"}; !slices.Equal(got, want) {
+		t.Errorf("first batch sent %v, want %v", got, want)
+	}
+	if got, want := sentKinds(f.links[1]), []string{"Parse:", "Bind:"}; !slices.Equal(got, want) {
+		t.Errorf("second batch sent %v, want %v", got, want)
 	}
 }

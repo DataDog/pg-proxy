@@ -13,12 +13,15 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/classifier"
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 // ClientMessageAction contains a set of actions the proxy will take to handle
@@ -65,6 +68,31 @@ type ClientMessageAction struct {
 	// This is only valid for replacing auto-cached unnamed prepared statements, as named prepared statements must be deallocated
 	// before the name can be reused.
 	UpdateAutoCachedUnnamedPreparedStmt prepared.PreparedStatement
+	// bindStmt is the statement a Bind of a named or auto-cached statement runs,
+	// kept unjudged for SessionMarks.
+	bindStmt prepared.PreparedStatement
+}
+
+// SessionMarks returns what proxying the action's message may do to session state:
+// running a simple Query's text, or the statement a Bind names. Judging scans SQL
+// text, which only some reset modes need, so the session calls it just before
+// sending, and only for a link that uses the marks. stmts and unnamed are the
+// session's prepared statements and its confirmed unnamed statement then.
+func (action *ClientMessageAction) SessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
+	switch m := action.ProxyMsgToPg.(type) {
+	case *pgproto3.Query:
+		return sessionMarks(sessionsql.ScanEither(m.String), link.MarkClientSQL)
+	case *pgproto3.Bind:
+		if action.bindStmt != nil {
+			return sessionMarks(action.bindStmt.MayChangeSession(), link.MarkPreparedStmt)
+		}
+		if action.EnsureUnnamedPreparedStmt {
+			return bindSessionMarks(stmts, unnamed)
+		}
+		// Not built by DecideClientMessageAction, so its statement is unknown.
+		return link.MarkPreparedStmt
+	}
+	return 0
 }
 
 // PGQueryProtocolType represents the Postgres query protocol used by a client message.
@@ -239,13 +267,14 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
-		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
+		proxyName, stmt, found, errorAction := findPreparedStatement(clientName, state.PreparedStatements)
 		if errorAction != nil {
 			observeErrorAction(errorAction, hooks)
 			return *errorAction, nil
 		}
 		m.PreparedStatement = proxyName
 		action.CheckExistingPreparedStmt = stmt
+		action.bindStmt = found
 		return action, nil
 
 	case *pgproto3.Execute:
@@ -319,6 +348,33 @@ func handleClientQuery(msg pgproto3.FrontendMessage, sql string, protocol PGQuer
 	return action, nil
 }
 
+// sessionMarks converts a scanner verdict to the marks a link records. source is
+// the mark for a possible session change.
+func sessionMarks(mayChangeSession bool, source link.SessionMarks) link.SessionMarks {
+	if mayChangeSession {
+		return source
+	}
+	return 0
+}
+
+// bindSessionMarks returns the marks for a Bind of the unnamed statement, which the
+// proxy does not keep in the prepared statement state once confirmed. One still
+// pending in this pipeline, including the copy the session re-creates on a new link,
+// is the one the Bind refers to, so it wins over unnamed, the client's confirmed
+// one. A confirmed entry for "" is one auto-caching left before it was turned
+// off, which this Bind does not run. A Bind the proxy cannot match to a Parse may
+// run anything.
+func bindSessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
+	stmt := stmts.FindPendingNamedStmtFromClientName("")
+	if stmt == nil {
+		stmt = unnamed
+	}
+	if stmt == nil {
+		return link.MarkPreparedStmt
+	}
+	return sessionMarks(stmt.MayChangeSession(), link.MarkPreparedStmt)
+}
+
 // ShouldDiscardUntilSync reports whether the proxy should skip the message.
 // When an error occurs, the proxy will discard all future messages until a Sync is properly handled.
 func ShouldDiscardUntilSync(discard bool, msg pgproto3.FrontendMessage) bool {
@@ -375,17 +431,24 @@ func LookupPreparedStatement(clientName string, state prepared.PreparedStatement
 // It returns the proxy name and the prepared statement if it was confirmed already.
 // It returns a non-nil error action if the prepared statement does not exist.
 func FindPotentiallyExistingPreparedStatement(clientName string, state prepared.PreparedStatementState) (string, prepared.PreparedStatement, *ClientMessageAction) {
+	proxyName, stmt, _, errorAction := findPreparedStatement(clientName, state)
+	return proxyName, stmt, errorAction
+}
+
+// findPreparedStatement is FindPotentiallyExistingPreparedStatement that also
+// returns the statement it found, pending or confirmed.
+func findPreparedStatement(clientName string, state prepared.PreparedStatementState) (proxyName string, existing, found prepared.PreparedStatement, errorAction *ClientMessageAction) {
 	stmt, confirmed := LookupPreparedStatement(clientName, state)
 	if stmt == nil {
 		action := NewFlushErrorAction(BuildPreparedStatementDoesNotExistErrorResponse(clientName))
-		return "", nil, &action
+		return "", nil, nil, &action
 	}
 	if !confirmed {
 		// we only want to check if the stmt is confirmed
 		// since if its pending we already checked that the underlying connection does not have the prepared statement
-		return stmt.GetProxyName(), nil, nil
+		return stmt.GetProxyName(), nil, stmt, nil
 	}
-	return stmt.GetProxyName(), stmt, nil
+	return stmt.GetProxyName(), stmt, stmt, nil
 }
 
 // GetParameterString formats Bind parameters for optional diagnostics.
@@ -452,6 +515,18 @@ func BuildPreparedStatementDoesNotExistErrorResponse(name string) *pgproto3.Erro
 		Message:  "Named prepared statement with this name does not exist.",
 		Detail:   fmt.Sprintf("Received named prepared statement with name: `%s`", name),
 		Hint:     "Please prepare the statement name with the given name before attempting to use it.",
+	}
+}
+
+// BuildUnnamedStatementDoesNotExistErrorResponse builds the 26000 error Postgres
+// returns for a Bind or Describe of an unnamed statement that does not exist. The
+// session sends it instead of Postgres when the connection may hold another
+// client's unnamed statement.
+func BuildUnnamedStatementDoesNotExistErrorResponse() *pgproto3.ErrorResponse {
+	return &pgproto3.ErrorResponse{
+		Severity: "ERROR",
+		Code:     pgerrcode.InvalidSQLStatementName,
+		Message:  "unnamed prepared statement does not exist",
 	}
 }
 

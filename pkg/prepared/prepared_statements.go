@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 const (
@@ -53,6 +55,11 @@ type PreparedStatement interface {
 	GetParamOIDs() []uint32
 	GetErrorTags() []string
 	GetMetricTags() []string
+	// MayChangeSession reports whether running the statement may change session
+	// state, judged from its text under either value of standard_conforming_strings,
+	// so the verdict holds on any later connection. The text is scanned on the first
+	// call, which only reset modes that use session marks make.
+	MayChangeSession() bool
 }
 
 func PreparedStatementEquivalent(a, b PreparedStatement) bool {
@@ -77,43 +84,86 @@ func CreatePreparedStatement(clientName string, proxyName string, sql string, pa
 	}
 }
 
+// Values of proxyPreparedStmt.verdict.
+const (
+	verdictUnjudged uint32 = iota
+	verdictClean
+	verdictChanges
+)
+
+// Unwrap returns the statement that a pending-queue entry wraps, or stmt itself.
+// The plain statement keeps its cached verdict.
+func Unwrap(stmt PreparedStatement) PreparedStatement {
+	for {
+		queued, ok := stmt.(queuedPreparedStmt)
+		if !ok {
+			return stmt
+		}
+		stmt = queued.PreparedStatement
+	}
+}
+
+// Judged reports whether stmt's text has already been scanned for
+// MayChangeSession. Tests use it to check that a reset mode that does not use
+// session marks scans nothing.
+func Judged(stmt PreparedStatement) bool {
+	p, ok := Unwrap(stmt).(*proxyPreparedStmt)
+	return ok && atomic.LoadUint32(&p.verdict) != verdictUnjudged
+}
+
 // contains the client name and the corresponding prepared statement created between the proxy and PG
 type proxyPreparedStmt struct {
 	clientName string
 	proxyName  string
 	sql        string
 	paramOIDs  []uint32
+	// verdict caches MayChangeSession: verdictUnjudged until the first call. It is
+	// read and written atomically: a mirror worker can hold the statement too. The
+	// methods take a pointer so that no copy reads it.
+	verdict uint32
 }
 
-func (p proxyPreparedStmt) IsClientNamedPreparedStmt() bool {
+func (p *proxyPreparedStmt) MayChangeSession() bool {
+	verdict := atomic.LoadUint32(&p.verdict)
+	if verdict == verdictUnjudged {
+		verdict = verdictClean
+		if sessionsql.ScanEither(p.sql) {
+			verdict = verdictChanges
+		}
+		atomic.StoreUint32(&p.verdict, verdict)
+	}
+	return verdict == verdictChanges
+}
+
+func (p *proxyPreparedStmt) IsClientNamedPreparedStmt() bool {
 	return IsNamedPreparedStmt(p.clientName)
 }
 
-func (p proxyPreparedStmt) IsProxyNamedPreparedStmt() bool {
+func (p *proxyPreparedStmt) IsProxyNamedPreparedStmt() bool {
 	return IsNamedPreparedStmt(p.proxyName)
 }
 
-func (p proxyPreparedStmt) IsAutoCachedStmt() bool {
+func (p *proxyPreparedStmt) IsAutoCachedStmt() bool {
 	return !IsNamedPreparedStmt(p.clientName) && IsNamedPreparedStmt(p.proxyName)
 }
 
-func (p proxyPreparedStmt) GetClientName() string {
+func (p *proxyPreparedStmt) GetClientName() string {
 	return p.clientName
 }
 
-func (p proxyPreparedStmt) GetProxyName() string {
+func (p *proxyPreparedStmt) GetProxyName() string {
 	return p.proxyName
 }
 
-func (p proxyPreparedStmt) GetSQLQuery() string {
+func (p *proxyPreparedStmt) GetSQLQuery() string {
 	return p.sql
 }
 
-func (p proxyPreparedStmt) GetParamOIDs() []uint32 {
+func (p *proxyPreparedStmt) GetParamOIDs() []uint32 {
 	return p.paramOIDs
 }
 
-func (p proxyPreparedStmt) GetErrorTags() []string {
+func (p *proxyPreparedStmt) GetErrorTags() []string {
 	return append(p.GetMetricTags(),
 		fmt.Sprintf("client_name:%s", p.clientName),
 		fmt.Sprintf("proxy_name:%s", p.proxyName),
@@ -122,7 +172,7 @@ func (p proxyPreparedStmt) GetErrorTags() []string {
 }
 
 // GetMetricTags gets non-high-cardinality tags intended for metrics.
-func (p proxyPreparedStmt) GetMetricTags() []string {
+func (p *proxyPreparedStmt) GetMetricTags() []string {
 	return []string{preparedStmtNamedTag(p.IsClientNamedPreparedStmt()), preparedStmtAutocachedTag(p.IsAutoCachedStmt())}
 }
 
@@ -289,7 +339,8 @@ func (p *proxyPreparedStmtsState) AddConfirmedNamedStmt(preparedStmt PreparedSta
 }
 
 func (p *proxyPreparedStmtsState) EnqueuePendingStmt(pendingPreparedStmt PreparedStatement, existing bool) {
-	p.allPendingPreparedStmtsQueue = append(p.allPendingPreparedStmtsQueue, createQueuedPreparedStmt(pendingPreparedStmt, existing))
+	// Unwrap a statement that comes back from the queue, so wrappers do not nest.
+	p.allPendingPreparedStmtsQueue = append(p.allPendingPreparedStmtsQueue, createQueuedPreparedStmt(Unwrap(pendingPreparedStmt), existing))
 
 	tags := append(p.metricTags, pendingPreparedStmt.GetMetricTags()...)
 	tags = append(tags, preparedStmtExistingTag(existing))

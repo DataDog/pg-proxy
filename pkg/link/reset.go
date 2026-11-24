@@ -1,0 +1,295 @@
+// Unless explicitly stated otherwise all files in this repository are licensed
+// under the Apache-2.0 License.
+// This product includes software developed at Datadog (https://www.datadoghq.com/)
+// Copyright 2026-Present Datadog, Inc.
+
+package link
+
+import (
+	"fmt"
+	"math/rand/v2"
+	"slices"
+	"strings"
+
+	"github.com/DataDog/pg-proxy/pkg/config"
+)
+
+const (
+	metricReset          = "pg_proxy.sessions.connections.reset"
+	metricResetWouldLeak = "pg_proxy.sessions.connections.reset.would_leak"
+)
+
+// SessionMarks record what a checkout may have done to session state. Each
+// checkout starts with none, because the previous release left the connection
+// at its baseline.
+type SessionMarks uint8
+
+const (
+	// MarkClientSQL: client SQL that the session scanner flagged ran in this
+	// checkout.
+	MarkClientSQL SessionMarks = 1 << iota
+	// MarkPreparedStmt: a Bind used a statement whose text the scanner
+	// flagged, or that the proxy could not match to a Parse.
+	MarkPreparedStmt
+	// MarkParameterStatus: the backend reported a changed setting.
+	MarkParameterStatus
+)
+
+// ResetPolicy is how a SessionLink resets its connection when it returns to the
+// pool. Build one per pool with NewResetPolicy and share it across that pool's
+// links. The zero value resets on every release.
+type ResetPolicy struct {
+	mode config.ResetMode
+	// auditSQL reads the settings in auditColumns, in order. ResetAudit runs it
+	// before the reset on a sample of the releases that ResetDynamic would skip.
+	auditSQL     string
+	auditColumns []string
+	// auditRate and fullCheckRate are the shares of the releases ResetDynamic
+	// would skip that run auditSQL and, also, fullCheckSQL. Only an audited
+	// release runs the full check, so a full-check rate above the audit rate
+	// gives every audited release the full check.
+	auditRate     float64
+	fullCheckRate float64
+}
+
+// auditedSettings are the settings ResetAudit compares on every audited release:
+// those that Postgres does not report with ParameterStatus and whose leak changes
+// another client's results, errors, messages, timeouts or durability. A reported
+// setting cannot change without marking the checkout. A setting that a version
+// lacks reads as NULL (missing_ok). The sampled full check finds the settings
+// this list misses, including default_transaction_read_only, which Postgres
+// reports only from PostgreSQL 14.
+var auditedSettings = []string{
+	// Query results and meaning.
+	"search_path", // reported only from PostgreSQL 18
+	"row_security",
+	"session_replication_role",
+	"transform_null_equals",
+	"default_text_search_config",
+	"lc_monetary",
+	"lc_numeric",
+	"lc_time",
+	"bytea_output",
+	"extra_float_digits",
+	"xmlbinary",
+	"xmloption",
+	"array_nulls",
+	"backslash_quote",
+	"quote_all_identifiers",
+	"gin_fuzzy_search_limit",
+	// Transactions and DDL.
+	"default_transaction_isolation",
+	"default_transaction_deferrable",
+	"check_function_bodies",
+	"default_tablespace",
+	"temp_tablespaces",
+	// What the client sees.
+	"client_min_messages",
+	"lc_messages",
+	// Timeouts.
+	"statement_timeout",
+	"lock_timeout",
+	"idle_in_transaction_session_timeout",
+	"idle_session_timeout",
+	"transaction_timeout", // PostgreSQL 17 and later
+	// Durability.
+	"synchronous_commit",
+}
+
+const auditColumnRole = "current_user"
+
+// fullCheckSQL names every setting the checkout left different from its reset
+// value. Reading pg_settings costs about 1 ms of backend time, against about
+// 0.1 ms for auditSQL, so it runs on fewer releases. It does not see custom
+// settings, which pg_settings does not list, or the role; the audit columns
+// cover both.
+const fullCheckSQL = "SELECT pg_catalog.string_agg(name, ',' ORDER BY name) FROM pg_catalog.pg_settings " +
+	"WHERE source = 'session' AND setting IS DISTINCT FROM reset_val"
+
+// defaultAuditRate and defaultFullCheckRate are the shares of the releases
+// ResetDynamic would skip that ResetAudit checks and, also, full-checks, when
+// the configuration does not set reset_audit_rate.
+const (
+	defaultAuditRate     = 0.1
+	defaultFullCheckRate = 0.01
+)
+
+// NewResetPolicy validates the reset fields of settings, and for ResetAudit
+// builds the audit query once.
+func NewResetPolicy(settings config.DatabaseSettings) (ResetPolicy, error) {
+	if err := settings.ValidateReset(); err != nil {
+		return ResetPolicy{}, err
+	}
+	policy := ResetPolicy{mode: settings.ResetMode}
+	if policy.Mode() != config.ResetAudit {
+		return policy, nil
+	}
+	var columns, exprs []string
+	add := func(name, expr string) {
+		columns = append(columns, name)
+		exprs = append(exprs, expr)
+	}
+	for _, name := range auditedSettings {
+		add(name, fmt.Sprintf("pg_catalog.current_setting('%s', true)", name))
+	}
+	// pg_catalog. keeps a leaked search_path from redirecting the check itself.
+	// current_user is a keyword, not a function.
+	add(auditColumnRole, "current_user")
+	for _, name := range settings.ResetAuditSettings {
+		if slices.Contains(columns, name) {
+			continue
+		}
+		// ValidateReset accepted only identifier characters and dots.
+		add(name, fmt.Sprintf("pg_catalog.current_setting('%s', true)", name))
+	}
+	policy.auditSQL = "SELECT " + strings.Join(exprs, ", ")
+	policy.auditColumns = columns
+	policy.auditRate = settings.ResetAuditRate
+	if policy.auditRate == 0 {
+		policy.auditRate = defaultAuditRate
+	}
+	policy.fullCheckRate = defaultFullCheckRate
+	return policy, nil
+}
+
+// Mode returns the resolved mode: never config.ResetDefault.
+func (p ResetPolicy) Mode() config.ResetMode { return p.mode.Resolve() }
+
+// usesMarks reports whether releases read the checkout's session marks. Only
+// these modes need the session to scan SQL text.
+func (p ResetPolicy) usesMarks() bool {
+	mode := p.Mode()
+	return mode == config.ResetAudit || mode == config.ResetDynamic
+}
+
+// reports reports whether releases emit the reset metrics. ResetAlways emits
+// none, as before reset_mode existed.
+func (p ResetPolicy) reports() bool { return p.Mode() != config.ResetAlways }
+
+// sampleAudit draws what ResetAudit does on a release that ResetDynamic would
+// skip: one draw picks the full check, the audit check alone, or the plain
+// reset. The draw is random, so a periodic workload cannot fall between samples.
+func (p ResetPolicy) sampleAudit() resetAction {
+	switch draw := rand.Float64(); {
+	case draw < min(p.fullCheckRate, p.auditRate):
+		return resetFullAudited
+	case draw < p.auditRate:
+		return resetAudited
+	default:
+		return resetSend
+	}
+}
+
+// resetSQL returns the reset statements, which run as one simple query.
+// roleManaged says an embedder RoleSession has already reset the role.
+//
+// RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). Without a
+// RoleSession, the same simple query resets identity first: any user may run
+// RESET SESSION AUTHORIZATION, and RESET ROLE restores a connection-time role
+// (ALTER ROLE ... SET role, or a startup option), which Postgres releases before
+// the CVE-2024-10978 fix drop.
+//
+// Every mode sends the same statement, so ResetAudit changes nothing a client
+// sees and ResetDynamic differs from ResetAlways only in whether it is sent.
+// Closing held cursors and discarding sequence state (OSQQUERY-823, -826) would
+// change every mode at once. The slices are shared: callers must not modify them.
+func resetSQL(roleManaged bool) []string {
+	if roleManaged {
+		return roleResetSQL
+	}
+	return identityResetSQL
+}
+
+// resetQuery returns resetSQL as the one simple query a plain reset sends.
+func resetQuery(roleManaged bool) string {
+	if roleManaged {
+		return roleResetQuery
+	}
+	return identityResetQuery
+}
+
+var (
+	roleResetSQL       = []string{"RESET ALL"}
+	identityResetSQL   = []string{"RESET SESSION AUTHORIZATION", "RESET ROLE", "RESET ALL"}
+	roleResetQuery     = strings.Join(roleResetSQL, "; ")
+	identityResetQuery = strings.Join(identityResetSQL, "; ")
+)
+
+// Reset reasons, the reason tag of the reset metric.
+const (
+	resetReasonAlways          = "always"
+	resetReasonOff             = "off"
+	resetReasonClientSQL       = "client_sql"
+	resetReasonPreparedStmt    = "prepared_stmt"
+	resetReasonParameterStatus = "parameter_status"
+	resetReasonAudit           = "audit" // dynamic would skip this release
+	resetReasonClean           = "clean"
+)
+
+// resetAction is what a release does about the reset.
+type resetAction uint8
+
+const (
+	resetSkip        resetAction = iota
+	resetSend                    // send the reset
+	resetAudited                 // send the reset inside the audit check
+	resetFullAudited             // send the reset inside the audit check and the full check
+)
+
+// resetDecision reports what a release with marks does about the reset, and why.
+func (p ResetPolicy) resetDecision(marks SessionMarks) (action resetAction, reason string) {
+	mode := p.Mode()
+	switch {
+	case mode == config.ResetAlways:
+		return resetSend, resetReasonAlways
+	case mode == config.ResetOff:
+		return resetSkip, resetReasonOff
+	case marks&MarkClientSQL != 0:
+		return resetSend, resetReasonClientSQL
+	case marks&MarkPreparedStmt != 0:
+		return resetSend, resetReasonPreparedStmt
+	case marks&MarkParameterStatus != 0:
+		return resetSend, resetReasonParameterStatus
+	case mode == config.ResetAudit:
+		return p.sampleAudit(), resetReasonAudit
+	default:
+		return resetSkip, resetReasonClean
+	}
+}
+
+// reasonTags returns the reset metrics' tags for a release's decision: its
+// reason and, on a release ResetDynamic would skip in ResetAudit, the check it
+// ran: none, list or full.
+func reasonTags(action resetAction, reason string) []string {
+	if reason != resetReasonAudit {
+		return []string{"reason:" + reason}
+	}
+	check := "none"
+	switch action {
+	case resetAudited:
+		check = "list"
+	case resetFullAudited:
+		check = "full"
+	}
+	return []string{"reason:" + reason, "check:" + check}
+}
+
+// auditBaseline, kept in pgconn's CustomData for the life of the backend
+// connection, is the audit row the connection reads right after a reset: what
+// every audited setting reads at the connection's baseline.
+type auditBaseline struct {
+	sql    string // the audit query the values answer
+	values [][]byte
+}
+
+// changedColumns returns the audited columns whose values differ between the
+// row read before the reset and the baseline.
+func (p ResetPolicy) changedColumns(before, after [][]byte) []string {
+	var changed []string
+	for i, name := range p.auditColumns {
+		if !slices.Equal(before[i], after[i]) || (before[i] == nil) != (after[i] == nil) {
+			changed = append(changed, name)
+		}
+	}
+	return changed
+}

@@ -27,6 +27,7 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/backend"
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/limiter"
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/listener"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/protocol"
@@ -54,6 +55,7 @@ type config struct {
 	requireTLS          bool
 	authenticate        authenticationHook
 	databases           map[string]*pgxpool.Config
+	resets              map[string]link.ResetPolicy // by database name
 	clusters            map[string]pgconfig.Cluster // Primary and replica database names.
 	logicalDatabases    map[string]topology.LogicalDatabase
 }
@@ -348,9 +350,14 @@ func openBackend(ctx context.Context, cfg config, name string) (*backend.Runtime
 		}
 		return nil, err
 	}
+	resets := make([]link.ResetPolicy, len(databases))
+	for i, database := range databases {
+		resets[i] = cfg.resets[database]
+	}
 	return backend.New(backend.Config{
 		ClusterName: name, PrimaryDatabaseName: cfg.databases[cluster.Primary].ConnConfig.Database,
 		Primary: pools[0], Replicas: pools[1:], ParameterStatuses: statuses[0],
+		PrimaryReset: resets[0], ReplicaResets: resets[1:],
 	}), nil
 }
 
