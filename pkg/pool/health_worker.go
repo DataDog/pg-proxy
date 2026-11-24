@@ -135,16 +135,22 @@ type HealthWorkerHooks struct {
 	Evicted              func(ip string, tags []string)
 }
 
-// SQLHealthResultsSnapshot is one credential target's raw result set for retained IPs. Errors remain wrapped
+// SQLHealthResultsSnapshot is one credential target's result set for retained IPs. Errors remain wrapped
 // so observability hooks can inspect PostgreSQL SQLSTATEs and errors.Is/errors.As chains.
 type SQLHealthResultsSnapshot struct {
-	// StartedAt is the probe start time used to order evidence against Patroni recovery.
+	// StartedAt is the poll start. Merged routing snapshots use each result's
+	// own start when checking freshness against Patroni recovery.
 	StartedAt    time.Time
 	ScheduledAt  time.Time
 	ObservedAt   time.Time
 	CandidateIPs []string
-	Tags         []string
-	Results      []SQLHealthCheckResult
+
+	// BannedIPs excludes this snapshot's cached roles from routing until this
+	// credential replaces them. Other credentials unbanning an IP does not clear it.
+	// Raw comparison snapshots leave this empty and retain all evidence.
+	BannedIPs []string
+	Tags      []string
+	Results   []SQLHealthCheckResult
 }
 
 // SQLPatroniHealthSnapshot exposes retained raw SQL findings alongside the Patroni snapshot used for
@@ -543,6 +549,7 @@ func aggregateSQLComparisonRoles(results []SQLHealthCheckResult) (map[string]boo
 
 func cloneSQLHealthResultsSnapshot(snapshot SQLHealthResultsSnapshot) SQLHealthResultsSnapshot {
 	snapshot.CandidateIPs = slices.Clone(snapshot.CandidateIPs)
+	snapshot.BannedIPs = slices.Clone(snapshot.BannedIPs)
 	snapshot.Tags = slices.Clone(snapshot.Tags)
 	snapshot.Results = slices.Clone(snapshot.Results)
 	return snapshot
@@ -1172,12 +1179,13 @@ func (w *HealthWorker) completeSQLHealthCheck(
 	resolvedSet map[string]struct{},
 	outcome SQLHealthCheckOutcome,
 ) {
-	w.completeSQLHealthCheckMode(target, generation, scheduledAt, candidateIPs, resolvedSet, outcome, sqlCompletePoll)
+	w.completeSQLHealthCheckMode(target, generation, scheduledAt, candidateIPs, resolvedSet, outcome, sqlCompletePoll, nil)
 }
 
 func (w *HealthWorker) completeSQLHealthCheckMode(
 	target *sqlHealthTarget, generation uint64, scheduledAt time.Time,
 	candidateIPs []string, resolvedSet map[string]struct{}, outcome SQLHealthCheckOutcome, mode sqlPollMode,
+	bannedIPs []string,
 ) {
 	// Preserve probe completion time even when routing-flag evaluation blocks.
 	observedAt := time.Now()
@@ -1211,7 +1219,7 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 		if mode == sqlCompletePoll {
 			rawSnapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		}
-		snapshot = poolHealth.recordSQLRoutingPollLocked(target, scheduledAt, observedAt, outcome, mode)
+		snapshot = poolHealth.recordSQLRoutingPollLocked(target, scheduledAt, observedAt, outcome, mode, bannedIPs)
 		if len(snapshot.retainedIPs) == 0 {
 			poolHealth.routingMu.Lock()
 			if policy := poolHealth.hybridPolicy; policy != nil && !scheduledAt.Before(poolHealth.routingChangedAt) {
@@ -1259,6 +1267,7 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 			}
 		}
 		outcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
+		routingOutcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
 		for _, credential := range snapshot.results {
 			var results []SQLHealthCheckResult
 			for _, result := range credential.Results {
@@ -1269,6 +1278,7 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 			if len(results) != 0 {
 				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: credential.StartedAt, Results: results})
 			}
+			routingOutcomes = append(routingOutcomes, credential.routingOutcome(snapshot.retainedIPs))
 		}
 		aggregate := aggregateSQLHealthCheckOutcomes(outcomes).Outcome
 		if mode == sqlRecoveryPoll {
@@ -1276,7 +1286,8 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 			poolHealth.publishRoutingBanExclusionsLocked(policy, &decision)
 			return false
 		}
-		decision = policy.observeSQLRound(snapshot.retainedIPs, aggregate, fresh, time.Now())
+		routingAggregate := aggregateSQLHealthCheckOutcomes(routingOutcomes).Outcome
+		decision = policy.observeSQLRoundWithRoutingEvidence(snapshot.retainedIPs, aggregate, &routingAggregate, fresh, time.Now())
 		if !decision.publish && decision.routingResult == SQLRoutingResultPatroniRecovery {
 			// Old SQL evidence cannot replace the recovery route, but shutdown bans
 			// must still remove IPs from the route clients currently read.

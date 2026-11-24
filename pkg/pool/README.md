@@ -262,6 +262,28 @@ for every eligible IP, but neither the current decision nor its next tick waits
 for banned-IP probes. Raw snapshot comparisons still wait for both parts of
 their original scheduled poll; a late raw comparison cannot replace routing.
 
+If an earlier recovery is still running and this tick's eligible probes find no
+primary, subscribers receive a missed SQL availability observation for this tick.
+This prevents an earlier writable result from remaining current. A primary found
+on this tick still reports writable immediately. This availability update does
+not create a complete raw comparison or count as a missed scheduling tick.
+
+Each credential's routing snapshot captures the banned IPs it skipped. Another
+credential unbanning an IP does not make that snapshot's old role usable again;
+this credential must replace it with a new probe result. A fresh timeout is
+uncertain evidence, not an old role to reuse. Shutdown checks still inspect all
+cached evidence. Routing freshness uses the starts of the included IP probes,
+not the timestamp of a partial refresh that checked different IPs.
+
+If this credential's recovery and routing probes overlap and disagree about an
+IP's role, the routing cache keeps the observations in `Results`. The existing
+interval comparison removes only roles proven older by another successful probe;
+remaining primary/standby disagreement triggers `conflicting_roles` fallback.
+Timeouts cannot resolve that disagreement. The cache keeps only the useful start
+and finish bounds for each role, plus unknown timing and the selected poll's
+errors, rather than accumulating probe history. Complete raw comparisons remain
+unchanged.
+
 Banned results do not force SQL fallback, and cached Patroni fallback cannot
 select them. Recovery can clear a ban as soon as its result finishes, but the
 next routing poll must actually check that newly eligible IP before selecting

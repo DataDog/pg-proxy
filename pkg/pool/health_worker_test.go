@@ -3989,7 +3989,10 @@ func TestSQLRoutingTimestampFollowsFlagEvaluation(t *testing.T) {
 			complete := func(primary string) {
 				at := time.Now()
 				w.completeSQLHealthCheck(target, 0, at, ips, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
-					StartedAt: at, Results: []SQLHealthCheckResult{{IP: a, InRecovery: primary != a}, {IP: b, InRecovery: primary != b}},
+					StartedAt: at, Results: []SQLHealthCheckResult{
+						{IP: a, InRecovery: primary != a, StartedAt: at, CompletedAt: at},
+						{IP: b, InRecovery: primary != b, StartedAt: at, CompletedAt: at},
+					},
 				})
 			}
 			w.applyPatroniHealth(s, map[string]bool{a: true, b: false}, nil, ips, time.Now())

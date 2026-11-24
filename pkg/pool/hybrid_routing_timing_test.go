@@ -124,8 +124,8 @@ func TestHybridTimingUsesWorkerPublication(t *testing.T) {
 				w.completeSQLHealthCheck(target, 0, startedAt, ips, resolved, SQLHealthCheckOutcome{
 					StartedAt: startedAt,
 					Results: []SQLHealthCheckResult{
-						{IP: oldIP, InRecovery: primary != oldIP},
-						{IP: newIP, InRecovery: primary != newIP},
+						{IP: oldIP, InRecovery: primary != oldIP, StartedAt: startedAt, CompletedAt: startedAt},
+						{IP: newIP, InRecovery: primary != newIP, StartedAt: startedAt, CompletedAt: startedAt},
 					},
 				})
 			}

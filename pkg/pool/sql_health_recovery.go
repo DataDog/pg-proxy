@@ -45,7 +45,7 @@ func (p *hybridHealthPolicy) observeSQLRecovery(ips []string, outcome SQLHealthC
 // recordSQLRoutingPollLocked keeps per-IP routing evidence independently of raw complete polls.
 // A recovery completion replaces only its own IPs, preserving newer routing-poll results.
 // sqlComparisonMu is held by the caller.
-func (s *PoolHealth) recordSQLRoutingPollLocked(target *sqlHealthTarget, scheduledAt, observedAt time.Time, outcome SQLHealthCheckOutcome, mode sqlPollMode) *sqlHealthComparisonSnapshot {
+func (s *PoolHealth) recordSQLRoutingPollLocked(target *sqlHealthTarget, scheduledAt, observedAt time.Time, outcome SQLHealthCheckOutcome, mode sqlPollMode, bannedIPs []string) *sqlHealthComparisonSnapshot {
 	if s.sqlRoutingLatest == nil {
 		s.sqlRoutingLatest = make(map[*sqlHealthTarget]SQLHealthResultsSnapshot)
 		for target, snapshot := range s.sqlComparisonLatest {
@@ -57,16 +57,34 @@ func (s *PoolHealth) recordSQLRoutingPollLocked(target *sqlHealthTarget, schedul
 		retained[ip] = struct{}{}
 	}
 	previous := s.sqlRoutingLatest[target]
+	excluded := make(map[string]struct{})
+	for _, ip := range previous.BannedIPs {
+		if _, ok := retained[ip]; ok {
+			excluded[ip] = struct{}{}
+		}
+	}
 	byIP := make(map[string][]SQLHealthCheckResult)
 	for _, r := range previous.Results {
 		if _, ok := retained[r.IP]; ok {
+			if r.StartedAt.IsZero() {
+				r.StartedAt = previous.StartedAt
+			}
 			byIP[r.IP] = append(byIP[r.IP], r)
 		}
 	}
 	incoming := make(map[string][]SQLHealthCheckResult)
 	for _, r := range outcome.Results {
 		if _, ok := retained[r.IP]; ok {
+			if r.StartedAt.IsZero() {
+				r.StartedAt = outcome.StartedAt
+			}
 			incoming[r.IP] = append(incoming[r.IP], r)
+		}
+	}
+	// The list describes IPs this poll skipped, not results it actually collected.
+	for _, ip := range bannedIPs {
+		if _, ok := retained[ip]; ok && len(incoming[ip]) == 0 {
+			excluded[ip] = struct{}{}
 		}
 	}
 	for ip, results := range incoming {
@@ -81,16 +99,27 @@ func (s *PoolHealth) recordSQLRoutingPollLocked(target *sqlHealthTarget, schedul
 				newAt = r.CompletedAt
 			}
 		}
-		if oldAt.After(newAt) || oldAt.IsZero() && newAt.IsZero() && previous.ScheduledAt.After(scheduledAt) {
-			continue
+		replace := !(oldAt.After(newAt) || oldAt.IsZero() && newAt.IsZero() && previous.ScheduledAt.After(scheduledAt))
+		old := byIP[ip]
+		if slices.Contains(previous.BannedIPs, ip) {
+			if !replace {
+				continue
+			}
+			old = nil // Invalidated cached roles cannot conflict with their replacement.
 		}
-		byIP[ip] = slices.Clone(results)
+		byIP[ip] = mergeSQLRoutingResults(old, results, replace)
+		if replace {
+			// Only this credential replacing the cached result clears its exclusion.
+			delete(excluded, ip)
+		}
 	}
 	previous.Results = nil
 	for _, results := range byIP {
 		previous.Results = append(previous.Results, results...)
 	}
 	previous.CandidateIPs = slices.Collect(maps.Keys(retained))
+	previous.BannedIPs = slices.Collect(maps.Keys(excluded))
+	slices.Sort(previous.BannedIPs)
 	previous.Tags = slices.Clone(target.tags)
 	if mode != sqlRecoveryPoll && !scheduledAt.Before(previous.ScheduledAt) {
 		previous.StartedAt = outcome.StartedAt
@@ -100,6 +129,95 @@ func (s *PoolHealth) recordSQLRoutingPollLocked(target *sqlHealthTarget, schedul
 	s.sqlRoutingLatest[target] = previous
 	snapshot := buildSQLHealthComparisonSnapshot(retained, s.sqlRoutingLatest)
 	return &snapshot
+}
+
+// mergeSQLRoutingResults is called for one IP. Keep unresolved successful roles
+// for the existing conflict/freshness checks, but keep errors only from the
+// selected poll so a cached shutdown cannot block recovery forever.
+func mergeSQLRoutingResults(old, incoming []SQLHealthCheckResult, replace bool) []SQLHealthCheckResult {
+	selected := old
+	if replace {
+		selected = incoming
+	}
+	combined := filterSupersededSQLRoles(append(slices.Clone(old), incoming...))
+	_, conflicts := aggregateSQLComparisonRoles(combined)
+	keepRoles := len(conflicts) != 0
+	var merged []SQLHealthCheckResult
+	for _, result := range selected {
+		if result.Err != nil {
+			merged = append(merged, result)
+		} else {
+			keepRoles = true
+		}
+	}
+	if !keepRoles {
+		return merged
+	}
+	// For each role, the latest start can supersede an older opposite role;
+	// the latest finish prevents an overlapping opposite role from being lost.
+	// One unknown interval per role preserves uncertainty without keeping history.
+	type bounds struct{ start, finish, unknown int }
+	roles := [2]bounds{{-1, -1, -1}, {-1, -1, -1}}
+	for i, result := range combined {
+		if result.Err != nil {
+			continue
+		}
+		role := 0
+		if result.InRecovery {
+			role = 1
+		}
+		r := &roles[role]
+		if !result.hasProbeInterval() {
+			r.unknown = i
+			continue
+		}
+		if r.start < 0 || result.StartedAt.After(combined[r.start].StartedAt) {
+			r.start = i
+		}
+		if r.finish < 0 || result.CompletedAt.After(combined[r.finish].CompletedAt) {
+			r.finish = i
+		}
+	}
+	for i, result := range combined {
+		if result.Err == nil {
+			role := 0
+			if result.InRecovery {
+				role = 1
+			}
+			r := roles[role]
+			if i == r.start || i == r.finish || i == r.unknown {
+				merged = append(merged, result)
+			}
+		}
+	}
+	return merged
+}
+
+// routingOutcome omits roles skipped while banned, even if another credential
+// subsequently unbans the IP. Preserve the start of each included probe rather
+// than giving old results the timestamp of a partial routing refresh.
+func (s SQLHealthResultsSnapshot) routingOutcome(retained []string) SQLHealthCheckOutcome {
+	var outcome SQLHealthCheckOutcome
+	for _, result := range s.Results {
+		if !slices.Contains(retained, result.IP) || slices.Contains(s.BannedIPs, result.IP) {
+			continue
+		}
+		if result.StartedAt.IsZero() {
+			result.StartedAt = s.StartedAt
+		}
+		outcome.Results = append(outcome.Results, result)
+	}
+	return outcome
+}
+
+func sqlRoutingEvidenceStartedAt(results []SQLHealthCheckResult) time.Time {
+	var startedAt time.Time
+	for i, result := range results {
+		if i == 0 || result.StartedAt.Before(startedAt) {
+			startedAt = result.StartedAt
+		}
+	}
+	return startedAt
 }
 
 // checkSQLHealthWithRecovery lets routing wait only for eligible candidates. Each credential
@@ -161,14 +279,24 @@ func (w *HealthWorker) checkSQLHealthWithRecovery(target *sqlHealthTarget, gener
 		go func() {
 			outcome, observedAt, ok := check(recoveryIPs)
 			if ok {
-				w.completeSQLHealthCheckMode(target, generation, scheduledAt, ips, resolvedSet, outcome, sqlRecoveryPoll)
+				w.completeSQLHealthCheckMode(target, generation, scheduledAt, ips, resolvedSet, outcome, sqlRecoveryPoll, recoveryIPs)
 			}
 			recoveryDone <- completedPoll{outcome: outcome, observedAt: observedAt}
 		}()
 	}
 	routingOutcome, observedAt, ok := check(routingIPs)
 	if ok {
-		w.completeSQLHealthCheckMode(target, generation, scheduledAt, ips, resolvedSet, routingOutcome, sqlRoutingPoll)
+		w.completeSQLHealthCheckMode(target, generation, scheduledAt, ips, resolvedSet, routingOutcome, sqlRoutingPoll, recoveryIPs)
+	}
+	// This tick has no full-poll completion when an older recovery is still busy.
+	// Report its incomplete availability rather than retaining an earlier writable result.
+	if !startRecovery && ok && !writable.Load() {
+		target.poolHealth.sqlComparisonMu.Lock()
+		valid := target.acceptsSQLRoundLocked(generation)
+		target.poolHealth.sqlComparisonMu.Unlock()
+		if valid {
+			publishMissedSQLAvailability(target, scheduledAt)
+		}
 	}
 	// Recovery must not keep the credential reserved and make its next routing tick miss.
 	target.finishSQLRound(scheduledAt)
