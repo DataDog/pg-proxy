@@ -39,7 +39,7 @@ type fakeShadowLink struct {
 	forceCloses    int
 	marks          link.SessionMarks // what the worker marked before releasing
 	ignoreMarks    bool              // as a source link: reports that its release does not read marks
-	foreignUnnamed bool              // MayHoldForeignUnnamedStmt, cleared by a Parse of the unnamed statement
+	foreignUnnamed bool              // MayHoldForeignUnnamedStmt, cleared when a replacement is sent
 
 	// blockUntilClose, when set, makes Receive block until ForceClose is called —
 	// used to exercise the stop() force-close path.

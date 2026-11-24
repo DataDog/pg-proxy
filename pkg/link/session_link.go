@@ -106,7 +106,7 @@ func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.Re
 		}
 		if !link.discardingUntilSync {
 			link.replyExpectations = append(link.replyExpectations, expectation)
-			if link.foreignUnnamed && link.replacing == 0 && ReplacesUnnamedStmt(msg) {
+			if link.MayHoldForeignUnnamedStmt() && ReplacesUnnamedStmt(msg) {
 				link.replacing = len(link.replyExpectations)
 			}
 		}
@@ -131,7 +131,8 @@ func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
 
 // ReplacesUnnamedStmt reports whether msg replaces or drops the connection's
 // unnamed statement once Postgres runs it: a Parse or Close of it, or any simple
-// Query. Test doubles of Link use it to track MayHoldForeignUnnamedStmt.
+// Query. Test doubles of Link use it to clear MayHoldForeignUnnamedStmt when
+// they send one, as if Postgres ran it.
 func ReplacesUnnamedStmt(msg pgproto3.FrontendMessage) bool {
 	switch m := msg.(type) {
 	case *pgproto3.Parse:
@@ -196,13 +197,8 @@ func (link *SessionLink) DiscardUntilSync() {
 	link.replyExpectations = link.replyExpectations[nDrop:]
 	link.discardingUntilSync = len(link.replyExpectations) == 0 // we still have more in the future to discard
 	// The failed message heads the queue, so a replacement among the dropped ones
-	// either failed or was skipped, and the next Bind of the unnamed statement is
-	// refused again. One that follows the Sync still runs.
-	if link.replacing > nDrop {
-		link.replacing -= nDrop
-	} else {
-		link.replacing = 0
-	}
+	// failed or was skipped. One after the Sync still runs.
+	link.replacing = max(link.replacing-nDrop, 0)
 }
 
 const (

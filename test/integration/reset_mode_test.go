@@ -295,20 +295,21 @@ func TestUnnamedStatementGuard(t *testing.T) {
 // had one, and its own statement when it did.
 func TestUnnamedStatementGuardAfterSkippedParse(t *testing.T) {
 	const clientA, clientB = 0, 1
-	named := func(name, sql string) []pgproto3.FrontendMessage {
-		return []pgproto3.FrontendMessage{
-			&pgproto3.Parse{Name: name, Query: sql},
-			&pgproto3.Bind{PreparedStatement: name},
-			&pgproto3.Execute{},
+	// viaNamed runs each statement as client B through a named statement, which
+	// leaves the unnamed one in place.
+	viaNamed := func(sqls ...string) step {
+		var msgs []pgproto3.FrontendMessage
+		for _, sql := range sqls {
+			msgs = append(msgs, &pgproto3.Parse{Name: sql, Query: sql}, &pgproto3.Bind{PreparedStatement: sql}, &pgproto3.Execute{})
 		}
+		return onClient(clientB, ready(append(msgs, &pgproto3.Sync{})...))
 	}
-	at := func(client int, s step) step { s.client = client; return s }
 	leaveUnnamed := func(client int, sql string) step {
-		return at(client, ready(&pgproto3.Parse{Query: sql}, &pgproto3.Sync{}))
+		return onClient(client, ready(&pgproto3.Parse{Query: sql}, &pgproto3.Sync{}))
 	}
-	begin := at(clientB, ready(append(append(named("begin", "BEGIN"), named("sp", "SAVEPOINT sp")...), &pgproto3.Sync{})...))
-	rollback := at(clientB, ready(append(named("rollback", "ROLLBACK TO SAVEPOINT sp"), &pgproto3.Sync{})...))
-	bindUnnamed := at(clientB, ready(&pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{}))
+	begin := viaNamed("BEGIN", "SAVEPOINT sp")
+	rollback := viaNamed("ROLLBACK TO SAVEPOINT sp")
+	bindUnnamed := onClient(clientB, ready(&pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{}))
 	badParse := &pgproto3.Parse{Name: "bad", Query: "SELEC 1"}
 
 	for _, mode := range append(resettingModes, pgconfig.ResetOff) {
@@ -319,7 +320,7 @@ func TestUnnamedStatementGuardAfterSkippedParse(t *testing.T) {
 			replies := exchange(t, url, []step{
 				leaveUnnamed(clientA, "SELECT 'from client A'"),
 				begin,
-				at(clientB, ready(badParse, &pgproto3.Parse{Query: "SELECT 'from client B'"}, &pgproto3.Sync{})),
+				onClient(clientB, ready(badParse, &pgproto3.Parse{Query: "SELECT 'from client B'"}, &pgproto3.Sync{})),
 				rollback,
 				bindUnnamed,
 			}, 0)
@@ -334,7 +335,7 @@ func TestUnnamedStatementGuardAfterSkippedParse(t *testing.T) {
 				begin,
 				// The proxy re-creates client B's statement before the Bind, and
 				// Postgres skips both.
-				at(clientB, ready(badParse, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})),
+				onClient(clientB, ready(badParse, &pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{})),
 				rollback,
 				bindUnnamed,
 			}, 0)

@@ -34,7 +34,7 @@ type testLink struct {
 	calls                  testLinkCalls
 	marks                  link.SessionMarks
 	usesMarks              bool // UsesSessionMarks
-	mayHoldForeignUnnamed  bool // MayHoldForeignUnnamedStmt, cleared as SessionLink clears it
+	mayHoldForeignUnnamed  bool // MayHoldForeignUnnamedStmt, cleared when a replacement is sent
 	send                   func(pgproto3.FrontendMessage, query.ReplyExpectation)
 	flush                  func() error
 	receive                func() (pgproto3.BackendMessage, error)

@@ -266,14 +266,19 @@ func TestSendTracksUnnamedStmtReplacement(t *testing.T) {
 		{&pgproto3.Bind{}, query.BindReply, false},
 		{&pgproto3.Describe{ObjectType: 'S'}, query.DescribeReply, false},
 	} {
-		link, _ := newTestSessionLink()
-		link.foreignUnnamed = true
+		link := newForeignLink()
 		link.Send(test.msg, test.expectation)
 		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v in flight", test.msg)
 		link.ResolveNextExpectation()
 		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v answered", test.msg)
-		assert.Equal(t, !test.want, link.foreignUnnamed, "%#v answered", test.msg)
 	}
+}
+
+// newForeignLink returns a link whose connection's last release skipped the reset.
+func newForeignLink() *SessionLink {
+	link, _ := newTestSessionLink()
+	link.foreignUnnamed = true
+	return link
 }
 
 // TestUnnamedStmtReplacementNeedsAnAnswer: Postgres skips what follows a failed
@@ -285,20 +290,12 @@ func TestUnnamedStmtReplacementNeedsAnAnswer(t *testing.T) {
 	unnamed := &pgproto3.Parse{Query: "SELECT 1"}
 	sendAll := func(link *SessionLink, msgs ...pgproto3.FrontendMessage) {
 		for _, msg := range msgs {
-			switch msg.(type) {
-			case *pgproto3.Parse:
-				link.Send(msg, query.ParseReply)
-			case *pgproto3.Bind:
-				link.Send(msg, query.BindReply)
-			case *pgproto3.Sync:
-				link.Send(msg, query.SyncReply)
+			expectation := query.ParseReply // the link only tells a Sync from other replies
+			if _, ok := msg.(*pgproto3.Sync); ok {
+				expectation = query.SyncReply
 			}
+			link.Send(msg, expectation)
 		}
-	}
-	newForeignLink := func() *SessionLink {
-		link, _ := newTestSessionLink()
-		link.foreignUnnamed = true
-		return link
 	}
 
 	link := newForeignLink()

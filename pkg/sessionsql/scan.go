@@ -43,8 +43,7 @@ func Scan(sql string, scsOn bool) bool {
 					continue
 				}
 				if lexClass[c] == clsDigit {
-					// A number runs on through identifier bytes other than $,
-					// as in the digit case below.
+					// Skip a number, as in the digit case below.
 					for i++; i < n && numCont[sql[i]]; i++ {
 					}
 					continue
@@ -64,10 +63,7 @@ func Scan(sql string, scsOn bool) bool {
 			i++
 		case clsDash:
 			if i+1 < n && sql[i+1] == '-' {
-				i += 2
-				for i < n && sql[i] != '\n' && sql[i] != '\r' {
-					i++
-				}
+				i = skipLineComment(sql, i+2)
 				continue
 			}
 			state = leaveStart(state)
@@ -201,7 +197,6 @@ func Scan(sql string, scsOn bool) bool {
 			}
 			i = j
 		case clsDigit:
-			// Postgres ends a number before a $, which may open a dollar quote.
 			j := i + 1
 			for j < n && numCont[sql[j]] {
 				j++
@@ -282,7 +277,8 @@ var identCont = func() (t [256]bool) {
 	return t
 }()
 
-// numCont marks bytes that continue a number: identifier bytes other than $.
+// numCont marks bytes that continue a number: identifier bytes other than $,
+// which Postgres does not take into a number, as it may open a dollar quote.
 var numCont = func() (t [256]bool) {
 	t = identCont
 	t['$'] = false
@@ -380,6 +376,15 @@ func skipBlockComment(sql string, i int) (int, bool) {
 	return n, false
 }
 
+// skipLineComment returns the index of the newline that ends the -- comment
+// whose text starts at i, or len(sql).
+func skipLineComment(sql string, i int) int {
+	for i < len(sql) && sql[i] != '\n' && sql[i] != '\r' {
+		i++
+	}
+	return i
+}
+
 // skipString returns the index after the literal whose opening quote is at
 // i. backslash says whether \ escapes the next byte (E-prefixed strings, and plain
 // strings when standard_conforming_strings is off). Adjacent literals
@@ -413,12 +418,15 @@ func skipContinuedString(sql string, i int, backslash bool) (int, bool) {
 		if !ok {
 			return j, false
 		}
+		if j == len(sql) || lexClass[sql[j]] != clsSpace && sql[j] != '-' {
+			return j, true
+		}
 		k, continues, unsure := quoteContinues(sql, j)
 		if unsure {
 			return len(sql), false
 		}
 		if !continues {
-			return j, true
+			return k, true
 		}
 		i = k
 	}
@@ -434,16 +442,12 @@ func quoteContinues(sql string, i int) (j int, ok, unsure bool) {
 	newline, comment := false, false
 	for i < n {
 		switch c := sql[i]; {
-		case c == '\n' || c == '\r':
-			newline = true
-			i++
-		case c == ' ' || c == '\t' || c == '\f' || c == '\v':
+		case lexClass[c] == clsSpace:
+			newline = newline || c == '\n' || c == '\r'
 			i++
 		case c == '-' && i+1 < n && sql[i+1] == '-':
 			comment = true
-			for i < n && sql[i] != '\n' && sql[i] != '\r' {
-				i++
-			}
+			i = skipLineComment(sql, i+2)
 		default:
 			if c != '\'' || !newline {
 				return i, false, false
