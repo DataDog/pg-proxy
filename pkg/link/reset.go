@@ -57,7 +57,8 @@ type ResetPolicy struct {
 // another client's results, errors, messages, timeouts or durability. A reported
 // setting cannot change without marking the checkout. A setting that a version
 // lacks reads as NULL (missing_ok). The sampled full check finds the settings
-// this list misses.
+// this list misses, including default_transaction_read_only, which Postgres
+// reports only from PostgreSQL 14.
 var auditedSettings = []string{
 	// Query results and meaning.
 	"search_path", // reported only from PostgreSQL 18
