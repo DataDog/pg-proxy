@@ -307,8 +307,8 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	return p.observeSQLRoundWithRoutingEvidence(candidateIPs, outcome, nil, fresh, evaluatedAt)
 }
 
-// Separate routing evidence may omit a credential's invalidated cached roles.
-// Ban recovery must still inspect all evidence, including cached shutdown errors.
+// Ban evidence includes recovery results and cached shutdowns from every
+// credential. Separate routing evidence contains only normal routing polls.
 func (p *hybridHealthPolicy) observeSQLRoundWithRoutingEvidence(
 	candidateIPs []string, outcome SQLHealthCheckOutcome, routingEvidence *SQLHealthCheckOutcome,
 	fresh SQLHealthResultsSnapshot, evaluatedAt time.Time,
@@ -325,7 +325,6 @@ func (p *hybridHealthPolicy) observeSQLRoundWithRoutingEvidence(
 	routingOutcome := p.routingEligibleOutcomeLocked(outcome)
 	if routingEvidence != nil {
 		routingOutcome = p.routingEligibleOutcomeLocked(*routingEvidence)
-		routingOutcome.StartedAt = sqlRoutingEvidenceStartedAt(routingOutcome.Results)
 	}
 	fallbackReason, timeoutType := sqlHealthFallback(routingOutcome)
 	if !p.routingEnabled {

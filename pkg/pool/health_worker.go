@@ -138,15 +138,15 @@ type HealthWorkerHooks struct {
 // SQLHealthResultsSnapshot is one credential target's result set for retained IPs. Errors remain wrapped
 // so observability hooks can inspect PostgreSQL SQLSTATEs and errors.Is/errors.As chains.
 type SQLHealthResultsSnapshot struct {
-	// StartedAt is the poll start. Merged routing snapshots use each result's
-	// own start when checking freshness against Patroni recovery.
+	// StartedAt is the start of this credential poll. Recovery results never
+	// refresh the timestamp or roles in a routing snapshot.
 	StartedAt    time.Time
 	ScheduledAt  time.Time
 	ObservedAt   time.Time
 	CandidateIPs []string
 
-	// BannedIPs excludes this snapshot's cached roles from routing until this
-	// credential replaces them. Other credentials unbanning an IP does not clear it.
+	// BannedIPs captures the IPs this routing poll skipped. Unbanning an IP does
+	// not fill that missing coverage; the next normal poll must check it.
 	// Raw comparison snapshots leave this empty and retain all evidence.
 	BannedIPs []string
 	Tags      []string
@@ -310,8 +310,8 @@ type PoolHealth struct {
 	// sqlScheduleMu serializes DNS discovery and starting each tick's idle credential checks. The
 	// checks themselves run after this lock is released.
 	sqlScheduleMu sync.Mutex
-	// sqlComparisonMu protects target lifecycle generations and each credential's latest raw
-	// results, plus the per-IP evidence used by independent routing and recovery polls.
+	// sqlComparisonMu protects target lifecycle generations, complete raw snapshots,
+	// eligible-IP routing snapshots, and separate per-IP ban evidence.
 	// Aggregate roles are derived from these results, never cached independently.
 	// It also serializes invalidation with retention changes and hybrid policy evaluation.
 	// When both are needed, acquire sqlScheduleMu before sqlComparisonMu; DNS lookup itself
@@ -319,6 +319,7 @@ type PoolHealth struct {
 	sqlComparisonMu     sync.Mutex
 	sqlComparisonLatest map[*sqlHealthTarget]SQLHealthResultsSnapshot
 	sqlRoutingLatest    map[*sqlHealthTarget]SQLHealthResultsSnapshot
+	sqlBanLatest        map[*sqlHealthTarget]map[string]sqlBanEvidence
 	// Potential timing is telemetry-only and protected by sqlComparisonMu.
 	potentialTiming sqlPotentialTimingState
 	// subscriptionTargets associates each pool subscription with its SQL connection string.
@@ -360,6 +361,7 @@ func (s *PoolHealth) disableSQLComparisonTarget(target *sqlHealthTarget) {
 	s.resetSQLPotentialTargetLocked(target)
 	delete(s.sqlComparisonLatest, target)
 	delete(s.sqlRoutingLatest, target)
+	delete(s.sqlBanLatest, target)
 }
 
 func (s *PoolHealth) retireSQLComparisonTarget(target *sqlHealthTarget) {
@@ -369,6 +371,7 @@ func (s *PoolHealth) retireSQLComparisonTarget(target *sqlHealthTarget) {
 	s.resetSQLPotentialTargetLocked(target)
 	delete(s.sqlComparisonLatest, target)
 	delete(s.sqlRoutingLatest, target)
+	delete(s.sqlBanLatest, target)
 }
 
 func (s *PoolHealth) currentSQLComparisonGeneration(target *sqlHealthTarget) uint64 {
@@ -396,6 +399,7 @@ func (s *PoolHealth) reserveSQLComparisonPoll(
 		s.resetSQLPotentialTargetLocked(target)
 		delete(s.sqlComparisonLatest, target)
 		delete(s.sqlRoutingLatest, target)
+		delete(s.sqlBanLatest, target)
 	}
 	return target.sqlComparisonGeneration, target.tryStartSQLRound(scheduledAt), true
 }
@@ -413,8 +417,12 @@ func (s *PoolHealth) refreshSQLResolved(trackPotential bool, resolved []string, 
 			for target, snapshot := range latest {
 				snapshot.CandidateIPs = slices.DeleteFunc(snapshot.CandidateIPs, func(candidate string) bool { return candidate == ip })
 				snapshot.Results = slices.DeleteFunc(snapshot.Results, func(result SQLHealthCheckResult) bool { return result.IP == ip })
+				snapshot.BannedIPs = slices.DeleteFunc(snapshot.BannedIPs, func(banned string) bool { return banned == ip })
 				latest[target] = snapshot
 			}
+		}
+		for _, byIP := range s.sqlBanLatest {
+			delete(byIP, ip)
 		}
 	})
 	if trackPotential && !s.isReadReplica {
@@ -567,8 +575,9 @@ type sqlHealthTarget struct {
 	refcount             int
 
 	// sqlCheckMu guards checker lifetime and sqlClosed. Routing and recovery probes hold
-	// read locks so they can run independently; subscription setup, pool release, and shutdown
-	// take the write lock. Probe-pool retention separately protects in-flight IPs.
+	// read locks so they can run independently. Subscription setup also takes a read
+	// lock; pool release and shutdown take the write lock. Probe-pool retention
+	// separately protects in-flight IPs.
 	sqlCheckMu      sync.RWMutex
 	sqlClosed       bool
 	recoveryMu      sync.Mutex
@@ -1219,7 +1228,7 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 		if mode == sqlCompletePoll {
 			rawSnapshot = poolHealth.recordSQLComparisonPollLocked(w.hooks.SQLPotentialCompared != nil, target, generation, scheduledAt, observedAt, candidateIPs, outcome)
 		}
-		snapshot = poolHealth.recordSQLRoutingPollLocked(target, scheduledAt, observedAt, outcome, mode, bannedIPs)
+		snapshot = poolHealth.recordSQLPollEvidenceLocked(target, scheduledAt, observedAt, outcome, mode, bannedIPs)
 		if len(snapshot.retainedIPs) == 0 {
 			poolHealth.routingMu.Lock()
 			if policy := poolHealth.hybridPolicy; policy != nil && !scheduledAt.Before(poolHealth.routingChangedAt) {
@@ -1266,25 +1275,15 @@ func (w *HealthWorker) completeSQLHealthCheckMode(
 				return false
 			}
 		}
-		outcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
-		routingOutcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
-		for _, credential := range snapshot.results {
-			var results []SQLHealthCheckResult
-			for _, result := range credential.Results {
-				if slices.Contains(snapshot.retainedIPs, result.IP) {
-					results = append(results, result)
-				}
-			}
-			if len(results) != 0 {
-				outcomes = append(outcomes, SQLHealthCheckOutcome{StartedAt: credential.StartedAt, Results: results})
-			}
-			routingOutcomes = append(routingOutcomes, credential.routingOutcome(snapshot.retainedIPs))
-		}
-		aggregate := aggregateSQLHealthCheckOutcomes(outcomes).Outcome
+		aggregate := poolHealth.sqlBanOutcomeLocked(snapshot.retainedIPs)
 		if mode == sqlRecoveryPoll {
 			decision = policy.observeSQLRecovery(snapshot.retainedIPs, aggregate, fresh)
 			poolHealth.publishRoutingBanExclusionsLocked(policy, &decision)
 			return false
+		}
+		routingOutcomes := make([]SQLHealthCheckOutcome, 0, len(snapshot.results))
+		for _, credential := range snapshot.results {
+			routingOutcomes = append(routingOutcomes, credential.routingOutcome(snapshot.retainedIPs))
 		}
 		routingAggregate := aggregateSQLHealthCheckOutcomes(routingOutcomes).Outcome
 		decision = policy.observeSQLRoundWithRoutingEvidence(snapshot.retainedIPs, aggregate, &routingAggregate, fresh, time.Now())
@@ -1500,6 +1499,7 @@ func (s *PoolHealth) removeSQLTarget(target *sqlHealthTarget, subscription Healt
 		s.resetSQLPotentialTargetLocked(target)
 		delete(s.sqlComparisonLatest, target)
 		delete(s.sqlRoutingLatest, target)
+		delete(s.sqlBanLatest, target)
 		if len(s.subscriptionTargets) == 0 {
 			s.routingMu.Lock()
 			s.disableSQLRoutingLocked()

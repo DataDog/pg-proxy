@@ -68,10 +68,11 @@ routing result, but neither that decision nor the next routing tick waits for
 the banned IPs. At most one recovery poll runs per credential.
 
 For raw comparisons, a completed poll replaces the credential's previous complete
-snapshot, including old successes becoming errors. The routing cache instead
-updates the IPs checked by each part of the poll and preserves unresolved
-overlapping role observations. The worker combines the active credentials'
-evidence whenever an eligible poll finishes; credentials do not have to finish
+snapshot, including old successes becoming errors. Each completed routing poll
+also replaces that credential's routing snapshot as a whole. Recovery results
+update separate ban evidence and never add roles to the routing snapshot.
+The worker combines the active credentials' evidence whenever an eligible poll
+finishes; credentials do not have to finish
 together. The one-second tick schedules work, rather than setting the age of
 every saved result. See [Background recovery](#background-recovery) for the
 separate routing, availability, and raw-comparison behavior.
@@ -99,11 +100,12 @@ slow IP can delay that round after this IP's probe has finished.
 Overlapping probes, missing timestamps, and invalid intervals cannot establish
 which role is newer, so their conflicting successful results still require
 Patroni fallback. One credential's error does not erase another credential's
-successful role. A newer error normally replaces the same credential's previous
-answer, but it cannot resolve an existing primary/standby conflict in the routing
-cache. Raw per-credential snapshots remain available for diagnosis.
+successful role. A new routing poll replaces the same credential's previous
+answer, including successes becoming errors. Raw per-credential snapshots
+remain available for diagnosis.
 
-For example, these are two successful observations of the same IP:
+For example, two credentials can successfully observe different roles on the
+same IP:
 
 ```text
 Probe A: starts at 0s, finishes at 5s, reports primary.
@@ -202,17 +204,18 @@ For a snapshot that reaches `observeSQL`, use the following order:
 | Order and condition | Result | History changes |
 | --- | --- | --- |
 | 1. SQL routing is off | `shadow`: SQL does not publish a route. | Do not establish SQL leader history. |
-| 2. Patroni restored a route at T, but any included SQL probe started at or before T (or has no start time) | Keep the current route: `patroni_recovery`. | Keep history unchanged. A late finish does not make an old check new. |
+| 2. Patroni restored a route at T, but any included SQL routing poll started at or before T (or has no start time) | Keep the current route: `patroni_recovery`. | Keep history unchanged. A late finish does not make an old check new. |
 | 3. The snapshot passes that time check | Continue below. | Stop active Patroni recovery. Remove replaced SQL leaders no longer in the candidate set. Reset `sqlNoPrimaryAt`, setting it again if SQL finds no primary. Keep the recovery time so another old completion cannot undo the route later. |
 | 4. SQL is uncertain, but we can keep the awaiting SQL leader | `retained_sql`: keep B. | Keep B and the old-leader list. Apply the checks described above before keeping B. |
 | 5. SQL is uncertain and we cannot keep that leader | `cached_fallback`: use saved Patroni results, with replaced leaders marked unhealthy. There may be no healthy leader left. | Add the previous awaiting leader to history if it is still a candidate, then clear awaiting. Keep older exclusions. If those exclusions leave no healthy IP, set `sqlNoPrimaryAt` to allow later Patroni recovery. |
 | 6. SQL definitely selects B | `conclusive_sql`: use B. | If Patroni uniquely agrees on B, clear awaiting and the old-leader lists. Otherwise set awaiting B and its selection time, remember leaders it replaced, and exclude Patroni's different unique leader. SQL can select a previously excluded IP again. |
 | 7. SQL definitely finds no primary | `conclusive_sql`: publish no healthy leader. | Clear awaiting, remembering the previous leader if it is still a candidate. Keep older exclusions and set `sqlNoPrimaryAt`. |
 
-Each result's `StartedAt` is captured before that IP's probe starts. Routing uses
-the earliest included probe start, including an unknown/zero time. A newer
-credential result, or a partial refresh of other IPs, must not give an old answer
-a newer timestamp and let it pass row 2.
+Each routing poll's `StartedAt` is captured before its eligible IP probes start.
+Routing uses the earliest included credential poll start, including an
+unknown/zero time. A newer credential poll must not give another credential's
+old answer a newer timestamp and let it pass row 2. Recovery never refreshes a
+routing snapshot's timestamp.
 
 ### Decision table: Patroni reports a result
 
@@ -263,7 +266,8 @@ rejections.
 See [hybrid_health_test.go](hybrid_health_test.go) for policy examples and
 [health_worker_test.go](health_worker_test.go) for scheduling and publication tests.
 [sql_health_banlist_recovery_test.go](sql_health_banlist_recovery_test.go) covers independent
-recovery, overlapping results, availability updates, and probe-pool retention.
+recovery, separation of routing and ban evidence, availability updates, and
+probe-pool retention.
 
 ## SQL shutdown banlist
 
@@ -317,20 +321,24 @@ on this tick still reports writable immediately. This availability update does
 not create a complete raw comparison or count as a missed scheduling tick.
 
 Each credential's routing snapshot captures the banned IPs it skipped. Another
-credential unbanning an IP does not make that snapshot's old role usable again;
-this credential must replace it with a new probe result. A fresh timeout is
-uncertain evidence, not an old role to reuse. Shutdown checks still inspect all
-cached evidence. Routing freshness uses the starts of the included IP probes,
-not the timestamp of a partial refresh that checked different IPs.
+credential unbanning an IP does not fill that gap: a new normal routing poll
+must actually check it. Each normal poll replaces the credential's routing
+snapshot as a whole, so a timeout replaces an old role rather than reviving it.
 
-If this credential's recovery and routing probes overlap and disagree about an
-IP's role, the routing cache keeps the observations in `Results`. The existing
-interval comparison removes only roles proven older by another successful probe;
-remaining primary/standby disagreement triggers `conflicting_roles` fallback.
-Timeouts cannot resolve that disagreement. The cache keeps only the useful start
-and finish bounds for each role, plus unknown timing and the selected poll's
-errors, rather than accumulating probe history. Complete raw comparisons remain
-unchanged.
+Recovery answers only whether an IP can leave the banlist. It updates separate
+per-credential, per-IP ban evidence, including cached shutdowns that still veto
+recovery. It does not create a routing snapshot, replace a routing role, or
+refresh routing timestamps. An older recovery completion cannot replace newer
+ban evidence or erase shutdown evidence observed while its probe was running.
+
+For example, recovery may find that banned `ip1` is a standby while normal
+routing uses primary `ip2`. If the recovery rules allow unbanning `ip1`, the next
+normal routing poll must check both IPs before SQL can publish another route.
+If that later routing poll sees `ip1` as primary instead, its result supplies the
+routing role; the recovery standby result is used only for ban eligibility.
+Different credentials' normal routing results still use the existing interval
+and conflict rules. Complete raw comparisons continue to combine both halves
+of their original poll.
 
 Banned results do not force SQL fallback, and cached Patroni fallback cannot
 select them. Recovery can clear a ban as soon as its result finishes, but the

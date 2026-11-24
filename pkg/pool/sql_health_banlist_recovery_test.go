@@ -311,10 +311,12 @@ func TestRecoveryUnbanRequiresNewCompleteEligibleCoverage(t *testing.T) {
 	w.completeSQLHealthCheckMode(target, 0, now, []string{a, b}, retained, outcome, sqlRecoveryPoll, nil)
 	require.NotContains(t, health.hybridPolicy.routingBanSnapshot(), a)
 	require.False(t, health.IsHealthy(a), "recovery alone must not publish a newly unbanned primary")
+	require.Empty(t, health.sqlRoutingLatest, "unbanning does not supply routing roles")
 	// This routing poll excluded A before it was unbanned. Cached recovery evidence cannot fill it in.
-	w.completeSQLHealthCheckMode(target, 0, now, []string{a, b}, retained, SQLHealthCheckOutcome{StartedAt: now, PrimaryIPs: []string{b}, Results: []SQLHealthCheckResult{{IP: b}}}, sqlRoutingPoll, nil)
+	w.completeSQLHealthCheckMode(target, 0, now, []string{a, b}, retained, SQLHealthCheckOutcome{StartedAt: now, PrimaryIPs: []string{b}, Results: []SQLHealthCheckResult{{IP: b}}}, sqlRoutingPoll, []string{a})
 	require.False(t, health.IsHealthy(a))
 	require.False(t, health.sqlRoutingActive, "an unchecked newly eligible IP prevents SQL publication")
+	require.Equal(t, []string{a}, health.sqlRoutingLatest[target].BannedIPs)
 	// A later poll checks both and sees two primaries: it must use Patroni fallback.
 	w.completeSQLHealthCheck(target, 0, now.Add(time.Second), []string{a, b}, retained, SQLHealthCheckOutcome{StartedAt: now.Add(time.Second), PrimaryIPs: []string{a, b}, Results: []SQLHealthCheckResult{{IP: a}, {IP: b}}})
 	require.False(t, health.sqlRoutingActive)
@@ -365,6 +367,7 @@ func TestLateRecoveryCannotChangeDisabledTarget(t *testing.T) {
 	require.False(t, w.recordSQLCompletePoll(target, 0, now, now, []string{ip}, outcome))
 	require.Empty(t, health.sqlComparisonLatest)
 	require.Empty(t, health.sqlRoutingLatest)
+	require.Empty(t, health.sqlBanLatest)
 }
 
 func TestRetentionKeepsPoolsUsedByRecovery(t *testing.T) {
@@ -433,32 +436,31 @@ func TestCapturedBansDoNotReviveAnotherCredentialsCachedPrimary(t *testing.T) {
 	result := func(ip string, start int, standby bool, err error) SQLHealthCheckResult {
 		return SQLHealthCheckResult{IP: ip, StartedAt: at(start), CompletedAt: at(start + 1), InRecovery: standby, Err: err}
 	}
-	health.sqlRoutingLatest = map[*sqlHealthTarget]SQLHealthResultsSnapshot{
-		first: {StartedAt: at(0), ScheduledAt: at(0), Results: []SQLHealthCheckResult{result(a, 0, false, nil)}},
-	}
-	// This credential skips banned A, but keeps its raw primary answer for diagnostics.
-	health.recordSQLRoutingPollLocked(first, at(20), at(21), SQLHealthCheckOutcome{
+	health.recordSQLPollEvidenceLocked(first, at(0), at(1), SQLHealthCheckOutcome{
+		StartedAt: at(0), Results: []SQLHealthCheckResult{result(a, 0, false, nil)},
+	}, sqlCompletePoll, nil)
+	// This credential skips banned A; the old role remains only in ban evidence.
+	health.recordSQLPollEvidenceLocked(first, at(20), at(21), SQLHealthCheckOutcome{
 		StartedAt: at(20), Results: []SQLHealthCheckResult{result(b, 20, true, nil)},
 	}, sqlRoutingPoll, []string{a})
 	stored := health.sqlRoutingLatest[first]
 	require.Equal(t, []string{a}, stored.BannedIPs)
-	require.Len(t, stored.Results, 2)
+	require.Len(t, stored.Results, 1)
 	// Another credential supplies fresh standby evidence, allowing A's global ban to clear.
-	health.recordSQLRoutingPollLocked(second, at(21), at(22), SQLHealthCheckOutcome{
+	health.recordSQLPollEvidenceLocked(second, at(21), at(22), SQLHealthCheckOutcome{
 		StartedAt: at(21), Results: []SQLHealthCheckResult{result(a, 21, true, nil), result(b, 21, true, nil)},
 	}, sqlCompletePoll, nil)
 	// Its next timeout replaces that standby. The first credential's old primary stays excluded.
-	health.recordSQLRoutingPollLocked(second, at(23), at(24), SQLHealthCheckOutcome{
+	health.recordSQLPollEvidenceLocked(second, at(23), at(24), SQLHealthCheckOutcome{
 		StartedAt: at(23), Results: []SQLHealthCheckResult{result(a, 23, false, context.DeadlineExceeded), result(b, 23, true, nil)},
 	}, sqlCompletePoll, nil)
-	var all, eligible []SQLHealthCheckOutcome
+	var eligible []SQLHealthCheckOutcome
 	for _, snapshot := range health.sqlRoutingLatest {
-		all = append(all, SQLHealthCheckOutcome{StartedAt: snapshot.StartedAt, Results: snapshot.Results})
 		eligible = append(eligible, snapshot.routingOutcome(ips))
 	}
-	raw := aggregateSQLHealthCheckOutcomes(all).Outcome
+	raw := health.sqlBanOutcomeLocked(ips)
 	routing := aggregateSQLHealthCheckOutcomes(eligible).Outcome
-	require.Contains(t, raw.PrimaryIPs, a, "raw evidence must remain available")
+	require.Contains(t, raw.PrimaryIPs, a, "ban evidence must remain separate from routing")
 	require.NotContains(t, routing.PrimaryIPs, a)
 	policy := newHybridHealthPolicy(true)
 	policy.patroniHealth = map[string]bool{a: false, b: true}
@@ -469,7 +471,7 @@ func TestCapturedBansDoNotReviveAnotherCredentialsCachedPrimary(t *testing.T) {
 	require.True(t, decision.health[b], "the timeout must use Patroni rather than revive cached A")
 	require.Equal(t, SQLRoutingResultCachedFallback, decision.routingResult)
 	// This credential's own next probe replaces the cached role, even when it times out.
-	health.recordSQLRoutingPollLocked(first, at(31), at(32), SQLHealthCheckOutcome{
+	health.recordSQLPollEvidenceLocked(first, at(31), at(32), SQLHealthCheckOutcome{
 		StartedAt: at(31), Results: []SQLHealthCheckResult{result(a, 31, false, context.DeadlineExceeded), result(b, 31, true, nil)},
 	}, sqlCompletePoll, nil)
 	require.Empty(t, health.sqlRoutingLatest[first].BannedIPs)
@@ -480,33 +482,7 @@ func TestCapturedBansDoNotReviveAnotherCredentialsCachedPrimary(t *testing.T) {
 	require.Equal(t, []string{a}, stored.BannedIPs)
 }
 
-func TestRoutingRecoveryKeepsItsOwnProbeStart(t *testing.T) {
-	const a, b = "10.0.0.1", "10.0.0.2"
-	ips := []string{a, b}
-	base := time.Now().Add(-time.Minute)
-	at := func(n int) time.Time { return base.Add(time.Duration(n) * time.Second) }
-	health := newTestPoolHealth(a, b)
-	health.sqlHealthState = NewHealthState()
-	health.sqlHealthState.Track(ips)
-	target := &sqlHealthTarget{poolHealth: health}
-	health.recordSQLRoutingPollLocked(target, at(20), at(21), SQLHealthCheckOutcome{
-		StartedAt: at(20), Results: []SQLHealthCheckResult{{IP: b, StartedAt: at(20), CompletedAt: at(21), InRecovery: true}},
-	}, sqlRoutingPoll, []string{a})
-	// Recovery began before Patroni's transition, but finishes after the newer routing poll.
-	health.recordSQLRoutingPollLocked(target, at(5), at(25), SQLHealthCheckOutcome{
-		StartedAt: at(5), Results: []SQLHealthCheckResult{{IP: a, StartedAt: at(5), CompletedAt: at(25)}},
-	}, sqlRecoveryPoll, []string{a})
-	stored := health.sqlRoutingLatest[target]
-	require.Equal(t, at(20), stored.StartedAt)
-	routing := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{stored.routingOutcome(ips)}).Outcome
-	policy := newHybridHealthPolicy(true)
-	policy.patroniRecoveryAt = at(10)
-	decision := policy.observeSQLRoundWithRoutingEvidence(ips, routing, &routing, SQLHealthResultsSnapshot{}, at(30))
-	require.Equal(t, SQLRoutingResultPatroniRecovery, decision.routingResult)
-	require.False(t, decision.publish, "a later completion must not refresh an older probe's start")
-}
-
-func TestRoutingOverlappingResultsPreserveFallback(t *testing.T) {
+func TestRecoveryCannotChangeRoutingEvidence(t *testing.T) {
 	for _, recoveryArrivesLast := range []bool{false, true} {
 		name := "recovery_arrives_first"
 		if recoveryArrivesLast {
@@ -524,102 +500,121 @@ func TestRoutingOverlappingResultsPreserveFallback(t *testing.T) {
 			health.hybridPolicy = newHybridHealthPolicy(true)
 			health.hybridPolicy.patroniHealth = map[string]bool{a: false, b: true}
 			target := &sqlHealthTarget{poolHealth: health}
-			primary := SQLHealthCheckOutcome{StartedAt: at(1), Results: []SQLHealthCheckResult{
+			w := newTestWorker(nil)
+			recovery := SQLHealthCheckOutcome{StartedAt: at(1), Results: []SQLHealthCheckResult{
 				{IP: a, StartedAt: at(1), CompletedAt: at(5)},
 			}}
-			standby := SQLHealthCheckOutcome{StartedAt: at(3), Results: []SQLHealthCheckResult{
+			routing := SQLHealthCheckOutcome{StartedAt: at(3), Results: []SQLHealthCheckResult{
 				{IP: a, StartedAt: at(3), CompletedAt: at(4), InRecovery: true},
+				{IP: b, StartedAt: at(3), CompletedAt: at(4)},
 			}}
+			completeRecovery := func() {
+				w.completeSQLHealthCheckMode(target, 0, at(1), ips, retained, recovery, sqlRecoveryPoll, []string{a})
+			}
+			if !recoveryArrivesLast {
+				completeRecovery()
+				require.Empty(t, health.sqlRoutingLatest, "recovery must not create a routing snapshot")
+			}
+			w.completeSQLHealthCheckMode(target, 0, at(3), ips, retained, routing, sqlRoutingPoll, nil)
 			if recoveryArrivesLast {
-				health.recordSQLRoutingPollLocked(target, at(3), at(4), standby, sqlRoutingPoll, nil)
-				health.recordSQLRoutingPollLocked(target, at(1), at(5), primary, sqlRecoveryPoll, []string{a})
-			} else {
-				health.recordSQLRoutingPollLocked(target, at(1), at(5), primary, sqlRecoveryPoll, []string{a})
-				health.recordSQLRoutingPollLocked(target, at(3), at(6), standby, sqlRoutingPoll, nil)
+				completeRecovery()
 			}
 			stored := health.sqlRoutingLatest[target]
-			_, conflicts := aggregateSQLComparisonRoles(stored.Results)
-			require.Equal(t, []string{a}, conflicts)
-			require.Len(t, stored.Results, 2, "preserve both overlapping role observations")
-			copy := cloneSQLHealthResultsSnapshot(stored)
-			copy.Results[0].IP = b
-			require.Equal(t, a, stored.Results[0].IP, "snapshot copies must own their results")
-
-			w := newTestWorker(nil)
-			var iterations []SQLIteration
-			w.sqlHooks.Iteration = func(i SQLIteration, _ []string) { iterations = append(iterations, i) }
-			// A timeout replaces the latest error, but cannot resolve overlapping roles.
-			w.completeSQLHealthCheck(target, 0, at(6), ips, retained, SQLHealthCheckOutcome{StartedAt: at(6), Results: []SQLHealthCheckResult{
-				{IP: a, StartedAt: at(6), CompletedAt: at(7), Err: context.DeadlineExceeded},
-				{IP: b, StartedAt: at(6), CompletedAt: at(7), InRecovery: true},
-			}})
-			_, conflicts = aggregateSQLComparisonRoles(health.sqlRoutingLatest[target].Results)
-			require.Equal(t, []string{a}, conflicts)
-			require.Len(t, iterations, 1)
-			require.Equal(t, SQLHealthFallbackConflictingRoles, iterations[0].FallbackReason)
-			require.Equal(t, SQLRoutingResultCachedFallback, iterations[0].RoutingResult)
+			require.Equal(t, routing.Results, stored.Results, "recovery must not add or replace routing roles")
+			require.Equal(t, at(3), stored.StartedAt)
+			require.True(t, health.IsHealthy(b))
 			require.False(t, health.IsHealthy(a))
-			require.True(t, health.IsHealthy(b), "use eligible Patroni routing while SQL remains uncertain")
 
-			// Starting exactly at the boundary still cannot prove a later observation.
-			health.recordSQLRoutingPollLocked(target, at(5), at(8), SQLHealthCheckOutcome{StartedAt: at(5), Results: []SQLHealthCheckResult{
-				{IP: a, StartedAt: at(5), CompletedAt: at(8), InRecovery: true},
-			}}, sqlRecoveryPoll, nil)
-			_, conflicts = aggregateSQLComparisonRoles(health.sqlRoutingLatest[target].Results)
-			require.Equal(t, []string{a}, conflicts)
-			w.completeSQLHealthCheck(target, 0, at(10), ips, retained, SQLHealthCheckOutcome{StartedAt: at(10), Results: []SQLHealthCheckResult{
-				{IP: a, StartedAt: at(10), CompletedAt: at(11), InRecovery: true},
-				{IP: b, StartedAt: at(10), CompletedAt: at(11)},
-			}})
-			_, conflicts = aggregateSQLComparisonRoles(health.sqlRoutingLatest[target].Results)
-			require.Empty(t, conflicts)
-			require.Len(t, iterations, 2)
-			require.Empty(t, iterations[1].FallbackReason)
-			require.Equal(t, SQLRoutingResultConclusive, iterations[1].RoutingResult)
+			// The delayed raw comparison still sees the original recovery role,
+			// without changing routing or its evidence.
+			var raw SQLPatroniHealthSnapshot
+			w.hooks.SQLPatroniCompared = func(snapshot SQLPatroniHealthSnapshot, _ []string) { raw = snapshot }
+			originalPoll := SQLHealthCheckOutcome{StartedAt: at(1), Results: []SQLHealthCheckResult{
+				recovery.Results[0], {IP: b, StartedAt: at(1), CompletedAt: at(2)},
+			}}
+			require.True(t, w.recordSQLCompletePoll(target, 0, at(1), at(5), ips, originalPoll))
+			require.True(t, raw.SQLHealth[a])
+			require.True(t, raw.SQLHealth[b])
+			require.Equal(t, stored, health.sqlRoutingLatest[target])
 			require.True(t, health.IsHealthy(b))
 
-			// Membership and target cleanup also discard obsolete role observations.
-			cached := health.sqlRoutingLatest[target]
-			cached.Results = stored.Results
-			health.sqlRoutingLatest[target] = cached
-			health.sqlHealthState = NewHealthState()
-			health.sqlHealthState.Track([]string{b})
-			health.recordSQLRoutingPollLocked(target, at(13), at(14), SQLHealthCheckOutcome{StartedAt: at(13), Results: []SQLHealthCheckResult{
-				{IP: b, StartedAt: at(13), CompletedAt: at(14)},
-			}}, sqlCompletePoll, nil)
-			_, conflicts = aggregateSQLComparisonRoles(health.sqlRoutingLatest[target].Results)
-			require.Empty(t, conflicts)
-			health.disableSQLComparisonTarget(target)
-			require.NotContains(t, health.sqlRoutingLatest, target)
+			// A later normal timeout replaces the old standby answer; the
+			// recovery primary cannot reappear or create a synthetic conflict.
+			var iterations []SQLIteration
+			w.sqlHooks.Iteration = func(i SQLIteration, _ []string) { iterations = append(iterations, i) }
+			w.completeSQLHealthCheck(target, 0, at(6), ips, retained, SQLHealthCheckOutcome{StartedAt: at(6), Results: []SQLHealthCheckResult{
+				{IP: a, StartedAt: at(6), CompletedAt: at(7), Err: context.DeadlineExceeded},
+				{IP: b, StartedAt: at(6), CompletedAt: at(7)},
+			}})
+			require.Len(t, iterations, 1)
+			require.Equal(t, SQLHealthFallbackTimeout, iterations[0].FallbackReason)
+			require.Equal(t, SQLRoutingResultCachedFallback, iterations[0].RoutingResult)
+			require.True(t, health.IsHealthy(b))
+			require.False(t, health.IsHealthy(a))
 		})
 	}
 }
 
-func TestRoutingResultMergeBoundsEvidence(t *testing.T) {
-	const ip = "10.0.0.1"
-	base := time.Now().Add(-time.Hour)
-	at := func(n int) time.Time { return base.Add(time.Duration(n) * time.Millisecond) }
-	// Keep both useful bounds of a role: its latest start can supersede an
-	// opposite role even when another same-role observation finished later.
-	merged := mergeSQLRoutingResults(
-		[]SQLHealthCheckResult{{IP: ip, StartedAt: at(1), CompletedAt: at(10)}},
-		[]SQLHealthCheckResult{{IP: ip, StartedAt: at(7), CompletedAt: at(8)}}, false)
-	merged = mergeSQLRoutingResults(merged, []SQLHealthCheckResult{{IP: ip, StartedAt: at(3), CompletedAt: at(4), InRecovery: true}}, false)
-	_, conflicts := aggregateSQLComparisonRoles(merged)
-	require.Empty(t, conflicts, "the primary probe starting at 7 supersedes the standby ending at 4")
+func TestRecoveryDoesNotRefreshRoutingTimestamp(t *testing.T) {
+	const a, b = "10.0.0.1", "10.0.0.2"
+	ips := []string{a, b}
+	base := time.Now().Add(-time.Minute)
+	at := func(n int) time.Time { return base.Add(time.Duration(n) * time.Second) }
+	health := newTestPoolHealth(a, b)
+	health.sqlHealthState = NewHealthState()
+	health.sqlHealthState.Track(ips)
+	target := &sqlHealthTarget{poolHealth: health}
+	health.recordSQLPollEvidenceLocked(target, at(5), at(6), SQLHealthCheckOutcome{
+		StartedAt: at(5), Results: []SQLHealthCheckResult{{IP: b, StartedAt: at(5), CompletedAt: at(6)}},
+	}, sqlRoutingPoll, []string{a})
+	// Fresh recovery of A cannot make B's older routing observation fresh.
+	health.recordSQLPollEvidenceLocked(target, at(20), at(25), SQLHealthCheckOutcome{
+		StartedAt: at(20), Results: []SQLHealthCheckResult{{IP: a, StartedAt: at(20), CompletedAt: at(25), InRecovery: true}},
+	}, sqlRecoveryPoll, []string{a})
+	stored := health.sqlRoutingLatest[target]
+	require.Equal(t, at(5), stored.StartedAt)
+	require.Len(t, stored.Results, 1)
+	routing := aggregateSQLHealthCheckOutcomes([]SQLHealthCheckOutcome{stored.routingOutcome(ips)}).Outcome
+	policy := newHybridHealthPolicy(true)
+	policy.patroniRecoveryAt = at(10)
+	decision := policy.observeSQLRoundWithRoutingEvidence(ips, routing, &routing, SQLHealthResultsSnapshot{}, at(30))
+	require.Equal(t, SQLRoutingResultPatroniRecovery, decision.routingResult)
+	require.False(t, decision.publish)
+}
 
-	// Repeated overlaps, unknown intervals, and errors must not accumulate history.
-	merged = []SQLHealthCheckResult{{IP: ip, StartedAt: at(1), CompletedAt: at(5000)}}
-	for i := 2; i < 1000; i++ {
-		for _, result := range []SQLHealthCheckResult{
-			{IP: ip, StartedAt: at(i), CompletedAt: at(5000 + i), InRecovery: true},
-			{IP: ip}, {IP: ip, InRecovery: true},
-			{IP: ip, Err: context.DeadlineExceeded},
-		} {
-			merged = mergeSQLRoutingResults(merged, []SQLHealthCheckResult{result}, true)
-			require.LessOrEqual(t, len(merged), 7, "at most start/end/unknown per role plus the current error")
+func TestOldRecoveryCannotEraseShutdownEvidence(t *testing.T) {
+	const ip = "10.0.0.1"
+	for _, shutdownScheduled := range []int{1, 3} {
+		name := "probe_started_before_shutdown"
+		if shutdownScheduled == 3 {
+			name = "older_poll"
 		}
+		t.Run(name, func(t *testing.T) {
+			base := time.Now().Add(-time.Minute)
+			at := func(n int) time.Time { return base.Add(time.Duration(n) * time.Second) }
+			health := newTestPoolHealth(ip)
+			health.sqlHealthState = NewHealthState()
+			health.sqlHealthState.Track([]string{ip})
+			target := &sqlHealthTarget{poolHealth: health}
+			policy := newHybridHealthPolicy(true)
+			policy.routingBannedIPs[ip] = at(5)
+			shutdown := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, Err: &pgconn.PgError{Code: "57P01"}}}}
+			health.recordSQLPollEvidenceLocked(target, at(shutdownScheduled), at(5), shutdown, sqlRecoveryPoll, nil)
+			// Recovery was scheduled at 2, before shutdown was observed at 5.
+			success := SQLHealthCheckOutcome{Results: []SQLHealthCheckResult{{IP: ip, InRecovery: true}}}
+			health.recordSQLPollEvidenceLocked(target, at(2), at(6), success, sqlRecoveryPoll, nil)
+			fresh := SQLHealthResultsSnapshot{ScheduledAt: at(2), ObservedAt: at(6), Results: success.Results}
+			decision := policy.observeSQLRecovery([]string{ip}, health.sqlBanOutcomeLocked([]string{ip}), fresh)
+			require.Contains(t, decision.routingBannedIPs, ip)
+			require.True(t, isPostgresShutdownError(health.sqlBanLatest[target][ip].result.Err))
+
+			// A new recovery scheduled after shutdown can replace the evidence
+			// and clear the ban without supplying a routing role.
+			health.recordSQLPollEvidenceLocked(target, at(7), at(8), success, sqlRecoveryPoll, nil)
+			fresh.ScheduledAt, fresh.ObservedAt = at(7), at(8)
+			decision = policy.observeSQLRecovery([]string{ip}, health.sqlBanOutcomeLocked([]string{ip}), fresh)
+			require.NotContains(t, decision.routingBannedIPs, ip)
+			require.Empty(t, health.sqlRoutingLatest)
+		})
 	}
-	reason, _ := sqlHealthFallback(aggregateSQLHealthCheckResults(merged).Outcome)
-	require.Equal(t, SQLHealthFallbackConflictingRoles, reason)
 }
