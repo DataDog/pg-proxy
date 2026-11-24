@@ -285,17 +285,35 @@ without downtime durations or percentages, using the completed-snapshot mismatch
 aggregate. See [SQL snapshot timing](sql-potential-timing.md) for the
 snapshot boundary, lifecycle rules, and how to compare it with hybrid timing.
 
-### Routing and probe timestamps
+### Hybrid routing downtime
 
-Raw SQL detection and shutdown observations use probe-completion time. Routing
-history and cached-Patroni age use evaluation time after acquiring the routing
-lock. Hybrid comparison timestamps are captured when the worker replaces the
-client routing snapshot, before notifying subscribers. Flag evaluation and lock
-waits therefore cannot make a hybrid publication appear earlier than it happened.
-When hybrid uses Patroni, the publication can be slightly later than Patroni's
-observation, producing a small negative speedup.
+`LeaderRoutingCompared` reports `HybridDowntime`, `PatroniDowntime`, and
+`DowntimeReductionPercent` when `HasDowntimeComparison` is true. Both durations
+start when hybrid routing first publishes no healthy leader, and end when hybrid
+and Patroni respectively select the same replacement. The percentage is:
 
-Ban filtering applies only to routing eligibility. Raw SQL detection evaluates
-its own unfiltered evidence and fallback conditions, including in shadow mode.
-A partial shutdown exclusion keeps the source label of the last publication;
-it does not change routing ownership.
+`100 * (PatroniDowntime - HybridDowntime) / PatroniDowntime`
+
+For example, hybrid routing loses primary A at 1s. Patroni reports replacement B
+at 2s and hybrid uses it immediately. SQL identifies B at 4s. Hybrid and Patroni
+both took 1s, so the reduction is 0%. If hybrid selects B at 2s and Patroni finds B
+at 5s instead, their durations are 1s and 4s: a 75% reduction. A slower hybrid
+selection keeps its negative percentage.
+
+Hybrid timestamps are captured when the worker replaces the client routing
+snapshot, before notifying subscribers. Time spent waiting for flag evaluation
+or the publication lock is not counted as an outage while the old route remains
+healthy. Patroni timestamps remain probe observations, and the independent SQL
+comparison keeps its probe-completion timestamps. Small negative speedups are
+possible when hybrid publishes just after Patroni reports the same leader.
+
+This measures routing snapshots, not successful client queries or PostgreSQL's
+actual promotion time. Missing outage starts, non-positive Patroni
+durations, same-leader recoveries, and ambiguous publications do not produce
+downtime comparisons. Routing-mode changes clear unfinished comparisons.
+The existing independent SQL/Patroni snapshot comparison remains separate.
+
+Routing history and cached-Patroni age use evaluation time after acquiring the
+routing lock. Shutdown observations and independent raw snapshot timing retain
+probe-completion timestamps. A partial shutdown exclusion keeps the source label
+of the last publication without changing routing ownership.

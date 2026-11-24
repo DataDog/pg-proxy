@@ -835,7 +835,7 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			policy.observePatroni(map[string]bool{ip: true}, scheduledAt.Add(time.Nanosecond))
 			var iterations, comparisons int
 			w.sqlHooks.Iteration = func(SQLIteration, []string) { iterations++ }
-			w.sqlHooks.LeaderDetectionCompared = func(LeaderDetectionComparison, []string) { comparisons++ }
+			w.hooks.SQLPatroniCompared = func(SQLPatroniHealthSnapshot, []string) { comparisons++ }
 			group := w.sqlHealthGroups()[0]
 			done := make(chan struct{})
 			go func() { defer close(done); w.checkSQLHealthGroup(group, scheduledAt) }()
@@ -868,7 +868,7 @@ func TestHybridEvaluationRejectsInvalidatedCredentialPoll(t *testing.T) {
 			assert.Zero(t, comparisons)
 			assert.Empty(t, health.sqlComparisonLatest)
 			assert.Empty(t, health.sqlHealthState.lastKnownHealthy)
-			assert.Equal(t, map[string]bool{oldIP: true}, policy.detectionTiming.candidate.lastNonempty)
+			assert.Empty(t, policy.routingTiming.pending, "an invalidated poll must not complete a routing comparison")
 			if invalidation == "disable" {
 				w.checkSQLHealthGroup(group, scheduledAt.Add(2*time.Second))
 				assert.Equal(t, 1, iterations)
@@ -2490,7 +2490,7 @@ func TestHybridEvaluationIncludesPrimaryRestoredByLateSuccess(t *testing.T) {
 	assert.Equal(t, SQLRoutingResultConclusive, iterations[0].RoutingResult)
 	assert.ElementsMatch(t, []string{oldIP, newIP}, comparison.SQLRetainedIPs)
 	assert.Equal(t, map[string]bool{oldIP: false, newIP: true}, comparison.SQLHealth)
-	assert.Equal(t, map[string]bool{newIP: true}, health.hybridPolicy.detectionTiming.candidate.lastNonempty,
+	assert.Equal(t, map[string]bool{newIP: true}, health.hybridPolicy.routingTiming.candidate.lastNonempty,
 		"the same completion must include the restored primary in the hybrid decision")
 }
 
@@ -4030,7 +4030,7 @@ func TestSQLRoutingTimestampFollowsFlagEvaluation(t *testing.T) {
 				assert.False(t, s.hybridPolicy.routingTiming.pending[b].candidateAt.Before(boundary), "hybrid timing starts at actual publication")
 			} else {
 				assert.False(t, s.hybridPolicy.sqlNoPrimaryAt.Before(boundary), "routing history starts after evaluation waits")
-				assert.Equal(t, completedAt, s.hybridPolicy.sqlDowntimeStartedAt, "raw SQL detection keeps its independent timestamp")
+				assert.False(t, s.hybridPolicy.routingDowntimeStartedAt.Before(boundary), "hybrid downtime starts at actual publication")
 			}
 		})
 	}

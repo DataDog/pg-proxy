@@ -396,7 +396,6 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 	var got []SQLPotentialComparison
 	var snapshot SQLPatroniHealthSnapshot
 	var iterations []SQLIteration
-	var detections []LeaderDetectionComparison
 	var routings []LeaderRoutingComparison
 	w := &HealthWorker{
 		hooks: HealthWorkerHooks{
@@ -413,10 +412,6 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 			Iteration: func(iteration SQLIteration, _ []string) {
 				assertUnlocked()
 				iterations = append(iterations, iteration)
-			},
-			LeaderDetectionCompared: func(c LeaderDetectionComparison, _ []string) {
-				assertUnlocked()
-				detections = append(detections, c)
 			},
 			LeaderRoutingCompared: func(c LeaderRoutingComparison, _ []string) {
 				assertUnlocked()
@@ -444,12 +439,10 @@ func TestSQLPotentialSQLTimestampPrecedesRoutingEvaluation(t *testing.T) {
 	assert.Positive(t, got[0].Speedup, "SQL completed first, even though its routing flag returned later")
 	require.Len(t, iterations, 1, "the same completion must also evaluate the hybrid policy")
 	assert.Equal(t, SQLRoutingResultPatroniRecovery, iterations[0].RoutingResult)
-	require.Len(t, detections, 1)
-	assert.Equal(t, newIP, detections[0].NewLeaderIP)
-	assert.True(t, detections[0].HasDowntimeComparison)
 	require.Len(t, routings, 1)
 	assert.Equal(t, newIP, routings[0].NewLeaderIP)
 	assert.Equal(t, SQLRoutingResultPatroniRecovery, routings[0].HybridSource)
+	assert.True(t, routings[0].HasDowntimeComparison)
 }
 
 func TestSQLPotentialEvictOldLeaderPreservesReplacement(t *testing.T) {
