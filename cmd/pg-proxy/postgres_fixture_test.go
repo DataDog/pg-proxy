@@ -20,15 +20,19 @@ import (
 	"github.com/DataDog/pg-proxy/internal/itest"
 )
 
-// postgresTestConnectionString uses the shared container fixture by default.
-// An explicit URL supports running this suite against an external disposable
-// PostgreSQL instance. The tests create roles and databases, so it must not
-// point at a shared or production database.
-func postgresTestConnectionString(t *testing.T, ctx context.Context) func(context.Context, ...string) (string, error) {
+// testDatabaseURLVariable names an external disposable PostgreSQL instance to
+// use instead of the container fixture.
+const testDatabaseURLVariable = "PG_PROXY_TEST_DATABASE_URL"
+
+// postgresTestConnectionString uses the shared container fixture by default,
+// started with opts. An explicit URL supports running this suite against an
+// external disposable PostgreSQL instance. The tests create roles and
+// databases, so it must not point at a shared or production database.
+func postgresTestConnectionString(t *testing.T, ctx context.Context, opts ...itest.PostgresOption) func(context.Context, ...string) (string, error) {
 	t.Helper()
-	value, supplied := os.LookupEnv("PG_PROXY_TEST_DATABASE_URL")
+	value, supplied := os.LookupEnv(testDatabaseURLVariable)
 	if !supplied {
-		pg, err := itest.StartPostgres(ctx)
+		pg, err := itest.StartPostgres(ctx, opts...)
 		require.NoError(t, err)
 		t.Cleanup(func() { require.NoError(t, pg.Terminate(context.Background())) })
 		value = pg.URL("postgres")

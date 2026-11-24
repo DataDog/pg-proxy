@@ -70,9 +70,15 @@ func WithContainerOptions(customizers ...testcontainers.ContainerCustomizer) Pos
 // StartPostgres starts a PostgreSQL container and waits until it accepts
 // connections. Callers must Terminate it.
 func StartPostgres(ctx context.Context, opts ...PostgresOption) (*Postgres, error) {
-	options := postgresOptions{image: PostgresImage(), readyLogs: 2}
+	options := postgresOptions{readyLogs: 2}
 	for _, opt := range opts {
 		opt(&options)
+	}
+	if options.image == "" {
+		var err error
+		if options.image, err = postgresImage(); err != nil {
+			return nil, err
+		}
 	}
 	image := options.image
 	customizers := append([]testcontainers.ContainerCustomizer{

@@ -2,11 +2,14 @@
 #   skip <test>     # <cause>  Left out of the schedule: pg-proxy cannot pass it by design.
 #   isolate <test>  # <cause>  Left out of the schedule because its failure would break later
 #                              tests. Not established as by design; re-check as pg-proxy improves.
-#   fail <test>     # <cause>  Runs and is expected to fail; listing a test that passes fails the run.
-#                              A by-design failure that later tests depend on is a fail entry, so it
-#                              still creates their objects.
+#   fail <test> diff=<lines>  # <cause>
+#                              Runs and is expected to fail, with <lines> lines of its output differing
+#                              from PostgreSQL's expected output. The run fails if a listed test passes
+#                              or its count changes. A by-design failure that later tests depend on is
+#                              a fail entry, so it still creates their objects.
 # Any other failing test fails TestInstallcheckThroughProxy. PG_PROXY_REGRESS_UPDATE=1
-# rewrites the fail entries from a run, keeping skip and isolate entries and reasons.
+# rewrites the fail entries and their counts from a run, keeping skip and isolate
+# entries and reasons.
 #
 # Causes:
 #   session-reset        SET, SET ROLE and SET SESSION AUTHORIZATION are undone after every
@@ -112,23 +115,23 @@ isolate union                        # backend-reuse: relation "t1" already exis
 isolate updatable_views              # backend-reuse: relation "t1" already exists
 isolate vacuum_parallel              # session-reset: output differs
 isolate xid                          # backend-reuse: relation "snapshot_test" already exists
-fail alter_operator               # session-reset: role is reset after each transaction, so checks run as the backend user
-fail amutils                      # depends-on-skipped: indexes from skipped tests are missing
-fail constraints                  # session-reset: role is reset after each transaction, so checks run as the backend user
-fail create_index                 # session-reset: column b.relkind does not exist (runs: later tests use its objects)
-fail create_procedure             # session-reset: role is reset after each transaction, so checks run as the backend user
-fail create_role                  # session-reset: role is reset after each transaction, so checks run as the backend user
-fail create_schema                # session-reset: role is reset after each transaction, so checks run as the backend user
-fail dependency                   # session-reset: role is reset after each transaction, so checks run as the backend user
-fail float8                       # session-reset: output differs (runs: later tests use its objects)
-fail insert                       # session-reset: role is reset after each transaction, so checks run as the backend user
-fail lock                         # session-reset: role is reset after each transaction, so checks run as the backend user
-fail merge                        # session-reset: role is reset after each transaction, so checks run as the backend user
-fail multirangetypes              # session-reset: role is reset after each transaction, so checks run as the backend user
-fail rangetypes                   # session-reset: output differs (runs: later tests use its objects)
-fail select_into                  # session-reset: role is reset after each transaction, so checks run as the backend user
-fail sequence                     # backend-reuse: relation "t1" already exists
-fail subscription                 # session-reset: role is reset after each transaction, so checks run as the backend user
-fail transactions                 # session-reset: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
-fail update                       # session-reset: role is reset after each transaction, so checks run as the backend user
-fail vacuum                       # session-reset: role is reset after each transaction, so checks run as the backend user
+fail alter_operator               diff=1     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail amutils                      diff=55    # depends-on-skipped: indexes from skipped tests are missing
+fail constraints                  diff=2     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail create_index                 diff=264   # session-reset: column b.relkind does not exist (runs: later tests use its objects)
+fail create_procedure             diff=1     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail create_role                  diff=28    # session-reset: role is reset after each transaction, so checks run as the backend user
+fail create_schema                diff=18    # session-reset: role is reset after each transaction, so checks run as the backend user
+fail dependency                   diff=53    # session-reset: role is reset after each transaction, so checks run as the backend user
+fail float8                       diff=70    # session-reset: output differs (runs: later tests use its objects)
+fail insert                       diff=4     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail lock                         diff=4     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail merge                        diff=10    # session-reset: role is reset after each transaction, so checks run as the backend user
+fail multirangetypes              diff=2     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail rangetypes                   diff=24    # session-reset: output differs (runs: later tests use its objects)
+fail select_into                  diff=1     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail sequence                     diff=13    # backend-reuse: relation "t1" already exists
+fail subscription                 diff=215   # session-reset: role is reset after each transaction, so checks run as the backend user
+fail transactions                 diff=32    # session-reset: SET SESSION CHARACTERISTICS AS TRANSACTION READ ONLY
+fail update                       diff=4     # session-reset: role is reset after each transaction, so checks run as the backend user
+fail vacuum                       diff=51    # session-reset: role is reset after each transaction, so checks run as the backend user

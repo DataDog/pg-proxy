@@ -24,8 +24,8 @@ Platform team built it and runs it in production.
 - [**Transaction pooling.**](docs/site/src/content/docs/explanation/pooling.md) Keep many more client sessions open than backend connections.
 - [**Prepared statements.**](docs/site/src/content/docs/explanation/prepared-statements.md) Named prepared statements keep working when transactions run on different backend connections.
 - [**Read routing.**](docs/site/src/content/docs/explanation/read-routing.md) Map client-facing database names to clusters, and send eligible reads to replicas.
-- [**Session limits and load shedding.**](docs/site/src/content/docs/how-to/set-pool-limits.md) Cap client sessions separately from backend connections.
-- [**Traffic mirroring.**](docs/site/src/content/docs/explanation/traffic-mirroring.md) Replay live traffic against a separate database without slowing clients.
+- [**Session limits.**](docs/site/src/content/docs/how-to/set-pool-limits.md) Cap client sessions separately from backend connections. Applications that embed the library can also add load shedding.
+- [**Traffic mirroring.**](docs/site/src/content/docs/explanation/traffic-mirroring.md) Replay live traffic against a separate database without slowing clients. Go library only.
 - [**Graceful shutdown.**](docs/site/src/content/docs/explanation/graceful-shutdown.md) Drain sessions at transaction boundaries during a planned stop.
 - [**TLS and SCRAM authentication.**](docs/site/src/content/docs/explanation/authentication.md) Secure client connections and verify passwords with SCRAM-SHA-256.
 - [**Observability.**](docs/site/src/content/docs/reference/observability/index.md) Logs, metrics, and query traces through OpenTelemetry or native Datadog.

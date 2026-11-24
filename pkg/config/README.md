@@ -34,7 +34,7 @@ A username may have an omitted or empty password. Secret-store references belong
 to the application: embed `DatabaseSettings`, add your own credential fields,
 and resolve them into `Username`/`Password` before building a pool.
 
-Users retain the existing `static_credentials` block:
+Users use a `static_credentials` block:
 
 ```yaml
 users:
@@ -57,7 +57,7 @@ A user may supply either a password or a verifier, never both.
 
 The `pg-proxy` binary uses `-config` for direct backend credentials, connection
 and pool settings, primary, replica, and logical routes, read clusters, and
-loopback listener settings,
+listener settings,
 including optional or required client TLS through `tls_cert_file`, `tls_key_file`,
 and `tls_required`. See [client TLS](../../docs/site/src/content/docs/reference/configuration/client-tls.md#pg-proxy-binary).
 Set `password_auth_enabled: true` (JSON: `passwordAuthEnabled`) with required TLS
@@ -130,7 +130,3 @@ logical databases. JSON uses `maxSessions` and `defaultMaxUserSessions` under
 `proxy`, and `maxSessions` under each user. Omitted or zero values use defaults;
 negative values fail at startup. In loopback trust mode, the backend username
 is the per-user key. These limits do not change `databases[].max_conns`.
-
-This raises the old fixed limit of 100. To keep it, set both proxy limits to
-`100`. Older binaries reject the new proxy fields and nonzero per-user limits;
-remove them before rolling back to an older binary.

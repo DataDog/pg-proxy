@@ -28,13 +28,19 @@ CI builds and tests on Linux (Ubuntu 24.04, x86-64). The binary also builds and 
 
 | PostgreSQL | Status |
 | --- | --- |
-| 14 | Tested in CI on every change. |
-| 15, 16, 17, 18 | The full integration suite passes. Not yet tested in CI. |
+| 14, 18 | Tested in CI on every change. |
+| 15, 16, 17 | The full integration suite passes. Not yet tested in CI. |
 | 13 and older | Not tested. |
 
 PG Proxy speaks PostgreSQL wire protocol version 3.0, which every supported PostgreSQL version uses. Features that depend on session state have limits under transaction pooling; see [Transaction-pooling compatibility](../compatibility/).
 
-To run the integration suite against another version, set `PG_PROXY_TEST_POSTGRES_IMAGE`:
+The integration suite runs against PostgreSQL 14 by default. To run it against another version that CI tests, set `PG_PROXY_TEST_POSTGRES_MAJOR`. It selects that version's image, pinned by digest in [internal/itest/images.go](https://github.com/DataDog/pg-proxy/blob/main/internal/itest/images.go):
+
+```sh
+PG_PROXY_TEST_POSTGRES_MAJOR=18 go test -tags=integration -count=1 ./...
+```
+
+To run it against any other image, set `PG_PROXY_TEST_POSTGRES_IMAGE`. It takes precedence over `PG_PROXY_TEST_POSTGRES_MAJOR`:
 
 ```sh
 PG_PROXY_TEST_POSTGRES_IMAGE=postgres:17-bookworm go test -tags=integration -count=1 ./...
