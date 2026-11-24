@@ -45,9 +45,10 @@ const (
 	maxPooledReplyBufCap = 256 << 10 // 256 KiB
 )
 
-// replyBufPool lends buffers to replies that outgrow the session's retained buffer. A reply
-// takes a buffer when it reaches maxRetainedReplyBufCap/2 bytes, or when one message makes it
-// larger than maxRetainedReplyBufCap, and returns the buffer after its last write to the client.
+// replyBufPool lends buffers to replies that outgrow the session's retained buffer, when
+// Config.ReplyBufferPool is set. A reply takes a buffer when it reaches maxRetainedReplyBufCap/2
+// bytes, or when one message makes it larger than maxRetainedReplyBufCap, and returns the buffer
+// after its last write to the client.
 // Thus a reply of many rows does not grow a new buffer each time, and the memory follows the
 // large replies in progress, not the number of sessions.
 var replyBufPool = sync.Pool{New: func() any {
@@ -144,7 +145,8 @@ type Session struct {
 	// clientReplyBuf is the reusable PG->client forwarding buffer. It is reused across the flushes
 	// of a reply AND retained across replies on this connection so small replies don't re-allocate.
 	// It stays within maxRetainedReplyBufCap so an idle connection never pins a large buffer: a
-	// reply that outgrows it continues in a buffer from replyBufPool.
+	// reply that outgrows it grows its own buffer, or, with Config.ReplyBufferPool, continues in
+	// a buffer from replyBufPool.
 	clientReplyBuf []byte
 	linkMu         sync.Mutex // protects link from concurrent access by the client monitor goroutine
 	link           link.Link  // non-nil when this session is linked to a postgres connection
@@ -156,6 +158,7 @@ type Session struct {
 	dynamicRoutingEnabled        bool
 	lastWrite                    time.Time // If dynamic routing is enabled, denotes when this session last received a write query
 	postgresMsgBufferSize        int       // The number of bytes the proxy buffers from PG before flushing to the client
+	replyBufferPool              bool      // replies that outgrow clientReplyBuf use replyBufPool; see Config.ReplyBufferPool
 	passthroughUser              bool
 	priority                     Priority
 	discardUntilSync             bool // whether the Session should discard all messages it receives until it gets a Sync message
@@ -333,7 +336,12 @@ type Config struct {
 	RandomInt             func(int) int
 	DynamicRoutingEnabled bool
 	PostgresMsgBufferSize int
-	PassthroughUser       bool
+	// ReplyBufferPool makes a reply that reaches half of the session's retained
+	// reply buffer, or whose message outgrows it, continue in a buffer from
+	// replyBufPool. The pool is shared by all sessions. Off by default: then each
+	// reply larger than maxRetainedReplyBufCap grows its own buffer.
+	ReplyBufferPool bool
+	PassthroughUser bool
 	// Priority is the query-level workload priority for backend load shedding.
 	Priority                     Priority
 	AutoPreparedStmtsEnabled     bool
@@ -393,7 +401,8 @@ func New(cfg Config) *Session {
 		clientReplyBuf: append([]byte(nil), cfg.InitialClientReplyBuffer...),
 		backend:        cfg.Backend, readStates: readStates,
 		readStatesFunc: cfg.ReadStatesFunc, randomInt: randomInt, dynamicRoutingEnabled: cfg.DynamicRoutingEnabled,
-		postgresMsgBufferSize: cfg.PostgresMsgBufferSize, passthroughUser: cfg.PassthroughUser,
+		postgresMsgBufferSize: cfg.PostgresMsgBufferSize, replyBufferPool: cfg.ReplyBufferPool,
+		passthroughUser:              cfg.PassthroughUser,
 		priority:                     cfg.Priority,
 		discardUntilSync:             cfg.InitialDiscardUntilSync,
 		pStmtState:                   preparedStatements,
@@ -1419,11 +1428,11 @@ func (s *Session) flushPostgres() (bool, error) {
 	// connection's retained buffer (so small replies don't re-allocate) and reused across the
 	// flushes of this reply (reset to [:0], capacity kept) — avoiding
 	// pgproto3.Backend.Flush's discard-and-regrow of any buffer over 1KB on every flush, the churn
-	// a production profile attributed to DataRow.Encode. A reply that outgrows the retained
-	// buffer continues in pooledBuf, a buffer from replyBufPool, so it does not grow a new buffer
-	// either. The defer below returns pooledBuf to the pool and keeps the retained buffer for the
-	// next reply, unless that buffer is larger than maxRetainedReplyBufCap, in which case it is
-	// released so an idle connection never pins a large buffer.
+	// a production profile attributed to DataRow.Encode. With Config.ReplyBufferPool, a reply that
+	// outgrows the retained buffer continues in pooledBuf, a buffer from replyBufPool, so it does
+	// not grow a new buffer either. The defer below returns pooledBuf to the pool and keeps the
+	// retained buffer for the next reply, unless that buffer is larger than maxRetainedReplyBufCap,
+	// in which case it is released so an idle connection never pins a large buffer.
 	replyBuf := s.clientReplyBuf[:0]
 	// pooledBuf is set when the reply outgrows the retained buffer. It holds the buffer that
 	// replyBufPool lent, or nil when the reply continues in a buffer that Encode grew.
@@ -1522,7 +1531,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 
 		if action.ProxyMsgToClient != nil {
-			if pooledBuf == nil && len(replyBuf) >= maxRetainedReplyBufCap/2 {
+			if s.replyBufferPool && pooledBuf == nil && len(replyBuf) >= maxRetainedReplyBufCap/2 {
 				// The reply is about to outgrow the retained buffer. Continue it in a pooled
 				// buffer before the next message makes Encode grow the retained one.
 				usePooledBuf()
@@ -1532,7 +1541,7 @@ func (s *Session) flushPostgres() (bool, error) {
 				return discardedUntilSync, fmt.Errorf("error encoding message to forward to client: %w", encErr)
 			}
 			s.obsVals.traceState.AddForwarded(action.ProxyMsgToClient, len(encoded)-len(replyBuf))
-			if pooledBuf == nil && cap(encoded) > maxRetainedReplyBufCap {
+			if s.replyBufferPool && pooledBuf == nil && cap(encoded) > maxRetainedReplyBufCap {
 				// The reply's buffer is now larger than maxRetainedReplyBufCap: Encode grew a new
 				// one for a message that did not fit, or the session started with a larger buffer.
 				// replyBuf is still the buffer from before Encode, so keep it for the next reply.

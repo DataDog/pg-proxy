@@ -60,6 +60,8 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 
 `PostgresMessageBufferSize` controls when buffered replies are flushed to the client. It does not cap incoming message sizes; see [Client-message size limitations](../../limitations/#client-messages-have-no-configured-size-limit).
 
+`ReplyBufferPool` is the library form of the `reply_buffer_pool` proxy setting, and it is off by default. With `true`, a reply of 512 bytes or more continues in a buffer from a pool that all sessions share, and the buffer goes back to the pool after the reply's last write to the client. Thus the client connection must not keep the slice that `Write` receives, as `io.Writer` requires.
+
 ## Logical databases
 
 `topology.LogicalDatabase.Cluster` selects the primary cluster. `ReadClusters` maps read-cluster names to their runtime weights. The application supplies configuration and backend discovery through the inventory interfaces.

@@ -81,9 +81,9 @@ func encodeReply(t *testing.T, reply []pgproto3.BackendMessage, flushSize int) (
 	return encoded, writes
 }
 
-// Replies of every size reach the client with the same bytes in the same writes, also when the
-// next replies on the session reuse its buffers. The session's retained buffer stays at
-// maxRetainedReplyBufCap or smaller.
+// Replies of every size reach the client with the same bytes in the same writes, with the
+// reply buffer pool off and on, also when the next replies on the session reuse its buffers.
+// The session's retained buffer stays at maxRetainedReplyBufCap or smaller.
 func TestFlushPostgresReplySizes(t *testing.T) {
 	largeFirstRow := rangeScanReply(20, 84)
 	largeFirstRow[1] = &pgproto3.DataRow{Values: [][]byte{[]byte("1"), []byte("1"), []byte("0"), bytes.Repeat([]byte("y"), 4<<10)}}
@@ -99,29 +99,32 @@ func TestFlushPostgresReplySizes(t *testing.T) {
 		{name: "one row larger than a pooled buffer", reply: rangeScanReply(1, pooledReplyBufCap+1)},
 		{name: "one row larger than the pool limit", reply: rangeScanReply(1, maxPooledReplyBufCap+1)},
 	} {
-		t.Run(test.name, func(t *testing.T) {
-			wantBytes, wantWrites := encodeReply(t, test.reply, testReplyFlushSize)
-			clientConn := &writeRecordingConn{}
-			s := New(Config{Client: &testClient{}, ClientConn: clientConn, PostgresMsgBufferSize: testReplyFlushSize})
-			for round := range 3 {
-				clientConn.written, clientConn.writeLens = nil, nil
-				backendLink, _ := reusableReplyLink(test.reply)
-				s.linkMu.Lock()
-				s.setLink(backendLink)
-				s.linkMu.Unlock()
+		for _, pool := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s, pool %v", test.name, pool), func(t *testing.T) {
+				wantBytes, wantWrites := encodeReply(t, test.reply, testReplyFlushSize)
+				clientConn := &writeRecordingConn{}
+				s := New(Config{Client: &testClient{}, ClientConn: clientConn, PostgresMsgBufferSize: testReplyFlushSize, ReplyBufferPool: pool})
+				for round := range 3 {
+					clientConn.written, clientConn.writeLens = nil, nil
+					backendLink, _ := reusableReplyLink(test.reply)
+					s.linkMu.Lock()
+					s.setLink(backendLink)
+					s.linkMu.Unlock()
 
-				_, err := s.flushPostgres()
-				require.NoError(t, err, "round %d", round)
-				require.True(t, bytes.Equal(wantBytes, clientConn.written), "round %d: the client got other bytes", round)
-				require.Equal(t, wantWrites, clientConn.writeLens, "round %d", round)
-				require.LessOrEqual(t, cap(s.clientReplyBuf), maxRetainedReplyBufCap, "round %d", round)
-			}
-		})
+					_, err := s.flushPostgres()
+					require.NoError(t, err, "round %d", round)
+					require.True(t, bytes.Equal(wantBytes, clientConn.written), "round %d: the client got other bytes", round)
+					require.Equal(t, wantWrites, clientConn.writeLens, "round %d", round)
+					require.LessOrEqual(t, cap(s.clientReplyBuf), maxRetainedReplyBufCap, "round %d", round)
+				}
+			})
+		}
 	}
 }
 
-// When an error stops a reply that is in a pooled buffer, the rows that came before the error
-// still reach the client before the buffer goes back to the pool.
+// When an error stops a reply, the rows that came before the error still reach the client,
+// with the reply buffer pool off and on. With the pool on, they reach it before the buffer goes
+// back to the pool.
 func TestFlushPostgresLargeReplyDeliversRowsBeforeError(t *testing.T) {
 	rows := rangeScanReply(20, 84)
 	rows = rows[:len(rows)-2] // without CommandComplete and ReadyForQuery
@@ -132,17 +135,21 @@ func TestFlushPostgresLargeReplyDeliversRowsBeforeError(t *testing.T) {
 	reply := append(rows[:len(rows):len(rows)], &pgproto3.ErrorResponse{
 		Severity: "FATAL", Code: "57P01", Message: "terminating connection due to administrator command",
 	})
-	errorLink, _ := reusableReplyLink(reply)
-	clientConn := &writeRecordingConn{}
-	s := New(Config{
-		Client: &testClient{}, ClientConn: clientConn, InitialLink: errorLink,
-		PostgresMsgBufferSize: testReplyFlushSize,
-	})
+	for _, pool := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pool %v", pool), func(t *testing.T) {
+			errorLink, _ := reusableReplyLink(reply)
+			clientConn := &writeRecordingConn{}
+			s := New(Config{
+				Client: &testClient{}, ClientConn: clientConn, InitialLink: errorLink,
+				PostgresMsgBufferSize: testReplyFlushSize, ReplyBufferPool: pool,
+			})
 
-	_, err := s.flushPostgres()
-	require.Error(t, err)
-	require.True(t, bytes.HasPrefix(clientConn.written, wantRows), "the rows before the error did not reach the client")
-	require.LessOrEqual(t, cap(s.clientReplyBuf), maxRetainedReplyBufCap)
+			_, err := s.flushPostgres()
+			require.Error(t, err)
+			require.True(t, bytes.HasPrefix(clientConn.written, wantRows), "the rows before the error did not reach the client")
+			require.LessOrEqual(t, cap(s.clientReplyBuf), maxRetainedReplyBufCap)
+		})
+	}
 }
 
 // poisonConn takes a buffer from replyBufPool, overwrites all of it, and returns it before it
@@ -181,7 +188,7 @@ func TestFlushPostgresReturnsPooledBufferAfterLastWrite(t *testing.T) {
 			want, _ := encodeReply(t, test.want, testReplyFlushSize)
 			clientConn := &poisonConn{}
 			backendLink, _ := reusableReplyLink(test.reply)
-			s := New(Config{Client: &testClient{}, ClientConn: clientConn, InitialLink: backendLink, PostgresMsgBufferSize: testReplyFlushSize})
+			s := New(Config{Client: &testClient{}, ClientConn: clientConn, InitialLink: backendLink, PostgresMsgBufferSize: testReplyFlushSize, ReplyBufferPool: true})
 
 			_, err := s.flushPostgres()
 			if test.wantErr {
@@ -219,7 +226,7 @@ func TestFlushPostgresConcurrentSessionsKeepTheirOwnBytes(t *testing.T) {
 		go func(replies []expected) {
 			defer wg.Done()
 			clientConn := &writeRecordingConn{}
-			s := New(Config{Client: &testClient{}, ClientConn: clientConn, PostgresMsgBufferSize: testReplyFlushSize})
+			s := New(Config{Client: &testClient{}, ClientConn: clientConn, PostgresMsgBufferSize: testReplyFlushSize, ReplyBufferPool: true})
 			for round := range rounds {
 				r := replies[round%len(replies)]
 				clientConn.written, clientConn.writeLens = nil, nil
@@ -251,10 +258,10 @@ func (discardConn) Write(p []byte) (int, error) { return len(p), nil }
 
 // allocsPerReply returns the allocations that flushPostgres makes to forward reply, after one
 // reply has set up the session's buffers.
-func allocsPerReply(t *testing.T, reply []pgproto3.BackendMessage) float64 {
+func allocsPerReply(t *testing.T, reply []pgproto3.BackendMessage, pool bool) float64 {
 	t.Helper()
 	backendLink, rewind := reusableReplyLink(reply)
-	s := New(Config{Client: &testClient{}, ClientConn: discardConn{}, PostgresMsgBufferSize: testReplyFlushSize})
+	s := New(Config{Client: &testClient{}, ClientConn: discardConn{}, PostgresMsgBufferSize: testReplyFlushSize, ReplyBufferPool: pool})
 	forward := func() {
 		rewind()
 		s.setLink(backendLink)
@@ -266,19 +273,21 @@ func allocsPerReply(t *testing.T, reply []pgproto3.BackendMessage) float64 {
 	return testing.AllocsPerRun(100, forward)
 }
 
-// A reply larger than the flush size makes no more allocations than a small reply: it grows
-// neither the session's retained buffer nor a new buffer each time.
+// With the reply buffer pool on, a reply larger than the flush size makes no more allocations
+// than a small reply: it grows neither the session's retained buffer nor a new buffer each time.
+// With the pool off, the large reply grows its own buffer, as before the pool.
 func TestFlushPostgresLargeReplyAllocations(t *testing.T) {
 	if raceEnabled {
 		t.Skip("with the race detector, sync.Pool drops some buffers, so the allocations vary")
 	}
-	small := allocsPerReply(t, rangeScanReply(1, 84))
-	large := allocsPerReply(t, rangeScanReply(100, 84))
-	require.LessOrEqual(t, large, small, "allocations for a 100-row reply")
+	small, large := rangeScanReply(1, 84), rangeScanReply(100, 84)
+	require.LessOrEqual(t, allocsPerReply(t, large, true), allocsPerReply(t, small, true), "allocations for a 100-row reply with the pool on")
+	require.Greater(t, allocsPerReply(t, large, false), allocsPerReply(t, small, false), "with the pool off, a 100-row reply must grow its own buffer")
 }
 
-// BenchmarkFlushPostgresReply forwards one reply for each iteration. Its allocation counts show
-// that a reply of many rows does not grow a new buffer each time.
+// BenchmarkFlushPostgresReply forwards one reply for each iteration, with the reply buffer pool
+// off and on. Its allocation counts show that, with the pool on, a reply of many rows does not
+// grow a new buffer each time.
 func BenchmarkFlushPostgresReply(b *testing.B) {
 	for _, bench := range []struct {
 		name            string
@@ -290,17 +299,19 @@ func BenchmarkFlushPostgresReply(b *testing.B) {
 		{name: "1 row of 4 KiB", rows: 1, fillerLen: 4 << 10},
 		{name: "1 row of 1 MiB", rows: 1, fillerLen: 1 << 20},
 	} {
-		b.Run(bench.name, func(b *testing.B) {
-			backendLink, rewind := reusableReplyLink(rangeScanReply(bench.rows, bench.fillerLen))
-			s := New(Config{Client: &testClient{}, ClientConn: discardConn{}, PostgresMsgBufferSize: testReplyFlushSize})
-			b.ReportAllocs()
-			for b.Loop() {
-				rewind()
-				s.setLink(backendLink)
-				if _, err := s.flushPostgres(); err != nil {
-					b.Fatal(err)
+		for _, pool := range []bool{false, true} {
+			b.Run(fmt.Sprintf("pool=%v/%s", pool, bench.name), func(b *testing.B) {
+				backendLink, rewind := reusableReplyLink(rangeScanReply(bench.rows, bench.fillerLen))
+				s := New(Config{Client: &testClient{}, ClientConn: discardConn{}, PostgresMsgBufferSize: testReplyFlushSize, ReplyBufferPool: pool})
+				b.ReportAllocs()
+				for b.Loop() {
+					rewind()
+					s.setLink(backendLink)
+					if _, err := s.flushPostgres(); err != nil {
+						b.Fatal(err)
+					}
 				}
-			}
-		})
+			})
+		}
 	}
 }

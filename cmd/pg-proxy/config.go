@@ -339,6 +339,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 	if cfg.messageBufferSize == 0 {
 		cfg.messageBufferSize = topology.DefaultPostgresMessageBufferSize
 	}
+	cfg.replyBufferPool = shared.Proxy.ReplyBufferPool
 	issues = append(issues, cfg.validateSettings())
 	// A TLS load error already explains the missing certificate. Still check the
 	// listener address, using the requested authentication policy to avoid cascades.

@@ -93,6 +93,10 @@ type ProxySettings struct {
 	JWTAuthEnabled        bool   `mapstructure:"jwt_auth_enabled" json:"jwtAuthEnabled" yaml:"jwt_auth_enabled"`
 	TLSRequired           bool   `mapstructure:"tls_required" json:"tlsRequired" yaml:"tls_required"`
 	PostgresMsgBufferSize int32  `mapstructure:"postgres_msg_pg_size" json:"postgresMsgBufferSize" yaml:"postgres_msg_buffer_size"`
+	// ReplyBufferPool lets a reply of 512 bytes or more continue in a buffer from
+	// a pool that all sessions share, so that replies of many rows do not grow a
+	// new buffer each time. Off by default.
+	ReplyBufferPool bool `mapstructure:"reply_buffer_pool" json:"replyBufferPool,omitempty" yaml:"reply_buffer_pool,omitempty"`
 }
 
 // Proxy contains listener settings and TLS certificate file paths.
