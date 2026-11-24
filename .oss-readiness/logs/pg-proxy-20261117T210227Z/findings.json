@@ -1,0 +1,204 @@
+[
+  {
+    "check_id": "contributing_present",
+    "title": "Missing CONTRIBUTING file",
+    "severity": "should",
+    "status": "warn",
+    "evidence": "No CONTRIBUTING.md found in root or .github/.",
+    "suggested_fix": "Add a CONTRIBUTING.md. Template available at https://github.com/DataDog/ospo-templates",
+    "can_autofix": true,
+    "details": {},
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "9653ce001fc47e9742fffb908b09bb94c39459bbb9b97179c8e8ff6fe93e5981"
+  },
+  {
+    "check_id": "pr_template_present",
+    "title": "Missing GitHub PR template",
+    "severity": "should",
+    "status": "warn",
+    "evidence": "No .github/PULL_REQUEST_TEMPLATE.md found.",
+    "suggested_fix": "Add .github/PULL_REQUEST_TEMPLATE.md to guide contributors.",
+    "can_autofix": true,
+    "details": {},
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "63925d35fc2ab69c2fb20493c86bd50b54eb94df744b371bc343525030e17568"
+  },
+  {
+    "check_id": "issue_template_present",
+    "title": "Missing GitHub Issue template",
+    "severity": "should",
+    "status": "warn",
+    "evidence": "No .github/ISSUE_TEMPLATE/ directory or ISSUE_TEMPLATE.md found.",
+    "suggested_fix": "Add at least one issue template under .github/ISSUE_TEMPLATE/.",
+    "can_autofix": true,
+    "details": {},
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "82cca75fb0162dbbfd86c74d0061c926f0bdecfc719a0a6918c45d66e2e9b27d"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "cmd/pg-proxy/config_test.go:23 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "bfa8d83eb326b7551d4a2008db7dbf54e2d557bb32ea381c931a775c057d1f4b"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "bf11d5ef7302d3baee1e09bc718b1d2819029f49c41eebee63d30fad8bfc105f"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "cmd/pg-proxy/auth_config_test.go:49 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "edada62f7ee33b15d3d8f65607dd9bafa315ad8d1bf5ca0397dcdf100ecb35bf"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "aef9b31599848c52d706b92bcc6852fb82c61f65aa7c800c1b0999ec159c3fd5"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/listener/startup_error_test.go:64 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "8c7e023bafa535f56909d2f18784156a095596c9dd97160b283bf2d20a45d1f0"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "bca627349849341c60d9616b6f0c566b318925176c3d1e82f6e49b8effb365dd"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/listener/startup_error_test.go:172 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "7104b1c19d3a43c24804c38fa0207dc7e3434809d6bed4f469e7207b681cb129"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "e9b1424453b5a5aff037b8a4ff028379ada0501349f3d51024fb14a943a67f23"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/scram/scram_test.go:157 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "5065eec13cb5efa13460ebe84bcb0c160896b06034229136554a76c4cb5848ac"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "75e32a8ab99bcb24e995f6f8741d39478a290f20e3a8539a8c38860cb9970b67"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/scram/scram_test.go:179 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "549e376d9c2d2a8e782f68f00d885d4e126214421ea3810c2da3e6edd57a2ed0"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "d07805c8e15b3667f85435c1eac246a0bb25c21dde789c487cf976f39c9ccb9d"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/pool/config_test.go:20 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "df7e8565b91895b172cdd4815acff548fa0bea2b031c1d9f493a3e71020e8ad7"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "fd913bd93ccdfea8ddc1612a7e29c9a764163d9e4dcf38a96510f20323669861"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/config/credentials_test.go:68 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "0f74b1e5b96ee8f79d879bf09535b04a57b1e9f9d0f1a859369f9ecc7dabe73d"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "7504c21a65af06d31c9b0c4bba26ec1fcf62ea0cee187c2b7e8cd1642a9e483b"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/config/credentials_test.go:69 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "5e8e177ced1c34f7b1e6eabf6762d9b0b8638f332b3cda6beed7f2ea186ccc1a"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "c8fdaa5ff301823fc4ac1605b203b8520abcad42de400a3aa348db141e50aa90"
+  },
+  {
+    "check_id": "no_secrets_patterns",
+    "title": "Potential secret: Generic token",
+    "severity": "must",
+    "status": "fail",
+    "evidence": "pkg/link/session_link_test.go:150 \u2014 matched pattern 'Generic token'",
+    "suggested_fix": "Remove the secret, rotate it immediately, and use environment variables or a secrets manager instead. If this is a known test/mock value, use the acknowledgement system: run 'oss-readiness acknowledge' with the finding's fingerprint to record it as a known false positive.",
+    "can_autofix": false,
+    "details": {
+      "matched_text_hash": "cbee78dbfb047ae01b32356ec3a1e4733f3d85c95f60e42c2f4ba2b23e0b876b"
+    },
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "08b14ab0a4b0ff4dfd54723809cede08e10457d2f935d18edb19aec335c55d70"
+  },
+  {
+    "check_id": "file_license_headers",
+    "title": "License header missing in 1 sampled file(s)",
+    "severity": "should",
+    "status": "warn",
+    "evidence": "Files without header (sample): docs/site/src/content.config.ts",
+    "suggested_fix": "Add header: \"Unless explicitly stated otherwise all files in this repository are licensed under the $license License. This product includes software developed at Datadog (https://www.datadoghq.com/) Copyright $year Datadog, Inc.\"",
+    "can_autofix": true,
+    "details": {},
+    "acknowledged": false,
+    "acknowledgement_reason": "",
+    "fingerprint": "d36fbe12565d288f6d55f6dec57f10311784605e77f500a13fa59280abbf19f5"
+  }
+]

@@ -1,0 +1,55 @@
+2026-11-17 21:02:27,274 [INFO] oss_readiness.engine: Run directory: /home/bits/go/src/github.com/DataDog/pg-proxy/.oss-readiness/logs/pg-proxy-20261117T210227Z
+2026-11-17 21:02:27,289 [INFO] oss_readiness.engine: Running check: license_file_present [deterministic]
+2026-11-17 21:02:27,290 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,290 [INFO] oss_readiness.engine: Running check: license_file_nonempty [deterministic]
+2026-11-17 21:02:27,291 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,291 [INFO] oss_readiness.engine: Running check: license_text_matches_official [deterministic]
+2026-11-17 21:02:27,292 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,292 [INFO] oss_readiness.engine: Running check: notice_file_present [deterministic]
+2026-11-17 21:02:27,292 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,292 [INFO] oss_readiness.engine: Running check: license_3rdparty_csv_present [deterministic]
+2026-11-17 21:02:27,292 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,292 [INFO] oss_readiness.engine: Running check: license_3rdparty_csv_format [deterministic]
+2026-11-17 21:02:27,293 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,294 [INFO] oss_readiness.engine: Running check: license_3rdparty_csv_copyright [deterministic]
+2026-11-17 21:02:27,295 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,295 [INFO] oss_readiness.engine: Running check: license_3rdparty_csv_license_values [deterministic]
+2026-11-17 21:02:27,296 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,296 [INFO] oss_readiness.engine: Running check: readme_present [deterministic]
+2026-11-17 21:02:27,296 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,296 [INFO] oss_readiness.engine: Running check: readme_nonempty [deterministic]
+2026-11-17 21:02:27,297 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,297 [INFO] oss_readiness.engine: Running check: contributing_present [deterministic]
+2026-11-17 21:02:27,298 [INFO] oss_readiness.engine:   → warn
+2026-11-17 21:02:27,298 [INFO] oss_readiness.engine: Running check: no_code_of_conduct [deterministic]
+2026-11-17 21:02:27,300 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,300 [INFO] oss_readiness.engine: Running check: pr_template_present [deterministic]
+2026-11-17 21:02:27,300 [INFO] oss_readiness.engine:   → warn
+2026-11-17 21:02:27,301 [INFO] oss_readiness.engine: Running check: issue_template_present [deterministic]
+2026-11-17 21:02:27,301 [INFO] oss_readiness.engine:   → warn
+2026-11-17 21:02:27,301 [INFO] oss_readiness.engine: Running check: no_broken_md_crosslinks [deterministic]
+2026-11-17 21:02:27,302 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,302 [INFO] oss_readiness.engine: Running check: no_code_of_conduct_references [deterministic]
+2026-11-17 21:02:27,587 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:27,587 [INFO] oss_readiness.engine: Running check: no_secrets_patterns [deterministic]
+2026-11-17 21:02:27,908 [INFO] oss_readiness.engine:   → fail
+2026-11-17 21:02:27,908 [INFO] oss_readiness.engine: Running check: no_internal_tokens [deterministic]
+2026-11-17 21:02:28,091 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:28,091 [INFO] oss_readiness.engine: Running check: no_internal_urls [deterministic]
+2026-11-17 21:02:28,326 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:28,327 [INFO] oss_readiness.engine: Running check: no_internal_slack_channels [deterministic]
+2026-11-17 21:02:28,437 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:28,437 [INFO] oss_readiness.engine: Running check: no_internal_jira_links [deterministic]
+2026-11-17 21:02:28,548 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:28,548 [INFO] oss_readiness.engine: Running check: file_license_headers [deterministic]
+2026-11-17 21:02:28,609 [INFO] oss_readiness.engine:   → warn
+2026-11-17 21:02:28,609 [INFO] oss_readiness.engine: Running check: gh_cli_available [tool]
+2026-11-17 21:02:29,340 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:29,340 [INFO] oss_readiness.engine: Running check: license_is_approved [claude]
+2026-11-17 21:02:29,341 [INFO] oss_readiness.engine:   → pass
+2026-11-17 21:02:29,342 [INFO] oss_readiness.engine: Artifacts written to /home/bits/go/src/github.com/DataDog/pg-proxy/.oss-readiness/logs/pg-proxy-20261117T210227Z
+2026-11-17 21:02:29,728 [INFO] oss_readiness.pr: Applied fixer 'add_contributing_template', modified: [PosixPath('/tmp/oss-readiness-fix-nvm1lf_m/pg-proxy/CONTRIBUTING.md')]
+2026-11-17 21:02:29,742 [INFO] oss_readiness.pr: Applied fixer 'add_pr_template', modified: [PosixPath('/tmp/oss-readiness-fix-nvm1lf_m/pg-proxy/.github/PULL_REQUEST_TEMPLATE.md')]
+2026-11-17 21:02:29,756 [INFO] oss_readiness.pr: Applied fixer 'add_issue_template', modified: [PosixPath('/tmp/oss-readiness-fix-nvm1lf_m/pg-proxy/.github/ISSUE_TEMPLATE/bug_report.md')]
+2026-11-17 21:02:29,816 [INFO] oss_readiness.pr: Applied fixer 'add_license_headers', modified: [PosixPath('/tmp/oss-readiness-fix-nvm1lf_m/pg-proxy/docs/site/src/content.config.ts')]
+2026-11-17 21:02:30,815 [INFO] oss_readiness.pr: Dry run: skipping push and PR creation. Staged at: /tmp/oss-readiness-fix-nvm1lf_m/pg-proxy
