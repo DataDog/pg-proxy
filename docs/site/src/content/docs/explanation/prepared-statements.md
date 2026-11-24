@@ -49,6 +49,12 @@ A protocol `Close` removes a named statement from the client's mapping. The back
 
 The session runtime supplies a retention threshold of `100` statements per backend connection. Cleanup happens on release, so this is not a hard cap at every point during a transaction.
 
+## Statement errors and recovery
+
+A `Bind` or statement `Describe` for an unknown client statement returns SQLSTATE `26000`. Reusing an existing client statement name in `Parse` returns `42P05`. Even when PG Proxy detects these errors locally, they fail the backend transaction: earlier writes in the same implicit transaction roll back at `Sync`, and an explicit transaction remains failed until recovery. `Sync` alone does not recover an explicit transaction. Use `ROLLBACK`, or `ROLLBACK TO SAVEPOINT` when a suitable savepoint exists, before continuing work.
+
+As with backend errors in the extended query protocol, messages after the error are ignored until `Sync`. The client connection remains usable after the required recovery.
+
 ## Boundaries
 
 This mechanism handles protocol-level prepared statements. SQL commands such as `PREPARE`, `EXECUTE`, and `DEALLOCATE` sent as query text do not use the same name mapping. Do not rely on SQL-level prepared statements surviving across transactions.

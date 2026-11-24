@@ -44,6 +44,10 @@ type ClientMessageAction struct {
 	// If AfterFlushAction is not nil and FlushPostgres is true, it will first flush all buffered messages to PG and then execute this action.
 	// This is useful for sending ReplyMsgsToClient after processing all previously received messages.
 	AfterFlushAction *ClientMessageAction
+	// AbortTransactionWithError makes PostgreSQL fail the current extended-query
+	// transaction, forwarding this error instead of the internal failure. Pending
+	// replies must be drained first so an earlier backend error takes precedence.
+	AbortTransactionWithError *pgproto3.ErrorResponse
 	// If DiscardUntilSync is true, the Session should proceed to discard all incoming messages from the client until a Sync is received.
 	DiscardUntilSync bool
 	// If RecordNewPreparedStmt is not nil, then on a non-error expected reply, check whether the SessionLink already
@@ -396,15 +400,14 @@ func GetParameterString(msg *pgproto3.Bind) string {
 	return string(bytes.Join(msg.Parameters, []byte(",")))
 }
 
-// NewFlushErrorAction returns a ClientMessageAction that ensures PostgreSQL flushes pending messages
-// before sending an error response to the client.
+// NewFlushErrorAction drains pending replies before failing the backend
+// transaction and returning a locally detected statement error to the client.
 func NewFlushErrorAction(response *pgproto3.ErrorResponse) ClientMessageAction {
 	return ClientMessageAction{
 		ProxyMsgToPg:  &pgproto3.Flush{},
 		FlushPostgres: true,
 		AfterFlushAction: &ClientMessageAction{
-			ReplyMsgsToClient: []pgproto3.BackendMessage{response},
-			DiscardUntilSync:  true,
+			AbortTransactionWithError: response,
 		},
 	}
 }
@@ -420,10 +423,10 @@ func newObservedFlushErrorAction(response *pgproto3.ErrorResponse, err error, ho
 }
 
 func observeErrorAction(action *ClientMessageAction, hooks Hooks) {
-	if action == nil || action.AfterFlushAction == nil || len(action.AfterFlushAction.ReplyMsgsToClient) == 0 {
+	if action == nil || action.AfterFlushAction == nil {
 		return
 	}
-	response, _ := action.AfterFlushAction.ReplyMsgsToClient[0].(*pgproto3.ErrorResponse)
+	response := action.AfterFlushAction.AbortTransactionWithError
 	if response != nil {
 		if hooks.ErrorActionCreated != nil {
 			hooks.ErrorActionCreated(response, nil)

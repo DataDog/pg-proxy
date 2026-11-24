@@ -1033,6 +1033,17 @@ func (s *Session) flushClientConn() error {
 func (s *Session) handleAction(action ClientMessageAction) error {
 	s.setDiscardUntilSync(action.DiscardUntilSync)
 
+	if response := action.AbortTransactionWithError; response != nil {
+		// A deliberately invalid named Parse invokes PostgreSQL's normal error
+		// cleanup without committing an implicit transaction or discarding an
+		// explicit transaction's savepoints. Naming it preserves the client's
+		// unnamed statement; invalid syntax cannot create a cached statement.
+		s.link.Send(&pgproto3.Parse{Name: "pg_proxy_transaction_error", Query: "!"}, query.ParseReply)
+		s.link.Send(&pgproto3.Flush{}, query.NoReply)
+		_, err := s.flushPostgresWithError(response)
+		return err
+	}
+
 	if action.InvalidateUnnamedPreparedStmt {
 		s.invalidateUnnamedStmt()
 	}
@@ -1376,6 +1387,12 @@ func (s *Session) handleDeallocatePreparedStmt(action ClientMessageAction) error
 // iterates through messages that it expected PG to send back to the proxy and handles them accordingly.
 // returns whether Postgres had to discard messages until a Sync was received and whether an error occurred.
 func (s *Session) flushPostgres() (bool, error) {
+	return s.flushPostgresWithError(nil)
+}
+
+// flushPostgresWithError substitutes the local error only after the earlier
+// pipeline has drained successfully and the internal failing Parse is sent.
+func (s *Session) flushPostgresWithError(localError *pgproto3.ErrorResponse) (bool, error) {
 	s.obsVals.traceState.StartTrace(query.ForwardOpName)
 	if s.link == nil {
 		return false, fmt.Errorf("expected non-nil session link to flush")
@@ -1450,6 +1467,15 @@ func (s *Session) flushPostgres() (bool, error) {
 				return discardedUntilSync, &clientDisconnectedError{cause: err}
 			}
 			return discardedUntilSync, fmt.Errorf("error receiving message from linked postgres conn: %w", err)
+		}
+		if backendError, ok := msg.(*pgproto3.ErrorResponse); ok && localError != nil {
+			severity := backendError.SeverityUnlocalized
+			if severity == "" {
+				severity = backendError.Severity
+			}
+			if severity == "ERROR" {
+				msg = localError
+			}
 		}
 		if s.hooks.BackendMessage != nil {
 			s.hooks.BackendMessage(msg)

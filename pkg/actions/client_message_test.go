@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/DataDog/pg-proxy/pkg/classifier"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
@@ -380,6 +381,24 @@ func TestCreateProxyPreparedStmtNameKeepsPairsApart(t *testing.T) {
 		CreateProxyPreparedStmtName("SELECT 12", []uint32{3}))
 	assert.NotEqual(t, CreateProxyPreparedStmtName("SELECT $1", nil),
 		CreateProxyPreparedStmtName("SELECT $1", []uint32{0}), "a declared unspecified type is still declared")
+}
+
+func TestNewFlushErrorAction(t *testing.T) {
+	response := BuildPreparedStatementDoesNotExistErrorResponse("missing")
+	action := NewFlushErrorAction(response)
+	assert.Equal(t, &pgproto3.Flush{}, action.ProxyMsgToPg)
+	assert.True(t, action.FlushPostgres)
+	assert.Empty(t, action.ReplyMsgsToClient, "earlier backend errors take precedence")
+	require.NotNil(t, action.AfterFlushAction)
+	assert.Same(t, response, action.AfterFlushAction.AbortTransactionWithError)
+	assert.Empty(t, action.AfterFlushAction.ReplyMsgsToClient, "error is sent only after the backend fails")
+
+	var observed *pgproto3.ErrorResponse
+	observeErrorAction(&action, Hooks{ErrorActionCreated: func(response *pgproto3.ErrorResponse, err error) {
+		assert.NoError(t, err)
+		observed = response
+	}})
+	assert.Same(t, response, observed)
 }
 
 func TestFindPotentiallyExistingPreparedStatement(t *testing.T) {
