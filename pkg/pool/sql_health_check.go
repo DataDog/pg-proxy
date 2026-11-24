@@ -226,6 +226,8 @@ type SQLHealthChecker struct {
 	prober       SQLHealthProber
 	runWithRetry SQLHealthCheckRunner
 	hooks        SQLHealthCheckHooks
+	probeMu      sync.Mutex
+	activeIPs    map[string]int
 }
 
 // NewSQLHealthChecker constructs a checker. When Prober is nil it uses the dedicated pool
@@ -257,8 +259,16 @@ func (c *SQLHealthChecker) Close() { c.ReleasePools() }
 func (c *SQLHealthChecker) RemoveIP(ip string) { c.pools.RemoveIP(ip) }
 
 // RetainIPs closes dedicated pools for addresses outside the current retained SQL snapshot.
-// The caller must ensure no health check is still using a pool that may be removed.
-func (c *SQLHealthChecker) RetainIPs(ips []string) { c.pools.RetainIPs(ips) }
+// Active probes keep their pools; a later retention pass removes them after completion.
+func (c *SQLHealthChecker) RetainIPs(ips []string) {
+	c.probeMu.Lock()
+	defer c.probeMu.Unlock()
+	keep := slices.Clone(ips)
+	for ip := range c.activeIPs {
+		keep = append(keep, ip)
+	}
+	c.pools.RetainIPs(keep)
+}
 
 // Check probes every IP concurrently and waits for all results. patroniHealth must be a stable
 // comparison snapshot. onResult is called as each IP's post-retry result completes and must not
@@ -304,6 +314,20 @@ func (c *SQLHealthChecker) checkIP(
 	patroniHealthy bool,
 	tags []string,
 ) SQLHealthCheckResult {
+	c.probeMu.Lock()
+	if c.activeIPs == nil {
+		c.activeIPs = make(map[string]int)
+	}
+	c.activeIPs[ip]++
+	c.probeMu.Unlock()
+	defer func() {
+		c.probeMu.Lock()
+		defer c.probeMu.Unlock()
+		c.activeIPs[ip]--
+		if c.activeIPs[ip] == 0 {
+			delete(c.activeIPs, ip)
+		}
+	}()
 	start := time.Now()
 	metricTags := append(slices.Clone(tags), "ip:"+ip)
 	var inRecovery bool

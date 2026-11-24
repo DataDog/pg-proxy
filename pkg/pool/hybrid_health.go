@@ -312,6 +312,12 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	fresh SQLHealthResultsSnapshot,
 	evaluatedAt time.Time,
 ) hybridRoutingDecision {
+	return p.observeSQLRoundWithDetection(candidateIPs, outcome, fresh, evaluatedAt, true)
+}
+
+func (p *hybridHealthPolicy) observeSQLRoundWithDetection(
+	candidateIPs []string, outcome SQLHealthCheckOutcome, fresh SQLHealthResultsSnapshot, evaluatedAt time.Time, recordDetection bool,
+) hybridRoutingDecision {
 	observedAt := fresh.ObservedAt
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -324,9 +330,8 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
 	routingOutcome := p.routingEligibleOutcomeLocked(outcome)
 	fallbackReason, timeoutType := sqlHealthFallback(routingOutcome)
-	if rawFallback, _ := sqlHealthFallback(outcome); rawFallback == "" {
-		downtime := p.recordSQLDowntimeLocked(outcome.PrimaryIPs, observedAt)
-		decision.leaderDetection = p.observeLeaderLocked("sql", outcome.PrimaryIPs, observedAt, downtime)
+	if recordDetection {
+		decision.leaderDetection = p.observeSQLDetectionLocked(outcome, observedAt)
 	}
 	if !p.routingEnabled {
 		return decision
@@ -734,4 +739,19 @@ func (p *hybridHealthPolicy) recordRoutingLeaderLocked(source string, health map
 	}
 	pair := pairs[0]
 	return &LeaderRoutingComparison{NewLeaderIP: pair.ip, Improvement: pair.speedup(), HybridSource: pair.candidateData}
+}
+
+// observeSQLDetection records raw complete-poll timing independently of early routing.
+func (p *hybridHealthPolicy) observeSQLDetection(outcome SQLHealthCheckOutcome, observedAt time.Time) *LeaderDetectionComparison {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.observeSQLDetectionLocked(outcome, observedAt)
+}
+
+func (p *hybridHealthPolicy) observeSQLDetectionLocked(outcome SQLHealthCheckOutcome, observedAt time.Time) *LeaderDetectionComparison {
+	if fallback, _ := sqlHealthFallback(outcome); fallback != "" {
+		return nil
+	}
+	downtime := p.recordSQLDowntimeLocked(outcome.PrimaryIPs, observedAt)
+	return p.observeLeaderLocked("sql", outcome.PrimaryIPs, observedAt, downtime)
 }

@@ -255,9 +255,17 @@ If older SQL evidence cannot replace a Patroni recovery route, shutdown bans
 still mark those IPs unhealthy in the published route. This does not select a
 replacement leader or change the recovery freshness boundary.
 
-Banned IPs remain discovery candidates and continue to be probed. Their results
-do not force SQL fallback, and cached Patroni fallback cannot select them. A
-successful role result from a poll started after the latest observed shutdown
+Banned IPs remain discovery candidates and continue to be probed. With hybrid
+routing enabled, each SQL tick checks eligible IPs separately from banned-IP
+recovery. A credential has at most one recovery poll in flight. Routing waits
+for every eligible IP, but neither the current decision nor its next tick waits
+for banned-IP probes. Raw snapshot comparisons still wait for both parts of
+their original scheduled poll; a late raw comparison cannot replace routing.
+
+Banned results do not force SQL fallback, and cached Patroni fallback cannot
+select them. Recovery can clear a ban as soon as its result finishes, but the
+next routing poll must actually check that newly eligible IP before selecting
+a route. A successful role result from a poll started after the latest observed shutdown
 clears it, provided the current credential evidence contains neither shutdown
 nor conflicting roles for that IP. Cached successes and polls already in flight
 when the ban was observed cannot clear it. Removing an IP from the retained SQL
