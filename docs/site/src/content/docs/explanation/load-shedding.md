@@ -25,6 +25,43 @@ The connection check covers the lifetime of an accepted connection. The backend 
 
 These checks are separate from the configured session and pool limits. A session limit caps the number of connected clients. A pool limit caps the number of backend connections. A load-shedding policy can reject new work before either limit is reached, depending on the signals it uses.
 
+## Client capability
+
+Query enforcement is opt-in per client connection. A client that can safely handle
+query-level SQLSTATE `53000` rejections advertises:
+
+```text
+-c pg_proxy.query_load_shedding=true
+```
+
+Put this inside the PostgreSQL startup `options` parameter, not a standalone
+startup parameter. The built-in server consumes it without forwarding it to
+PostgreSQL. When constructing sessions directly, propagate the parsed option to
+`session.Config.QueryLoadShedding`.
+
+Only the exact value `true` opts in. Missing, `false`, empty, and malformed values
+(including `true!`) opt out. The last occurrence wins, including empty or invalid
+occurrences. The capability is fixed for the lifetime of the connection.
+
+A capable client is a candidate for the backend policy; the capability does not
+enable that policy. Unadvertised clients bypass query admission, even when the
+backend policy rejects work. Workload priority does not imply capability and
+cannot opt a client in. Connection admission still applies independently to all
+clients, including capable clients.
+
+Deploy the capability-aware proxy before enabling client advertisement. Older
+proxies ignore this unknown option, but retain their previous query-admission
+behavior: advertising is not a way to disable an older proxy's enforcement.
+Qualify each public client interface's error recovery separately; sharing a
+PostgreSQL driver is not sufficient. No retry behavior is enabled by this option.
+
+`pg_proxy.sessions.query_shedding` counts sessions by the bounded tag
+`capable:true|false`, allowing adoption and candidate counts to be compared.
+`pg_proxy.sessions.query_shedding_enforced` counts a session only at its first
+actual rejection, while `pg_proxy.messages.load_shedding_rejected` continues to
+count rejected attempts. Candidate counts do not claim that the backend policy
+is enabled; enforcement remains application-owned and may change during a session.
+
 ## Transactions already in progress
 
 The backend check runs before new work starts. Once a session acquires a backend connection, it keeps its admission slot until that connection is released. PG Proxy does not make another load-shedding decision for every statement in the transaction.

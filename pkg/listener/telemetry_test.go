@@ -117,6 +117,10 @@ func TestListenerConnectionAttemptMetrics(t *testing.T) {
 			name: "datadog.pg_proxy.listener.connection_attempt", value: 1,
 			tags: []string{"user:successful", "database:testdb", "client_service_account:successful", "passthrough_user:false", "outcome:successful", "with_dynamic_routing:false"}, rate: 1,
 		},
+		{
+			name: "datadog.pg_proxy.sessions.query_shedding", value: 1,
+			tags: []string{"capable:false"}, rate: 1,
+		},
 	}, metrics.counts)
 }
 

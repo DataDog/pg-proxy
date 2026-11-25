@@ -27,6 +27,11 @@ const (
 	MetricQueries                 = "pg_proxy.messages.queries"
 	MetricQueryParseLatency       = pgproxy.MetricQueryParseLatency
 	MetricLoadSheddingRejected    = "pg_proxy.messages.load_shedding_rejected"
+	// MetricQuerySheddingSessions counts sessions by capability (capable:true|false).
+	// Capable sessions are candidates, not proof that backend enforcement is on.
+	MetricQuerySheddingSessions = "pg_proxy.sessions.query_shedding"
+	// MetricQuerySheddingEnforcedSessions counts each session at its first rejection.
+	MetricQuerySheddingEnforcedSessions = "pg_proxy.sessions.query_shedding_enforced"
 )
 
 // MetricTags carries both the tags sent to DogStatsD and a stable lookup key.

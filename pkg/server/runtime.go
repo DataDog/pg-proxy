@@ -153,6 +153,7 @@ func (r *Runtime) NewSession(cfg listener.SessionConfig[ResolvedStartup]) (liste
 		PostgresMsgBufferSize:    r.cfg.Settings.PostgresMessageBufferSize,
 		PassthroughUser:          cfg.Request.Options.PassthroughUser,
 		Priority:                 cfg.Request.Options.Priority,
+		QueryLoadShedding:        cfg.Request.Options.QueryLoadShedding,
 		ReadStates:               readStates,
 		RandomInt:                r.cfg.RandomInt,
 		AutoPreparedStmtsEnabled: cfg.Request.Options.AutoCachedPreparedStatements,

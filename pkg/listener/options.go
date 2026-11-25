@@ -23,6 +23,7 @@ const (
 	dynamicRoutingOption               = "dynamic_routing"
 	autoCachedPreparedStatementsOption = "auto_cached_prepared_statements"
 	priorityOption                     = "priority"
+	queryLoadSheddingOption            = "query_load_shedding"
 )
 
 // Uses custom options that are consumed by Postgres to use with extensions.
@@ -47,6 +48,11 @@ type SessionOptions struct {
 	// pg_proxy.priority option, or an invalid supplied value, to
 	// pgsession.DefaultPriority.
 	Priority pgsession.Priority
+	// QueryLoadShedding declares that the client can recover from query-level
+	// SQLSTATE 53000 rejections. It does not enable enforcement or affect
+	// connection admission. Only the exact value "true" opts in; absent, false,
+	// empty, and malformed values leave the session ineligible.
+	QueryLoadShedding bool
 }
 
 // ParseSessionOptions parses the PostgreSQL startup "options" parameter.
@@ -63,6 +69,15 @@ func ParseSessionOptions(options string) (SessionOptions, error) {
 	}
 
 	var result SessionOptions
+	// Parse the whole token independently: optionsRegex truncates punctuation
+	// and ignores empty values, which must never accidentally opt a client in.
+	tokens := strings.Fields(unescaped)
+	for i := 1; i < len(tokens); i++ {
+		key, value, _ := strings.Cut(tokens[i], "=")
+		if tokens[i-1] == "-c" && key == "pg_proxy."+queryLoadSheddingOption {
+			result.QueryLoadShedding = value == "true"
+		}
+	}
 	for key, value := range matches {
 		switch key {
 		case dynamicRoutingOption:
@@ -71,6 +86,8 @@ func ParseSessionOptions(options string) (SessionOptions, error) {
 			result.PassthroughUser = parseBoolOrFalse(key, value)
 		case autoCachedPreparedStatementsOption:
 			result.AutoCachedPreparedStatements = parseBoolOrFalse(key, value)
+		case queryLoadSheddingOption:
+			// Already parsed above, including empty/malformed last occurrences.
 		case priorityOption:
 			result.Priority = parsePriorityOrDefault(unescaped, key, value)
 		default:

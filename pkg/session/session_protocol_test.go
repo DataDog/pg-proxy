@@ -8,6 +8,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -132,6 +133,73 @@ func TestClientForwarding_DeliversBufferedMessagesBeforeError(t *testing.T) {
 			assert.Equal("FATAL", errResp.Severity)
 		}
 	})
+}
+
+func TestQuerySheddingRequiresCapability(t *testing.T) {
+	for _, capable := range []bool{false, true} {
+		t.Run(fmt.Sprintf("capable_%t", capable), func(t *testing.T) {
+			metrics := &recordingSessionMetrics{}
+			_, client, postgres, backend, closeSession := newRunningTestSessionWithBackend(t, func(cfg *Config) {
+				cfg.QueryLoadShedding = capable
+				cfg.Metrics = metrics
+			})
+			defer closeSession()
+			backend.loadShedder.active.Store(true)
+			attempts := 1
+			if capable {
+				attempts = 2
+			}
+			for attempt := 0; attempt < attempts; attempt++ {
+				client.Send(&pgproto3.Query{String: "SELECT 1"})
+				require.NoError(t, client.Flush())
+				if capable {
+					msg, err := client.Receive()
+					require.NoError(t, err)
+					require.Equal(t, "53000", msg.(*pgproto3.ErrorResponse).Code)
+				} else {
+					msg, err := postgres.Receive()
+					require.NoError(t, err)
+					require.Equal(t, &pgproto3.Query{String: "SELECT 1"}, msg)
+					postgres.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+					require.NoError(t, postgres.Flush())
+				}
+				msg, err := client.Receive()
+				require.NoError(t, err)
+				require.Equal(t, &pgproto3.ReadyForQuery{TxStatus: 'I'}, msg)
+			}
+			if capable {
+				// The same connection recovers when policy permits the next checkout.
+				backend.loadShedder.active.Store(false)
+				client.Send(&pgproto3.Query{String: "SELECT 2"})
+				require.NoError(t, client.Flush())
+				_, err := postgres.Receive()
+				require.NoError(t, err)
+				postgres.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
+				require.NoError(t, postgres.Flush())
+				msg, err := client.Receive()
+				require.NoError(t, err)
+				require.Equal(t, &pgproto3.ReadyForQuery{TxStatus: 'I'}, msg)
+			}
+			closeSession() // synchronize before inspecting session metrics
+			var sessions, enforced int
+			for _, call := range metrics.counts {
+				switch call.name {
+				case MetricQuerySheddingSessions:
+					sessions++
+					require.Equal(t, []string{fmt.Sprintf("capable:%t", capable)}, call.tags)
+				case MetricQuerySheddingEnforcedSessions:
+					enforced++
+				}
+			}
+			require.Equal(t, 1, sessions)
+			if capable {
+				require.Equal(t, 1, enforced, "count sessions, not rejected queries")
+			} else {
+				require.Zero(t, enforced)
+				require.Zero(t, backend.loadShedder.runCount.Load())
+			}
+		})
+	}
 }
 
 func TestSessionLoadShedding(t *testing.T) {

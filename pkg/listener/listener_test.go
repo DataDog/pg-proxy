@@ -342,16 +342,21 @@ func TestLoadShedding(t *testing.T) {
 	require.True(t, ok)
 
 	shedder.active.Store(true)
-	client, frontend = connect(t)
-	defer client.Close()
-	frontend.Send(startup)
-	require.NoError(t, frontend.Flush())
-	message, err = frontend.Receive()
-	require.NoError(t, err)
-	response, ok := message.(*pgproto3.ErrorResponse)
-	require.True(t, ok)
-	assert.Equal(t, "FATAL", response.Severity)
-	assert.Equal(t, pgerrcode.ConnectionFailure, response.Code)
+	for _, capability := range []string{"", "true", "false", "malformed"} {
+		t.Run("capability_"+capability, func(t *testing.T) {
+			client, frontend := connect(t)
+			defer client.Close()
+			startup.Parameters["options"] = "-c pg_proxy.query_load_shedding=" + capability
+			frontend.Send(startup)
+			require.NoError(t, frontend.Flush())
+			message, err := frontend.Receive()
+			require.NoError(t, err)
+			response, ok := message.(*pgproto3.ErrorResponse)
+			require.True(t, ok)
+			assert.Equal(t, "FATAL", response.Severity)
+			assert.Equal(t, pgerrcode.ConnectionFailure, response.Code)
+		})
+	}
 }
 
 func TestLoadSheddingConnectionRejectionSSL(t *testing.T) {

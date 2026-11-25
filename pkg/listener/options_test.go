@@ -10,9 +10,44 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	pgsession "github.com/DataDog/pg-proxy/pkg/session"
 )
+
+func TestQueryLoadSheddingCapability(t *testing.T) {
+	const option = "-c pg_proxy.query_load_shedding"
+	for _, tc := range []struct {
+		name, input string
+		want        bool
+	}{
+		{"legacy", "", false},
+		{"aware", option + "=true", true},
+		{"unaware", option + "=false", false},
+		{"missing value", option + "=", false},
+		{"missing equals", option, false},
+		{"malformed", option + "=yes", false},
+		{"numeric", option + "=1", false},
+		{"uppercase", option + "=TRUE", false},
+		{"punctuation", option + "=true.invalid", false},
+		{"last false", option + "=true " + option + "=false", false},
+		{"last empty", option + "=true " + option + "=", false},
+		{"last missing", option + "=true " + option, false},
+		{"last malformed", option + "=true " + option + "=true!", false},
+		{"last true", option + "=false " + option + "=true", true},
+		{"priority is not capability", "-c pg_proxy.priority=0", false},
+		{"distinct priority", option + "=true -c pg_proxy.priority=5", true},
+		{"similar name", "-c pg_proxy.query_load_shedding_extra=true", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, input := range []string{tc.input, url.QueryEscape(tc.input)} {
+				opts, err := ParseSessionOptions(input)
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, opts.QueryLoadShedding)
+			}
+		})
+	}
+}
 
 func TestParseSessionOptions_ErrorCases(t *testing.T) {
 	options, err := ParseSessionOptions("abc%xy")

@@ -17,6 +17,7 @@ Place these arguments inside the PostgreSQL startup `options` parameter using th
 | --- | --- | --- |
 | `pg_proxy.dynamic_routing` | `false` | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
 | `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. Cached statements are not classified, so extended-protocol reads use the main backend. See [Read routing](../../../explanation/read-routing/#classifying-work). |
+| `pg_proxy.query_load_shedding` | `false` | Declares client support for query-level `53000` recovery. Only `true` opts in, and backend policy must still enable enforcement. Does not affect connection admission or workload priority. |
 
 These values are read during connection startup. Reconnect to change them. A routing option does not create read replicas; configure them in the proxy configuration file. See [Read routing](../../../explanation/read-routing/).
 
@@ -46,9 +47,10 @@ psql 'postgres://postgres@127.0.0.1:5432/local_db?sslmode=disable&connect_timeou
 
 ## Parsing and invalid values
 
-- Use `true` or `false` for boolean values. Invalid boolean tokens that reach the boolean parser produce a warning and resolve to `false`.
-- If a boolean option appears more than once, the last occurrence that the parser matches wins, even when its value is invalid or truncated: `-c pg_proxy.dynamic_routing=true -c pg_proxy.dynamic_routing=maybe` sets the option to `false`. An occurrence the parser does not match, such as one with an empty value, is ignored, so an earlier value stays. Avoid repeating keys.
-- Boolean values can contain only ASCII letters, digits, `_`, and `$`. Parsing of a value stops at any other character. `tru-e` is read as `tru`, which is not a valid boolean, so the option is `false` and an `invalid bool` warning is logged. Truncation can also produce a valid value: `true-x` is read as `true`.
+- `pg_proxy.query_load_shedding` is a strict capability: only the complete token `true` opts in. Missing, `false`, empty, and malformed values opt out. The last occurrence wins, including an empty value or a key with no `=`. Unlike the older boolean options below, punctuation is never truncated into a valid opt-in.
+- For the other boolean options, use `true` or `false`. Invalid boolean tokens that reach the boolean parser produce a warning and resolve to `false`.
+- If another boolean option appears more than once, the last occurrence that the parser matches wins, even when its value is invalid or truncated: `-c pg_proxy.dynamic_routing=true -c pg_proxy.dynamic_routing=maybe` sets the option to `false`. An occurrence the parser does not match, such as one with an empty value, is ignored, so an earlier value stays. Avoid repeating keys.
+- The older boolean options' values can contain only ASCII letters, digits, `_`, and `$`. Parsing of a value stops at any other character. `tru-e` is read as `tru`, which is not a valid boolean, so the option is `false` and an `invalid bool` warning is logged. Truncation can also produce a valid value: `true-x` is read as `true`.
 - `pg_proxy.priority` is used only by a query-level load shedder (`backend.Config.LoadShedder`) in an application that embeds the library; the connection-level `server.Config.LoadShedder` does not receive it. It is parsed differently: the proxy reads the value up to the next whitespace and uses the last occurrence, even an empty one after a valid one. If that value is not an integer from `0` (highest priority) to `5` (lowest), such as `1-5`, the proxy uses the default, `3`, and logs an `invalid priority` warning. If no occurrence has a value that starts with a letter, digit, `_`, or `$` (for example `-c pg_proxy.priority=-1`, or only an empty value), the option is ignored without that warning, and the default applies.
 - Unknown matched `pg_proxy.*` keys are warned about and ignored. Nonmatching option text is not interpreted as a proxy option. Malformed percent-encoding causes startup to fail.
 
