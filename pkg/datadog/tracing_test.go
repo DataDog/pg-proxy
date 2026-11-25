@@ -48,3 +48,49 @@ func TestSpanSampled(t *testing.T) {
 		require.False(t, root.(pgproxy.SamplingReporter).Sampled())
 	})
 }
+
+func TestSpanDefaultsAndSQLCommentParent(t *testing.T) {
+	const comment = "/*traceparent='00-0000000000000000000000000000002a-000000000000000b-01'*/"
+	for _, tc := range []struct {
+		name       string
+		sql        string
+		wantParent bool
+	}{
+		{name: "empty"},
+		{name: "no comment", sql: "SELECT 'traceparent'"},
+		{name: "ordinary comment", sql: "SELECT 1 /*ordinary comment*/"},
+		{name: "malformed parent", sql: "SELECT 1 /*traceparent='invalid'*/"},
+		{name: "leading parent", sql: comment + " SELECT 1", wantParent: true},
+		{name: "embedded parent", sql: "SELECT " + comment + " 1", wantParent: true},
+		{name: "trailing parent after ordinary comment", sql: "/*ordinary comment*/ SELECT 1 " + comment, wantParent: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mt := mocktracer.Start()
+			defer mt.Stop()
+			tracing := proxydatadog.Tracer{}
+			require.Equal(t, tc.wantParent, tracing.HasQueryContext(tc.sql))
+			root, propagated := tracing.StartRoot("query", tc.sql)
+			require.Equal(t, tc.wantParent, propagated)
+			child := root.StartChild("child")
+			child.Finish(nil)
+			root.Finish(nil)
+
+			spans := mt.FinishedSpans()
+			require.Len(t, spans, 2)
+			gotChild, gotRoot := spans[0], spans[1]
+			require.Equal(t, gotRoot.SpanID(), gotChild.ParentID())
+			if tc.wantParent {
+				require.Equal(t, uint64(11), gotRoot.ParentID())
+				require.Equal(t, uint64(42), gotChild.TraceID())
+			} else {
+				require.Zero(t, gotRoot.ParentID())
+			}
+			for _, span := range spans {
+				require.Equal(t, ext.SpanKindServer, span.Tag(ext.SpanKind))
+				require.Equal(t, "postgres", span.Tag(ext.DBSystem))
+			}
+			require.Equal(t, tc.sql, gotRoot.Tag(ext.DBStatement))
+			require.Nil(t, gotChild.Tag(ext.DBStatement), "root query must not mutate the shared options")
+		})
+	}
+}

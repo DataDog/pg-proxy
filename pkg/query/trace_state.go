@@ -301,8 +301,13 @@ func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, described
 }
 
 func (t *TraceState) FinishTrace(errs ...error) {
-	messages := t.getMessages()
-	t.trace = finishSpan(t.trace, messages, t.rowsNumber, t.rowsSize, errs...)
+	if span := t.trace; span != nil {
+		if reporter, ok := span.(pgproxy.RecordingReporter); !ok || reporter.IsRecording() {
+			t.addDiagnosticTags(span)
+		}
+		finishSpan(span, errs...)
+		t.trace = nil
+	}
 	t.clearMessages()
 	t.rowsSize = 0
 	t.rowsNumber = 0
@@ -314,33 +319,50 @@ func (t *TraceState) FinishRootTrace(errs ...error) {
 	if t.bindParams.Recorded() {
 		t.bindParams.Render(t.rootTrace.SetTag)
 	}
-	t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)
+	finishSpan(t.rootTrace, errs...)
+	t.rootTrace = nil
 
 	t.rootQuery = ""
 	t.isBatch = false
 	t.usingFullPropagation = false
 }
 
-func finishSpan(span pgproxy.Span, messages []string, rowsNumber int, rowsTotalSize int, errs ...error) pgproxy.Span {
-	if span == nil {
-		return nil
-	}
-
-	if len(messages) > 0 {
+func (t *TraceState) addDiagnosticTags(span pgproxy.Span) {
+	if messages := t.getMessages(); len(messages) > 0 {
 		span.SetTag("messages", strings.Join(messages, ", "))
 	}
 
-	if rowsTotalSize > 0 {
-		span.SetTag("rowsReturned/Affected", rowsNumber)
-		span.SetTag("rowsTotalSize", humanize.Bytes(uint64(rowsTotalSize)))
+	if t.rowsSize > 0 {
+		span.SetTag("rowsReturned/Affected", t.rowsNumber)
+		span.SetTag("rowsTotalSize", formatRowSize(t.rowsSize))
 	}
+}
 
+// Common small replies can reuse their formatted size across spans.
+var smallRowSizes = func() [256]string {
+	var sizes [256]string
+	for size := range sizes {
+		sizes[size] = humanize.Bytes(uint64(size))
+	}
+	return sizes
+}()
+
+func formatRowSize(size int) string {
+	if size < len(smallRowSizes) {
+		return smallRowSizes[size]
+	}
+	return humanize.Bytes(uint64(size))
+}
+
+func finishSpan(span pgproxy.Span, errs ...error) {
+	if span == nil {
+		return
+	}
 	if containsOnlyBenignEOF(errs...) {
 		span.Finish(nil)
 	} else {
 		span.Finish(errors.Join(errs...))
 	}
-	return nil
 }
 
 func containsOnlyBenignEOF(errs ...error) bool {

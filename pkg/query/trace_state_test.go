@@ -6,11 +6,13 @@
 package query
 
 import (
+	"errors"
 	"fmt"
 	"reflect"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
 )
@@ -112,6 +114,58 @@ func TestTraceStateSampled(t *testing.T) {
 		if got := traceState.Sampled(); got != testCase.want {
 			t.Fatalf("%s: Sampled() = %v, want %v", testCase.name, got, testCase.want)
 		}
+	}
+}
+
+type diagnosticSpan struct {
+	pgproxy.Span
+	recording bool
+	finished  bool
+	err       error
+	tags      map[string]any
+}
+
+func (s *diagnosticSpan) Sampled() bool { return false }
+
+func (s *diagnosticSpan) IsRecording() bool { return s.recording }
+
+func (s *diagnosticSpan) SetTag(key string, value any) { s.tags[key] = value }
+
+func (s *diagnosticSpan) Finish(err error) {
+	s.finished = true
+	s.err = err
+}
+
+func TestFinishTraceDiagnosticTags(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		recording bool
+		size      int
+		wantSize  string
+	}{
+		{name: "unsampled but recording", recording: true, size: 15, wantSize: "15 B"},
+		{name: "large row bypasses cache", recording: true, size: 2500, wantSize: "2.5 kB"},
+		{name: "non-recording", size: 15},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			span := &diagnosticSpan{recording: tc.recording, tags: make(map[string]any)}
+			state := &TraceState{rootTrace: span, trace: span}
+			state.AddMessage(&pgproto3.Query{})
+			state.AddForwarded(&pgproto3.DataRow{}, tc.size)
+			state.AddMessage(&pgproto3.CommandComplete{})
+			err := errors.New("backend error")
+			state.FinishTrace(err)
+
+			require.True(t, span.finished)
+			require.ErrorIs(t, span.err, err)
+			if tc.recording {
+				require.Equal(t, "*pgproto3.Query, *pgproto3.CommandComplete", span.tags["messages"])
+				require.Equal(t, 1, span.tags["rowsReturned/Affected"])
+				require.Equal(t, tc.wantSize, span.tags["rowsTotalSize"])
+			} else {
+				require.Empty(t, span.tags)
+			}
+		})
 	}
 }
 

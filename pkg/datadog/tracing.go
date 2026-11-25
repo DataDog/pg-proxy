@@ -9,6 +9,7 @@ package datadog
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/ext"
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
@@ -19,26 +20,29 @@ import (
 // The application must start and stop the Datadog tracer.
 type Tracer struct{}
 
-func options() []tracer.StartSpanOption {
-	return []tracer.StartSpanOption{tracer.Tag(ext.SpanKind, ext.SpanKindServer), tracer.Tag(ext.DBSystem, "postgres")}
-}
+// WithStartSpanConfig can share its tag map when it is the only tag option.
+// Apply per-query tags first so they are written to a separate map.
+var baseSpanOptions = tracer.WithStartSpanConfig(&tracer.StartSpanConfig{
+	Tags: map[string]any{ext.SpanKind: ext.SpanKindServer, ext.DBSystem: "postgres"},
+})
 
 func (Tracer) StartRoot(operation, sql string) (pgproxy.Span, bool) {
-	opts := append(options(), tracer.Tag(ext.DBStatement, sql))
-	propagated := false
-	if sql != "" {
+	statement := tracer.Tag(ext.DBStatement, sql)
+	if strings.Contains(sql, "/*") {
 		carrier := tracer.SQLCommentCarrier{Query: sql}
 		if parent, err := carrier.Extract(); parent != nil {
-			opts = append(opts, tracer.WithStartSpanConfig(&tracer.StartSpanConfig{Parent: parent}))
-			propagated = true
+			return span{tracer.StartSpan(operation, statement, baseSpanOptions, tracer.ChildOf(parent))}, true
 		} else if !errors.Is(err, tracer.ErrSpanContextNotFound) {
 			pgproxy.Logger().Error("extracting trace comment from query", "query", sql, "error", err)
 		}
 	}
-	return span{tracer.StartSpan(operation, opts...)}, propagated
+	return span{tracer.StartSpan(operation, statement, baseSpanOptions)}, false
 }
 
 func (Tracer) HasQueryContext(sql string) bool {
+	if !strings.Contains(sql, "/*") {
+		return false
+	}
 	carrier := tracer.SQLCommentCarrier{Query: sql}
 	parent, _ := carrier.Extract()
 	return parent != nil
@@ -51,8 +55,13 @@ func (Tracer) WarnNamedPreparedStatement(name, sql, service string) {
 type span struct{ span *tracer.Span }
 
 func (s span) StartChild(operation string) pgproxy.Span {
-	return span{s.span.StartChild(operation, options()...)}
+	if s.span == nil {
+		return s
+	}
+	return span{tracer.StartSpan(operation, baseSpanOptions, tracer.ChildOf(s.span.Context()))}
 }
+
+func (s span) IsRecording() bool            { return s.span != nil }
 func (s span) SetTag(key string, value any) { s.span.SetTag(key, value) }
 func (s span) Finish(err error) {
 	if err == nil {

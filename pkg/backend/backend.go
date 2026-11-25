@@ -74,6 +74,7 @@ type Runtime struct {
 	selector            *PoolSelector
 	parameterStatuses   map[string]string
 	clusterName         string
+	clusterMetricTag    string
 	primaryDatabaseName string
 	sessionsWaiting     atomic.Int32
 	stopExportStats     chan struct{}
@@ -115,6 +116,7 @@ func New(cfg Config) *Runtime {
 		},
 		parameterStatuses:   cfg.ParameterStatuses,
 		clusterName:         cfg.ClusterName,
+		clusterMetricTag:    "database_cluster:" + cfg.ClusterName,
 		primaryDatabaseName: cfg.PrimaryDatabaseName,
 		stopExportStats:     make(chan struct{}),
 		fallbackRateLimiter: rate.NewLimiter(rate.Limit(replicaFallbackRateLimit), replicaFallbackRateBurst),
@@ -154,7 +156,7 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 
 	// Own the tags: link setup appends cluster/routing information, while the
 	// portable session keeps its base metric tags for the rest of its lifetime.
-	sessionLinkTags := buildSessionLinkMetricTags(request.MetricTags, r.clusterName, request.ForReadQuery)
+	sessionLinkTags := r.buildSessionLinkMetricTags(request.MetricTags, request.ForReadQuery)
 
 	// Note that if dynamic routing acquires a replica conn for a qualified parse,
 	// then all subsequent queries in the tx will be forwarded to the replica
@@ -202,11 +204,14 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	return backendLink, nil
 }
 
-func buildSessionLinkMetricTags(baseTags []string, clusterName string, forRead bool) []string {
-	return append(append([]string(nil), baseTags...),
-		fmt.Sprintf("database_cluster:%s", clusterName),
-		fmt.Sprintf("read:%t", forRead),
-	)
+func (r *Runtime) buildSessionLinkMetricTags(baseTags []string, forRead bool) []string {
+	readTag := "read:false"
+	if forRead {
+		readTag = "read:true"
+	}
+	tags := make([]string, 0, len(baseTags)+2)
+	tags = append(tags, baseTags...)
+	return append(tags, r.clusterMetricTag, readTag)
 }
 
 // AcquireConnection returns a connection and whether it came from a replica pool.
