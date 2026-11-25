@@ -7,6 +7,7 @@ package listener
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -27,13 +28,15 @@ func TestQueryLoadSheddingCapability(t *testing.T) {
 		{"missing value", option + "=", false},
 		{"missing equals", option, false},
 		{"malformed", option + "=yes", false},
-		{"numeric", option + "=1", false},
-		{"uppercase", option + "=TRUE", false},
-		{"punctuation", option + "=true.invalid", false},
+		{"numeric", option + "=1", true},
+		{"uppercase", option + "=TRUE", true},
+		{"punctuation truncated to true", option + "=true.invalid", true},
+		{"punctuation truncated to invalid", option + "=tru-e", false},
 		{"last false", option + "=true " + option + "=false", false},
-		{"last empty", option + "=true " + option + "=", false},
-		{"last missing", option + "=true " + option, false},
-		{"last malformed", option + "=true " + option + "=true!", false},
+		{"last empty ignored", option + "=true " + option + "=", true},
+		{"last missing ignored", option + "=true " + option, true},
+		{"last punctuation truncated", option + "=true " + option + "=true!", true},
+		{"last invalid boolean", option + "=true " + option + "=maybe", false},
 		{"last true", option + "=false " + option + "=true", true},
 		{"priority is not capability", "-c pg_proxy.priority=0", false},
 		{"distinct priority", option + "=true -c pg_proxy.priority=5", true},
@@ -44,6 +47,11 @@ func TestQueryLoadSheddingCapability(t *testing.T) {
 				opts, err := ParseSessionOptions(input)
 				require.NoError(t, err)
 				assert.Equal(t, tc.want, opts.QueryLoadShedding)
+
+				// Keep capability parsing aligned with the existing boolean options.
+				existing, err := ParseSessionOptions(strings.ReplaceAll(input, queryLoadSheddingOption, dynamicRoutingOption))
+				require.NoError(t, err)
+				assert.Equal(t, existing.DynamicRoutingEnabled, opts.QueryLoadShedding)
 			}
 		})
 	}

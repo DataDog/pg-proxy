@@ -34,7 +34,11 @@ func TestQueryCapabilityStartupAndPGXRecovery(t *testing.T) {
 	}{
 		{"old client", "", false},
 		{"unaware", "-c pg_proxy.query_load_shedding=false", false},
-		{"malformed", "-c pg_proxy.query_load_shedding=true!", false},
+		{"invalid boolean", "-c pg_proxy.query_load_shedding=maybe", false},
+		{"punctuation truncated", "-c pg_proxy.query_load_shedding=true!", true},
+		{"numeric boolean", "-c pg_proxy.query_load_shedding=1", true},
+		{"uppercase boolean", "-c pg_proxy.query_load_shedding=TRUE", true},
+		{"last empty ignored", "-c pg_proxy.query_load_shedding=true -c pg_proxy.query_load_shedding=", true},
 		{"missing value", "-c pg_proxy.query_load_shedding=", false},
 		{"aware", "-c pg_proxy.query_load_shedding=true", true},
 		{"priority alone", "-c pg_proxy.priority=0", false},

@@ -50,8 +50,8 @@ type SessionOptions struct {
 	Priority pgsession.Priority
 	// QueryLoadShedding declares that the client can recover from query-level
 	// SQLSTATE 53000 rejections. It does not enable enforcement or affect
-	// connection admission. Only the exact value "true" opts in; absent, false,
-	// empty, and malformed values leave the session ineligible.
+	// connection admission. It uses the same parsing rules as the other boolean
+	// session options and defaults to false.
 	QueryLoadShedding bool
 }
 
@@ -69,15 +69,6 @@ func ParseSessionOptions(options string) (SessionOptions, error) {
 	}
 
 	var result SessionOptions
-	// Parse the whole token independently: optionsRegex truncates punctuation
-	// and ignores empty values, which must never accidentally opt a client in.
-	tokens := strings.Fields(unescaped)
-	for i := 1; i < len(tokens); i++ {
-		key, value, _ := strings.Cut(tokens[i], "=")
-		if tokens[i-1] == "-c" && key == "pg_proxy."+queryLoadSheddingOption {
-			result.QueryLoadShedding = value == "true"
-		}
-	}
 	for key, value := range matches {
 		switch key {
 		case dynamicRoutingOption:
@@ -87,7 +78,7 @@ func ParseSessionOptions(options string) (SessionOptions, error) {
 		case autoCachedPreparedStatementsOption:
 			result.AutoCachedPreparedStatements = parseBoolOrFalse(key, value)
 		case queryLoadSheddingOption:
-			// Already parsed above, including empty/malformed last occurrences.
+			result.QueryLoadShedding = parseBoolOrFalse(key, value)
 		case priorityOption:
 			result.Priority = parsePriorityOrDefault(unescaped, key, value)
 		default:

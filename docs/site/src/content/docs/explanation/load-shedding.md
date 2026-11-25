@@ -39,9 +39,10 @@ startup parameter. The built-in server consumes it without forwarding it to
 PostgreSQL. When constructing sessions directly, propagate the parsed option to
 `session.Config.QueryLoadShedding`.
 
-Only the exact value `true` opts in. Missing, `false`, empty, and malformed values
-(including `true!`) opt out. The last occurrence wins, including empty or invalid
-occurrences. The capability is fixed for the lifetime of the connection.
+This option uses the same boolean parsing rules as the other session options.
+It defaults to `false`. See [Parsing and invalid values](../../reference/configuration/client-connections/#parsing-and-invalid-values)
+for duplicate-key and malformed-value behavior. The capability is fixed for the
+lifetime of the connection.
 
 A capable client is a candidate for the backend policy; the capability does not
 enable that policy. Unadvertised clients bypass query admission, even when the
