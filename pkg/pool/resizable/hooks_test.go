@@ -8,178 +8,122 @@ package resizable
 import (
 	"context"
 	"errors"
-	"testing"
-	"time"
-
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/stretchr/testify/assert"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/require"
+	"net"
+	"testing"
 )
 
-func TestHooksReserveBeforeConnectionConstruction(t *testing.T) {
-	gate, err := newResizableGate(1)
-	require.NoError(t, err)
-	config, err := pgxpool.ParseConfig("postgres://localhost/test")
-	require.NoError(t, err)
-	originalTracer := &queryOnlyTracer{}
-	config.ConnConfig.Tracer = originalTracer
-	installHooks(config, gate)
-
-	connConfig := config.ConnConfig.Copy()
-	require.NoError(t, config.BeforeConnect(context.Background(), connConfig))
-	assert.EqualValues(t, 1, gate.getTotalOpenConns())
-	tracer, ok := connConfig.Tracer.(*connectionTracer)
-	require.True(t, ok)
-	assert.Same(t, originalTracer, tracer.query)
-
-	tracer.TraceConnectEnd(context.Background(), pgx.TraceConnectEndData{Err: errors.New("failed")})
-	assert.Eventually(t, func() bool { return gate.getTotalOpenConns() == 0 }, time.Second, time.Millisecond)
-}
-
-func TestHooksPreserveSizingConfiguration(t *testing.T) {
-	gate, err := newResizableGate(10)
-	require.NoError(t, err)
-	config, err := pgxpool.ParseConfig("postgres://localhost/test")
-	require.NoError(t, err)
-	config.MaxConns = 10
-	config.MinConns = 3
-	config.MinIdleConns = 2
-
-	installHooks(config, gate)
-
-	assert.EqualValues(t, 10, config.MaxConns)
-	assert.EqualValues(t, 3, config.MinConns)
-	assert.EqualValues(t, 2, config.MinIdleConns)
-}
-
-func TestHooksRejectConstructionAtLimit(t *testing.T) {
-	gate, err := newResizableGate(1)
-	require.NoError(t, err)
-	require.True(t, gate.tryReserve())
-	config, err := pgxpool.ParseConfig("postgres://localhost/test")
-	require.NoError(t, err)
-	beforeConnectCalled := false
-	config.BeforeConnect = func(context.Context, *pgx.ConnConfig) error {
-		beforeConnectCalled = true
+func TestEffectiveDialerChargesBackendOnly(t *testing.T) {
+	g := testGate(t, 1, nil)
+	cfg := testConfig(t, 4)
+	cfg.MinConns = 2
+	cfg.MinIdleConns = 3
+	dialErr := errors.New("dial failed")
+	calls := 0
+	cfg.BeforeConnect = func(_ context.Context, c *pgx.ConnConfig) error {
+		c.DialFunc = func(context.Context, string, string) (net.Conn, error) {
+			calls++
+			if calls == 1 {
+				return nil, dialErr
+			}
+			a, b := net.Pipe()
+			t.Cleanup(func() { _ = b.Close() })
+			return a, nil
+		}
 		return nil
 	}
-	installHooks(config, gate)
-
-	err = config.BeforeConnect(context.Background(), config.ConnConfig.Copy())
+	installHooks(cfg, g)
+	require.EqualValues(t, 2, cfg.MinConns)
+	require.EqualValues(t, 3, cfg.MinIdleConns)
+	c := cfg.ConnConfig.Copy()
+	ctx := t.Context()
+	require.NoError(t, cfg.BeforeConnect(ctx, c))
+	require.Zero(t, g.getTotalOpenConns())
+	establish := c.Tracer.(pgx.ConnectTracer).TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: c})
+	_, err := c.DialFunc(establish, "tcp", "localhost")
+	require.ErrorIs(t, err, dialErr)
+	require.Zero(t, g.getTotalOpenConns())
+	backend, err := c.DialFunc(establish, "tcp", "localhost")
+	require.NoError(t, err)
+	require.EqualValues(t, 1, g.getTotalOpenConns())
+	_, err = c.DialFunc(establish, "tcp", "localhost")
 	require.ErrorIs(t, err, errVirtualConnectionLimit)
-	assert.EqualError(t, err, "virtual connection limit reached")
-	assert.False(t, beforeConnectCalled)
-	assert.EqualValues(t, 1, gate.getTotalOpenConns())
+	require.Equal(t, 2, calls)
+	control, err := c.DialFunc(ctx, "tcp", "localhost")
+	require.NoError(t, err)
+	require.NoError(t, control.Close())
+	require.EqualValues(t, 1, g.getTotalOpenConns())
+	require.NoError(t, backend.Close())
+	require.ErrorIs(t, backend.Close(), net.ErrClosed)
+	require.Zero(t, g.getTotalOpenConns())
+	require.Zero(t, g.getNumConnsRetiring())
 }
 
-func TestHooksReleaseReservationWhenExistingBeforeConnectFails(t *testing.T) {
-	gate, err := newResizableGate(1)
-	require.NoError(t, err)
-	config, err := pgxpool.ParseConfig("postgres://localhost/test")
-	require.NoError(t, err)
-	expected := errors.New("existing hook failed")
-	config.BeforeConnect = func(context.Context, *pgx.ConnConfig) error { return expected }
-	installHooks(config, gate)
-
-	err = config.BeforeConnect(context.Background(), config.ConnConfig.Copy())
-	require.ErrorIs(t, err, expected)
-	assert.EqualValues(t, 0, gate.getTotalOpenConns())
+type dialChoosingTracer struct {
+	queryOnlyTracer
+	dial pgconn.DialFunc
 }
 
-func TestHooksNotifyOnlyWhenConnectionReturnsIdle(t *testing.T) {
-	gate, err := newResizableGate(1)
-	require.NoError(t, err)
-	config, err := pgxpool.ParseConfig("postgres://localhost/test")
-	require.NoError(t, err)
-	config.AfterRelease = func(*pgx.Conn) bool { return false }
-	installHooks(config, gate)
+func (t *dialChoosingTracer) TraceConnectStart(_ context.Context, data pgx.TraceConnectStartData) context.Context {
+	data.ConnConfig.DialFunc = t.dial
+	return context.Background()
+}
+func (*dialChoosingTracer) TraceConnectEnd(context.Context, pgx.TraceConnectEndData) {}
 
-	signal := gate.getAvailabilitySignal()
-	assert.False(t, config.AfterRelease(nil))
-	assert.False(t, channelClosed(signal))
-
-	config, err = pgxpool.ParseConfig("postgres://localhost/test")
+func TestConnectTracerCanChooseDialerAndContext(t *testing.T) {
+	g := testGate(t, 1, nil)
+	cfg := testConfig(t, 1)
+	local, peer := net.Pipe()
+	defer peer.Close()
+	defer local.Close()
+	cfg.ConnConfig.Tracer = &dialChoosingTracer{dial: func(context.Context, string, string) (net.Conn, error) { return local, nil }}
+	installHooks(cfg, g)
+	c := cfg.ConnConfig.Copy()
+	require.NoError(t, cfg.BeforeConnect(t.Context(), c))
+	a := &admission{Context: t.Context(), gate: g}
+	g.grant(a)
+	ctx := c.Tracer.(pgx.ConnectTracer).TraceConnectStart(a, pgx.TraceConnectStartData{ConnConfig: c})
+	conn, err := c.DialFunc(ctx, "tcp", "unused")
 	require.NoError(t, err)
-	installHooks(config, gate)
-	signal = gate.getAvailabilitySignal()
-	assert.True(t, config.AfterRelease(nil))
-	assert.True(t, channelClosed(signal))
+	require.Same(t, local, conn.(*budgetConn).Conn)
+	require.Zero(t, g.pending)
+	require.EqualValues(t, 1, g.getTotalOpenConns())
+	require.NoError(t, conn.Close())
 }
 
-func TestRecordConnClosedAfterCleanupRetainsCountUntilCleanupCompletes(t *testing.T) {
-	gate, err := newResizableGate(1)
-	require.NoError(t, err)
-	require.True(t, gate.tryReserve())
-	cleanupDone := make(chan struct{})
-
-	recordConnClosedAfterCleanup(gate, cleanupDone, false)
-	assert.Never(t, func() bool { return gate.getTotalOpenConns() == 0 }, 10*time.Millisecond, time.Millisecond)
-	close(cleanupDone)
-	assert.Eventually(t, func() bool { return gate.getTotalOpenConns() == 0 }, time.Second, time.Millisecond)
+type blockedClose struct {
+	net.Conn
+	entered, permit chan struct{}
 }
 
-func TestRecordConnClosedAfterCleanupCompletesRetirement(t *testing.T) {
-	gate, err := newResizableGate(1)
-	require.NoError(t, err)
-	require.True(t, gate.tryReserve())
-	gate.trackClosingConnection()
-	cleanupDone := make(chan struct{})
-
-	recordConnClosedAfterCleanup(gate, cleanupDone, true)
-	assert.EqualValues(t, 1, gate.getTotalOpenConns())
-	assert.EqualValues(t, 1, gate.getNumConnsRetiring())
-	close(cleanupDone)
-	assert.Eventually(t, func() bool {
-		return gate.getTotalOpenConns() == 0 && gate.getNumConnsRetiring() == 0
-	}, time.Second, time.Millisecond)
+func (c *blockedClose) Close() error { close(c.entered); <-c.permit; return c.Conn.Close() }
+func TestClosingSocketStillConsumesBudget(t *testing.T) {
+	g := testGate(t, 2, nil)
+	c := testSocket(t, g)
+	survivor := testSocket(t, g)
+	b := &blockedClose{c.Conn, make(chan struct{}), make(chan struct{})}
+	c.Conn = b
+	done := make(chan error, 1)
+	go func() { done <- c.Close() }()
+	<-b.entered
+	require.NoError(t, g.resize(1))
+	require.False(t, survivor.retire(false))
+	require.ErrorIs(t, g.reserve(nil), errVirtualConnectionLimit)
+	require.EqualValues(t, 2, g.getTotalOpenConns())
+	close(b.permit)
+	require.NoError(t, <-done)
+	require.EqualValues(t, 1, g.getTotalOpenConns())
+	require.Zero(t, g.getNumConnsRetiring())
 }
 
-// Pending pgx closures must count toward a downsize before cleanup finishes.
-func TestPendingClosuresPreventExcessRetirement(t *testing.T) {
-	for _, resizeFirst := range []bool{false, true} {
-		name := "close_before_resize"
-		if resizeFirst {
-			name = "resize_before_close"
-		}
-		t.Run(name, func(t *testing.T) {
-			gate, err := newResizableGate(5)
-			require.NoError(t, err)
-			for i := 0; i < 5; i++ {
-				require.True(t, gate.tryReserve())
-			}
-			config, err := pgxpool.ParseConfig("postgres://localhost/test")
-			require.NoError(t, err)
-			installHooks(config, gate)
-
-			if resizeFirst {
-				require.NoError(t, gate.resize(3))
-			}
-			cleanupDone := make(chan struct{})
-			defer func() {
-				if !channelClosed(cleanupDone) {
-					close(cleanupDone)
-				}
-			}()
-			recordConnClosedAfterCleanup(gate, cleanupDone, false)
-			recordConnClosedAfterCleanup(gate, cleanupDone, false)
-			if !resizeFirst {
-				require.NoError(t, gate.resize(3))
-			}
-
-			assert.EqualValues(t, 5, gate.getTotalOpenConns())
-			assert.EqualValues(t, 2, gate.getNumConnsRetiring())
-			assert.False(t, gate.tryReserve(), "cleanup must still occupy physical capacity")
-			assert.False(t, gate.needsRetirement(), "reconciliation must exclude pending closures")
-			for i := 0; i < 3; i++ {
-				assert.True(t, config.AfterRelease(nil), "keep the remaining healthy connections")
-			}
-
-			close(cleanupDone)
-			assert.Eventually(t, func() bool {
-				return gate.getTotalOpenConns() == 3 && gate.getNumConnsRetiring() == 0
-			}, time.Second, time.Millisecond)
-			assert.False(t, gate.needsRetirement())
-		})
-	}
+func TestBeforeConnectRejectionPreserved(t *testing.T) {
+	g := testGate(t, 1, nil)
+	cfg := testConfig(t, 2)
+	want := errors.New("rejected")
+	cfg.BeforeConnect = func(context.Context, *pgx.ConnConfig) error { return want }
+	installHooks(cfg, g)
+	require.ErrorIs(t, cfg.BeforeConnect(t.Context(), cfg.ConnConfig.Copy()), want)
+	require.Zero(t, g.getTotalOpenConns())
 }
