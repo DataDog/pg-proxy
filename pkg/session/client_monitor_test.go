@@ -42,14 +42,17 @@ func (p *blockingProbe) IsDisconnected() bool {
 	return true
 }
 
-// forEachDisconnectMonitor runs test once with each client-disconnect monitor:
-// the goroutine for each checkout (the default) and the session timer.
+// disconnectMonitorModes lists the client-disconnect monitors: the goroutine
+// for each checkout (the default) and the session timer.
+var disconnectMonitorModes = []struct {
+	name  string
+	timer bool
+}{{"goroutine", false}, {"timer", true}}
+
+// forEachDisconnectMonitor runs test once with each client-disconnect monitor.
 func forEachDisconnectMonitor(t *testing.T, test func(t *testing.T, timer bool)) {
 	t.Helper()
-	for _, mode := range []struct {
-		name  string
-		timer bool
-	}{{"goroutine", false}, {"timer", true}} {
+	for _, mode := range disconnectMonitorModes {
 		t.Run(mode.name, func(t *testing.T) { test(t, mode.timer) })
 	}
 }
@@ -123,6 +126,8 @@ func TestClientMonitorAcquireContextLifetime(t *testing.T) {
 func TestClientMonitorStopWaitsForRunningPoll(t *testing.T) {
 	forEachDisconnectMonitor(t, func(t *testing.T, timer bool) {
 		probe := newBlockingProbe()
+		release := sync.OnceFunc(func() { close(probe.release) })
+		defer release() // a failed check must not leave the poll blocked
 		s := newMonitorTestSession(timer, probe)
 
 		monitor, _ := s.startClientMonitor()
@@ -142,7 +147,7 @@ func TestClientMonitorStopWaitsForRunningPoll(t *testing.T) {
 		case <-time.After(clientMonitorInterval):
 		}
 
-		close(probe.release)
+		release()
 		select {
 		case <-stopped:
 		case <-time.After(2 * time.Second):
@@ -276,17 +281,21 @@ func TestTimerMonitorStartedCallbackSkipsNextCheckout(t *testing.T) {
 	s := newMonitorTestSession(true, probe)
 	_, _ = s.startClientMonitor()
 	m := s.timerMonitor
+	defer m.stop()
 
-	// Hold the lock while the timer fires, so its callback waits for it.
+	// Reproduce a callback that started as the checkout ended: stop the pending
+	// timer and run its callback, which waits for m.mu.
 	m.mu.Lock()
-	time.Sleep(clientMonitorInterval + clientMonitorInterval/2)
+	m.timer.Stop()
+	go m.poll()
 	// End the checkout and start the next one before the callback runs.
 	m.stopLocked()
-	require.True(t, m.skipPoll, "stop must see that the callback already started")
+	skipped := m.skipPoll
 	m.armLocked()
 	probe.triggerDisconnect()
 	armed := time.Now()
 	m.mu.Unlock()
+	require.True(t, skipped, "stop must see that the callback already started")
 
 	// The old callback runs now. It must not handle the disconnect early.
 	time.Sleep(clientMonitorInterval / 4)
@@ -298,16 +307,40 @@ func TestTimerMonitorStartedCallbackSkipsNextCheckout(t *testing.T) {
 	// The next checkout's own poll still finds the disconnect.
 	assert.Eventually(t, s.ClientDisconnected, 2*time.Second, 10*time.Millisecond)
 	assert.ErrorIs(t, context.Cause(m.ctx), ErrClientDisconnected)
-	m.stop()
+}
+
+// TestTimerMonitorDisconnectHandlingCanCloseSession verifies that code the
+// disconnect handling calls, such as a link's ForceClose, can close the session
+// without a deadlock.
+func TestTimerMonitorDisconnectHandlingCanCloseSession(t *testing.T) {
+	probe := &fakeProbe{}
+	s := newMonitorTestSession(true, probe)
+	s.link = &testLink{forceClose: func() bool {
+		s.Close(nil)
+		return true
+	}}
+
+	monitor, acquireCtx := s.startClientMonitor()
+	probe.triggerDisconnect()
+	require.Eventually(t, s.ClientDisconnected, 2*time.Second, 10*time.Millisecond)
+
+	stopped := make(chan struct{})
+	go func() {
+		monitor.stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closing the session during disconnect handling deadlocked")
+	}
+	assert.ErrorIs(t, context.Cause(acquireCtx), ErrClientDisconnected)
 }
 
 // BenchmarkClientMonitorCheckout measures arming and stopping the client
 // monitor for one checkout that ends before the first poll, the common case.
 func BenchmarkClientMonitorCheckout(b *testing.B) {
-	for _, mode := range []struct {
-		name  string
-		timer bool
-	}{{"goroutine", false}, {"timer", true}} {
+	for _, mode := range disconnectMonitorModes {
 		b.Run(mode.name, func(b *testing.B) {
 			s := newMonitorTestSession(mode.timer, &fakeProbe{})
 			b.ReportAllocs()

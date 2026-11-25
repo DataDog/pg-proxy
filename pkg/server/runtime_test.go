@@ -162,6 +162,22 @@ func TestRuntimeSessionUsesResolvedBackendAndAuthenticatedIdentity(t *testing.T)
 	assert.True(t, active.(*session.Session).AutoPreparedStmtsEnabled)
 }
 
+// Both disconnect monitors behave the same, so only this test catches a session
+// that ignores Settings.ClientDisconnectTimer.
+func TestRuntimePassesClientDisconnectTimer(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		runtime, _ := newRuntimeForTest()
+		runtime.cfg.Settings.ClientDisconnectTimer = enabled
+		resolved, err := runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})
+		require.NoError(t, err)
+		created, err := runtime.NewSession(listener.SessionConfig[ResolvedStartup]{
+			Context: t.Context(), Resolved: resolved, PID: 42, SecretKey: []byte{1, 2, 3, 4},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, enabled, created.(*session.Session).ClientDisconnectTimer())
+	}
+}
+
 func TestRuntimeInstallsSessionExtensionsWithAuthenticatedInfo(t *testing.T) {
 	runtime, _ := newRuntimeForTest()
 	resolved, err := runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})

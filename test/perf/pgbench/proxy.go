@@ -23,9 +23,11 @@ import (
 )
 
 // proxyConfig is a minimal configuration that older refs also accept, so it is
-// written by hand rather than encoded from the current pkg/config types.
-func proxyConfig(pg *itest.Postgres, listen string, poolSize int) string {
-	return fmt.Sprintf(`databases:
+// written by hand rather than encoded from the current pkg/config types. It sets
+// client_disconnect_timer only when asked, because refs that predate the
+// setting reject it.
+func proxyConfig(pg *itest.Postgres, listen string, poolSize int, clientDisconnectTimer bool) string {
+	config := fmt.Sprintf(`databases:
   - name: primary
     host: %q
     port: %d
@@ -43,6 +45,10 @@ logical_databases:
 proxy:
   listener_address: %q
 `, pg.Host, pg.Port, poolSize, itest.PostgresUser, itest.PostgresPassword, listen)
+	if clientDisconnectTimer {
+		config += "  client_disconnect_timer: true\n"
+	}
+	return config
 }
 
 type proxyProcess struct {
@@ -63,7 +69,8 @@ func startProxy(ctx context.Context, opts options, v *variant, pg *itest.Postgre
 		return nil, err
 	}
 	configPath := filepath.Join(dir, "proxy.yaml")
-	if err := os.WriteFile(configPath, []byte(proxyConfig(pg, listen, opts.PoolSize)), 0o600); err != nil {
+	timer := opts.BClientDisconnectTimer && v.Label == "B"
+	if err := os.WriteFile(configPath, []byte(proxyConfig(pg, listen, opts.PoolSize, timer)), 0o600); err != nil {
 		return nil, err
 	}
 	log, err := os.Create(filepath.Join(dir, "proxy.log"))

@@ -177,7 +177,7 @@ type Session struct {
 	paramTypes            *bindParamTypes // allocated on the first statement Describe
 
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
-	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
+	acquireCtx                         context.Context // context for connection acquisition, set by client monitor; in timer mode it lasts for the session, not one checkout
 	clientDisconnectTimer              bool            // check for disconnects with timerMonitor; see Config.ClientDisconnectTimer
 	timerMonitor                       *timerMonitor   // created at the first checkout when clientDisconnectTimer is set
 	livenessProbeChanged               bool            // set by SetLivenessProbe so the next checkout rebuilds timerMonitor
@@ -556,6 +556,7 @@ func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
 }
+func (s *Session) ClientDisconnectTimer() bool { return s.clientDisconnectTimer }
 func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 	return s.pStmtState
 }
@@ -1651,7 +1652,7 @@ func (s *Session) close(err error) {
 
 	s.linkMu.Lock()
 	if s.link != nil {
-		// A client EOF or Terminate received between messages bypasses the per-message
+		// A client EOF or Terminate received between checkouts bypasses the client
 		// monitor. Release closes the link when that disconnect leaves it non-idle.
 		destroyedByReleaseOnClientDisconnect := clientDisconnected && !s.link.Idle()
 		releaseErr := s.link.Release()

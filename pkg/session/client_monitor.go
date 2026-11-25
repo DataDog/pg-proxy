@@ -211,10 +211,16 @@ type timerMonitor struct {
 	ctx    context.Context
 	cancel context.CancelCauseFunc
 
-	// mu serializes poll with startTimerMonitor and stop. Because stop waits for
-	// a poll that is running, the monitor does nothing after stop returns, as
-	// with clientMonitor. Without that wait, a poll could probe the socket after
-	// the listener closed it and report a disconnect that did not occur.
+	// mu serializes poll with startTimerMonitor, stop, and close. Because stop
+	// waits for a poll that is running, the monitor does nothing after stop
+	// returns, as with clientMonitor. Without that wait, a poll could probe the
+	// socket after the listener closed it and report a disconnect that did not
+	// occur.
+	//
+	// poll releases mu before it handles a disconnect, because the handling
+	// takes s.linkMu and calls code outside the monitor, such as a link's
+	// ForceClose, which may close the session. stop waits for that handling on
+	// handling, so do not call stop while holding s.linkMu.
 	mu    sync.Mutex
 	timer *time.Timer
 	// active is true while a checkout is in flight.
@@ -225,6 +231,8 @@ type timerMonitor struct {
 	skipPoll bool
 	// disconnected stops further polls once a disconnect has been handled.
 	disconnected bool
+	// handling counts the disconnect that poll handles after it releases mu.
+	handling sync.WaitGroup
 }
 
 func (s *Session) startTimerMonitor() (*timerMonitor, context.Context) {
@@ -264,27 +272,49 @@ func (m *timerMonitor) armLocked() {
 // poll runs on the timer's goroutine.
 func (m *timerMonitor) poll() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
+	found := m.checkLocked()
+	if found {
+		// Add under mu, so a stop that follows this poll waits for the handling.
+		m.handling.Add(1)
+	}
+	m.mu.Unlock()
+	if found {
+		m.s.handleClientDisconnect(m.cancel)
+		m.handling.Done()
+	}
+}
+
+// checkLocked probes the client during a checkout and re-arms the timer while
+// the client is connected. It reports whether it found a disconnect that poll
+// must handle. m.mu must be held.
+func (m *timerMonitor) checkLocked() bool {
 	if m.skipPoll || !m.active {
 		// A callback that runs between checkouts also consumes skipPoll, so
 		// the flag never outlives the callback it was set for.
 		m.skipPoll = false
-		return
+		return false
 	}
 	if m.disconnected {
-		return
+		return false
 	}
 	if !m.probe.IsDisconnected() {
 		m.timer.Reset(clientMonitorInterval)
-		return
+		return false
 	}
 	m.disconnected = true
-	m.s.handleClientDisconnect(m.cancel)
+	return true
 }
 
 // stop disarms polling when the checkout ends. It waits for a poll that is
-// running, which can still handle a disconnect.
+// running, and for the disconnect handling that poll may have started.
 func (m *timerMonitor) stop() {
+	m.disarm()
+	m.handling.Wait()
+}
+
+// disarm stops polling for the current checkout. It waits for a poll that holds
+// m.mu, but not for disconnect handling.
+func (m *timerMonitor) disarm() {
 	m.mu.Lock()
 	m.stopLocked()
 	m.mu.Unlock()
@@ -301,8 +331,11 @@ func (m *timerMonitor) stopLocked() {
 	m.active = false
 }
 
-// close stops the monitor for good and releases its context.
+// close stops the monitor for good and releases its context. Unlike stop, it
+// does not wait for disconnect handling: that handling can close the session,
+// which calls close on the timer's goroutine. The deferred stop at the end of
+// the checkout still waits for it.
 func (m *timerMonitor) close() {
-	m.stop()
+	m.disarm()
 	m.cancel(nil)
 }
