@@ -181,21 +181,16 @@ func TestQuerySheddingRequiresCapability(t *testing.T) {
 				require.Equal(t, &pgproto3.ReadyForQuery{TxStatus: 'I'}, msg)
 			}
 			closeSession() // synchronize before inspecting session metrics
-			var sessions, enforced int
+			var rejected float64
 			for _, call := range metrics.counts {
-				switch call.name {
-				case MetricQuerySheddingSessions:
-					sessions++
-					require.Equal(t, []string{fmt.Sprintf("capable:%t", capable)}, call.tags)
-				case MetricQuerySheddingEnforcedSessions:
-					enforced++
+				if call.name == MetricLoadSheddingRejected {
+					rejected += call.value
 				}
 			}
-			require.Equal(t, 1, sessions)
 			if capable {
-				require.Equal(t, 1, enforced, "count sessions, not rejected queries")
+				require.Equal(t, float64(attempts), rejected, "count every rejected attempt")
 			} else {
-				require.Zero(t, enforced)
+				require.Zero(t, rejected)
 				require.Zero(t, backend.loadShedder.runCount.Load())
 			}
 		})

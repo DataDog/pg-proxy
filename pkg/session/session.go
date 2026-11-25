@@ -143,7 +143,6 @@ type Session struct {
 	passthroughUser              bool
 	priority                     Priority
 	queryLoadShedding            bool
-	querySheddingEnforced        bool
 	discardUntilSync             bool // whether the Session should discard all messages it receives until it gets a Sync message
 	pStmtState                   prepared.PreparedStatementState
 	AutoPreparedStmtsEnabled     bool
@@ -742,10 +741,6 @@ func (s *Session) handleTransaction(initialMsg pgproto3.FrontendMessage) error {
 func (s *Session) rejectWithLoadShedding(msg pgproto3.FrontendMessage) error {
 	pgproxy.Logger().Debug("query rejected by load shedding", "session_id", s.pid)
 	s.recordLoadSheddingRejected()
-	if !s.querySheddingEnforced {
-		s.querySheddingEnforced = true
-		s.metrics.Count(MetricQuerySheddingEnforcedSessions, 1, newMetricTags(nil))
-	}
 	s.clientConn.Send(&pgproto3.ErrorResponse{
 		Severity: "ERROR",
 		Code:     pgerrcode.InsufficientResources,
@@ -857,9 +852,6 @@ func (s *Session) receiveAndHandleMessage() error {
 // (e.g. for statement caching). The event loop is entirely driven by the client. We only receive messages
 // from postgres on client-triggered flush events.
 func (s *Session) Run() error {
-	s.metrics.Count(MetricQuerySheddingSessions, 1, newMetricTags([]string{
-		fmt.Sprintf("capable:%t", s.queryLoadShedding),
-	}))
 	for {
 		select {
 		case <-s.ctx.Done(): // This is the shutdown signal for the session

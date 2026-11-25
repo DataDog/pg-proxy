@@ -55,12 +55,9 @@ behavior: advertising is not a way to disable an older proxy's enforcement.
 Qualify each public client interface's error recovery separately; sharing a
 PostgreSQL driver is not sufficient. No retry behavior is enabled by this option.
 
-`pg_proxy.sessions.query_shedding` counts sessions by the bounded tag
-`capable:true|false`, allowing adoption and candidate counts to be compared.
-`pg_proxy.sessions.query_shedding_enforced` counts a session only at its first
-actual rejection, while `pg_proxy.messages.load_shedding_rejected` continues to
-count rejected attempts. Candidate counts do not claim that the backend policy
-is enabled; enforcement remains application-owned and may change during a session.
+`pg_proxy.messages.load_shedding_rejected` counts rejected attempts. Capability
+adoption and policy-specific metrics are left to the embedding application and
+its admission policy.
 
 ## Transactions already in progress
 
