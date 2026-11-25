@@ -67,11 +67,14 @@ func TestDatadogPresetExportAndShutdown(t *testing.T) {
 		"DD_TRACE_STARTUP_LOGS":              "false", "DD_TRACE_DEBUG": "false",
 		"DD_REMOTE_CONFIGURATION_ENABLED": "false", "DD_INSTRUMENTATION_TELEMETRY_ENABLED": "false",
 		"DD_APPSEC_ENABLED": "false", "DD_RUNTIME_METRICS_ENABLED": "false",
+		"DD_TRACER_EXPERIMENTAL_SPAN_POOL_ENABLED": "",
 		// DD_TRACE_ENABLED explicitly overrides the SDK's normalized OTel setting.
 		"OTEL_TRACES_EXPORTER": " NONE ", "DD_TAGS": "",
 	} {
 		t.Setenv(key, value)
 	}
+	// Exercise the binary's default span pooling during export and shutdown.
+	require.NoError(t, os.Unsetenv("DD_TRACER_EXPERIMENTAL_SPAN_POOL_ENABLED"))
 	logs, err := os.CreateTemp(t.TempDir(), "proxy-logs-*.json")
 	require.NoError(t, err)
 	previousStderr := os.Stderr

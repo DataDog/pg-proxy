@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploghttp"
 	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
@@ -78,17 +79,24 @@ func setupTelemetry(ctx context.Context, cfg telemetryConfig) (deps pgproxy.Depe
 	}()
 	if cfg.Traces == traceDatadog || cfg.Metrics == metricDogStatsD || cfg.Logs == logsJSON {
 		// Supply disabled integrations so the helper creates only selected ones.
-		native := pgproxy.Dependencies{Tracer: deps.Tracer, Metrics: pgproxy.NoopMetrics{}, LogHandler: deps.LogHandler}
+		native := proxydatadog.Options{
+			Dependencies: pgproxy.Dependencies{Tracer: deps.Tracer, Metrics: pgproxy.NoopMetrics{}, LogHandler: deps.LogHandler},
+			LogLevel:     cfg.LogLevel,
+		}
 		if cfg.Traces == traceDatadog {
-			native.Tracer = nil
+			native.Dependencies.Tracer = nil
+			// The SDK's start option takes precedence over the environment.
+			if _, configured := os.LookupEnv("DD_TRACER_EXPERIMENTAL_SPAN_POOL_ENABLED"); !configured {
+				native.TracerOptions = []tracer.StartOption{tracer.WithSpanPool(true)}
+			}
 		}
 		if cfg.Metrics == metricDogStatsD {
-			native.Metrics = nil
+			native.Dependencies.Metrics = nil
 		}
 		if cfg.Logs == logsJSON {
-			native.LogHandler = nil
+			native.Dependencies.LogHandler = nil
 		}
-		deps, stopNative, err = proxydatadog.Start(proxydatadog.Options{Dependencies: native, LogLevel: cfg.LogLevel})
+		deps, stopNative, err = proxydatadog.Start(native)
 		if err != nil {
 			return deps, shutdown, err
 		}
