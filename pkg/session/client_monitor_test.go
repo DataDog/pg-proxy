@@ -283,11 +283,13 @@ func TestTimerMonitorStartedCallbackSkipsNextCheckout(t *testing.T) {
 	m := s.timerMonitor
 	defer m.stop()
 
-	// Reproduce a callback that started as the checkout ended: stop the pending
-	// timer and run its callback, which waits for m.mu.
+	// Reproduce a callback that started as the checkout ended. If Stop stops the
+	// pending timer, start its callback here. Otherwise the timer already fired,
+	// and its callback waits for m.mu.
 	m.mu.Lock()
-	m.timer.Stop()
-	go m.poll()
+	if m.timer.Stop() {
+		go m.poll()
+	}
 	// End the checkout and start the next one before the callback runs.
 	m.stopLocked()
 	skipped := m.skipPoll
@@ -309,9 +311,10 @@ func TestTimerMonitorStartedCallbackSkipsNextCheckout(t *testing.T) {
 	assert.ErrorIs(t, context.Cause(m.ctx), ErrClientDisconnected)
 }
 
-// TestTimerMonitorDisconnectHandlingCanCloseSession verifies that code the
-// disconnect handling calls, such as a link's ForceClose, can close the session
-// without a deadlock.
+// TestTimerMonitorDisconnectHandlingCanCloseSession covers a link that breaks
+// the link.Link contract by closing the session from ForceClose. Timer mode must
+// not hang on it. Goroutine mode does not hang either, because Session.close
+// never touches that monitor.
 func TestTimerMonitorDisconnectHandlingCanCloseSession(t *testing.T) {
 	probe := &fakeProbe{}
 	s := newMonitorTestSession(true, probe)

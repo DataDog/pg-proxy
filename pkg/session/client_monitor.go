@@ -218,9 +218,10 @@ type timerMonitor struct {
 	// occur.
 	//
 	// poll releases mu before it handles a disconnect, because the handling
-	// takes s.linkMu and calls code outside the monitor, such as a link's
-	// ForceClose, which may close the session. stop waits for that handling
-	// through m.handling, so do not call stop while holding s.linkMu.
+	// takes s.linkMu and calls code outside the monitor, such as metrics and a
+	// link's ForceClose. A ForceClose that wrongly closes the session then
+	// behaves as in goroutine mode rather than deadlocking. stop waits for that
+	// handling through m.handling, so do not call stop while holding s.linkMu.
 	mu    sync.Mutex
 	timer *time.Timer
 	// active is true while a checkout is in flight.
@@ -332,9 +333,9 @@ func (m *timerMonitor) stopLocked() {
 }
 
 // close stops the monitor for good and releases its context. Unlike stop, it
-// does not wait for disconnect handling: that handling can close the session,
-// which calls close on the timer's goroutine. The deferred stop at the end of
-// the checkout still waits for it.
+// does not wait for disconnect handling: a ForceClose that wrongly closes the
+// session calls close from that handling, on the timer's goroutine. The
+// deferred stop at the end of the checkout still waits for it.
 func (m *timerMonitor) close() {
 	m.disarm()
 	m.cancel(nil)

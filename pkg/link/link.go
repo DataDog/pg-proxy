@@ -31,6 +31,10 @@ const DefaultPreparedStmtsPerConnection = 100
 // Once Release starts, they must not touch the connection, which may be back in
 // the pool: a call that overlaps Release finishes before Release uses it or does
 // nothing, and a later call does nothing. SessionLink meets this with its lock.
+//
+// The session's client monitor calls ForceClose on its own goroutine to unblock
+// Receive. ForceClose must not call back into the session, for example to close
+// it: the session goroutine tears the session down once Receive returns.
 type Link interface {
 	Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation)
 	Flush() error

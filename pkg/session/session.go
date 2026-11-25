@@ -587,6 +587,9 @@ func (s *Session) FlushPostgres() (bool, error)   { return s.flushPostgres() }
 func (s *Session) HandleAction(action actions.ClientMessageAction) error {
 	return s.handleAction(action)
 }
+
+// Close tears the session down. Call it from the goroutine that runs the
+// session, not from a link or a hook that may run on another goroutine.
 func (s *Session) Close(err error)               { s.close(err) }
 func (s *Session) QueryLoadShedder() LoadShedder { return s.queryLoadShedder() }
 func (s *Session) ApplyStateRemapping() bool     { return s.handleStateRemapping() }
