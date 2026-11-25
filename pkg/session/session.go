@@ -142,6 +142,7 @@ type Session struct {
 	postgresMsgBufferSize        int       // The number of bytes the proxy buffers from PG before flushing to the client
 	passthroughUser              bool
 	priority                     Priority
+	queryLoadShedding            bool
 	discardUntilSync             bool // whether the Session should discard all messages it receives until it gets a Sync message
 	pStmtState                   prepared.PreparedStatementState
 	AutoPreparedStmtsEnabled     bool
@@ -318,6 +319,10 @@ type Config struct {
 	DynamicRoutingEnabled bool
 	PostgresMsgBufferSize int
 	PassthroughUser       bool
+	// QueryLoadShedding declares client support for query-level 53000 recovery.
+	// False bypasses query admission only. True still requires the backend's
+	// enforcement policy to reject work; connection admission is independent.
+	QueryLoadShedding bool
 	// Priority is the query-level workload priority for backend load shedding.
 	Priority                     Priority
 	AutoPreparedStmtsEnabled     bool
@@ -379,6 +384,7 @@ func New(cfg Config) *Session {
 		readStatesFunc: cfg.ReadStatesFunc, randomInt: randomInt, dynamicRoutingEnabled: cfg.DynamicRoutingEnabled,
 		postgresMsgBufferSize: cfg.PostgresMsgBufferSize, passthroughUser: cfg.PassthroughUser,
 		priority:                     cfg.Priority,
+		queryLoadShedding:            cfg.QueryLoadShedding,
 		discardUntilSync:             cfg.InitialDiscardUntilSync,
 		pStmtState:                   preparedStatements,
 		AutoPreparedStmtsEnabled:     cfg.AutoPreparedStmtsEnabled,
@@ -824,6 +830,10 @@ func (s *Session) receiveAndHandleMessage() error {
 			monitor.stop()
 			s.acquireCtx = nil
 		}()
+	}
+
+	if !s.queryLoadShedding {
+		return s.handleTransaction(msg)
 	}
 
 	loadShedder := s.queryLoadShedder()

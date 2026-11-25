@@ -251,6 +251,7 @@ func (h *cycleHarness) newClient(configure ...func(*Config)) *cycleClient {
 	cfg := Config{
 		Context: context.Background(), User: "app_user", Database: "app_db", LogicalDatabase: "app_db",
 		Service: "app", Client: pgproto3.NewBackend(conn, conn), ClientConn: conn, Backend: h.backend,
+		QueryLoadShedding:     true, // keep allocation budgets exercising the admission path
 		PostgresMsgBufferSize: topology.DefaultPostgresMessageBufferSize,
 		MetricTags:            []string{"database:app_db"},
 	}

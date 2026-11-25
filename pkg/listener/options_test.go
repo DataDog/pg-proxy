@@ -7,12 +7,55 @@ package listener
 
 import (
 	"net/url"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	pgsession "github.com/DataDog/pg-proxy/pkg/session"
 )
+
+func TestQueryLoadSheddingCapability(t *testing.T) {
+	const option = "-c pg_proxy.query_load_shedding"
+	for _, tc := range []struct {
+		name, input string
+		want        bool
+	}{
+		{"legacy", "", false},
+		{"aware", option + "=true", true},
+		{"unaware", option + "=false", false},
+		{"missing value", option + "=", false},
+		{"missing equals", option, false},
+		{"malformed", option + "=yes", false},
+		{"numeric", option + "=1", true},
+		{"uppercase", option + "=TRUE", true},
+		{"punctuation truncated to true", option + "=true.invalid", true},
+		{"punctuation truncated to invalid", option + "=tru-e", false},
+		{"last false", option + "=true " + option + "=false", false},
+		{"last empty ignored", option + "=true " + option + "=", true},
+		{"last missing ignored", option + "=true " + option, true},
+		{"last punctuation truncated", option + "=true " + option + "=true!", true},
+		{"last invalid boolean", option + "=true " + option + "=maybe", false},
+		{"last true", option + "=false " + option + "=true", true},
+		{"priority is not capability", "-c pg_proxy.priority=0", false},
+		{"distinct priority", option + "=true -c pg_proxy.priority=5", true},
+		{"similar name", "-c pg_proxy.query_load_shedding_extra=true", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, input := range []string{tc.input, url.QueryEscape(tc.input)} {
+				opts, err := ParseSessionOptions(input)
+				require.NoError(t, err)
+				assert.Equal(t, tc.want, opts.QueryLoadShedding)
+
+				// Keep capability parsing aligned with the existing boolean options.
+				existing, err := ParseSessionOptions(strings.ReplaceAll(input, queryLoadSheddingOption, dynamicRoutingOption))
+				require.NoError(t, err)
+				assert.Equal(t, existing.DynamicRoutingEnabled, opts.QueryLoadShedding)
+			}
+		})
+	}
+}
 
 func TestParseSessionOptions_ErrorCases(t *testing.T) {
 	options, err := ParseSessionOptions("abc%xy")

@@ -300,6 +300,7 @@ func newRunningTestSessionWithBackend(t *testing.T, configure ...func(*Config)) 
 		Client:                client,
 		ClientConn:            clientConn,
 		Backend:               backend,
+		QueryLoadShedding:     true,
 		PostgresMsgBufferSize: 8192,
 		PreparedStatements:    prepared.CreateProxyPreparedStmtsState(nil),
 		MetricTags:            []string{"user:testuser", "database:testdatabase", "client_service_account:testclient"},

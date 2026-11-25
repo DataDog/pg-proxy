@@ -17,6 +17,7 @@ Place these arguments inside the PostgreSQL startup `options` parameter using th
 | --- | --- | --- |
 | `pg_proxy.dynamic_routing` | `false` | Requests dynamic read routing. Effective routing also depends on configured read clusters and backend support. Configured read clusters can enable routing even when the client sends `false`. |
 | `pg_proxy.auto_cached_prepared_statements` | `false` | Enables the session's automatic prepared-statement caching path, including unnamed statements in the extended query protocol. Cached statements are not classified, so extended-protocol reads use the main backend. See [Read routing](../../../explanation/read-routing/#classifying-work). |
+| `pg_proxy.query_load_shedding` | `false` | Declares client support for query-level `53000` recovery. Set to `true` to opt in; backend policy must still enable enforcement. Does not affect connection admission or workload priority. |
 
 These values are read during connection startup. Reconnect to change them. A routing option does not create read replicas; configure them in the proxy configuration file. See [Read routing](../../../explanation/read-routing/).
 
