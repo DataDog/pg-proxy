@@ -255,14 +255,15 @@ func TestTimerMonitorNonComparableProbe(t *testing.T) {
 	}
 
 	first := s.timerMonitor
-	disconnected := []bool{false}
-	s.SetLivenessProbe(sliceProbe{disconnected: disconnected})
+	// The new probe reports a disconnect from the start. Changing its slice after
+	// the timer is armed would race with poll, which reads it on the timer's
+	// goroutine.
+	s.SetLivenessProbe(sliceProbe{disconnected: []bool{true}})
 	monitor, acquireCtx := s.startClientMonitor()
 	defer monitor.stop()
 	assert.NotSame(t, first, s.timerMonitor, "a new probe must get a new monitor")
 	assert.ErrorIs(t, first.ctx.Err(), context.Canceled, "the replaced monitor must be closed")
 
-	disconnected[0] = true
 	assert.Eventually(t, func() bool { return acquireCtx.Err() != nil }, 2*time.Second, 10*time.Millisecond)
 	assert.ErrorIs(t, context.Cause(acquireCtx), ErrClientDisconnected)
 }
