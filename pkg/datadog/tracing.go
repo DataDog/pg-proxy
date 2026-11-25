@@ -24,6 +24,10 @@ func options() []tracer.StartSpanOption {
 }
 
 func (Tracer) StartRoot(operation, sql string) (pgproxy.Span, bool) {
+	return startRoot(operation, sql)
+}
+
+func startRoot(operation, sql string) (span, bool) {
 	opts := append(options(), tracer.Tag(ext.DBStatement, sql))
 	propagated := false
 	if sql != "" {

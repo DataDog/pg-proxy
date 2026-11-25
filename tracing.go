@@ -5,6 +5,8 @@
 
 package pgproxy
 
+import "time"
+
 // Tracer owns backend-specific span creation and SQL-comment propagation.
 // Implementations must be safe for concurrent sessions. The caller owns exporter
 // setup and shutdown. A query without application context starts a local trace.
@@ -32,6 +34,23 @@ type Span interface {
 type SamplingReporter interface {
 	Sampled() bool
 }
+
+// OperationMetricsReporter is an optional root-span capability. The protocol
+// engine reports each completed child operation independently of span creation.
+// A false KeepChildSpans result suppresses the child spans for that root.
+type OperationMetricsReporter interface {
+	KeepChildSpans() bool
+	RecordOperation(operation string, elapsed time.Duration, outcome OperationOutcome)
+}
+
+// OperationOutcome records which side caused a query phase to fail.
+type OperationOutcome uint8
+
+const (
+	OperationSucceeded OperationOutcome = iota
+	OperationProxyError
+	OperationBackendError
+)
 
 // NoopTracer preserves protocol trace lifecycles without recording or exporting.
 type NoopTracer struct{}

@@ -473,6 +473,53 @@ func TestTraceParameterSelection(t *testing.T) {
 	}
 }
 
+func TestDatadogChildSpanMode(t *testing.T) {
+	data, err := json.Marshal(ossConfig())
+	require.NoError(t, err)
+	path := writeConfig(t, "json", string(data))
+	for _, env := range []string{"DD_SPAN_SAMPLING_RULES", "DD_SPAN_SAMPLING_RULES_FILE", "OTEL_TRACES_EXPORTER"} {
+		t.Setenv(env, "")
+	}
+	for _, tc := range []struct{ telemetry, mode, errorText string }{
+		{"datadog", "", ""},
+		{"datadog", "full", ""},
+		{"none", "full", ""},
+		{"datadog", "shadow", ""},
+		{"datadog", "sampled", ""},
+		{"otel", "shadow", "require -telemetry datadog"},
+		{"none", "sampled", "require -telemetry datadog"},
+		{"datadog", "invalid", "must be full, shadow, or sampled"},
+	} {
+		args := []string{"-config", path, "-telemetry", tc.telemetry}
+		if tc.mode != "" {
+			args = append(args, "-child-span-mode", tc.mode)
+		}
+		cfg, err := parseConfig(args)
+		if tc.errorText != "" {
+			require.ErrorContains(t, err, tc.errorText)
+		} else {
+			require.NoError(t, err)
+			require.Equal(t, tc.mode, string(cfg.telemetry.ChildSpanMode))
+		}
+	}
+	for key, value := range map[string]string{
+		"DD_SPAN_SAMPLING_RULES":      `[{"sample_rate":1}]`,
+		"DD_SPAN_SAMPLING_RULES_FILE": "rules.json",
+	} {
+		t.Run(key, func(t *testing.T) {
+			t.Setenv(key, value)
+			args := []string{"-config", path, "-telemetry", "datadog"}
+			cfg, err := parseConfig(args)
+			require.NoError(t, err)
+			require.Empty(t, cfg.telemetry.ChildSpanMode)
+			_, err = parseConfig(append(args, "-child-span-mode", "shadow"))
+			require.NoError(t, err)
+			_, err = parseConfig(append(args, "-child-span-mode", "sampled"))
+			require.ErrorContains(t, err, "cannot be combined with "+key)
+		})
+	}
+}
+
 func TestLogLevelSelection(t *testing.T) {
 	data, err := json.Marshal(ossConfig())
 	require.NoError(t, err)
