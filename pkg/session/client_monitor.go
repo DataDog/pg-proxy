@@ -219,8 +219,8 @@ type timerMonitor struct {
 	//
 	// poll releases mu before it handles a disconnect, because the handling
 	// takes s.linkMu and calls code outside the monitor, such as a link's
-	// ForceClose, which may close the session. stop waits for that handling on
-	// handling, so do not call stop while holding s.linkMu.
+	// ForceClose, which may close the session. stop waits for that handling
+	// through m.handling, so do not call stop while holding s.linkMu.
 	mu    sync.Mutex
 	timer *time.Timer
 	// active is true while a checkout is in flight.
