@@ -40,6 +40,11 @@ the child operation boundaries and use a bounded `operation` tag. Errors add
 `source:postgres` for PostgreSQL error responses or `source:proxy` for
 proxy-observed failures. The root span keeps its own errors and timing behavior.
 
+In `shadow` and `sampled` modes, the DogStatsD client created by PG Proxy
+flushes aggregated metrics every 250 ms to reduce the work per flush.
+Embedders can set a different interval through `StatsdOptions` or supply their
+own metrics client.
+
 Existing child-derived `trace.*` metrics lose coverage in `sampled` mode. The
 DogStatsD metrics use a separate namespace and bounded dimensions and may differ
 in timing and aggregation. Compare counts, error rates and latency distributions

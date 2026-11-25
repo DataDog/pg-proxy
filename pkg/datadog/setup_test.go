@@ -195,3 +195,40 @@ func TestNativeMetricsAggregateDistributionSamples(t *testing.T) {
 		})
 	}
 }
+
+func TestOperationMetricsFlushBeforeDefaultInterval(t *testing.T) {
+	t.Setenv("DD_AGENT_HOST", "")
+	t.Setenv("DD_TRACE_ENABLED", "false")
+	t.Setenv("DD_SPAN_SAMPLING_RULES", "")
+	t.Setenv("DD_SPAN_SAMPLING_RULES_FILE", "")
+	t.Setenv("OTEL_TRACES_EXPORTER", "")
+
+	for _, mode := range []proxydatadog.ChildSpanMode{proxydatadog.ChildSpansShadow, proxydatadog.ChildSpansSampled} {
+		t.Run(string(mode), func(t *testing.T) {
+			agent, err := net.ListenPacket("udp", "127.0.0.1:0")
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = agent.Close() })
+			t.Setenv("DD_DOGSTATSD_URL", "udp://"+agent.LocalAddr().String())
+
+			deps, shutdown, err := proxydatadog.Start(proxydatadog.Options{
+				ChildSpanMode: mode,
+				LogWriter:     io.Discard,
+				StatsdOptions: []statsd.Option{statsd.WithoutTelemetry()},
+			})
+			require.NoError(t, err)
+			t.Cleanup(func() { require.NoError(t, shutdown()) })
+
+			const metric = "pg_proxy.trace_operations.latency_us"
+			require.NoError(t, agent.SetReadDeadline(time.Now().Add(1500*time.Millisecond)))
+			require.NoError(t, deps.Metrics.Distribution(metric, 42, []string{"operation:handling_messages"}, 1))
+			buf := make([]byte, 65536)
+			for {
+				n, _, err := agent.ReadFrom(buf)
+				require.NoError(t, err, "aggregated sample must arrive before the SDK's 2-second default")
+				if strings.Contains(string(buf[:n]), metric+":42|d") {
+					break
+				}
+			}
+		})
+	}
+}

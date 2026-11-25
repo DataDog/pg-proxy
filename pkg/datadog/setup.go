@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/DataDog/datadog-go/v5/statsd"
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
@@ -107,6 +108,10 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 		}
 		// Needs Datadog Agent 7.25.0 or later. StatsdOptions can override it.
 		options := []statsd.Option{statsd.WithExtendedClientSideAggregation()}
+		if opts.ChildSpanMode.enabled() {
+			// Frequent flushes limit bursts of work from phase distributions.
+			options = append(options, statsd.WithAggregationInterval(250*time.Millisecond))
+		}
 		if os.Getenv("DD_SERVICE") == "" {
 			options = append(options, statsd.WithTags([]string{"service:" + service}))
 		}
