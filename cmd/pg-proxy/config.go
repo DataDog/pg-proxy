@@ -62,7 +62,7 @@ type telemetryConfig struct {
 	Logs                  logOutput
 	LogLevel              slog.Level
 	CaptureBindParameters bool
-	ChildSpanMode         proxydatadog.ChildSpanMode
+	SampleChildSpans      bool
 }
 
 // validate checks only local choices; it never creates telemetry providers.
@@ -81,12 +81,12 @@ func (c telemetryConfig) validate() error {
 	if c.Traces == traceDatadog {
 		issues = append(issues, proxydatadog.ValidateTracingEnvironment())
 	}
-	if err := c.ChildSpanMode.Validate(); err != nil {
-		issues = append(issues, err)
-	}
-	if c.ChildSpanMode != "" && c.ChildSpanMode != proxydatadog.ChildSpansFull &&
-		(c.Traces != traceDatadog || c.Metrics != metricDogStatsD) {
-		issues = append(issues, errors.New("-child-span-mode shadow and sampled require -telemetry datadog"))
+	if c.SampleChildSpans {
+		if c.Traces != traceDatadog || c.Metrics != metricDogStatsD {
+			issues = append(issues, errors.New("-sample-child-spans requires -telemetry datadog"))
+		} else {
+			issues = append(issues, proxydatadog.ValidateChildSpanSamplingEnvironment())
+		}
 	}
 	seen := make(map[string]bool)
 	for _, signal := range []struct {
@@ -108,13 +108,13 @@ func (c telemetryConfig) validate() error {
 
 func parseConfig(args []string) (config, error) {
 	var path string
-	var tracing, telemetry, childSpanMode string
-	var traceParameters, validateOnly bool
+	var tracing, telemetry string
+	var sampleChildSpans, traceParameters, validateOnly bool
 	var logLevel slog.Level
 	flags := flag.NewFlagSet("pg-proxy", flag.ContinueOnError)
 	flags.StringVar(&telemetry, "telemetry", "", "all-signal preset: datadog, otel, or none (default: OTEL_*_EXPORTER selection)")
 	flags.StringVar(&tracing, "tracing", "none", "query tracing backend: none or otel (overrides OTEL_TRACES_EXPORTER)")
-	flags.StringVar(&childSpanMode, "child-span-mode", "", "Datadog child spans: full (default), shadow, or sampled (experimental)")
+	flags.BoolVar(&sampleChildSpans, "sample-child-spans", false, "skip phase spans on rejected local traces and emit DogStatsD operation metrics (enabled by default with -telemetry datadog unless single-span sampling rules are configured)")
 	flags.BoolVar(&traceParameters, "trace-parameters", false, "include raw bind parameter values in sampled query traces (default: disabled; SQL text is always recorded)")
 	flags.TextVar(&logLevel, "log-level", slog.LevelInfo, "minimum proxy log level for stderr and OTLP: DEBUG, INFO, WARN, or ERROR")
 	flags.StringVar(&path, "config", "", "JSON or YAML configuration file")
@@ -147,15 +147,20 @@ func parseConfig(args []string) (config, error) {
 	if err != nil && !errors.As(err, &credentialErr) {
 		return config{}, fmt.Errorf("%s: %w", path, err)
 	}
-	tracingSet := false
+	var tracingSet, sampleChildSpansSet bool
 	flags.Visit(func(f *flag.Flag) {
-		if f.Name == "tracing" {
+		switch f.Name {
+		case "tracing":
 			tracingSet = true
+		case "sample-child-spans":
+			sampleChildSpansSet = true
 		}
 	})
 	resolved, telemetryErr := resolveTelemetry(telemetry, tracing, tracingSet, traceParameters)
 	resolved.LogLevel = logLevel
-	resolved.ChildSpanMode = proxydatadog.ChildSpanMode(childSpanMode)
+	if sampleChildSpansSet {
+		resolved.SampleChildSpans = sampleChildSpans
+	}
 	cfg, settingsErr := (config{validateOnly: validateOnly, telemetry: resolved, telemetryWarnings: telemetryPresetWarnings(telemetry)}).withSharedConfig(shared)
 	if err := errors.Join(fileErr, telemetryErr, resolved.validate(), settingsErr); err != nil {
 		return config{}, err
@@ -215,6 +220,7 @@ func resolveTelemetry(preset, tracing string, tracingSet, captureBindParameters 
 		}
 		if preset == "datadog" {
 			cfg.Traces, cfg.Metrics, cfg.Logs = traceDatadog, metricDogStatsD, logsJSON
+			cfg.SampleChildSpans = proxydatadog.ValidateChildSpanSamplingEnvironment() == nil
 		} else if preset == "otel" {
 			cfg.Traces, cfg.Metrics, cfg.Logs = traceOTel, metricOTel, logsOTel
 		}

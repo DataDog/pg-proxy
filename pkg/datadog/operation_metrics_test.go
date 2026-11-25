@@ -23,18 +23,16 @@ func TestOperationTracerKeepsPropagatedAndUndecidedChildren(t *testing.T) {
 	defer mt.Stop()
 	for _, tc := range []struct {
 		name    string
-		mode    ChildSpanMode
 		sql     string
 		dropped bool
 		keep    bool
 	}{
-		{"shadow keeps all", ChildSpansShadow, "SELECT 1", true, true},
-		{"sampled omits rejected local", ChildSpansSampled, "SELECT 1", true, false},
-		{"sampled keeps undecided", ChildSpansSampled, "SELECT 1", false, true},
-		{"sampled keeps propagated", ChildSpansSampled, "SELECT 1 /*traceparent='00-0000000000000000000000000000002a-000000000000000b-00'*/", false, true},
+		{"omits rejected local children", "SELECT 1", true, false},
+		{"keeps undecided local children", "SELECT 1", false, true},
+		{"keeps rejected propagated children", "SELECT 1 /*traceparent='00-0000000000000000000000000000002a-000000000000000b-00'*/", true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			root, _ := (operationTracer{mode: tc.mode}).StartRoot("query", tc.sql)
+			root, _ := (operationTracer{}).StartRoot("query", tc.sql)
 			defer root.Finish(nil)
 			if tc.dropped {
 				root.SetTag(ext.ManualDrop, true)

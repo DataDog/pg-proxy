@@ -24,14 +24,16 @@ The OpenTelemetry adapter marks the incoming request span as `SERVER` and its pr
 
 ## Child spans and operation metrics
 
-The Datadog binary defaults to `-child-span-mode full`. In this mode Datadog APM
-can compute statistics from children of traces rejected by the sampler. The
-following experimental modes require `-telemetry datadog`.
+With `-telemetry datadog`, the pg-proxy binary enables `-sample-child-spans`
+at startup. PG Proxy skips child spans when a proxy-local root is already
+rejected by the sampler at trace start. Roots with propagated context, kept
+roots, and undecided roots retain their children. Completed phases report
+DogStatsD operation metrics regardless of the sampling decision.
 
-| Mode | Behavior |
-| --- | --- |
-| `shadow` | Creates the existing spans and also sends direct DogStatsD operation metrics. Use this mode to compare the two metric sources. |
-| `sampled` | Sends the same DogStatsD metrics and skips children on proxy-local roots with a rejected sampling decision. Roots with propagated context, kept roots and undecided roots retain their children. |
+Set `-sample-child-spans=false` at startup to restore full phase tracing.
+When the sampler drops a trace, its detailed timeline is discarded. With the
+flag disabled, the tracer can still use its child spans to compute aggregate
+APM statistics when client-side APM stats are enabled.
 
 The direct metrics are `datadog.pg_proxy.trace_operations.hits`,
 `datadog.pg_proxy.trace_operations.errors`, and
@@ -40,23 +42,26 @@ the child operation boundaries and use a bounded `operation` tag. Errors add
 `source:postgres` for PostgreSQL error responses or `source:proxy` for
 proxy-observed failures. The root span keeps its own errors and timing behavior.
 
-In `shadow` and `sampled` modes, the DogStatsD client created by PG Proxy
-flushes aggregated metrics every 250 ms to reduce the work per flush.
-Embedders can set a different interval through `StatsdOptions` or supply their
-own metrics client.
+With the flag enabled, the DogStatsD client created by PG Proxy flushes
+aggregated metrics every 250 ms to reduce the work per flush. Go embedders opt
+in through `datadog.Options.SampleChildSpans` and can override the interval
+through `StatsdOptions` or supply their own metrics client.
 
-Existing child-derived `trace.*` metrics lose coverage in `sampled` mode. The
-DogStatsD metrics use a separate namespace and bounded dimensions and may differ
-in timing and aggregation. Compare counts, error rates and latency distributions
-in `shadow` mode before migrating any monitoring. Sampling individual spans with
-`DD_SPAN_SAMPLING_RULES` or `DD_SPAN_SAMPLING_RULES_FILE` requires `full` or
-`shadow`. Use either mode when the trace may be promoted after phase recording
-begins. Throughput gains depend on the fraction of rejected local roots.
+Existing child-derived `trace.*` metrics lose coverage when the flag is enabled.
+The DogStatsD metrics have a separate namespace, omit APM resource and peer
+dimensions, and may differ in timing and aggregation. Review monitors that
+rely on child `trace.*` metrics before enabling the flag in an existing
+deployment. If a rejected trace is kept later, its phase spans can be missing.
+Throughput gains depend on the fraction of rejected local roots.
+
+When `DD_SPAN_SAMPLING_RULES` or `DD_SPAN_SAMPLING_RULES_FILE` is set, the
+binary defaults to full phase tracing. Explicitly enabling the flag with
+either variable configured produces a startup configuration error.
 
 ## Propagation
 
-Without incoming context, each query or protocol batch gets a proxy-local root
-span and child spans. For OpenTelemetry, leading or trailing sqlcommenter blocks
+Without incoming context, each traced query or protocol batch gets a
+proxy-local root span. For OpenTelemetry, leading or trailing sqlcommenter blocks
 can supply W3C `traceparent` and URL-encoded `tracestate`:
 
 ```sql
