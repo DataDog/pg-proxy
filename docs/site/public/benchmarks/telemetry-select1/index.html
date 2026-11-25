@@ -1,0 +1,544 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="Paired SELECT 1 results for three pg-proxy telemetry changes."
+    />
+    <title>pg-proxy telemetry benchmarks</title>
+    <link rel="stylesheet" href="./report.css" />
+  </head>
+  <body>
+    <div hidden id="overview"></div>
+    <div hidden id="span-pooling"></div>
+    <div hidden id="cheaper-tags"></div>
+    <div hidden id="child-spans"></div>
+    <header>
+      <div class="wrap top">
+        <a href="#overview"
+          ><span class="dot" aria-hidden="true"></span>pg-proxy / benchmarks</a
+        ><a
+          class="commit"
+          href="https://github.com/DataDog/pg-proxy/commit/b117b382d86d544289d692a7d8d97049d1222398"
+          >Baseline b117b38</a
+        >
+      </div>
+    </header>
+    <div class="intro">
+      <div class="wrap">
+        <h1>Telemetry overhead</h1>
+        <p>
+          Paired runs of the standalone PostgreSQL proxy with Datadog telemetry
+          enabled.
+        </p>
+        <div class="meta">
+          <span>SELECT 1</span><span>1 proxy core</span><span>16 clients</span
+          ><span>3 runs per variant</span>
+        </div>
+      </div>
+    </div>
+    <main class="wrap">
+      <nav class="nav" aria-label="Benchmark views">
+        <a href="#overview">Overview</a><a href="#span-pooling">Span pooling</a
+        ><a href="#cheaper-tags">Cheaper tags</a
+        ><a href="#child-spans">Child spans</a>
+      </nav>
+      <div id="result"></div>
+      <noscript
+        >Enable JavaScript to switch views and inspect the recorded
+        runs.</noscript
+      >
+      <section class="method" aria-labelledby="method-heading">
+        <h2 id="method-heading">Method</h2>
+        <ul>
+          <li>
+            ARM64 Linux, one pinned proxy core, PostgreSQL 16.16 and pgbench
+            16.16. Pool size 16, 4 pgbench workers, simple protocol.
+          </li>
+          <li>
+            Each comparison alternated baseline and candidate in three pairs.
+            Each run used a fresh proxy, a 3-second warmup, and a 12-second
+            measurement window.
+          </li>
+          <li>
+            The loopback fake Agent advertised a 0.1% trace keep rate, accepted
+            client-side APM statistics, and received DogStatsD over UDP.
+            Client-side distribution batching was active for both variants.
+          </li>
+          <li>
+            Throughput, p99 and CPU per transaction are medians of three runs.
+            p99 is calculated from each run’s transaction log.
+          </li>
+        </ul>
+        <p>
+          These runs cover synthetic <code>SELECT 1</code> queries. They
+          estimate each change’s effect independently. A combined run is needed
+          to measure overlap.
+        </p>
+      </section>
+    </main>
+    <footer class="footer">
+      <div class="wrap">
+        Captured 25 Nov 2026 ·
+        <a href="https://github.com/DataDog/pg-proxy">DataDog / pg-proxy</a>
+      </div>
+    </footer>
+    <script id="measurements" type="application/json">
+      {
+        "main": {
+          "name": "Current main on/off",
+          "caption": "",
+          "runs": [
+            {
+              "variant": "baseline",
+              "mode": "none",
+              "repeat": 1,
+              "transactions": 86382,
+              "tps": 7198.67,
+              "cpu_us_per_txn": 138.8,
+              "proxy_cpu_pct": 99.09,
+              "postgres_cpu_pct_of_8_cpus": 11.7,
+              "p99_ms": 4.07,
+              "udp_datagrams_per_txn": 0.0,
+              "traces_per_txn": 0.0,
+              "stats_requests_including_shutdown": 0
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 49710,
+              "tps": 4142.13,
+              "cpu_us_per_txn": 241.4,
+              "proxy_cpu_pct": 99.09,
+              "postgres_cpu_pct_of_8_cpus": 7.27,
+              "p99_ms": 7.885,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00107,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 49853,
+              "tps": 4153.94,
+              "cpu_us_per_txn": 240.91,
+              "proxy_cpu_pct": 99.25,
+              "postgres_cpu_pct_of_8_cpus": 7.0,
+              "p99_ms": 7.823,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00104,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "none",
+              "repeat": 2,
+              "transactions": 86231,
+              "tps": 7186.37,
+              "cpu_us_per_txn": 139.05,
+              "proxy_cpu_pct": 99.1,
+              "postgres_cpu_pct_of_8_cpus": 11.78,
+              "p99_ms": 4.075,
+              "udp_datagrams_per_txn": 0.0,
+              "traces_per_txn": 0.0,
+              "stats_requests_including_shutdown": 0
+            },
+            {
+              "variant": "baseline",
+              "mode": "none",
+              "repeat": 3,
+              "transactions": 85931,
+              "tps": 7161.93,
+              "cpu_us_per_txn": 139.53,
+              "proxy_cpu_pct": 99.12,
+              "postgres_cpu_pct_of_8_cpus": 11.6,
+              "p99_ms": 4.098,
+              "udp_datagrams_per_txn": 0.0,
+              "traces_per_txn": 0.0,
+              "stats_requests_including_shutdown": 0
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 50322,
+              "tps": 4193.86,
+              "cpu_us_per_txn": 238.46,
+              "proxy_cpu_pct": 99.19,
+              "postgres_cpu_pct_of_8_cpus": 7.14,
+              "p99_ms": 7.761,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00093,
+              "stats_requests_including_shutdown": 1
+            }
+          ]
+        },
+        "pooling": {
+          "name": "Span pooling",
+          "caption": "Experimental default for the standalone tracer.",
+          "runs": [
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 49477,
+              "tps": 4122.59,
+              "cpu_us_per_txn": 242.13,
+              "proxy_cpu_pct": 98.97,
+              "postgres_cpu_pct_of_8_cpus": 7.17,
+              "p99_ms": 8.242,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00075,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 50493,
+              "tps": 4207.78,
+              "cpu_us_per_txn": 237.66,
+              "proxy_cpu_pct": 99.19,
+              "postgres_cpu_pct_of_8_cpus": 7.24,
+              "p99_ms": 7.167,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00095,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 50361,
+              "tps": 4196.6,
+              "cpu_us_per_txn": 238.28,
+              "proxy_cpu_pct": 99.13,
+              "postgres_cpu_pct_of_8_cpus": 7.19,
+              "p99_ms": 7.224,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00117,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 50321,
+              "tps": 4193.43,
+              "cpu_us_per_txn": 238.47,
+              "proxy_cpu_pct": 99.21,
+              "postgres_cpu_pct_of_8_cpus": 7.22,
+              "p99_ms": 7.851,
+              "udp_datagrams_per_txn": 0.0155,
+              "traces_per_txn": 0.00121,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 50797,
+              "tps": 4233.09,
+              "cpu_us_per_txn": 236.04,
+              "proxy_cpu_pct": 99.11,
+              "postgres_cpu_pct_of_8_cpus": 7.19,
+              "p99_ms": 7.832,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.0011,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 49779,
+              "tps": 4148.3,
+              "cpu_us_per_txn": 241.07,
+              "proxy_cpu_pct": 99.16,
+              "postgres_cpu_pct_of_8_cpus": 7.27,
+              "p99_ms": 7.501,
+              "udp_datagrams_per_txn": 0.0155,
+              "traces_per_txn": 0.0009,
+              "stats_requests_including_shutdown": 1
+            }
+          ]
+        },
+        "tags": {
+          "name": "Cheaper trace tags",
+          "caption": "Preserves diagnostic tags on recording spans.",
+          "runs": [
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 50006,
+              "tps": 4167.65,
+              "cpu_us_per_txn": 240.17,
+              "proxy_cpu_pct": 98.08,
+              "postgres_cpu_pct_of_8_cpus": 7.46,
+              "p99_ms": 7.902,
+              "udp_datagrams_per_txn": 0.0152,
+              "traces_per_txn": 0.0008,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 50229,
+              "tps": 4185.65,
+              "cpu_us_per_txn": 239.1,
+              "proxy_cpu_pct": 97.73,
+              "postgres_cpu_pct_of_8_cpus": 7.38,
+              "p99_ms": 7.695,
+              "udp_datagrams_per_txn": 0.0152,
+              "traces_per_txn": 0.00088,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 50248,
+              "tps": 4187.38,
+              "cpu_us_per_txn": 239.01,
+              "proxy_cpu_pct": 97.81,
+              "postgres_cpu_pct_of_8_cpus": 7.38,
+              "p99_ms": 7.769,
+              "udp_datagrams_per_txn": 0.0152,
+              "traces_per_txn": 0.0008,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 49987,
+              "tps": 4165.39,
+              "cpu_us_per_txn": 240.06,
+              "proxy_cpu_pct": 98.35,
+              "postgres_cpu_pct_of_8_cpus": 7.35,
+              "p99_ms": 7.932,
+              "udp_datagrams_per_txn": 0.0153,
+              "traces_per_txn": 0.00082,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 49847,
+              "tps": 4153.93,
+              "cpu_us_per_txn": 240.54,
+              "proxy_cpu_pct": 97.8,
+              "postgres_cpu_pct_of_8_cpus": 7.33,
+              "p99_ms": 8.055,
+              "udp_datagrams_per_txn": 0.0153,
+              "traces_per_txn": 0.0011,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 50049,
+              "tps": 4170.71,
+              "cpu_us_per_txn": 239.77,
+              "proxy_cpu_pct": 98.03,
+              "postgres_cpu_pct_of_8_cpus": 7.42,
+              "p99_ms": 7.59,
+              "udp_datagrams_per_txn": 0.0149,
+              "traces_per_txn": 0.00084,
+              "stats_requests_including_shutdown": 1
+            }
+          ]
+        },
+        "sampled": {
+          "name": "Child spans · sampled mode",
+          "caption": "Skips children of rejected proxy-local traces.",
+          "runs": [
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 50358,
+              "tps": 4196.61,
+              "cpu_us_per_txn": 238.29,
+              "proxy_cpu_pct": 98.69,
+              "postgres_cpu_pct_of_8_cpus": 7.31,
+              "p99_ms": 7.738,
+              "udp_datagrams_per_txn": 0.0149,
+              "traces_per_txn": 0.00107,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 61617,
+              "tps": 5134.98,
+              "cpu_us_per_txn": 194.75,
+              "proxy_cpu_pct": 98.65,
+              "postgres_cpu_pct_of_8_cpus": 9.13,
+              "p99_ms": 6.132,
+              "udp_datagrams_per_txn": 0.0372,
+              "traces_per_txn": 0.00105,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 61975,
+              "tps": 5164.84,
+              "cpu_us_per_txn": 193.47,
+              "proxy_cpu_pct": 98.13,
+              "postgres_cpu_pct_of_8_cpus": 8.86,
+              "p99_ms": 6.115,
+              "udp_datagrams_per_txn": 0.038,
+              "traces_per_txn": 0.00095,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 50022,
+              "tps": 4168.65,
+              "cpu_us_per_txn": 239.89,
+              "proxy_cpu_pct": 98.35,
+              "postgres_cpu_pct_of_8_cpus": 7.51,
+              "p99_ms": 7.938,
+              "udp_datagrams_per_txn": 0.0149,
+              "traces_per_txn": 0.00096,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 50128,
+              "tps": 4177.69,
+              "cpu_us_per_txn": 239.39,
+              "proxy_cpu_pct": 98.27,
+              "postgres_cpu_pct_of_8_cpus": 7.41,
+              "p99_ms": 7.834,
+              "udp_datagrams_per_txn": 0.0153,
+              "traces_per_txn": 0.00094,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 61719,
+              "tps": 5143.15,
+              "cpu_us_per_txn": 194.43,
+              "proxy_cpu_pct": 98.43,
+              "postgres_cpu_pct_of_8_cpus": 9.17,
+              "p99_ms": 6.106,
+              "udp_datagrams_per_txn": 0.0381,
+              "traces_per_txn": 0.00099,
+              "stats_requests_including_shutdown": 1
+            }
+          ]
+        },
+        "shadow": {
+          "name": "Child spans · shadow mode",
+          "caption": "Emits both existing spans and replacement metrics.",
+          "runs": [
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 50193,
+              "tps": 4183.05,
+              "cpu_us_per_txn": 239.08,
+              "proxy_cpu_pct": 98.22,
+              "postgres_cpu_pct_of_8_cpus": 7.16,
+              "p99_ms": 7.851,
+              "udp_datagrams_per_txn": 0.0153,
+              "traces_per_txn": 0.0012,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 1,
+              "transactions": 47757,
+              "tps": 3980.85,
+              "cpu_us_per_txn": 251.06,
+              "proxy_cpu_pct": 97.87,
+              "postgres_cpu_pct_of_8_cpus": 6.84,
+              "p99_ms": 8.199,
+              "udp_datagrams_per_txn": 0.0371,
+              "traces_per_txn": 0.00094,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 47709,
+              "tps": 3975.54,
+              "cpu_us_per_txn": 251.32,
+              "proxy_cpu_pct": 98.46,
+              "postgres_cpu_pct_of_8_cpus": 6.84,
+              "p99_ms": 8.419,
+              "udp_datagrams_per_txn": 0.0367,
+              "traces_per_txn": 0.00084,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 2,
+              "transactions": 50441,
+              "tps": 4203.55,
+              "cpu_us_per_txn": 237.9,
+              "proxy_cpu_pct": 99.19,
+              "postgres_cpu_pct_of_8_cpus": 7.32,
+              "p99_ms": 7.77,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00089,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "baseline",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 50439,
+              "tps": 4203.44,
+              "cpu_us_per_txn": 238.11,
+              "proxy_cpu_pct": 99.28,
+              "postgres_cpu_pct_of_8_cpus": 7.25,
+              "p99_ms": 7.713,
+              "udp_datagrams_per_txn": 0.0154,
+              "traces_per_txn": 0.00117,
+              "stats_requests_including_shutdown": 1
+            },
+            {
+              "variant": "candidate",
+              "mode": "datadog",
+              "repeat": 3,
+              "transactions": 47538,
+              "tps": 3961.52,
+              "cpu_us_per_txn": 252.64,
+              "proxy_cpu_pct": 99.28,
+              "postgres_cpu_pct_of_8_cpus": 6.79,
+              "p99_ms": 8.001,
+              "udp_datagrams_per_txn": 0.0402,
+              "traces_per_txn": 0.00114,
+              "stats_requests_including_shutdown": 1
+            }
+          ]
+        }
+      }
+    </script>
+    <script src="./report.js" defer></script>
+  </body>
+</html>
