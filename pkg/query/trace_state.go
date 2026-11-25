@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/dustin/go-humanize"
 	"github.com/jackc/pgx/v5/pgproto3"
@@ -42,6 +43,10 @@ type TraceState struct {
 	isBatch              bool
 	trace                pgproxy.Span
 	rootTrace            pgproxy.Span
+	operationMetrics     pgproxy.OperationMetricsReporter
+	operation            string
+	operationStarted     time.Time
+	keepChildSpans       bool
 	rowsNumber           int
 	rowsSize             int
 	// Fixed-size buffer for messages - keeps first MaxTrackedMessages messages
@@ -57,6 +62,9 @@ type TraceState struct {
 // the span when the trace finishes. Data-bearing messages (DataRow, CopyData) are
 // skipped — their volume would swamp MaxTrackedMessages for no diagnostic value.
 func (t *TraceState) AddMessage(msg interface{}) {
+	if t.operationMetrics != nil && !t.keepChildSpans {
+		return
+	}
 	// Skip data messages
 	switch msg.(type) {
 	case *pgproto3.DataRow, *pgproto3.CopyData:
@@ -75,6 +83,9 @@ func (t *TraceState) AddMessage(msg interface{}) {
 // Only DataRows count toward the trace's rowsReturned/Affected and
 // rowsTotalSize tags.
 func (t *TraceState) AddForwarded(msg pgproto3.BackendMessage, n int) {
+	if t.operationMetrics != nil && !t.keepChildSpans {
+		return
+	}
 	if _, ok := msg.(*pgproto3.DataRow); ok {
 		t.rowsNumber++
 		t.rowsSize += n
@@ -240,6 +251,10 @@ func (t *TraceState) StartRootTrace(msg pgproto3.FrontendMessage) {
 
 	t.rootQuery = query
 	t.rootTrace, t.usingFullPropagation = pgproxy.Tracing().StartRoot(TransactionOpName, query)
+	t.operationMetrics, _ = t.rootTrace.(pgproxy.OperationMetricsReporter)
+	if t.operationMetrics != nil {
+		t.keepChildSpans = t.operationMetrics.KeepChildSpans()
+	}
 
 	t.StartTrace(HandlingMessagesOpName)
 }
@@ -249,12 +264,19 @@ func (t *TraceState) StartTrace(operationName string) {
 	if operationName == QueryExecutionAndProxying && t.isBatch {
 		operationName = BatchExecutionAndProxying
 	}
-	if t.trace != nil {
+	if t.trace != nil || t.operation != "" {
 		pgproxy.Logger().Debug("previous trace did not complete before starting a new trace", "operation", operationName)
 		t.FinishTrace()
 	}
 	if t.rootTrace == nil {
 		return
+	}
+	if t.operationMetrics != nil {
+		t.operation = operationName
+		t.operationStarted = time.Now()
+		if !t.keepChildSpans {
+			return
+		}
 	}
 	t.trace = t.rootTrace.StartChild(operationName)
 }
@@ -262,7 +284,7 @@ func (t *TraceState) StartTrace(operationName string) {
 func (t *TraceState) SetTag(key string, value interface{}) {
 	if trace := t.trace; trace != nil {
 		trace.SetTag(key, value)
-	} else {
+	} else if t.operation == "" {
 		pgproxy.Logger().Debug("trace not started, unable to set tag", "tag", key, "value", value)
 	}
 }
@@ -301,8 +323,25 @@ func (t *TraceState) RecordBindParameters(b *pgproto3.Bind, parseOIDs, described
 }
 
 func (t *TraceState) FinishTrace(errs ...error) {
+	t.finishTrace(pgproxy.OperationProxyError, errs...)
+}
+
+func (t *TraceState) finishTrace(failure pgproxy.OperationOutcome, errs ...error) {
+	var elapsed time.Duration
+	if t.operation != "" {
+		elapsed = time.Since(t.operationStarted)
+	}
 	messages := t.getMessages()
 	t.trace = finishSpan(t.trace, messages, t.rowsNumber, t.rowsSize, errs...)
+	if t.operation != "" {
+		outcome := pgproxy.OperationSucceeded
+		if !containsOnlyBenignEOF(errs...) && errors.Join(errs...) != nil {
+			outcome = failure
+		}
+		t.operationMetrics.RecordOperation(t.operation, elapsed, outcome)
+		t.operation = ""
+		t.operationStarted = time.Time{}
+	}
 	t.clearMessages()
 	t.rowsSize = 0
 	t.rowsNumber = 0
@@ -315,6 +354,7 @@ func (t *TraceState) FinishRootTrace(errs ...error) {
 		t.bindParams.Render(t.rootTrace.SetTag)
 	}
 	t.rootTrace = finishSpan(t.rootTrace, nil, 0, 0, errs...)
+	t.operationMetrics = nil
 
 	t.rootQuery = ""
 	t.isBatch = false
