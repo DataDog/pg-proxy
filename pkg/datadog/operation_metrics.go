@@ -15,33 +15,53 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
-// ValidateChildSpanSamplingEnvironment checks for single-span sampling rules
-// that require PG Proxy to create child spans even on rejected traces.
-func ValidateChildSpanSamplingEnvironment() error {
-	for _, key := range []string{"DD_SPAN_SAMPLING_RULES", "DD_SPAN_SAMPLING_RULES_FILE"} {
-		if strings.TrimSpace(os.Getenv(key)) != "" {
-			return fmt.Errorf("child span sampling cannot be combined with %s", key)
+// ChildSpanMode selects how native Datadog query phases are observed.
+type ChildSpanMode string
+
+const (
+	ChildSpansFull    ChildSpanMode = "full"
+	ChildSpansShadow  ChildSpanMode = "shadow"
+	ChildSpansSampled ChildSpanMode = "sampled"
+)
+
+// Validate checks the mode and its compatibility with single-span sampling.
+func (m ChildSpanMode) Validate() error {
+	switch m {
+	case "", ChildSpansFull, ChildSpansShadow:
+		return nil
+	case ChildSpansSampled:
+		for _, key := range []string{"DD_SPAN_SAMPLING_RULES", "DD_SPAN_SAMPLING_RULES_FILE"} {
+			if strings.TrimSpace(os.Getenv(key)) != "" {
+				return fmt.Errorf("sampled child spans cannot be combined with %s", key)
+			}
 		}
+		return nil
+	default:
+		return fmt.Errorf("child span mode must be full, shadow, or sampled")
 	}
-	return nil
+}
+
+func (m ChildSpanMode) enabled() bool {
+	return m == ChildSpansShadow || m == ChildSpansSampled
 }
 
 type operationTracer struct {
 	Tracer
+	mode ChildSpanMode
 }
 
 func (t operationTracer) StartRoot(operation, sql string) (pgproxy.Span, bool) {
 	root, propagated := startRoot(operation, sql)
-	return operationRoot{span: root, propagated: propagated}, propagated
+	return operationRoot{span: root, canSuppress: t.mode == ChildSpansSampled && !propagated}, propagated
 }
 
 type operationRoot struct {
 	span
-	propagated bool
+	canSuppress bool
 }
 
 func (s operationRoot) KeepChildSpans() bool {
-	return s.propagated || s.Sampled()
+	return !s.canSuppress || s.Sampled()
 }
 
 // Operation tags are static and bounded. Resource and peer tags on Datadog

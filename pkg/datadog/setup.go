@@ -29,10 +29,10 @@ type Options struct {
 	Dependencies  pgproxy.Dependencies
 	TracerOptions []tracer.StartOption
 	StatsdOptions []statsd.Option
-	// SampleChildSpans skips phase spans on rejected local traces and emits
-	// DogStatsD phase metrics. It requires this helper to own the tracer and
-	// callers to omit single-span rules and late overrides from TracerOptions.
-	SampleChildSpans bool
+	// ChildSpanMode enables experimental DogStatsD phase metrics. It requires
+	// this helper to own the tracer. With sampled mode, callers must omit
+	// single-span rules and late sampling overrides from TracerOptions.
+	ChildSpanMode ChildSpanMode
 	// LogWriter defaults to stderr. Ignored when Dependencies.LogHandler is set.
 	LogWriter io.Writer
 	// LogLevel defaults to INFO. Ignored when Dependencies.LogHandler is set.
@@ -47,16 +47,14 @@ type Options struct {
 // require Agent log collection; this helper does not send logs over the network.
 func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 	deps := opts.Dependencies
-	if opts.SampleChildSpans {
-		if err := ValidateChildSpanSamplingEnvironment(); err != nil {
-			return deps, nil, err
-		}
-		if deps.Tracer != nil {
-			return deps, nil, errors.New("child span sampling requires this helper to own the native tracer")
-		}
-		if _, noMetrics := deps.Metrics.(pgproxy.NoopMetrics); noMetrics {
-			return deps, nil, errors.New("child span sampling requires a metrics client")
-		}
+	if err := opts.ChildSpanMode.Validate(); err != nil {
+		return deps, nil, err
+	}
+	if opts.ChildSpanMode.enabled() && deps.Tracer != nil {
+		return deps, nil, errors.New("child span mode requires this helper to own the native tracer")
+	}
+	if _, noMetrics := deps.Metrics.(pgproxy.NoopMetrics); opts.ChildSpanMode.enabled() && noMetrics {
+		return deps, nil, errors.New("child span mode requires a metrics client")
 	}
 	if deps.Tracer == nil {
 		if err := ValidateTracingEnvironment(); err != nil {
@@ -110,7 +108,7 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 		}
 		// Needs Datadog Agent 7.25.0 or later. StatsdOptions can override it.
 		options := []statsd.Option{statsd.WithExtendedClientSideAggregation()}
-		if opts.SampleChildSpans {
+		if opts.ChildSpanMode.enabled() {
 			// Frequent flushes limit bursts of work from phase distributions.
 			options = append(options, statsd.WithAggregationInterval(250*time.Millisecond))
 		}
@@ -148,8 +146,8 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 			return deps, nil, errors.New("could not initialize Datadog tracer")
 		}
 		deps.Tracer = Tracer{}
-		if opts.SampleChildSpans {
-			deps.Tracer = operationTracer{}
+		if opts.ChildSpanMode.enabled() {
+			deps.Tracer = operationTracer{mode: opts.ChildSpanMode}
 		}
 	}
 	shutdown := sync.OnceValue(func() error {

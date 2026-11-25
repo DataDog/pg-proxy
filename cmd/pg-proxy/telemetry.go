@@ -89,7 +89,7 @@ func setupTelemetry(ctx context.Context, cfg telemetryConfig) (deps pgproxy.Depe
 			native.LogHandler = nil
 		}
 		deps, stopNative, err = proxydatadog.Start(proxydatadog.Options{
-			Dependencies: native, LogLevel: cfg.LogLevel, SampleChildSpans: cfg.SampleChildSpans,
+			Dependencies: native, LogLevel: cfg.LogLevel, ChildSpanMode: cfg.ChildSpanMode,
 		})
 		if err != nil {
 			return deps, shutdown, err
