@@ -7,6 +7,7 @@ package session
 
 import (
 	"context"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -273,40 +274,33 @@ func TestTimerMonitorNonComparableProbe(t *testing.T) {
 	assert.ErrorIs(t, context.Cause(acquireCtx), ErrClientDisconnected)
 }
 
-// TestTimerMonitorStartedCallbackSkipsNextCheckout covers a timer callback that
-// starts as its checkout ends and gets the lock only after the next checkout
-// started. It must not poll the next checkout before that checkout's interval.
-func TestTimerMonitorStartedCallbackSkipsNextCheckout(t *testing.T) {
+// TestTimerMonitorStaleCallbacksKeepPolling covers callbacks that started as
+// their checkouts ended and get the lock only after a later checkout started.
+// They probe that checkout early, and the timer must keep polling it.
+func TestTimerMonitorStaleCallbacksKeepPolling(t *testing.T) {
 	probe := &fakeProbe{}
 	s := newMonitorTestSession(true, probe)
 	_, _ = s.startClientMonitor()
 	m := s.timerMonitor
 	defer m.stop()
 
-	// Reproduce a callback that started as the checkout ended. If Stop stops the
-	// pending timer, start its callback here. Otherwise the timer already fired,
-	// and its callback waits for m.mu.
+	// End two checkouts while holding m.mu, each just after its timer fired,
+	// so two callbacks wait for the lock when the third checkout starts.
 	m.mu.Lock()
-	if m.timer.Stop() {
-		go m.poll()
+	for range 2 {
+		if m.timer.Stop() {
+			go m.poll()
+		}
+		m.stopLocked()
+		m.armLocked()
 	}
-	// End the checkout and start the next one before the callback runs.
-	m.stopLocked()
-	skipped := m.skipPoll
-	m.armLocked()
-	probe.triggerDisconnect()
-	armed := time.Now()
 	m.mu.Unlock()
-	require.True(t, skipped, "stop must see that the callback already started")
 
-	// The old callback runs now. It must not handle the disconnect early.
+	// The stale callbacks find the client connected and re-arm the timer.
+	// The next poll still finds a disconnect.
 	time.Sleep(clientMonitorInterval / 4)
-	if time.Since(armed) < clientMonitorInterval {
-		assert.False(t, s.ClientDisconnected(), "the old callback polled the next checkout")
-		assert.NoError(t, m.ctx.Err())
-	}
-
-	// The next checkout's own poll still finds the disconnect.
+	require.False(t, s.ClientDisconnected())
+	probe.triggerDisconnect()
 	assert.Eventually(t, s.ClientDisconnected, 2*time.Second, 10*time.Millisecond)
 	assert.ErrorIs(t, context.Cause(m.ctx), ErrClientDisconnected)
 }
@@ -352,5 +346,28 @@ func BenchmarkClientMonitorCheckout(b *testing.B) {
 				monitor.stop()
 			}
 		})
+	}
+}
+
+// BenchmarkTimerMonitorStaleCallback measures a checkout that a callback from an
+// earlier checkout probes, with the probe on a loopback TCP socket. Compare it
+// with BenchmarkClientMonitorCheckout/timer.
+func BenchmarkTimerMonitorStaleCallback(b *testing.B) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(b, err)
+	defer ln.Close()
+	client, err := net.Dial("tcp", ln.Addr().String())
+	require.NoError(b, err)
+	defer client.Close()
+	server, err := ln.Accept()
+	require.NoError(b, err)
+	defer server.Close()
+
+	s := newMonitorTestSession(true, NewTCPLivenessProbe(client))
+	b.ReportAllocs()
+	for b.Loop() {
+		monitor, _ := s.startClientMonitor()
+		s.timerMonitor.poll() // the earlier checkout's callback
+		monitor.stop()
 	}
 }

@@ -224,12 +224,10 @@ type timerMonitor struct {
 	// handling through m.handling, so do not call stop while holding s.linkMu.
 	mu    sync.Mutex
 	timer *time.Timer
-	// active is true while a checkout is in flight.
+	// active is true while a checkout is in flight. A callback that started
+	// for an earlier checkout and gets mu during a later one probes that
+	// checkout early, which is harmless.
 	active bool
-	// skipPoll is set when stop could not stop a timer callback that had
-	// already started. That callback belongs to the checkout that ended, so it
-	// must not poll the next one.
-	skipPoll bool
 	// disconnected stops further polls once a disconnect has been handled.
 	disconnected bool
 	// handling counts the disconnect that poll handles after it releases mu.
@@ -289,13 +287,7 @@ func (m *timerMonitor) poll() {
 // the client is connected. It reports whether it found a disconnect that poll
 // must handle. m.mu must be held.
 func (m *timerMonitor) checkLocked() bool {
-	if m.skipPoll || !m.active {
-		// A callback that runs between checkouts also consumes skipPoll, so
-		// the flag never outlives the callback it was set for.
-		m.skipPoll = false
-		return false
-	}
-	if m.disconnected {
+	if !m.active || m.disconnected {
 		return false
 	}
 	if !m.probe.IsDisconnected() {
@@ -323,11 +315,10 @@ func (m *timerMonitor) disarm() {
 
 // stopLocked disarms polling. m.mu must be held.
 func (m *timerMonitor) stopLocked() {
-	if m.active && m.timer != nil && !m.timer.Stop() && !m.disconnected {
-		// While a checkout is active, the timer is pending or its callback has
-		// started. Stop returned false, so the callback has started and waits
-		// for m.mu.
-		m.skipPoll = true
+	if m.timer != nil {
+		// A callback that already started waits for m.mu and then sees that
+		// no checkout is active, or probes the next checkout.
+		m.timer.Stop()
 	}
 	m.active = false
 }
