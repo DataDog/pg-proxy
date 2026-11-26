@@ -29,9 +29,6 @@ type Options struct {
 	Dependencies  pgproxy.Dependencies
 	TracerOptions []tracer.StartOption
 	StatsdOptions []statsd.Option
-	// ChildSpanMode enables experimental DogStatsD phase metrics. It requires
-	// this helper to own the tracer. With sampled mode, callers must omit
-	// single-span rules and late sampling overrides from TracerOptions.
 	ChildSpanMode ChildSpanMode
 	// LogWriter defaults to stderr. Ignored when Dependencies.LogHandler is set.
 	LogWriter io.Writer
