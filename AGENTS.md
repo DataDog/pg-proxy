@@ -22,8 +22,12 @@ Do not disclose Datadog's internal infrastructure or systems. Never include:
 - Internal datacenters, regions, environments, or Datadog organizations.
 - Internal URLs, IP addresses, dashboards, monitors, notebooks, or traces.
 - Internal repositories, file paths, packages, or deployment and CI tooling.
-- Links to Jira or Linear tickets, Slack, Confluence, incidents, or internal
-  documents.
+- Jira or Linear ticket IDs and links, Confluence pages, Slack threads, incident
+  references, or other internal documentation.
+- Datadog-specific jargon or labels such as "Feature Flag". Use plain,
+  public-facing terms such as "rollout setting" or "configuration option".
+- Internal-only functionality, integrations, or behavior that readers cannot
+  verify in this repository or in public documentation.
 - Production configuration values, capacity figures, or traffic volumes.
 - SQL statements or query parameter values taken from internal systems, such
   as production queries, slow-query logs, or captured traffic.
@@ -34,7 +38,6 @@ These are allowed:
 - Public Datadog products and documentation, such as the Datadog Agent,
   Database Monitoring, and `docs.datadoghq.com`.
 - The GitHub team handles already in `.github/CODEOWNERS`.
-- Jira or Linear ticket IDs, such as `PROJ-123`, without a URL.
 
 Use neutral substitutes:
 
@@ -46,9 +49,10 @@ Use neutral substitutes:
 - Performance claims: numbers from benchmarks or tests in this repository.
 
 Internal context, such as an incident, a ticket, or a production trace, may
-inform a change. Describe the behavior it revealed in general terms. Do not copy
-its identifiers, other than a ticket ID, or excerpts into the repository or a
-pull request.
+inform a change. Describe the problem in terms that a public reader can
+understand and reproduce. Keep internal identifiers and excerpts out of the
+repository and pull requests. Link to public GitHub issues or public
+documentation when readers need more context.
 
 If a change cannot be explained without internal details, stop and ask the user.
 
