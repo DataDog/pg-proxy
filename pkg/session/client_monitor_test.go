@@ -158,6 +158,52 @@ func TestClientMonitorStopWaitsForRunningPoll(t *testing.T) {
 	})
 }
 
+// TestClientMonitorStopWaitsForDisconnectHandling verifies that in both modes
+// stop waits for a disconnect that a poll is handling. In timer mode, poll has
+// released m.mu by the time it calls the link's ForceClose, so only m.handling
+// makes stop wait.
+func TestClientMonitorStopWaitsForDisconnectHandling(t *testing.T) {
+	forEachDisconnectMonitor(t, func(t *testing.T, timer bool) {
+		entered := make(chan struct{})
+		enter := sync.OnceFunc(func() { close(entered) })
+		blocked := make(chan struct{})
+		release := sync.OnceFunc(func() { close(blocked) })
+		defer release() // a failed check must not leave ForceClose blocked
+		probe := &fakeProbe{}
+		s := newMonitorTestSession(timer, probe)
+		s.link = &testLink{forceClose: func() bool {
+			enter()
+			<-blocked
+			return true
+		}}
+
+		monitor, _ := s.startClientMonitor()
+		probe.triggerDisconnect()
+		select {
+		case <-entered:
+		case <-time.After(2 * time.Second):
+			t.Fatal("the monitor did not force-close the link")
+		}
+		stopped := make(chan struct{})
+		go func() {
+			monitor.stop()
+			close(stopped)
+		}()
+		select {
+		case <-stopped:
+			t.Fatal("stop returned while ForceClose was running")
+		case <-time.After(clientMonitorInterval):
+		}
+
+		release()
+		select {
+		case <-stopped:
+		case <-time.After(2 * time.Second):
+			t.Fatal("stop did not return after ForceClose returned")
+		}
+	})
+}
+
 // TestTimerMonitorPollAfterCheckoutDoesNothing covers a timer that fires just
 // after its checkout ended.
 func TestTimerMonitorPollAfterCheckoutDoesNothing(t *testing.T) {
