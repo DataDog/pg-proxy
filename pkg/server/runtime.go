@@ -152,6 +152,7 @@ func (r *Runtime) NewSession(cfg listener.SessionConfig[ResolvedStartup]) (liste
 		DynamicRoutingEnabled:    dynamicRoutingEnabled,
 		PostgresMsgBufferSize:    r.cfg.Settings.PostgresMessageBufferSize,
 		ClientDisconnectTimer:    r.cfg.Settings.ClientDisconnectTimer,
+		ReplyBufferPool:          r.cfg.Settings.ReplyBufferPool,
 		PassthroughUser:          cfg.Request.Options.PassthroughUser,
 		Priority:                 cfg.Request.Options.Priority,
 		ReadStates:               readStates,

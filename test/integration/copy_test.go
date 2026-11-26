@@ -14,9 +14,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 )
 
-// Known COPY bugs. Each case that hits one still runs against PostgreSQL
-// directly; set PG_PROXY_ITEST_RUN_KNOWN_BUGS=1 to reproduce it through the
-// proxy.
+// Known COPY bugs, for protocolCase.proxySkip.
 const (
 	copyInUnderExecute = "TODO: proxy rejects CopyInResponse while it expects ExecuteReply " +
 		"and closes the client connection without an ErrorResponse (#12 reported 08006)"
@@ -71,7 +69,7 @@ func TestCopy(t *testing.T) {
 			ready(&pgproto3.Query{String: copyTo}),
 			selectRows,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				textCopyIn,
 				[]string{"CommandComplete COPY 3", "ReadyForQuery I"},
@@ -96,7 +94,7 @@ func TestCopy(t *testing.T) {
 			),
 			selectRows,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"CopyInResponse 1 [1 1]"},
 				[]string{"CommandComplete COPY 2", "ReadyForQuery I"},
@@ -117,7 +115,7 @@ func TestCopy(t *testing.T) {
 			ready(&pgproto3.CopyData{Data: []byte("leftover\n")}, &pgproto3.CopyDone{},
 				countQuery),
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				textCopyIn, []string{"ErrorResponse 57014", "ReadyForQuery I"}, zeroCount,
 			)
@@ -134,7 +132,7 @@ func TestCopy(t *testing.T) {
 			ready(duplicate, &pgproto3.CopyDone{}),
 			countRows,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				textCopyIn, []string{"ErrorResponse 22P02", "ReadyForQuery I"}, zeroCount,
 				textCopyIn, []string{"ErrorResponse 23505", "ReadyForQuery I"}, zeroCount,
@@ -154,7 +152,7 @@ func TestCopy(t *testing.T) {
 			ready(&pgproto3.Sync{}),
 			selectRows,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				extendedCopyIn,
 				[]string{"CommandComplete COPY 3", "ReadyForQuery I"},
@@ -176,7 +174,7 @@ func TestCopy(t *testing.T) {
 			ready(ignoredInsert...),
 			selectRows,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				extendedCopyIn, []string{"ErrorResponse 57014"}, []string{"ReadyForQuery I"},
 				extendedCopyIn, []string{"ErrorResponse 22P02"}, []string{"ReadyForQuery I"},
@@ -196,7 +194,7 @@ func TestCopy(t *testing.T) {
 			ready(&pgproto3.Query{String: "ROLLBACK"}),
 			selectRows,
 		},
-		check: func(t *testing.T, replies [][]pgproto3.BackendMessage) {
+		check: func(t testing.TB, replies [][]pgproto3.BackendMessage) {
 			requireReplies(t, replies,
 				[]string{"CommandComplete BEGIN", "ReadyForQuery T"},
 				extendedCopyIn,
