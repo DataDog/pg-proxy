@@ -13,7 +13,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1
 	github.com/jackc/pgerrcode v0.0.0-20240316143900-6e2875d9b438
 	github.com/jackc/pgx/v5 v5.10.0
-	github.com/jackc/puddle/v2 v2.2.3
+	github.com/jackc/puddle/v2 v2.2.4
 	github.com/pganalyze/pg_query_go/v6 v6.2.2
 	github.com/stretchr/testify v1.12.1
 	github.com/testcontainers/testcontainers-go v0.45.0
