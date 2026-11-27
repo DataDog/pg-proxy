@@ -1217,11 +1217,12 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	if action.EnsureUnnamedPreparedStmt && s.link.MayHoldForeignUnnamedStmt() {
 		// The client has no unnamed statement (handleEnsureUnnamedPreparedStmt would
 		// have re-created it, and a Parse in this pipeline was sent on the link), and
-		// the connection's last release skipped the reset. Postgres would run or
-		// describe the statement the previous client left there, so answer with the
-		// error Postgres gives a connection that has none. Every other connection,
-		// including every one in ResetAlways and ResetAudit, gets the message.
-		return s.handleAction(NewFlushErrorAction(actions.BuildUnnamedStatementDoesNotExistErrorResponse(), nil))
+		// the connection's last release skipped the reset. Drop the statement the
+		// previous client may have left there, so Postgres answers this Bind or
+		// Describe as on a connection that has none: with its own error, which also
+		// aborts the transaction. Every other connection, including every one in
+		// ResetAlways and ResetAudit, gets the message alone.
+		s.link.Send(&pgproto3.Close{ObjectType: 'S'}, query.ProxyCloseReply)
 	}
 
 	if s.link.UsesSessionMarks() {

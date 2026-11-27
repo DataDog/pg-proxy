@@ -85,7 +85,13 @@ func TestDiscardedReparseIsSentAgain(t *testing.T) {
 // the client received.
 func sendThroughSession(t *testing.T, backendLink *testLink, msgs ...pgproto3.FrontendMessage) (s *Session, sent []pgproto3.FrontendMessage, received []pgproto3.BackendMessage) {
 	t.Helper()
-	backendLink.send = func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) { sent = append(sent, msg) }
+	observe := backendLink.send
+	backendLink.send = func(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
+		sent = append(sent, msg)
+		if observe != nil {
+			observe(msg, expectation)
+		}
+	}
 	client := &testClient{}
 	s = New(Config{Context: context.Background(), Client: client, InitialLink: backendLink})
 	for _, msg := range msgs {
@@ -98,19 +104,24 @@ func sendThroughSession(t *testing.T, backendLink *testLink, msgs ...pgproto3.Fr
 }
 
 // TestForeignUnnamedStmtGuard: a Bind or Describe of the unnamed statement from a
-// client that has none reaches Postgres, which answers, unless the connection's
-// last release skipped the reset. Then the session answers, because Postgres
-// would run or describe the statement another client left.
+// client that has none reaches Postgres, which answers. When the connection's
+// last release skipped the reset, a Close of the unnamed statement goes first,
+// so Postgres answers as on a connection that has none instead of running or
+// describing the statement another client left. Its CloseComplete is the proxy's.
 func TestForeignUnnamedStmtGuard(t *testing.T) {
 	for _, msg := range []pgproto3.FrontendMessage{&pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'S'}} {
 		_, sent, received := sendThroughSession(t, &testLink{}, msg)
 		assert.Equal(t, []pgproto3.FrontendMessage{msg}, sent, "%T on a connection that reset", msg)
 		assert.Empty(t, received)
 
-		_, sent, received = sendThroughSession(t, &testLink{mayHoldForeignUnnamed: true}, msg)
-		assert.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Flush{}}, sent, "%T on a connection that skipped the reset", msg)
-		require.Len(t, received, 1)
-		assert.Equal(t, actions.BuildUnnamedStatementDoesNotExistErrorResponse(), received[0])
+		var expectations []query.ReplyExpectation
+		backendLink := &testLink{mayHoldForeignUnnamed: true, send: func(_ pgproto3.FrontendMessage, e query.ReplyExpectation) {
+			expectations = append(expectations, e)
+		}}
+		_, sent, received = sendThroughSession(t, backendLink, msg)
+		assert.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Close{ObjectType: 'S'}, msg}, sent, "%T on a connection that skipped the reset", msg)
+		assert.Equal(t, query.ProxyCloseReply, expectations[0])
+		assert.Empty(t, received)
 	}
 }
 

@@ -273,15 +273,49 @@ func TestUnnamedStatementGuard(t *testing.T) {
 			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
 				result := conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
 				pgErr := requirePgErrorCode(t, result.Err, "26000")
-				// Client A's checkout changed nothing, so dynamic skipped its reset.
-				skipped := mode == pgconfig.ResetDynamic || mode == pgconfig.ResetOff
-				require.Equal(t, !skipped, pgErr.Routine != "", "Postgres names the routine that raised its error; the proxy names none")
+				// Client A's checkout changed nothing, so dynamic skipped its reset,
+				// and the proxy dropped client A's statement before the Bind.
+				require.NotEmpty(t, pgErr.Routine, "Postgres names the routine that raised its error")
 
 				// The client's own unnamed statement still works across checkouts.
 				_, err := conn.PgConn().Prepare(ctx, "", "SELECT 'from client B'", nil)
 				require.NoError(t, err)
 				result = conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
 				require.Equal(t, "from client B", scalarResult(t, result))
+			})
+		})
+	}
+}
+
+// TestUnnamedStatementGuardRollsBack checks that the guard's 26000 aborts the
+// transaction it ends, as on a connection that reset: an INSERT earlier in the
+// same pipeline is not committed.
+func TestUnnamedStatementGuardRollsBack(t *testing.T) {
+	require.NoError(t, backend.Exec(t.Context(), "CREATE TABLE itest_guard_rows (id int)"))
+	t.Cleanup(func() { _ = backend.Exec(context.Background(), "DROP TABLE IF EXISTS itest_guard_rows") })
+	const clientA, clientB = 0, 1
+	const insert = "INSERT INTO itest_guard_rows VALUES (1)"
+
+	for _, mode := range append(resettingModes, pgconfig.ResetOff) {
+		t.Run(string(mode), func(t *testing.T) {
+			require.NoError(t, backend.Exec(t.Context(), "TRUNCATE itest_guard_rows"))
+			proxy := startResetModeProxy(t, mode)
+			replies := exchange(t, proxy.URL(dbPooled, itest.PostgresUser), []step{
+				onClient(clientA, ready(&pgproto3.Parse{Query: "SELECT 'from client A'"}, &pgproto3.Sync{})),
+				onClient(clientB, ready(
+					&pgproto3.Parse{Name: "insert", Query: insert}, &pgproto3.Bind{PreparedStatement: "insert"}, &pgproto3.Execute{},
+					&pgproto3.Bind{}, &pgproto3.Execute{}, &pgproto3.Sync{},
+				)),
+			}, 0)
+			require.Equal(t, []string{"ParseComplete", "BindComplete", "CommandComplete INSERT 0 1", "ErrorResponse 26000", "ReadyForQuery I"},
+				summarize(replies[len(replies)-1]))
+
+			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+			defer cancel()
+			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
+				var rows int
+				require.NoError(t, conn.QueryRow(ctx, "SELECT count(*) FROM itest_guard_rows").Scan(&rows))
+				require.Zero(t, rows, "the failed pipeline's INSERT was committed")
 			})
 		})
 	}
@@ -324,10 +358,8 @@ func TestUnnamedStatementGuardAfterSkippedParse(t *testing.T) {
 				rollback,
 				bindUnnamed,
 			}, 0)
-			// Postgres's own 26000 aborts the transaction; the proxy's leaves it open.
-			last := summarize(replies[len(replies)-1])
-			require.Len(t, last, 2, "%v", last)
-			require.Equal(t, "ErrorResponse 26000", last[0], "client B's own Parse was skipped, so it has no unnamed statement")
+			// Client B's own Parse was skipped, so it has no unnamed statement.
+			require.Equal(t, []string{"ErrorResponse 26000", "ReadyForQuery E"}, summarize(replies[len(replies)-1]))
 
 			replies = exchange(t, url, []step{
 				leaveUnnamed(clientB, "SELECT 'from client B'"),

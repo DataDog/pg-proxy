@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
@@ -515,18 +514,6 @@ func BuildPreparedStatementDoesNotExistErrorResponse(name string) *pgproto3.Erro
 		Message:  "Named prepared statement with this name does not exist.",
 		Detail:   fmt.Sprintf("Received named prepared statement with name: `%s`", name),
 		Hint:     "Please prepare the statement name with the given name before attempting to use it.",
-	}
-}
-
-// BuildUnnamedStatementDoesNotExistErrorResponse builds the 26000 error Postgres
-// returns for a Bind or Describe of an unnamed statement that does not exist. The
-// session sends it instead of Postgres when the connection may hold another
-// client's unnamed statement.
-func BuildUnnamedStatementDoesNotExistErrorResponse() *pgproto3.ErrorResponse {
-	return &pgproto3.ErrorResponse{
-		Severity: "ERROR",
-		Code:     pgerrcode.InvalidSQLStatementName,
-		Message:  "unnamed prepared statement does not exist",
 	}
 }
 

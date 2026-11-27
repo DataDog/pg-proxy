@@ -101,7 +101,6 @@ func TestUnnamedStatementReachesPostgres(t *testing.T) {
 		assert.Same(t, msg, action.ProxyMsgToPg)
 		assert.True(t, action.EnsureUnnamedPreparedStmt)
 	}
-	assert.Equal(t, "26000", BuildUnnamedStatementDoesNotExistErrorResponse().Code)
 }
 
 func TestSessionMarksOfOtherMessages(t *testing.T) {
