@@ -335,12 +335,28 @@ func finishSpan(span pgproxy.Span, messages []string, rowsNumber int, rowsTotalS
 		span.SetTag("rowsTotalSize", humanize.Bytes(uint64(rowsTotalSize)))
 	}
 
-	if containsOnlyBenignEOF(errs...) {
-		span.Finish(nil)
-	} else {
-		span.Finish(errors.Join(errs...))
-	}
+	span.Finish(spanError(errs...))
 	return nil
+}
+
+// spanError returns the error to record on a span, or nil when errs holds only
+// nils and benign EOFs. A single error is returned unwrapped so its concrete type,
+// not *errors.joinError, becomes the span's error type, which Error Tracking uses
+// to group issues.
+func spanError(errs ...error) error {
+	if containsOnlyBenignEOF(errs...) {
+		return nil
+	}
+	nonNil := make([]error, 0, len(errs))
+	for _, err := range errs {
+		if err != nil {
+			nonNil = append(nonNil, err)
+		}
+	}
+	if len(nonNil) == 1 {
+		return nonNil[0]
+	}
+	return errors.Join(nonNil...) // nil when nonNil is empty
 }
 
 func containsOnlyBenignEOF(errs ...error) bool {
