@@ -108,7 +108,7 @@ func Unwrap(stmt PreparedStatement) PreparedStatement {
 // session marks scans nothing.
 func Judged(stmt PreparedStatement) bool {
 	p, ok := Unwrap(stmt).(*proxyPreparedStmt)
-	return ok && atomic.LoadUint32(&p.verdict) != verdictUnjudged
+	return ok && p.verdict.Load() != verdictUnjudged
 }
 
 // contains the client name and the corresponding prepared statement created between the proxy and PG
@@ -118,19 +118,18 @@ type proxyPreparedStmt struct {
 	sql        string
 	paramOIDs  []uint32
 	// verdict caches MayChangeSession: verdictUnjudged until the first call. It is
-	// read and written atomically: a mirror worker can hold the statement too. The
-	// methods take a pointer so that no copy reads it.
-	verdict uint32
+	// atomic because a mirror worker can hold the statement too.
+	verdict atomic.Uint32
 }
 
 func (p *proxyPreparedStmt) MayChangeSession() bool {
-	verdict := atomic.LoadUint32(&p.verdict)
+	verdict := p.verdict.Load()
 	if verdict == verdictUnjudged {
 		verdict = verdictClean
 		if sessionsql.ScanEither(p.sql) {
 			verdict = verdictChanges
 		}
-		atomic.StoreUint32(&p.verdict, verdict)
+		p.verdict.Store(verdict)
 	}
 	return verdict == verdictChanges
 }

@@ -37,9 +37,15 @@ const (
 
 // ResetPolicy is how a SessionLink resets its connection when it returns to the
 // pool. Build one per pool with NewResetPolicy and share it across that pool's
-// links. The zero value resets on every release.
+// links. The zero value resets on every release. It is one pointer, nil for
+// ResetAlways, so a link that resets every time is no larger than before
+// reset_mode existed.
 type ResetPolicy struct {
-	mode config.ResetMode
+	*resetPolicy
+}
+
+type resetPolicy struct {
+	mode config.ResetMode // resolved, and never ResetAlways
 	// auditSQL reads the settings in auditColumns, in order. ResetAudit runs it
 	// before the reset on a sample of the releases that ResetDynamic would skip.
 	auditSQL     string
@@ -120,8 +126,12 @@ func NewResetPolicy(settings config.DatabaseSettings) (ResetPolicy, error) {
 	if err := settings.ValidateReset(); err != nil {
 		return ResetPolicy{}, err
 	}
-	policy := ResetPolicy{mode: settings.ResetMode}
-	if policy.Mode() != config.ResetAudit {
+	mode := settings.ResetMode.Resolve()
+	if mode == config.ResetAlways {
+		return ResetPolicy{}, nil
+	}
+	policy := ResetPolicy{&resetPolicy{mode: mode}}
+	if mode != config.ResetAudit {
 		return policy, nil
 	}
 	var columns, exprs []string
@@ -153,7 +163,12 @@ func NewResetPolicy(settings config.DatabaseSettings) (ResetPolicy, error) {
 }
 
 // Mode returns the resolved mode: never config.ResetDefault.
-func (p ResetPolicy) Mode() config.ResetMode { return p.mode.Resolve() }
+func (p ResetPolicy) Mode() config.ResetMode {
+	if p.resetPolicy == nil {
+		return config.ResetAlways
+	}
+	return p.mode
+}
 
 // usesMarks reports whether releases read the checkout's session marks. Only
 // these modes need the session to scan SQL text.
@@ -180,32 +195,20 @@ func (p ResetPolicy) sampleAudit() resetAction {
 	}
 }
 
-// resetSQL returns the reset statements, which run as one simple query.
-// roleManaged says an embedder RoleSession has already reset the role.
-//
-// RESET ALL skips role and session_authorization (GUC_NO_RESET_ALL). Without a
-// RoleSession, the same simple query resets identity first: any user may run
-// RESET SESSION AUTHORIZATION, and RESET ROLE restores a connection-time role
-// (ALTER ROLE ... SET role, or a startup option), which Postgres releases before
-// the CVE-2024-10978 fix drop.
-//
-// Every mode sends the same statement, so ResetAudit changes nothing a client
-// sees and ResetDynamic differs from ResetAlways only in whether it is sent.
-// Closing held cursors and discarding sequence state (OSQQUERY-823, -826) would
-// change every mode at once. The slices are shared: callers must not modify them.
-func resetSQL(roleManaged bool) []string {
+// resetStatements returns the reset statements and the one simple query that
+// runs them, the same in every mode. roleManaged says an embedder RoleSession
+// has already reset the role. RESET ALL skips role and session_authorization
+// (GUC_NO_RESET_ALL), so without one the query resets identity first: any user
+// may run RESET SESSION AUTHORIZATION, and RESET ROLE restores a
+// connection-time role (ALTER ROLE ... SET role, or a startup option), which
+// releases before the CVE-2024-10978 fix drop. Closing held cursors and
+// discarding sequence state (OSQQUERY-823, -826) would change every mode at
+// once. The slices are shared: callers must not modify them.
+func resetStatements(roleManaged bool) (statements []string, sql string) {
 	if roleManaged {
-		return roleResetSQL
+		return roleResetSQL, roleResetQuery
 	}
-	return identityResetSQL
-}
-
-// resetQuery returns resetSQL as the one simple query a plain reset sends.
-func resetQuery(roleManaged bool) string {
-	if roleManaged {
-		return roleResetQuery
-	}
-	return identityResetQuery
+	return identityResetSQL, identityResetQuery
 }
 
 var (

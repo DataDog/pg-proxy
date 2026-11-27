@@ -1214,16 +1214,6 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 		return err
 	}
 	s.handleEnsureUnnamedPreparedStmt(action)
-	if action.EnsureUnnamedPreparedStmt && s.link.MayHoldForeignUnnamedStmt() {
-		// The client has no unnamed statement (handleEnsureUnnamedPreparedStmt would
-		// have re-created it, and a Parse in this pipeline was sent on the link), and
-		// the connection's last release skipped the reset. Drop the statement the
-		// previous client may have left there, so Postgres answers this Bind or
-		// Describe as on a connection that has none: with its own error, which also
-		// aborts the transaction. Every other connection, including every one in
-		// ResetAlways and ResetAudit, gets the message alone.
-		s.link.Send(&pgproto3.Close{ObjectType: 'S'}, query.ProxyCloseReply)
-	}
 
 	if s.link.UsesSessionMarks() {
 		if marks := action.SessionMarks(s.pStmtState, s.unnamedStmt); marks != 0 {
@@ -1329,10 +1319,9 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 // on the link's connection before a Bind or Describe that refers to it. The client
 // may have parsed it on a link that has since been released (for example psql's
 // \gdesc sends Parse+Sync, then Describe+Sync). The release reset is a simple Query,
-// and any simple Query discards the unnamed statement. A release that skips the
-// reset can leave another client's unnamed statement on the connection, which this
-// Parse replaces; when the client has none, handleProxyMsgToPg answers instead.
-// The ParseComplete is not forwarded to the client.
+// and any simple Query discards the unnamed statement; a release that skips it
+// leaves the next link to close the statement first. The ParseComplete is not
+// forwarded to the client.
 func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
 		return

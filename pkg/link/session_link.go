@@ -48,6 +48,10 @@ type SessionLink struct {
 	replyExpectations   []query.ReplyExpectation // expected replies from the linked pg conn
 	discardingUntilSync bool                     // if true, in an extended query error state where all messages will be discarded until a Sync
 	readyForQuery       bool                     // true after Postgres has sent ReadyForQuery for the latest request
+	marks               SessionMarks             // what this checkout may have done to session state
+	// foreignUnnamed: the connection's last release skipped the reset, and no
+	// request has been sent on this link yet.
+	foreignUnnamed bool
 
 	namedPreparedStmtThreshold int
 	createdTime                int
@@ -55,14 +59,6 @@ type SessionLink struct {
 	token                      string // opaque token from RoleSession.Set when role management is enabled
 	role                       RoleSession
 	reset                      ResetPolicy
-	marks                      SessionMarks // what this checkout may have done to session state
-	// foreignUnnamed: the connection's last release skipped the reset, and
-	// Postgres has not yet answered a message on this link that replaces or drops
-	// the unnamed statement.
-	foreignUnnamed bool
-	// replacing is the queue position, from 1, of the first such message still
-	// unanswered, or 0. Postgres skips it if an earlier message before the Sync fails.
-	replacing int
 }
 
 // MarkSession records what this checkout may have done to session state.
@@ -71,14 +67,6 @@ func (link *SessionLink) MarkSession(marks SessionMarks) { link.marks |= marks }
 // UsesSessionMarks reports whether Release reads the marks: only in the reset
 // modes that decide per checkout.
 func (link *SessionLink) UsesSessionMarks() bool { return link.reset.usesMarks() }
-
-// MayHoldForeignUnnamedStmt reports whether the connection's last release skipped
-// the reset, which only ResetDynamic and ResetOff do, and nothing sent on this
-// link since has replaced or dropped the unnamed statement. A replacement still
-// unanswered counts: what follows it in its pipeline runs only if it did.
-func (link *SessionLink) MayHoldForeignUnnamedStmt() bool {
-	return link.foreignUnnamed && link.replacing == 0
-}
 
 // Conn returns the pooled Postgres connection associated with this link.
 func (link *SessionLink) Conn() *pgxpool.Conn {
@@ -97,7 +85,21 @@ func (link *SessionLink) SetRoleToken(token string) {
 
 // Send sends a message to the linked Postgres connection, and optionally (but typically) adds
 // a ReplyExpectation to the queue.
+//
+// The first request after a release that skipped the reset, which only
+// ResetDynamic and ResetOff do, is preceded by a Close of the unnamed statement:
+// the last checkout's statement may still be there, and no client may reach it.
+// The Close rides the request's round trip, nothing before it can fail and make
+// Postgres skip it, and its CloseComplete is not forwarded. A simple Query drops
+// the statement itself.
 func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
+	if link.foreignUnnamed && expectation != query.NoReply {
+		link.foreignUnnamed = false
+		if _, ok := msg.(*pgproto3.Query); !ok {
+			link.pgConn.Send(&pgproto3.Close{ObjectType: 'S'})
+			link.replyExpectations = append(link.replyExpectations, query.ProxyCloseReply)
+		}
+	}
 	link.pgConn.Send(msg)
 	if expectation != query.NoReply {
 		link.readyForQuery = false
@@ -106,9 +108,6 @@ func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.Re
 		}
 		if !link.discardingUntilSync {
 			link.replyExpectations = append(link.replyExpectations, expectation)
-			if link.MayHoldForeignUnnamedStmt() && ReplacesUnnamedStmt(msg) {
-				link.replacing = len(link.replyExpectations)
-			}
 		}
 	}
 }
@@ -127,22 +126,6 @@ func (link *SessionLink) Receive() (pgproto3.BackendMessage, error) {
 		link.marks |= MarkParameterStatus
 	}
 	return msg, err
-}
-
-// ReplacesUnnamedStmt reports whether msg replaces or drops the connection's
-// unnamed statement once Postgres runs it: a Parse or Close of it, or any simple
-// Query. Test doubles of Link use it to clear MayHoldForeignUnnamedStmt when
-// they send one, as if Postgres ran it.
-func ReplacesUnnamedStmt(msg pgproto3.FrontendMessage) bool {
-	switch m := msg.(type) {
-	case *pgproto3.Parse:
-		return !prepared.IsNamedPreparedStmt(m.Name)
-	case *pgproto3.Close:
-		return m.ObjectType == 'S' && !prepared.IsNamedPreparedStmt(m.Name)
-	case *pgproto3.Query:
-		return true
-	}
-	return false
 }
 
 // resetTags returns the link's metric tags plus its reset mode.
@@ -164,12 +147,6 @@ func (link *SessionLink) NextExpectation() query.ReplyExpectation {
 
 func (link *SessionLink) ResolveNextExpectation() {
 	link.replyExpectations = link.replyExpectations[1:]
-	if link.replacing > 0 {
-		link.replacing--
-		if link.replacing == 0 {
-			link.foreignUnnamed = false // Postgres ran the replacement
-		}
-	}
 }
 
 // DiscardUntilSync drops all expectations until the next Sync call. This is the
@@ -196,9 +173,6 @@ func (link *SessionLink) DiscardUntilSync() {
 	}
 	link.replyExpectations = link.replyExpectations[nDrop:]
 	link.discardingUntilSync = len(link.replyExpectations) == 0 // we still have more in the future to discard
-	// The failed message heads the queue, so a replacement among the dropped ones
-	// failed or was skipped. One after the Sync still runs.
-	link.replacing = max(link.replacing-nDrop, 0)
 }
 
 const (
@@ -296,12 +270,14 @@ func (link *SessionLink) Release() error {
 	//
 	// The policy decides whether this release sends it: always, never, or only when the
 	// checkout's marks say something may have changed; and in audit mode, whether it
-	// also runs the check. resetSQL builds the statement, the same in every mode,
+	// also runs the check. resetStatements builds the statement, the same in every mode,
 	// including the identity reset when no RoleSession ran above. ResetAlways sends it
 	// and reports nothing, as before reset_mode existed.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
 		// A RoleSession reset the role above, whatever the server does with it.
-		rolePersists := link.role != nil || !resetDropsRole(link.conn.Conn().PgConn().ParameterStatus("server_version"))
+		// Only the modes that read the marks look at the server's version.
+		rolePersists := link.role != nil || !link.reset.usesMarks() ||
+			!resetDropsRole(link.conn.Conn().PgConn().ParameterStatus("server_version"))
 		action, reason := link.reset.resetDecision(link.marks, rolePersists)
 		reports := link.reset.reports()
 		var start time.Time
@@ -313,8 +289,8 @@ func (link *SessionLink) Release() error {
 			// The reset is what discards the unnamed statement; without it, the next
 			// checkout's client could run this one's.
 			link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey] = true
-		} else if err = link.runReset(action); err == nil {
-			delete(link.conn.Conn().PgConn().CustomData(), customDataResetSkippedKey)
+		} else {
+			err = link.runReset(action)
 		}
 		if reports {
 			link.reportReset(action, reason, start, err)
@@ -341,19 +317,19 @@ func (link *SessionLink) Release() error {
 // query). An audited action wraps the reset in the audit check. A failure closes
 // the connection, so nothing it might have left behind reaches the pool.
 func (link *SessionLink) runReset(action resetAction) error {
-	roleManaged := link.role != nil
+	statements, resetQuery := resetStatements(link.role != nil)
 	resetCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var err error
 	if action == resetSend {
-		_, err = link.conn.Exec(resetCtx, resetQuery(roleManaged))
+		_, err = link.conn.Exec(resetCtx, resetQuery)
 	} else {
-		err = link.runAuditedReset(resetCtx, resetSQL(roleManaged), action == resetFullAudited)
+		err = link.runAuditedReset(resetCtx, statements, action == resetFullAudited)
 	}
 	if err != nil {
 		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections.guc_reset_failure", 1, link.sessionLinkTags, 1)
 		link.conn.Conn().Close(context.Background())
-		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetQuery(roleManaged), "error", err)
+		pgproxy.Logger().Warn("Closing connection due to session reset failure", "statement", resetQuery, "error", err)
 	}
 	return err
 }

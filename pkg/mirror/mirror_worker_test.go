@@ -34,12 +34,11 @@ type fakeShadowLink struct {
 
 	receiveDelay time.Duration // per-Receive delay — models a slow-but-progressing shadow
 
-	flushes        int
-	releases       int
-	forceCloses    int
-	marks          link.SessionMarks // what the worker marked before releasing
-	ignoreMarks    bool              // as a source link: reports that its release does not read marks
-	foreignUnnamed bool              // MayHoldForeignUnnamedStmt, cleared when a replacement is sent
+	flushes     int
+	releases    int
+	forceCloses int
+	marks       link.SessionMarks // what the worker marked before releasing
+	ignoreMarks bool              // as a source link: reports that its release does not read marks
 
 	// blockUntilClose, when set, makes Receive block until ForceClose is called —
 	// used to exercise the stop() force-close path.
@@ -56,9 +55,6 @@ func (l *fakeShadowLink) Send(msg pgproto3.FrontendMessage, e query.ReplyExpecta
 		panic("shadow send blew up")
 	}
 	l.sent = append(l.sent, msg)
-	if link.ReplacesUnnamedStmt(msg) {
-		l.foreignUnnamed = false
-	}
 	if e != query.NoReply {
 		// Mirror SessionLink: a Sync clears the error state, and while it is set
 		// the message still goes out but no reply is expected for it.
@@ -113,7 +109,6 @@ func (l *fakeShadowLink) DiscardUntilSync() {
 func (l *fakeShadowLink) DiscardingUntilSync() bool           { return l.discarding }
 func (l *fakeShadowLink) MarkSession(marks link.SessionMarks) { l.marks |= marks }
 func (l *fakeShadowLink) UsesSessionMarks() bool              { return !l.ignoreMarks }
-func (l *fakeShadowLink) MayHoldForeignUnnamedStmt() bool     { return l.foreignUnnamed }
 func (l *fakeShadowLink) Idle() bool                          { return len(l.expectations) == 0 }
 func (l *fakeShadowLink) Cancel() error                       { return nil }
 func (l *fakeShadowLink) Release() error                      { l.releases++; return nil }
@@ -951,29 +946,5 @@ func TestMirrorWorker_MarksShadowLinkBeforeRelease(t *testing.T) {
 	}
 	if f.links[1].marks != 0 {
 		t.Errorf("second batch: marks=%b, want none", f.links[1].marks)
-	}
-}
-
-// TestMirrorWorker_ClosesForeignUnnamedStmt: on a shadow connection that may still
-// hold another session's unnamed statement, the worker drops it before a Bind that
-// would reach it, but not before a Bind of an unnamed statement the batch parsed.
-func TestMirrorWorker_ClosesForeignUnnamedStmt(t *testing.T) {
-	q := newMirrorQueue(queueCapRoomy, nil)
-	enqueueBatch(q, mirrorItem{msg: &pgproto3.Bind{}, expectation: query.BindReply})
-	enqueueBatch(q,
-		mirrorItem{msg: &pgproto3.Parse{Query: "SELECT 1"}, expectation: query.ParseReply},
-		mirrorItem{msg: &pgproto3.Bind{}, expectation: query.BindReply})
-
-	f := newLinkFactory(func(l *fakeShadowLink) { l.foreignUnnamed = true })
-	drainClosed(q, f.acquire)
-
-	if len(f.links) != 2 {
-		t.Fatalf("acquired %d links, want 2 (one per batch)", len(f.links))
-	}
-	if got, want := sentKinds(f.links[0]), []string{"*pgproto3.Close", "Bind:"}; !slices.Equal(got, want) {
-		t.Errorf("first batch sent %v, want %v", got, want)
-	}
-	if got, want := sentKinds(f.links[1]), []string{"Parse:", "Bind:"}; !slices.Equal(got, want) {
-		t.Errorf("second batch sent %v, want %v", got, want)
 	}
 }

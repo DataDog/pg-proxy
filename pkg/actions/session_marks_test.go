@@ -87,22 +87,6 @@ func TestHandBuiltBindIsMarked(t *testing.T) {
 	assert.Equal(t, link.MarkPreparedStmt, action.SessionMarks(prepared.CreateProxyPreparedStmtsState(nil), nil))
 }
 
-// TestUnnamedStatementReachesPostgres: the decision forwards a Bind or Describe of
-// the unnamed statement even when the client has none. Only the session, which
-// knows whether the connection skipped its reset, may answer it instead.
-func TestUnnamedStatementReachesPostgres(t *testing.T) {
-	state := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil)}
-	for _, msg := range []pgproto3.FrontendMessage{
-		&pgproto3.Bind{},
-		&pgproto3.Describe{ObjectType: 'S'},
-	} {
-		action, err := DecideClientMessageAction(msg, state, Hooks{})
-		require.NoError(t, err)
-		assert.Same(t, msg, action.ProxyMsgToPg)
-		assert.True(t, action.EnsureUnnamedPreparedStmt)
-	}
-}
-
 func TestSessionMarksOfOtherMessages(t *testing.T) {
 	state := State{PreparedStatements: prepared.CreateProxyPreparedStmtsState(nil)}
 	for _, msg := range []pgproto3.FrontendMessage{

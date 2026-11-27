@@ -63,6 +63,9 @@ func TestScan(t *testing.T) {
 		{"SELECT 'SET search_path = x'", clean},
 		{"SELECT 1 -- SET search_path = x", clean},
 		{"SELECT 1 /* SET /* nested */ search_path = x */", clean},
+		{"SELECT 1 /*/ SET search_path = x */", clean},
+		{"SELECT 1 /* **/; SET search_path = x", changes},
+		{"SELECT 1 /*/**/*/; SET search_path = x", changes},
 		{"SELECT $tag$ SET search_path = x $tag$", clean},
 		{"SELECT current_setting('search_path')", clean},
 		{"SELECT 1 OFFSET 10", clean},
@@ -141,6 +144,8 @@ func BenchmarkScan(b *testing.B) {
 	for _, bc := range []struct{ name, sql string }{
 		{"select1", "SELECT 1"},
 		{"oltp", "SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.tenant_id = $1 AND o.created_at > $2 ORDER BY o.created_at DESC LIMIT 50"},
+		{"commented_oltp", "/*application='orders-api',traceparent='00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01'*/ " +
+			"SELECT o.id, o.total FROM orders o JOIN customers c ON c.id = o.customer_id WHERE c.tenant_id = $1 AND o.created_at > $2 ORDER BY o.created_at DESC LIMIT 50"},
 		{"in_list_10KB", "SELECT * FROM t WHERE id IN (" + strings.Repeat("123456, ", 1250) + "1)"},
 		{"escape_literals", `SELECT * FROM t WHERE a = E'x\ty' AND b = U&'d\0061t' AND c IN (E'a', E'b', E'c')`},
 		{"dollar_quote_10KB", "SELECT $fn$" + strings.Repeat("x = $1 ", 1430) + "$fn$"},

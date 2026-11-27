@@ -60,10 +60,6 @@ type Link interface {
 	// the session skips judging its messages, which scans SQL text. A wrapper that
 	// consumes marks itself must report its own need, not just the inner link's.
 	UsesSessionMarks() bool
-	// MayHoldForeignUnnamedStmt reports whether the connection's unnamed statement,
-	// if any, may belong to another client: its last release skipped the reset, and
-	// nothing sent on this link since has replaced or dropped the statement.
-	MayHoldForeignUnnamedStmt() bool
 }
 
 // RoleSession changes the Postgres role after acquire and restores it before the
@@ -76,10 +72,10 @@ type RoleSession interface {
 	// after it, Release sends at most RESET ALL, which leaves both in place, and
 	// under config.ResetDynamic or config.ResetOff it may send nothing.
 	//
-	// Neither Set nor Reset may leave the unnamed prepared statement holding their
-	// query, as pgx's exec and describe-exec modes do: MayHoldForeignUnnamedStmt
-	// tracks only what a skipped reset leaves, so a client's Bind of the unnamed
-	// statement would run the role change with the client's arguments.
+	// Set may not leave the unnamed prepared statement holding its query, as pgx's
+	// exec and describe-exec modes do: on a connection whose last release reset,
+	// a client's Bind of the unnamed statement would run the role change with the
+	// client's arguments.
 	Reset(ctx context.Context, conn *pgxpool.Conn, token string, tags []string) error
 }
 
@@ -94,7 +90,12 @@ type Options struct {
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	setUpConnMetaData(conn)
-	_, foreignUnnamed := conn.Conn().PgConn().CustomData()[customDataResetSkippedKey]
+	// The link takes over the mark: its release sets it again if it skips too.
+	customData := conn.Conn().PgConn().CustomData()
+	_, foreignUnnamed := customData[customDataResetSkippedKey]
+	if foreignUnnamed {
+		delete(customData, customDataResetSkippedKey)
+	}
 
 	sl := &SessionLink{
 		conn:                       conn,

@@ -7,13 +7,11 @@ package link
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -141,11 +139,6 @@ func TestAuditSampling(t *testing.T) {
 	assert.InDelta(t, draws*defaultFullCheckRate, counts[resetFullAudited], 200)
 }
 
-func TestResetSQL(t *testing.T) {
-	assert.Equal(t, []string{"RESET ALL"}, resetSQL(true), "with a RoleSession")
-	assert.Equal(t, []string{"RESET SESSION AUTHORIZATION", "RESET ROLE", "RESET ALL"}, resetSQL(false), "without a RoleSession")
-}
-
 func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
 	policy := mustResetPolicy(t, config.ResetAudit, "app.tenant_id", "app.tenant_id")
 	assert.Equal(t, config.ResetAudit, policy.Mode())
@@ -171,7 +164,7 @@ func TestNewResetPolicyBuildsAuditQueryOnce(t *testing.T) {
 }
 
 func TestChangedColumns(t *testing.T) {
-	policy := ResetPolicy{auditColumns: []string{"search_path", "transaction_timeout", "synchronous_commit"}}
+	policy := ResetPolicy{&resetPolicy{auditColumns: []string{"search_path", "transaction_timeout", "synchronous_commit"}}}
 	before := [][]byte{[]byte("app"), nil, []byte("off")}
 	after := [][]byte{[]byte(`"$user", public`), nil, []byte("on")}
 	assert.Equal(t, []string{"search_path", "synchronous_commit"}, policy.changedColumns(before, after))
@@ -275,19 +268,13 @@ func TestReleaseByMode(t *testing.T) {
 	}
 }
 
-// quietRoleSession manages the role without sending SQL.
-type quietRoleSession struct{}
-
-func (quietRoleSession) Set(context.Context, *pgxpool.Conn, []string) (string, error) { return "", nil }
-func (quietRoleSession) Reset(context.Context, *pgxpool.Conn, string, []string) error { return nil }
-
 // TestReleaseWithRoleSessionOnServerThatDropsRole: a RoleSession restores the
 // role on every release, so ResetDynamic still skips a clean checkout's reset on
 // a server that may drop it.
 func TestReleaseWithRoleSessionOnServerThatDropsRole(t *testing.T) {
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn, _ := newSessionLinkTestPoolServingVersion(t, "16.4", serveReset(received))
-	link, err := New(conn, Options{Role: quietRoleSession{}, Reset: mustResetPolicy(t, config.ResetDynamic)})
+	link, err := New(conn, Options{Role: noopRoleSession{}, Reset: mustResetPolicy(t, config.ResetDynamic)})
 	require.NoError(t, err)
 
 	require.NoError(t, link.Release())
@@ -298,9 +285,9 @@ func TestReleaseWithRoleSessionOnServerThatDropsRole(t *testing.T) {
 	}
 }
 
-// TestReleaseClearsSkippedReset checks the mark that MayHoldForeignUnnamedStmt
-// reads: a release that runs the reset discards the unnamed statement, so it
-// clears the mark in every mode.
+// TestReleaseClearsSkippedReset checks the mark the next link reads: New takes it
+// over, and a release that runs the reset discards the unnamed statement, so it
+// leaves the mark cleared in every mode.
 func TestReleaseClearsSkippedReset(t *testing.T) {
 	for _, mode := range []config.ResetMode{config.ResetDynamic, config.ResetAlways} {
 		t.Run(string(mode), func(t *testing.T) {
@@ -311,7 +298,7 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 			pgConn.CustomData()[customDataResetSkippedKey] = true
 			link, err := New(conn, Options{Reset: mustResetPolicy(t, mode)})
 			require.NoError(t, err)
-			assert.True(t, link.MayHoldForeignUnnamedStmt(), "New reads the mark the last release left")
+			assert.True(t, link.(*SessionLink).foreignUnnamed, "New reads the mark the last release left")
 			link.MarkSession(MarkClientSQL)
 
 			require.NoError(t, link.Release())
@@ -323,79 +310,45 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 	}
 }
 
-func TestSendTracksUnnamedStmtReplacement(t *testing.T) {
+// TestFirstSendClosesForeignUnnamedStmt: on a connection whose last release
+// skipped the reset, the first request goes after a Close of the unnamed
+// statement, unless it is a simple Query, which drops the statement itself. A
+// Flush expects no reply and leaves the Close to the request after it.
+func TestFirstSendClosesForeignUnnamedStmt(t *testing.T) {
 	for _, test := range []struct {
-		msg         pgproto3.FrontendMessage
+		first       pgproto3.FrontendMessage
 		expectation query.ReplyExpectation
-		want        bool
+		wantClose   bool
 	}{
-		{&pgproto3.Parse{Query: "SELECT 1"}, query.ParseReply, true},
-		{&pgproto3.Parse{Name: "named", Query: "SELECT 1"}, query.ParseReply, false},
-		{&pgproto3.Query{String: "SELECT 1"}, query.QueryReply, true},
-		{&pgproto3.Close{ObjectType: 'S'}, query.CloseReply, true},
-		{&pgproto3.Close{ObjectType: 'P'}, query.CloseReply, false},
-		{&pgproto3.Close{ObjectType: 'S', Name: "named"}, query.CloseReply, false},
-		{&pgproto3.Bind{}, query.BindReply, false},
-		{&pgproto3.Describe{ObjectType: 'S'}, query.DescribeReply, false},
+		{&pgproto3.Bind{}, query.BindReply, true},
+		{&pgproto3.Parse{Name: "named", Query: "SELECT 1"}, query.ParseReply, true},
+		{&pgproto3.Sync{}, query.SyncReply, true},
+		{&pgproto3.Query{String: "SELECT 1"}, query.QueryReply, false},
 	} {
-		link := newForeignLink()
-		link.Send(test.msg, test.expectation)
-		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v in flight", test.msg)
-		link.ResolveNextExpectation()
-		assert.Equal(t, !test.want, link.MayHoldForeignUnnamedStmt(), "%#v answered", test.msg)
-	}
-}
+		link, backend := newTestSessionLink()
+		link.foreignUnnamed = true
+		link.Send(&pgproto3.Flush{}, query.NoReply)
+		link.Send(test.first, test.expectation)
+		link.Send(&pgproto3.Bind{}, query.BindReply)
+		require.NoError(t, link.Flush())
 
-// newForeignLink returns a link whose connection's last release skipped the reset.
-func newForeignLink() *SessionLink {
-	link, _ := newTestSessionLink()
-	link.foreignUnnamed = true
-	return link
-}
-
-// TestUnnamedStmtReplacementNeedsAnAnswer: Postgres skips what follows a failed
-// message until the Sync, so a replacement counts once it is answered. Until
-// then a Bind after it in the same pipeline goes through, because it runs only
-// if the replacement did.
-func TestUnnamedStmtReplacementNeedsAnAnswer(t *testing.T) {
-	bad := &pgproto3.Parse{Name: "bad", Query: "SELEC 1"}
-	unnamed := &pgproto3.Parse{Query: "SELECT 1"}
-	sendAll := func(link *SessionLink, msgs ...pgproto3.FrontendMessage) {
-		for _, msg := range msgs {
-			expectation := query.ParseReply // the link only tells a Sync from other replies
-			if _, ok := msg.(*pgproto3.Sync); ok {
-				expectation = query.SyncReply
-			}
-			link.Send(msg, expectation)
+		want := []query.ReplyExpectation{test.expectation, query.BindReply}
+		wantSent := []pgproto3.FrontendMessage{&pgproto3.Flush{}, test.first}
+		if test.wantClose {
+			want = append([]query.ReplyExpectation{query.ProxyCloseReply}, want...)
+			wantSent = []pgproto3.FrontendMessage{&pgproto3.Flush{}, &pgproto3.Close{ObjectType: 'S'}, test.first}
+		}
+		assert.Equal(t, want, link.replyExpectations, "%T first", test.first)
+		for _, msg := range wantSent {
+			got, err := backend.Receive()
+			require.NoError(t, err)
+			assert.IsType(t, msg, got, "%T first", test.first)
 		}
 	}
 
-	link := newForeignLink()
-	sendAll(link, bad, unnamed, &pgproto3.Bind{}, &pgproto3.Sync{})
-	assert.False(t, link.MayHoldForeignUnnamedStmt(), "the Bind follows the replacement")
-	link.DiscardUntilSync() // the bad Parse failed, so Postgres skipped the rest
-	assert.True(t, link.MayHoldForeignUnnamedStmt(), "a skipped replacement replaced nothing")
-	link.ResolveNextExpectation() // ReadyForQuery
-	assert.True(t, link.MayHoldForeignUnnamedStmt())
-
-	link = newForeignLink()
-	sendAll(link, unnamed, &pgproto3.Sync{})
-	link.DiscardUntilSync() // the replacement itself failed
-	assert.True(t, link.MayHoldForeignUnnamedStmt(), "Postgres holds no unnamed statement of the client's")
-
-	link = newForeignLink()
-	sendAll(link, unnamed, &pgproto3.Bind{}, &pgproto3.Sync{})
-	link.ResolveNextExpectation() // ParseComplete
-	link.DiscardUntilSync()       // the Bind failed
-	assert.False(t, link.MayHoldForeignUnnamedStmt(), "an answered replacement stays")
-
-	link = newForeignLink()
-	sendAll(link, bad) // and a Flush, so no Sync is queued when the error arrives
-	link.DiscardUntilSync()
-	sendAll(link, unnamed)
-	assert.True(t, link.MayHoldForeignUnnamedStmt(), "a Parse sent while Postgres discards is skipped")
-	sendAll(link, &pgproto3.Sync{}, unnamed)
-	assert.False(t, link.MayHoldForeignUnnamedStmt(), "a Parse after the Sync runs")
+	link, _ := newTestSessionLink()
+	link.Send(&pgproto3.Bind{}, query.BindReply)
+	assert.Equal(t, []query.ReplyExpectation{query.BindReply}, link.replyExpectations, "a connection whose last release reset")
 }
 
 func TestUsesSessionMarks(t *testing.T) {
@@ -409,7 +362,6 @@ func TestUsesSessionMarks(t *testing.T) {
 		link := &SessionLink{reset: mustResetPolicy(t, mode)}
 		assert.Equal(t, want, link.UsesSessionMarks(), "mode %q", mode)
 	}
-	assert.False(t, NewFrontendLink(nil).MayHoldForeignUnnamedStmt(), "a link without a connection holds nothing")
 }
 
 // auditRows returns two audit rows for policy, both "baseline" except for the

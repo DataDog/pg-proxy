@@ -85,13 +85,7 @@ func TestDiscardedReparseIsSentAgain(t *testing.T) {
 // the client received.
 func sendThroughSession(t *testing.T, backendLink *testLink, msgs ...pgproto3.FrontendMessage) (s *Session, sent []pgproto3.FrontendMessage, received []pgproto3.BackendMessage) {
 	t.Helper()
-	observe := backendLink.send
-	backendLink.send = func(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
-		sent = append(sent, msg)
-		if observe != nil {
-			observe(msg, expectation)
-		}
-	}
+	backendLink.send = func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) { sent = append(sent, msg) }
 	client := &testClient{}
 	s = New(Config{Context: context.Background(), Client: client, InitialLink: backendLink})
 	for _, msg := range msgs {
@@ -101,44 +95,6 @@ func sendThroughSession(t *testing.T, backendLink *testLink, msgs ...pgproto3.Fr
 		}
 	}
 	return s, sent, client.sent
-}
-
-// TestForeignUnnamedStmtGuard: a Bind or Describe of the unnamed statement from a
-// client that has none reaches Postgres, which answers. When the connection's
-// last release skipped the reset, a Close of the unnamed statement goes first,
-// so Postgres answers as on a connection that has none instead of running or
-// describing the statement another client left. Its CloseComplete is the proxy's.
-func TestForeignUnnamedStmtGuard(t *testing.T) {
-	for _, msg := range []pgproto3.FrontendMessage{&pgproto3.Bind{}, &pgproto3.Describe{ObjectType: 'S'}} {
-		_, sent, received := sendThroughSession(t, &testLink{}, msg)
-		assert.Equal(t, []pgproto3.FrontendMessage{msg}, sent, "%T on a connection that reset", msg)
-		assert.Empty(t, received)
-
-		var expectations []query.ReplyExpectation
-		backendLink := &testLink{mayHoldForeignUnnamed: true, send: func(_ pgproto3.FrontendMessage, e query.ReplyExpectation) {
-			expectations = append(expectations, e)
-		}}
-		_, sent, received = sendThroughSession(t, backendLink, msg)
-		assert.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Close{ObjectType: 'S'}, msg}, sent, "%T on a connection that skipped the reset", msg)
-		assert.Equal(t, query.ProxyCloseReply, expectations[0])
-		assert.Empty(t, received)
-	}
-}
-
-// TestForeignUnnamedStmtGuardLetsClientsOwnStatementsThrough: a client's own unnamed
-// statement, parsed earlier in the pipeline, and a Describe of a portal reach
-// Postgres even on a connection whose last release skipped the reset.
-func TestForeignUnnamedStmtGuardLetsClientsOwnStatementsThrough(t *testing.T) {
-	parse := &pgproto3.Parse{Query: "SELECT 1"}
-	bind := &pgproto3.Bind{}
-	_, sent, received := sendThroughSession(t, &testLink{mayHoldForeignUnnamed: true}, parse, bind)
-	assert.Equal(t, []pgproto3.FrontendMessage{parse, bind}, sent, "a Parse pending in the pipeline is the client's statement")
-	assert.Empty(t, received)
-
-	portal := &pgproto3.Describe{ObjectType: 'P'}
-	_, sent, received = sendThroughSession(t, &testLink{mayHoldForeignUnnamed: true}, portal)
-	assert.Equal(t, []pgproto3.FrontendMessage{portal}, sent, "a portal is not a statement")
-	assert.Empty(t, received)
 }
 
 // TestSessionMarksOnlyForLinksThatUseThem: the session judges a message only for

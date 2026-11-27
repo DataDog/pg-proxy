@@ -67,9 +67,6 @@ type ClientMessageAction struct {
 	// This is only valid for replacing auto-cached unnamed prepared statements, as named prepared statements must be deallocated
 	// before the name can be reused.
 	UpdateAutoCachedUnnamedPreparedStmt prepared.PreparedStatement
-	// bindStmt is the statement a Bind of a named or auto-cached statement runs,
-	// kept unjudged for SessionMarks.
-	bindStmt prepared.PreparedStatement
 }
 
 // SessionMarks returns what proxying the action's message may do to session state:
@@ -82,14 +79,18 @@ func (action *ClientMessageAction) SessionMarks(stmts prepared.PreparedStatement
 	case *pgproto3.Query:
 		return sessionMarks(sessionsql.ScanEither(m.String), link.MarkClientSQL)
 	case *pgproto3.Bind:
-		if action.bindStmt != nil {
-			return sessionMarks(action.bindStmt.MayChangeSession(), link.MarkPreparedStmt)
-		}
 		if action.EnsureUnnamedPreparedStmt {
 			return bindSessionMarks(stmts, unnamed)
 		}
-		// Not built by DecideClientMessageAction, so its statement is unknown.
-		return link.MarkPreparedStmt
+		// DecideClientMessageAction renamed the Bind to the statement's proxy name.
+		stmt := action.CheckExistingPreparedStmt
+		if stmt == nil && m.PreparedStatement != "" {
+			stmt = stmts.FindPendingNamedStmtFromProxyName(m.PreparedStatement)
+		}
+		if stmt == nil {
+			return link.MarkPreparedStmt // the proxy cannot tell what it runs
+		}
+		return sessionMarks(stmt.MayChangeSession(), link.MarkPreparedStmt)
 	}
 	return 0
 }
@@ -266,14 +267,13 @@ func DecideClientMessageAction(msg pgproto3.FrontendMessage, state State, hooks 
 			action.EnsureUnnamedPreparedStmt = true
 			return action, nil
 		}
-		proxyName, stmt, found, errorAction := findPreparedStatement(clientName, state.PreparedStatements)
+		proxyName, stmt, errorAction := FindPotentiallyExistingPreparedStatement(clientName, state.PreparedStatements)
 		if errorAction != nil {
 			observeErrorAction(errorAction, hooks)
 			return *errorAction, nil
 		}
 		m.PreparedStatement = proxyName
 		action.CheckExistingPreparedStmt = stmt
-		action.bindStmt = found
 		return action, nil
 
 	case *pgproto3.Execute:
@@ -430,24 +430,17 @@ func LookupPreparedStatement(clientName string, state prepared.PreparedStatement
 // It returns the proxy name and the prepared statement if it was confirmed already.
 // It returns a non-nil error action if the prepared statement does not exist.
 func FindPotentiallyExistingPreparedStatement(clientName string, state prepared.PreparedStatementState) (string, prepared.PreparedStatement, *ClientMessageAction) {
-	proxyName, stmt, _, errorAction := findPreparedStatement(clientName, state)
-	return proxyName, stmt, errorAction
-}
-
-// findPreparedStatement is FindPotentiallyExistingPreparedStatement that also
-// returns the statement it found, pending or confirmed.
-func findPreparedStatement(clientName string, state prepared.PreparedStatementState) (proxyName string, existing, found prepared.PreparedStatement, errorAction *ClientMessageAction) {
 	stmt, confirmed := LookupPreparedStatement(clientName, state)
 	if stmt == nil {
 		action := NewFlushErrorAction(BuildPreparedStatementDoesNotExistErrorResponse(clientName))
-		return "", nil, nil, &action
+		return "", nil, &action
 	}
 	if !confirmed {
 		// we only want to check if the stmt is confirmed
 		// since if its pending we already checked that the underlying connection does not have the prepared statement
-		return stmt.GetProxyName(), nil, stmt, nil
+		return stmt.GetProxyName(), nil, nil
 	}
-	return stmt.GetProxyName(), stmt, stmt, nil
+	return stmt.GetProxyName(), stmt, nil
 }
 
 // GetParameterString formats Bind parameters for optional diagnostics.

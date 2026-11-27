@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/require"
 
@@ -56,14 +55,6 @@ func showSetting(t *testing.T, ctx context.Context, conn *pgx.Conn, name string)
 	var value string
 	require.NoError(t, conn.QueryRow(ctx, "SELECT pg_catalog.current_setting($1)", name).Scan(&value))
 	return value
-}
-
-func requirePgErrorCode(t *testing.T, err error, code string) *pgconn.PgError {
-	t.Helper()
-	var pgErr *pgconn.PgError
-	require.ErrorAs(t, err, &pgErr, "want SQLSTATE %s", code)
-	require.Equal(t, code, pgErr.Code, pgErr.Message)
-	return pgErr
 }
 
 // TestResetModesIsolateSettings checks that each way a client's SQL can change a
@@ -249,39 +240,6 @@ func TestResetModesLeaveCursorsAndSequencesAsAlways(t *testing.T) {
 				var last int64
 				require.NoError(t, conn.QueryRow(ctx, "SELECT lastval()").Scan(&last))
 				require.Equal(t, issued, last)
-			})
-		})
-	}
-}
-
-// TestUnnamedStatementGuard checks that a Bind of the unnamed statement from a
-// client that has none gets 26000 in every mode, even when the backend still holds
-// the previous client's unnamed statement because the release skipped the reset.
-// Where the release reset, as in always and audit, Postgres answers, as before
-// reset_mode; only after a skipped reset does the proxy answer.
-func TestUnnamedStatementGuard(t *testing.T) {
-	for _, mode := range append(resettingModes, pgconfig.ResetOff) {
-		t.Run(string(mode), func(t *testing.T) {
-			proxy := startResetModeProxy(t, mode)
-			ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
-			defer cancel()
-
-			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
-				_, err := conn.PgConn().Prepare(ctx, "", "SELECT 'from client A'", nil)
-				require.NoError(t, err)
-			})
-			asClient(t, ctx, proxy, func(conn *pgx.Conn) {
-				result := conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
-				pgErr := requirePgErrorCode(t, result.Err, "26000")
-				// Client A's checkout changed nothing, so dynamic skipped its reset,
-				// and the proxy dropped client A's statement before the Bind.
-				require.NotEmpty(t, pgErr.Routine, "Postgres names the routine that raised its error")
-
-				// The client's own unnamed statement still works across checkouts.
-				_, err := conn.PgConn().Prepare(ctx, "", "SELECT 'from client B'", nil)
-				require.NoError(t, err)
-				result = conn.PgConn().ExecPrepared(ctx, "", nil, nil, nil).Read()
-				require.Equal(t, "from client B", scalarResult(t, result))
 			})
 		})
 	}

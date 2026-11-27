@@ -18,7 +18,8 @@ const (
 	customDataStatsKey         = "preparedStmtsStats"
 	customDataAuditBaselineKey = "resetAuditBaseline" // an auditBaseline
 	// customDataResetSkippedKey is set while the connection's last release skipped
-	// the reset, so it may hold another checkout's unnamed statement.
+	// the reset, so it may hold another checkout's unnamed statement, until the
+	// next link takes it over.
 	customDataResetSkippedKey = "resetSkipped"
 
 	connPreparedStmtDeallocatedCount = "pg_proxy.sessions.connections.prepared_stmt.deallocated.count"
