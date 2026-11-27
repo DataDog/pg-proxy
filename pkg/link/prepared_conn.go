@@ -14,12 +14,7 @@ import (
 )
 
 const (
-	customDataConnStateKey     = "preparedStmtsState"
-	customDataAuditBaselineKey = "resetAuditBaseline" // an auditBaseline
-	// customDataResetSkippedKey is set while the connection's last release skipped
-	// the reset, so it may hold another checkout's unnamed statement, until the
-	// next link takes it over.
-	customDataResetSkippedKey = "resetSkipped"
+	customDataConnStateKey = "preparedStmtsState"
 
 	connPreparedStmtDeallocatedCount = "pg_proxy.sessions.connections.prepared_stmt.deallocated.count"
 	connPreparedStmtCreatedCount     = "pg_proxy.sessions.connections.prepared_stmt.created.count"
@@ -40,13 +35,20 @@ type connStats struct {
 	preparedStmtsMaxUsage int
 }
 
-// connState is the prepared statement state of one Postgres connection. It lives in
-// the connection's pgx CustomData, so it outlasts each SessionLink and stays with the
-// connection while it sits in the pool.
+// connState is the state of one Postgres connection: its prepared statements and
+// what its releases left on it. It lives in the connection's pgx CustomData, so it
+// outlasts each SessionLink and stays with the connection while it sits in the pool.
 type connState struct {
 	// Keyed by proxy statement name. Pointers, so a Bind updates usage in place.
 	stmts map[string]*stmtUsage
 	stats connStats
+	// resetSkipped is set while the connection's last release skipped the reset, so
+	// it may hold another checkout's unnamed statement, until the next link takes it
+	// over.
+	resetSkipped bool
+	// auditBaseline is the zero value while the connection has none. Its empty sql
+	// matches no audit query.
+	auditBaseline auditBaseline
 }
 
 // stmtUsage is what eviction needs to know about one statement on a connection. Its
@@ -63,9 +65,9 @@ type ConnPreparedStmt struct {
 	TimeLastUsed int
 }
 
-// setUpConnMetaData returns the connection's prepared statement state, creating it
-// on the connection's first checkout. A pool hook cannot own this: links accept
-// conns from any pool.Pool, and the state only matters once a link uses the conn.
+// setUpConnMetaData returns the connection's state, creating it on the connection's
+// first checkout. A pool hook cannot own this: links accept conns from any
+// pool.Pool, and the state only matters once a link uses the conn.
 func setUpConnMetaData(conn *pgxpool.Conn) *connState {
 	customData := conn.Conn().PgConn().CustomData()
 	if state, ok := customData[customDataConnStateKey].(*connState); ok {

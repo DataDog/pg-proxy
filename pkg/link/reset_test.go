@@ -235,7 +235,7 @@ func TestReleaseByMode(t *testing.T) {
 				serverVersion = testServerVersion
 			}
 			conn := newSessionLinkTestPoolConnServingVersion(t, serverVersion, serveReset(t, received))
-			pgConn := conn.Conn().PgConn()
+			state := setUpConnMetaData(conn)
 			tags := []string{"database_cluster:test-cluster"}
 			link, err := New(conn, Options{MetricTags: tags, Reset: mustResetPolicy(t, test.mode)})
 			require.NoError(t, err)
@@ -250,8 +250,7 @@ func TestReleaseByMode(t *testing.T) {
 			default:
 				require.Empty(t, test.wantQuery, "Release sent no reset query")
 			}
-			_, skipped := pgConn.CustomData()[customDataResetSkippedKey]
-			assert.Equal(t, test.wantQuery == "", skipped, "a skipped reset marks the connection")
+			assert.Equal(t, test.wantQuery == "", state.resetSkipped, "a skipped reset marks the connection")
 			if test.wantReason == "" {
 				assert.Empty(t, metrics.counts, "always reports nothing, as before reset_mode")
 				assert.Empty(t, metrics.distributions)
@@ -300,8 +299,8 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: newRecordingMetrics()}))
 			received := make(chan pgproto3.FrontendMessage, 1)
 			conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received))
-			pgConn := conn.Conn().PgConn()
-			pgConn.CustomData()[customDataResetSkippedKey] = true
+			state := setUpConnMetaData(conn)
+			state.resetSkipped = true
 			link, err := New(conn, Options{Reset: mustResetPolicy(t, mode)})
 			require.NoError(t, err)
 			assert.True(t, link.(*SessionLink).foreignUnnamed, "New reads the mark the last release left")
@@ -310,8 +309,7 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 			require.NoError(t, link.Release())
 
 			require.Equal(t, &pgproto3.Query{String: testReset}, <-received)
-			_, skipped := pgConn.CustomData()[customDataResetSkippedKey]
-			assert.False(t, skipped)
+			assert.False(t, state.resetSkipped)
 		})
 	}
 }
@@ -419,7 +417,7 @@ func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 	before, after := auditRows(policy, map[string][]byte{"search_path": []byte("leaked"), "app.tenant_id": []byte("t1")})
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, before, after))
-	pgConn := conn.Conn().PgConn()
+	state := setUpConnMetaData(conn)
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 
@@ -431,7 +429,7 @@ func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 		assert.Equal(t, []int64{1}, wouldLeak(metrics, setting, "list"), setting)
 	}
 	assert.Empty(t, wouldLeak(metrics, "statement_timeout", "list"), "unchanged settings are not counted")
-	assert.Equal(t, auditBaseline{sql: policy.auditSQL, values: after}, pgConn.CustomData()[customDataAuditBaselineKey],
+	assert.Equal(t, auditBaseline{sql: policy.auditSQL, values: after}, state.auditBaseline,
 		"the row read after the reset becomes the connection's baseline")
 	counts, _ := metrics.getCount("datadog.pg_proxy.sessions.connections.reset",
 		[]string{"database_cluster:test-cluster", "reset_mode:audit", "outcome:reset", "reason:audit", "check:list"})
@@ -454,8 +452,8 @@ func TestReleaseAuditComparesWithBaseline(t *testing.T) {
 			before, baseline := auditRows(policy, test.changed)
 			received := make(chan pgproto3.FrontendMessage, 1)
 			conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, before))
-			pgConn := conn.Conn().PgConn()
-			pgConn.CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+			state := setUpConnMetaData(conn)
+			state.auditBaseline = auditBaseline{sql: policy.auditSQL, values: baseline}
 			link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 			require.NoError(t, err)
 
@@ -466,7 +464,7 @@ func TestReleaseAuditComparesWithBaseline(t *testing.T) {
 			for setting := range test.changed {
 				assert.Equal(t, []int64{1}, wouldLeak(metrics, setting, "list"), setting)
 			}
-			_, kept := pgConn.CustomData()[customDataAuditBaselineKey]
+			kept := state.auditBaseline.sql == policy.auditSQL
 			assert.Equal(t, test.keepBaseline, kept, "a change drops the baseline, so the next check reads it again")
 		})
 	}
@@ -481,7 +479,7 @@ func TestReleaseAuditSampledFullCheck(t *testing.T) {
 	full := [][]byte{[]byte("synchronous_commit,work_mem")}
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, full, before))
-	conn.Conn().PgConn().CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+	setUpConnMetaData(conn).auditBaseline = auditBaseline{sql: policy.auditSQL, values: baseline}
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 
@@ -507,7 +505,7 @@ func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
 	before, baseline := auditRows(policy, nil)
 	received := make(chan pgproto3.FrontendMessage, 1)
 	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, [][]byte{nil}, before))
-	conn.Conn().PgConn().CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
+	setUpConnMetaData(conn).auditBaseline = auditBaseline{sql: policy.auditSQL, values: baseline}
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 

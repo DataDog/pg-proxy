@@ -325,9 +325,9 @@ func reasonTags(action resetAction, reason string) []string {
 	return []string{"reason:" + reason, "check:" + check}
 }
 
-// auditBaseline, kept in pgconn's CustomData for the life of the backend
-// connection, is the audit row the connection reads right after a reset: what
-// every audited setting reads at the connection's baseline.
+// auditBaseline, kept in connState for the life of the backend connection, is
+// the audit row the connection reads right after a reset: what every audited
+// setting reads at the connection's baseline.
 type auditBaseline struct {
 	sql    string // the audit query the values answer
 	values [][]byte

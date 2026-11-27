@@ -53,7 +53,7 @@ type SessionLink struct {
 	// request has been sent on this link yet.
 	foreignUnnamed bool
 
-	connState                  *connState // the conn's prepared statement state; nil once released
+	connState                  *connState // the conn's state; nil once released
 	namedPreparedStmtThreshold int
 	createdTime                int
 	sessionLinkTags            []string
@@ -290,7 +290,7 @@ func (link *SessionLink) Release() error {
 		if action == resetSkip {
 			// The reset is what discards the unnamed statement; without it, the next
 			// checkout's client could run this one's.
-			link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey] = true
+			link.connState.resetSkipped = true
 		} else {
 			err = link.runReset(action)
 		}
@@ -363,8 +363,9 @@ func (link *SessionLink) reportReset(action resetAction, reason string, start ti
 // connection.
 func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string, fullCheck bool) error {
 	pgConn := link.conn.Conn().PgConn()
-	baseline, haveBaseline := pgConn.CustomData()[customDataAuditBaselineKey].(auditBaseline)
-	haveBaseline = haveBaseline && baseline.sql == link.reset.auditSQL
+	state := link.connState
+	baseline := state.auditBaseline
+	haveBaseline := baseline.sql == link.reset.auditSQL
 
 	var statements []string
 	if fullCheck {
@@ -408,10 +409,10 @@ func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string, fu
 	changed := link.reset.changedColumns(before, after)
 	switch {
 	case !haveBaseline:
-		pgConn.CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: link.reset.auditSQL, values: after}
+		state.auditBaseline = auditBaseline{sql: link.reset.auditSQL, values: after}
 	case len(changed) > 0:
 		// Read the baseline again next time, in case a server default changed.
-		delete(pgConn.CustomData(), customDataAuditBaselineKey)
+		state.auditBaseline = auditBaseline{}
 	}
 
 	for _, setting := range changed {

@@ -96,16 +96,14 @@ type Options struct {
 // On success the link owns conn until Release. On error the caller still owns conn,
 // whose session state is then unknown, and should pass it to DiscardConn.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
+	state := setUpConnMetaData(conn)
 	// The link takes over the mark: its release sets it again if it skips too.
-	customData := conn.Conn().PgConn().CustomData()
-	_, foreignUnnamed := customData[customDataResetSkippedKey]
-	if foreignUnnamed {
-		delete(customData, customDataResetSkippedKey)
-	}
+	foreignUnnamed := state.resetSkipped
+	state.resetSkipped = false
 
 	sl := &SessionLink{
 		conn:                       conn,
-		connState:                  setUpConnMetaData(conn),
+		connState:                  state,
 		pgConn:                     conn.Conn().PgConn().Frontend(),
 		txStatus:                   query.Idle,
 		replyExpectations:          []query.ReplyExpectation{},
