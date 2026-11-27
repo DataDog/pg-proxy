@@ -17,7 +17,7 @@ PG Proxy also has specific boundaries around prepared statements and connection 
 
 ## The `dynamic` reset mode can leak session state
 
-With `reset_mode: dynamic`, the proxy skips the release reset when the checkout's SQL shows no sign of changing session state. A function or trigger can still change a setting, or the role, without the client's SQL naming it. Unless PostgreSQL reports that setting with `ParameterStatus`, the change survives the skipped reset and reaches the next client of the connection. `off` never resets, so every change reaches the next client. The default, `always`, has neither gap. Run `audit` first to see which settings `dynamic` would leak on your traffic. See [Reset modes](../compatibility/#reset-modes).
+With `reset_mode: dynamic`, the proxy skips the release reset when the checkout's SQL shows no sign of changing session state. A function or trigger can still change a setting, or the role, without the client's SQL naming it. Unless PostgreSQL reports that setting with `ParameterStatus`, the change survives the skipped reset and reaches the next client of the connection. `off` never resets, so every change reaches the next client, apart from a role that application-supplied role management resets. The default, `always`, has neither gap. Run `audit` first to see which settings `dynamic` would leak on your traffic. See [Reset modes](../compatibility/#reset-modes).
 
 ## Traces can contain sensitive data
 

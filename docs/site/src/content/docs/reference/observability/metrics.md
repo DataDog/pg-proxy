@@ -78,23 +78,23 @@ These names use the prefix `datadog.pg_proxy.` and are emitted through the proce
 | `sessions.connect_wait_us` | Distribution | Time through a successful backend acquisition, in microseconds. Failed acquisitions are not included. |
 | `sessions.connections.destroyed.release_non_idle` | Count | Backend connections closed because release found a state unsafe for reuse; includes a `state` tag. |
 | `sessions.connections.guc_reset_failure` | Count | Failed resets before connection reuse. The reset runs `RESET ALL`; without role management it first runs `RESET SESSION AUTHORIZATION` and `RESET ROLE`. |
-| `sessions.connections.reset` | Count | Releases, one each, with `outcome:reset` or `outcome:skipped` and a `reason` tag (see below). |
+| `sessions.connections.reset` | Count | Releases that reach the reset decision, one each, with `outcome:reset` or `outcome:skipped` and a `reason` tag (see below). A release that closes its connection first, such as one left in an unsafe state, is not counted. |
 | `sessions.connections.reset.latency_us` | Distribution | Time to send the reset and read its reply, in microseconds, including the `audit` check. Only releases whose reset succeeded; tagged with `reason`, and `check` when present. |
-| `sessions.connections.reset.would_leak` | Count | In `audit` mode, settings that an audited release found changed: settings that `dynamic` would have left for the next client. One count per setting, tagged `setting:<name>` and `check:list` or `check:full`. |
+| `sessions.connections.reset.would_leak` | Count | In `audit` mode, settings that an audited release found changed: settings that `dynamic` would have left for the next client. One count per setting and check, tagged `setting:<name>` and `check:list` or `check:full`. On a release with the full check, a setting that both checks find is counted once with each tag. |
 
-The three reset metrics depend on the database's [`reset_mode`](../../../explanation/pooling/#session-reset-modes). `always` emits none of them. In the other modes, each carries a `reset_mode` tag, and `sessions.connections.reset` carries one of these reasons:
+The three reset metrics depend on the database's [`reset_mode`](../../../explanation/pooling/#session-reset-modes). `always` emits none of them. In the other modes, each carries a `reset_mode` tag, and `sessions.connections.reset` carries one of these reasons. A release gets the first reason in the table that applies:
 
 | `reason` | Meaning |
 | --- | --- |
 | `client_sql` | The client's SQL may have changed session state. |
 | `prepared_stmt` | A `Bind` ran a prepared statement whose SQL may change session state, or one the proxy could not match to its `Parse`. |
 | `parameter_status` | PostgreSQL reported a changed setting with `ParameterStatus`. |
-| `server_version` | The server lacks the fix for CVE-2024-10978, so the proxy resets on every release. See [Reset modes](../../compatibility/#reset-modes). |
+| `server_version` | The server is one of the releases listed in [Reset modes](../../compatibility/#reset-modes) and no role implementation is in use, so the proxy reset a release it would otherwise have skipped. |
 | `clean` | `dynamic` found nothing to reset and skipped the reset. |
 | `audit` | `audit` reset a release that `dynamic` would have skipped. A `check` tag says what it checked: `none`, `list` for the built-in settings, the role, and `reset_audit_settings`, or `full` for the list and every setting that `pg_settings` shows changed in the session. |
 | `off` | `off` skipped the reset. |
 
-`reset_audit_rate` sets the share of `audit`-reason releases that run a check, `0.1` by default. A share of `0.01` of them runs the `full` check, which reads `pg_settings` and costs more; with a `reset_audit_rate` below `0.01`, every checked release runs it. A `would_leak` count names the setting, never its value; `setting:current_user` stands for the role. The proxy also logs a `reset_would_leak` warning with the changed setting names and the backend PID.
+`reset_audit_rate` sets the share of `audit`-reason releases that run a check, `0.1` by default. A share of `0.01` of all `audit`-reason releases runs the `full` check, which reads `pg_settings` and costs more; with a `reset_audit_rate` below `0.01`, every checked release runs it. A `would_leak` count names the setting, never its value; `setting:current_user` stands for the role. The proxy also logs a `reset_would_leak` warning with the changed setting names and the backend PID.
 
 A high waiting count together with an acquired count near the pool maximum suggests pool pressure. Low PostgreSQL CPU alone does not rule it out: open transactions can retain connections between statements.
 
@@ -110,7 +110,7 @@ These counters use the prefix `datadog.pg_proxy.session.` and the process-wide m
 | `message_mirror_dropped` | The first copy in a batch rejected by a capacity limit; `reason:session` or `reason:global` identifies the budget. Later messages in that batch are neither copied nor counted. |
 | `mirror.replayed` | Messages forwarded to a shadow link (`kind:msg`), completed flushes (`kind:flush`), or a `Parse` skipped because the shadow connection already had the statement (`kind:parse_existing`; also counted as `kind:msg`). This is not a result-equivalence check. |
 | `mirror.replay_errors` | Replay failures, tagged by `op`: `acquire` (could not get a shadow connection), `flush` (flush or drain failed), `stmt_rejected` (an error occurred in a batch that created a prepared statement, so the statement may be missing and the connection was discarded), or `reparse_budget` (the session's queue byte cap or the shared byte budget could not admit a `Parse` that re-creates a missing statement on the shadow connection, so the batch was skipped). Other errors that the shadow returns for replayed statements are counted only in `mirror.replay_error_response`. |
-| `mirror.replay_error_response` | Error responses from the shadow, tagged `code:<SQLSTATE>`. The flush that carried the error still counts as `mirror.replayed` with `kind:flush`. |
+| `mirror.replay_error_response` | Error responses from the shadow, tagged `code:<SQLSTATE>`. After a non-fatal error, the flush still counts as `mirror.replayed` with `kind:flush`, unless the batch created a prepared statement since its last flush; then it counts as `mirror.replay_errors` with `op:stmt_rejected`. A `FATAL` error counts as `op:flush`. |
 | `mirror.shadow_reparse` | `Parse` messages the worker sent to re-create a named statement on a shadow connection that lacked it. |
 | `mirror.catalog_miss` | A replayed `Bind` or `Describe` named a statement the worker has no definition for, for example because its `Parse` was dropped. The message is still replayed and can fail on the shadow. |
 | `mirror.worker.stop_timeout` | Worker teardown exceeded its first waiting period and attempted to force-close its shadow link. |

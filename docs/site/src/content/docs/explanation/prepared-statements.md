@@ -27,7 +27,7 @@ For named statements, the proxy generates a backend name from the SQL text and p
 3. In a later transaction, the client sends `Bind` or `Describe` using its original name.
 4. If the selected backend connection lacks the statement, the proxy prepares it there before forwarding the operation.
 
-If the backend connection already has the statement when the client sends `Parse`, for example because another client prepared the same SQL, the proxy replies `ParseComplete` itself instead of forwarding it.
+If the backend connection already has the statement when the client sends `Parse`, for example because another client prepared the same SQL, the proxy replies `ParseComplete` itself instead of forwarding it, unless an earlier message in the pipeline failed.
 
 The client does not receive extra preparation replies for this internal work. Its statement remains associated with its client session even as backend connections change.
 

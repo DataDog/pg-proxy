@@ -19,7 +19,7 @@ level=ERROR msg="failed to open connection from 127.0.0.1:36676: logical databas
 
 ## The proxy does not start
 
-Run `pg-proxy -config proxy.yaml -validate-config` first. It reports configuration errors one per line, with the field path, and exits with status `1` if there are any. A syntax or type error in the file also gives the line, and stops the check before the other checks run, so run it again after fixing one. It does not connect to PostgreSQL.
+Run `pg-proxy -config proxy.yaml -validate-config` first. It reports configuration errors one per line, naming the setting, and exits with status `1` if there are any. A file that cannot be decoded, because of a syntax error, a wrong type, or an unknown field, stops the check before the other checks run, so run it again after fixing that error. See [`-validate-config`](../configuration/command-line/) for how each kind of error gives its location. It does not connect to PostgreSQL.
 
 At startup, the same errors are printed after `invalid configuration:` and the process exits with status `1` before it opens any pool or the listener.
 

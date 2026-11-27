@@ -41,7 +41,7 @@ A later transaction may acquire another connection. Use transaction-scoped setti
 
 ## Session reset modes
 
-A connection returns to the pool after every transaction and every autocommit statement, and the reset is one more query to PostgreSQL each time. Most checkouts change nothing that needs resetting. `databases[].reset_mode` chooses, for each database's pools, when the proxy sends the reset:
+A connection returns to the pool after every transaction and every autocommit statement, and the reset is one more query to PostgreSQL each time, even after a checkout that changed no session state. `databases[].reset_mode` chooses, for each database's pools, when the proxy sends the reset:
 
 | Mode | On release |
 | --- | --- |

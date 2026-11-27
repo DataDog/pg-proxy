@@ -132,7 +132,7 @@ These unit tests fail when a change makes the proxy do more work per query:
 
 - `TestProtocolCycleAllocationBudgets` in `pkg/session` counts heap allocations per query cycle.
 - `TestProtocolCycleRoundTripBudgets` in `pkg/session` and `TestReleaseResetSQL` in `pkg/link` count writes to PostgreSQL and to the client, and reset queries.
-- `TestBackendStatementsPerClientStatement` in `cmd/pg-proxy`, an integration test, checks those round-trip counts against a real PostgreSQL server with `pg_stat_statements`. Its container preloads that extension; with `PG_PROXY_TEST_DATABASE_URL`, it skips itself unless the server preloads it and tracks utility statements.
+- `TestBackendStatementsPerClientStatement` in `cmd/pg-proxy`, an integration test, uses `pg_stat_statements` to check, against a real PostgreSQL server, the statements PostgreSQL runs for each client statement, including the reset queries. Its container preloads that extension; with `PG_PROXY_TEST_DATABASE_URL`, it skips itself unless the server preloads it and tracks utility statements.
 - `TestLargeBindAmplification` in `pkg/session` bounds the memory used to forward a 64 MiB parameter.
 - The `goleak` check in the `main_test.go` of `pkg/backend`, `pkg/link`, `pkg/listener`, `pkg/mirror`, `pkg/pool`, and `pkg/session` fails the package when its tests leave a goroutine running.
 

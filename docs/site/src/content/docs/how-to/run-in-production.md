@@ -84,7 +84,7 @@ users:
 
 **Keep secrets out of the file.** The example reads the backend password from `password_file`. Credentials can also come from environment variables; see [credential references](../../reference/configuration/client-authentication/#credential-references). Make secret files readable only by the user that runs the proxy, for example `chmod 600`. If you keep any credentials inline, protect the configuration file the same way and keep it out of version control.
 
-**Replicas.** To send eligible reads to replicas, list them under `clusters[].replicas` and add `read_clusters` to the logical database. The binary's replicas are static: each must accept a connection at startup, and there are no replica health checks. If a replica checkout fails or takes longer than 50 ms, the read falls back to the primary, up to 100 fallbacks per second for each cluster; beyond that, the read fails. See [Read routing](../../explanation/read-routing/) for an example and its consistency limits.
+**Replicas.** To send eligible reads to replicas, list them under `clusters[].replicas` and add `read_clusters` to the logical database. The binary's replicas are static: each must accept a connection at startup, and there are no replica health checks. If a replica checkout fails or takes longer than 50 ms, the read falls back to the primary, up to 100 fallbacks per second for each cluster; beyond that, the client's session ends with a `FATAL` error. See [Read routing](../../explanation/read-routing/) for an example and its consistency limits.
 
 Complete [YAML](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.yaml) and [JSON](https://github.com/DataDog/pg-proxy/blob/main/examples/password-auth.json) examples are in the repository. The [settings table](../../reference/configuration/configuration-file/) lists the other options.
 
@@ -128,7 +128,7 @@ Useful signals to watch, all prefixed with `datadog.pg_proxy.`:
 | `sessions.connect_wait_us` | Time clients wait for a backend connection; growth means pool pressure |
 | `sessions.connections.destroyed.release_non_idle` | Connections discarded because a client left them in an unsafe state |
 | `sessions.connections.reset.would_leak` | With `reset_mode: audit`, the settings that `dynamic` would have leaked; check its `setting` tags before you switch a database to `dynamic` |
-| `sessions.connections.reset` | With `audit` or `dynamic`, how often releases reset and why, by `reason` tag |
+| `sessions.connections.reset` | With `audit`, `dynamic`, or `off`, how often releases reset and why, by `reason` tag |
 
 See [Metrics](../../reference/observability/metrics/) for more.
 
