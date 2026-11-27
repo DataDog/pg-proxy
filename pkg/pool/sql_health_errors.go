@@ -18,7 +18,7 @@ func isConclusiveSQLUnroutableError(err error) bool {
 	// pgx joins failures from multiple connection attempts. A matching error anywhere in that
 	// tree is insufficient: an earlier refusal must not hide a later timeout or auth failure.
 	// Walk ordinary wrappers and require every branch of a combined error to be conclusive.
-	switch wrapped := err.(type) {
+	switch wrapped := err.(type) { //nolint:errorlint // the manual walk above peels wrappers; leaves are typed directly
 	case interface{ Unwrap() []error }:
 		causes := wrapped.Unwrap()
 		if len(causes) == 0 {
@@ -34,10 +34,10 @@ func isConclusiveSQLUnroutableError(err error) bool {
 		return isConclusiveSQLUnroutableError(wrapped.Unwrap())
 	}
 
-	if errno, ok := err.(syscall.Errno); ok {
+	if errno, ok := err.(syscall.Errno); ok { //nolint:errorlint // manual walk above already unwrapped; err is a leaf
 		return errno == syscall.ECONNREFUSED
 	}
-	postgresErr, ok := err.(*pgconn.PgError)
+	postgresErr, ok := err.(*pgconn.PgError) //nolint:errorlint // manual walk above already unwrapped; err is a leaf
 	if !ok || postgresErr == nil {
 		return false
 	}

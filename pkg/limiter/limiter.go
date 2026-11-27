@@ -7,6 +7,7 @@ package limiter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -225,7 +226,8 @@ func (sl *Limiter) RegisterService(service string, limit int32) *ServiceState {
 
 // GetErrorType returns the error type string if err is a Limit Error, otherwise "unknown".
 func (sl *Limiter) GetErrorType(err error) string {
-	if e, ok := err.(*Error); ok {
+	var e *Error
+	if errors.As(err, &e) {
 		return string(e.Type)
 	}
 	pgproxy.Logger().Warn("unknown error type in limiter.GetErrorType", "type", fmt.Sprintf("%T", err))

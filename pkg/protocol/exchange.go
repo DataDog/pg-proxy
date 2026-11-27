@@ -49,7 +49,7 @@ func NewConnExchange(conn net.Conn, backend *pgproto3.Backend) ConnExchange {
 func (e ConnExchange) Send(msg pgproto3.BackendMessage) error {
 	buf, err := msg.Encode(nil)
 	if err != nil {
-		return fmt.Errorf("error encoding %T: %v", msg, err)
+		return fmt.Errorf("error encoding %T: %w", msg, err)
 	}
 
 	// Set before writing, so a failure here sends nothing. Writing first would
@@ -57,7 +57,7 @@ func (e ConnExchange) Send(msg pgproto3.BackendMessage) error {
 	// client's reply.
 	if authType, ok := authTypeFor(msg); ok {
 		if err := e.backend.SetAuthType(authType); err != nil {
-			return fmt.Errorf("error setting auth type for %T: %v", msg, err)
+			return fmt.Errorf("error setting auth type for %T: %w", msg, err)
 		}
 	}
 
