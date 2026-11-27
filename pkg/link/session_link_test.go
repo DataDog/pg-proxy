@@ -815,3 +815,16 @@ func TestReleaseDeallocatesExcessAndReportsStats(t *testing.T) {
 		require.Equal(t, want, got, name)
 	}
 }
+
+// LoginUser reads the user from the conn's config once, into the conn's state, and
+// later calls read the state, so a checkout does not copy the config again.
+func TestLoginUserIsKeptInConnState(t *testing.T) {
+	conn, err := newFakePgPool(t).pool.Acquire(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(conn.Release)
+
+	state := connStateOf(conn)
+	require.Equal(t, "app_user", state.loginUser, "the state reads the user from the conn's config")
+	state.loginUser = "kept_user"
+	require.Equal(t, "kept_user", LoginUser(conn), "LoginUser reads the state, not the config")
+}

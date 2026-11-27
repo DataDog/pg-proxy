@@ -35,13 +35,15 @@ type connStats struct {
 	preparedStmtsMaxUsage int
 }
 
-// connState is the state of one Postgres connection: its prepared statements and
-// what its releases left on it. It lives in the connection's pgx CustomData, so it
-// outlasts each SessionLink and stays with the connection while it sits in the pool.
+// connState is the state of one Postgres connection: who it logged in as, its
+// prepared statements, and what its releases left on it. It lives in the
+// connection's pgx CustomData, so it outlasts each SessionLink and stays with the
+// connection while it sits in the pool.
 //
 // Only the link that holds the connection touches it, on the session goroutine. An
 // AbortHandle's Cancel and ForceClose never do, so its lock does not guard it.
 type connState struct {
+	loginUser string // the user in the connection's config
 	// Keyed by proxy statement name. Pointers, so a Bind updates usage in place.
 	stmts map[string]*stmtUsage
 	stats connStats
@@ -72,13 +74,21 @@ type ConnPreparedStmt struct {
 // checkout. A pool hook cannot own this: links accept conns from any pool.Pool, and
 // the state only matters once a link uses the conn.
 func connStateOf(conn *pgxpool.Conn) *connState {
-	customData := conn.Conn().PgConn().CustomData()
+	pgxConn := conn.Conn()
+	customData := pgxConn.PgConn().CustomData()
 	if state, ok := customData[customDataConnStateKey].(*connState); ok {
 		return state
 	}
-	state := &connState{stmts: make(map[string]*stmtUsage)}
+	// Config deep-copies the connection's config, so read it once per connection.
+	state := &connState{loginUser: pgxConn.Config().User, stmts: make(map[string]*stmtUsage)}
 	customData[customDataConnStateKey] = state
 	return state
+}
+
+// LoginUser returns the user conn logged in as, from conn's config. It copies the
+// config once per connection, not per call. Call it only while holding conn.
+func LoginUser(conn *pgxpool.Conn) string {
+	return connStateOf(conn).loginUser
 }
 
 // A sorting function for ConnPreparedStmt that is based on a statement's deallocation priority.
