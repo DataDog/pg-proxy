@@ -76,6 +76,12 @@ func TestScan(t *testing.T) {
 		{"SELECT 1$$a'$$; SET work_mem = '1MB'; --'", changes},
 		{"SELECT x FROM t WHERE y = 1 AND z = 1$$a'$$; SET work_mem = '1MB'; --'", changes},
 		{"SELECT a1$ FROM t", clean},
+		// A letter after the digits starts an identifier, which takes in a $:
+		// before PostgreSQL 15, 1a$$ is 1 AS a$$.
+		{"SELECT 1a$$; SET search_path = s; SELECT 1 AS b$$", changes},
+		{"SELECT 1 FROM t WHERE x = 1e2a$$; SET search_path = s; SELECT 1 AS b$$", changes},
+		{"SELECT 1_a$$; SET search_path = s; SELECT 1 AS b$$", changes},
+		{"SELECT 1a$$ FROM t", clean},
 	}
 	for _, c := range cases {
 		assert.Equal(t, c.want, Scan(c.sql, true), "%q", c.sql)

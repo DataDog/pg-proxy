@@ -278,7 +278,7 @@ var identCont = func() (t [256]bool) {
 }()
 
 // numCont marks bytes that continue a number: identifier bytes other than $,
-// which Postgres does not take into a number, as it may open a dollar quote.
+// which may open a dollar quote (see identBeforeDollar).
 var numCont = func() (t [256]bool) {
 	t = identCont
 	t['$'] = false
@@ -472,12 +472,32 @@ func skipQuotedIdent(sql string, i int) (int, bool) {
 	return n, false
 }
 
+// identBeforeDollar reports whether the $ at i continues an identifier. Only a
+// number stops before a $ that continues it, and a letter or _ after its digits
+// starts an identifier, which takes in the $: before PostgreSQL 15, SELECT 1a$$
+// is SELECT 1 AS a$$. Later releases reject it. After digits alone, the $ may
+// open a dollar quote.
+func identBeforeDollar(sql string, i int) bool {
+	for k := i - 1; k >= 0 && numCont[sql[k]]; k-- {
+		if lexClass[sql[k]] == clsIdentStart {
+			return true
+		}
+	}
+	return false
+}
+
 // skipDollar handles a $ at the start of a token: $n parameters, $tag$
 // quotes, and a lone $ (an operator character in some contexts). isQuote is
 // true for a dollar quote.
 func skipDollar(sql string, i int) (end int, ok, isQuote bool) {
 	n := len(sql)
 	j := i + 1
+	if identBeforeDollar(sql, i) {
+		for j < n && identCont[sql[j]] {
+			j++
+		}
+		return j, true, false
+	}
 	if j < n && lexClass[sql[j]] == clsDigit {
 		for j < n && lexClass[sql[j]] == clsDigit {
 			j++
