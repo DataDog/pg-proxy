@@ -630,29 +630,28 @@ func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
 	go func() { released <- link.Release() }()
 	<-resetReceived
 
-	// ForceClose and Cancel overlap Release, so they must wait for Release and then
-	// do nothing.
+	// ForceClose and Cancel overlap Release: MarkReleased has already fenced
+	// them out, so they return immediately doing nothing instead of blocking on
+	// Release's reset SQL or touching the connection.
 	forceClosed := make(chan bool, 1)
 	go func() { forceClosed <- link.ForceClose() }()
 	cancelled := make(chan error, 1)
 	go func() { cancelled <- link.Cancel() }()
 	select {
-	case <-forceClosed:
-		t.Fatal("ForceClose did not wait for Release")
-	case <-cancelled:
-		t.Fatal("Cancel did not wait for Release")
-	case <-time.After(50 * time.Millisecond):
+	case got := <-forceClosed:
+		assert.False(t, got)
+	case <-time.After(time.Second):
+		t.Fatal("ForceClose blocked on Release instead of returning false")
 	}
-	close(replyToReset)
-	require.NoError(t, <-released)
-	assert.False(t, <-forceClosed)
 	select {
 	case err := <-cancelled:
 		assert.NoError(t, err)
 	case <-time.After(time.Second):
 		// A cancel request on the released connection blocks on the test pipe.
-		t.Fatal("Cancel used the connection after Release started")
+		t.Fatal("Cancel used the connection or blocked after Release started")
 	}
+	close(replyToReset)
+	require.NoError(t, <-released)
 
 	assert.False(t, link.ForceClose())
 	assert.NoError(t, link.Cancel())

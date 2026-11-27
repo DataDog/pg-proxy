@@ -139,12 +139,7 @@ func (s *Session) handleClientDisconnect(cancel context.CancelCauseFunc) {
 	s.clientDisconnected.Store(true)
 	cancel(ErrClientDisconnected) // abort a pending AcquireConnection with an identifiable cause
 
-	s.linkMu.Lock()
-	link := s.link
-	s.linkMu.Unlock()
-	if link != nil {
-		s.forceCloseBackendOnClientDisconnect(link)
-	}
+	s.forceCloseHandleOnClientDisconnect(s.abortHandle.Load())
 }
 
 // clientMonitor polls the client TCP connection to detect disconnection
@@ -218,10 +213,8 @@ type timerMonitor struct {
 	// occur.
 	//
 	// poll releases mu before it handles a disconnect, because the handling
-	// takes s.linkMu and calls code outside the monitor, such as metrics and a
-	// link's ForceClose. A ForceClose that wrongly closes the session then
-	// behaves as in goroutine mode rather than deadlocking. stop waits for that
-	// handling through m.handling, so do not call stop while holding s.linkMu.
+	// calls code outside the monitor, such as metrics and the link's
+	// AbortHandle.ForceClose. stop waits for that handling through m.handling.
 	mu    sync.Mutex
 	timer *time.Timer
 	// active is true while a checkout is in flight. A callback that started
@@ -323,10 +316,9 @@ func (m *timerMonitor) stopLocked() {
 	m.active = false
 }
 
-// close stops the monitor for good and releases its context. Unlike stop, it
-// does not wait for disconnect handling: a ForceClose that wrongly closes the
-// session calls close from that handling, on the timer's goroutine. The
-// deferred stop at the end of the checkout still waits for it.
+// close stops the monitor for good and releases its context. The deferred stop
+// at the end of an active checkout still waits for any in-flight disconnect
+// handling to finish.
 func (m *timerMonitor) close() {
 	m.disarm()
 	m.cancel(nil)

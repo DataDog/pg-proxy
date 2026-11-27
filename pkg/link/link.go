@@ -27,14 +27,11 @@ const DefaultPreparedStmtsPerConnection = 100
 
 // Link defines the behavior of PG conn <-> Session.
 //
-// Other goroutines may call Cancel and ForceClose concurrently with any method.
-// Once Release starts, they must not touch the connection, which may be back in
-// the pool: a call that overlaps Release finishes before Release uses it or does
-// nothing, and a later call does nothing. SessionLink meets this with its lock.
-//
-// The session's client monitor calls ForceClose on its own goroutine to unblock
-// Receive. ForceClose must not call back into the session, for example to close
-// it: the session goroutine tears the session down once Receive returns.
+// Out-of-band goroutines cancel or force-close a checked-out connection through
+// the AbortHandle that AbortHandleFor returns. Once Release starts,
+// MarkReleased makes later Cancel and ForceClose calls no-ops so they never
+// touch a connection returned to the pool. The handle holds its lock while it
+// calls Cancel or ForceClose, so they must not call back into the session.
 type Link interface {
 	Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation)
 	Flush() error
@@ -92,6 +89,7 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 		sessionLinkTags:            opts.MetricTags,
 		role:                       opts.Role,
 	}
+	sl.abort.target = sl
 	sl.exportStats()
 
 	if opts.Role != nil {
@@ -107,7 +105,7 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 
 // NewFrontendLink builds a link with only a Frontend (conn nil) for unit tests.
 func NewFrontendLink(fe *pgproto3.Frontend) *SessionLink {
-	return &SessionLink{
+	sl := &SessionLink{
 		conn:                nil,
 		pgConn:              fe,
 		txStatus:            query.Idle,
@@ -115,4 +113,6 @@ func NewFrontendLink(fe *pgproto3.Frontend) *SessionLink {
 		discardingUntilSync: false,
 		readyForQuery:       true,
 	}
+	sl.abort.target = sl
+	return sl
 }

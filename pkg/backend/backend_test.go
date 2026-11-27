@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -462,4 +464,216 @@ func TestFallbackMetricIdentity(t *testing.T) {
 		assert.Equal(t, "datadog.pg_proxy.replica_acquire_fallback", metrics.counts[i].name)
 		assert.ElementsMatch(t, []string{"database:primary", "database_cluster:test-cluster", "outcome:" + outcome}, metrics.counts[i].tags)
 	}
+}
+
+func TestCheckoutPopulatesCheckoutMeta(t *testing.T) {
+	tests := []struct {
+		name           string
+		routeToReplica bool
+		replicaAcquire func(context.Context) (*pgxpool.Conn, error)
+		expectReplica  bool
+		expectRerouted bool
+	}{
+		{name: "direct primary"},
+		{
+			name:           "successful replica",
+			routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, nil },
+			expectReplica:  true,
+			expectRerouted: true,
+		},
+		{
+			name:           "replica failure falls back to primary",
+			routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) {
+				return nil, errors.New("replica unavailable")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			primary := &fakePool{}
+			replica := &fakePool{acquire: test.replicaAcquire}
+			var annotated session.CheckoutMeta
+			runtime := New(Config{
+				ClusterName:         "cluster-a",
+				PrimaryDatabaseName: "primary-a",
+				Primary:             primary,
+				Replicas:            []pool.Pool{replica},
+				LinkFactory: func(*pgxpool.Conn, link.Options) (link.Link, error) {
+					return nil, nil
+				},
+				CheckoutAnnotator: func(meta session.CheckoutMeta) any {
+					annotated = meta
+					return "route-annotation"
+				},
+			})
+			runtime.selector.randomIntFn = func(int) int { return 25 }
+
+			acquired, err := runtime.Checkout(context.Background(), session.LinkRequest{
+				DynamicRoutingEnabled: test.routeToReplica,
+				ForReadQuery:          test.routeToReplica,
+				PassthroughRoleName:   "role-a",
+			})
+			require.NoError(t, err)
+			if test.expectReplica {
+				assert.Same(t, replica, acquired.Meta.Pool)
+				assert.Same(t, replica, annotated.Pool)
+			} else {
+				assert.Same(t, primary, acquired.Meta.Pool)
+				assert.Same(t, primary, annotated.Pool)
+			}
+			assert.Equal(t, "cluster-a", acquired.Meta.ClusterName)
+			assert.Equal(t, "role-a", acquired.Meta.EffectiveRole)
+			assert.Equal(t, test.expectRerouted, acquired.Meta.Rerouted)
+			assert.Equal(t, test.routeToReplica, acquired.Meta.ForReadQuery)
+			assert.Equal(t, "route-annotation", acquired.Meta.Annotation)
+		})
+	}
+}
+
+func TestCheckoutAnnotatorPanicIsRecovered(t *testing.T) {
+	metrics := &recordingMetrics{}
+	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
+	primary := &fakePool{}
+	runtime := New(Config{
+		ClusterName:         "cluster-a",
+		PrimaryDatabaseName: "primary-a",
+		Primary:             primary,
+		LinkFactory: func(*pgxpool.Conn, link.Options) (link.Link, error) {
+			return nil, nil
+		},
+		CheckoutAnnotator: func(session.CheckoutMeta) any {
+			panic("annotator boom")
+		},
+	})
+
+	acquired, err := runtime.Checkout(context.Background(), session.LinkRequest{})
+	require.NoError(t, err)
+	assert.Same(t, primary, acquired.Meta.Pool)
+	assert.Nil(t, acquired.Meta.Annotation)
+	found := false
+	for _, entry := range metrics.counts {
+		if entry.name == "datadog.pg_proxy.backend.checkout_annotator_panic" {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "expected checkout_annotator_panic metric")
+}
+
+type scriptedHandshakeConn struct {
+	in []byte
+}
+
+func (c *scriptedHandshakeConn) Read(p []byte) (int, error) {
+	if len(c.in) == 0 {
+		return 0, errors.New("script exhausted")
+	}
+	n := copy(p, c.in)
+	c.in = c.in[n:]
+	return n, nil
+}
+func (*scriptedHandshakeConn) Write(p []byte) (int, error)      { return len(p), nil }
+func (*scriptedHandshakeConn) Close() error                     { return nil }
+func (*scriptedHandshakeConn) LocalAddr() net.Addr              { return &net.TCPAddr{} }
+func (*scriptedHandshakeConn) RemoteAddr() net.Addr             { return &net.TCPAddr{} }
+func (*scriptedHandshakeConn) SetDeadline(time.Time) error      { return nil }
+func (*scriptedHandshakeConn) SetReadDeadline(time.Time) error  { return nil }
+func (*scriptedHandshakeConn) SetWriteDeadline(time.Time) error { return nil }
+
+// TestCheckoutCachesConfiguredUserWithoutConfigCopy verifies that steady-state
+// Runtime.Checkout reads the pool's configured user without calling
+// pgx.Conn.Config() (which deep-copies ConnConfig, RuntimeParams, TLSConfig,
+// and Fallbacks on every call).
+func TestCheckoutCachesConfiguredUserWithoutConfigCopy(t *testing.T) {
+	var handshake []byte
+	for _, msg := range []pgproto3.BackendMessage{
+		&pgproto3.AuthenticationOk{},
+		&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'},
+	} {
+		var err error
+		handshake, err = msg.Encode(handshake)
+		require.NoError(t, err)
+	}
+	cfg, err := pgxpool.ParseConfig("postgres://app_user@127.0.0.1/app_db?sslmode=disable")
+	require.NoError(t, err)
+	cfg.MaxConns = 1
+	cfg.HealthCheckPeriod = time.Hour
+	cfg.ShouldPing = func(context.Context, pgxpool.ShouldPingParams) bool { return false }
+	cfg.ConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
+		return &scriptedHandshakeConn{in: append([]byte(nil), handshake...)}, nil
+	}
+	pgxPool, err := pgxpool.NewWithConfig(context.Background(), cfg)
+	require.NoError(t, err)
+	t.Cleanup(pgxPool.Close)
+
+	wrappedPool := pool.NewPGXPool(pgxPool, pool.PGXHooks{})
+	runtime := New(Config{
+		ClusterName:         "cluster-a",
+		PrimaryDatabaseName: "app_db",
+		Primary:             wrappedPool,
+		LinkFactory: func(conn *pgxpool.Conn, _ link.Options) (link.Link, error) {
+			return &releaseOnlyLink{conn: conn}, nil
+		},
+	})
+
+	// Warm the single pooled connection so CustomData caches the configured user.
+	first, err := runtime.Checkout(context.Background(), session.LinkRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, "app_user", first.Meta.EffectiveRole)
+	require.NoError(t, first.Link.Release())
+
+	// Steady-state effectiveRoleForCheckout must allocate 0 times (no Config().Copy()).
+	conn, err := pgxPool.Acquire(context.Background())
+	require.NoError(t, err)
+	roleAllocs := testing.AllocsPerRun(50, func() {
+		if role := effectiveRoleForCheckout("", conn); role != "app_user" {
+			t.Fatalf("effectiveRole=%q, want app_user", role)
+		}
+	})
+	conn.Release()
+	if !raceEnabled {
+		assert.Zero(t, roleAllocs, "steady-state effectiveRoleForCheckout must not deep-copy pgx.ConnConfig")
+
+		// Steady-state Runtime.Checkout with empty PassthroughRoleName must not
+		// allocate more than a passthrough checkout. Run 128 iterations (one
+		// full pgxpool Conn wrapper batch) so both measurements see the exact
+		// same pool amortization.
+		nonPassthrough := testing.AllocsPerRun(128, func() {
+			acq, err := runtime.Checkout(context.Background(), session.LinkRequest{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if acq.Meta.EffectiveRole != "app_user" {
+				t.Fatalf("effectiveRole=%q, want app_user", acq.Meta.EffectiveRole)
+			}
+			_ = acq.Link.Release()
+		})
+		passthrough := testing.AllocsPerRun(128, func() {
+			acq, err := runtime.Checkout(context.Background(), session.LinkRequest{PassthroughRoleName: "role-a"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if acq.Meta.EffectiveRole != "role-a" {
+				t.Fatalf("effectiveRole=%q, want role-a", acq.Meta.EffectiveRole)
+			}
+			_ = acq.Link.Release()
+		})
+		assert.LessOrEqual(t, nonPassthrough, passthrough,
+			"non-passthrough Runtime.Checkout (%v allocs) must not allocate more than passthrough (%v allocs)",
+			nonPassthrough, passthrough)
+	}
+}
+
+type releaseOnlyLink struct {
+	link.Link
+	conn *pgxpool.Conn
+}
+
+func (l *releaseOnlyLink) Release() error {
+	l.conn.Release()
+	return nil
 }

@@ -148,8 +148,8 @@ type Session struct {
 	// reply that outgrows it grows its own buffer, or, with Config.ReplyBufferPool, continues in
 	// a buffer from replyBufPool.
 	clientReplyBuf []byte
-	linkMu         sync.Mutex // protects link from concurrent access by the client monitor goroutine
-	link           link.Link  // non-nil when this session is linked to a postgres connection
+	link           link.Link                        // non-nil when this session is linked to a postgres connection (session goroutine only)
+	abortHandle    atomic.Pointer[link.AbortHandle] // out-of-band Cancel/ForceClose handle for the active link
 
 	backend                      Backend
 	readStates                   []*ReadState
@@ -191,6 +191,7 @@ type Session struct {
 	obsVals               *SessionObservabilityValues
 	metrics               Metrics
 	hooks                 Hooks
+	observers             []observerSlot
 	decorateLink          bool
 	enableTraceParameters bool
 	paramTypes            *bindParamTypes // allocated on the first statement Describe
@@ -207,6 +208,7 @@ type Session struct {
 	mirror         *mirror.Queue  // per-session mirror queue; nil until the first mirrored link
 	mirrorBudget   *mirror.Budget // shared, process-wide byte budget for all mirror queues (set by the listener)
 	mirrorWorker   *mirror.Worker // drains s.mirror onto the shadow DB; started with s.mirror
+	mirrorTap      *mirror.Tap    // per-checkout mirroring tap; nil when mirroring is off or no link is held
 	hooksCloseOnce sync.Once
 }
 
@@ -365,10 +367,12 @@ type Config struct {
 	// arms the timer for each checkout.
 	ClientDisconnectTimer bool
 	Hooks                 Hooks
+	Observers             []Observer
 	// DecorateLink requests decoration when the session checks out a routed link.
 	// The listener sets this explicitly; installing hooks does not enable it.
 	DecorateLink             bool
 	InitialLink              link.Link
+	InitialCheckoutMeta      CheckoutMeta
 	InitialClientReplyBuffer []byte
 	InitialDiscardUntilSync  bool
 }
@@ -405,7 +409,6 @@ func New(cfg Config) *Session {
 		logicalDatabase: cfg.LogicalDatabase, pid: cfg.PID,
 		secretKey: append([]byte(nil), cfg.SecretKey...), service: cfg.Service,
 		clientConn: cfg.Client, clientNetConn: cfg.ClientConn, livenessProbe: cfg.LivenessProbe,
-		link:           cfg.InitialLink,
 		clientReplyBuf: append([]byte(nil), cfg.InitialClientReplyBuffer...),
 		backend:        cfg.Backend, readStates: readStates,
 		readStatesFunc: cfg.ReadStatesFunc, randomInt: randomInt, dynamicRoutingEnabled: cfg.DynamicRoutingEnabled,
@@ -419,7 +422,8 @@ func New(cfg Config) *Session {
 		obsVals:                      createSessionObservabilityValues(cfg.User, cfg.Database, cfg.Service, cfg.PassthroughUser),
 		metrics:                      resolveMetrics(cfg.Metrics),
 		mirroring:                    cfg.Mirroring, mirrorBudget: cfg.MirrorBudget,
-		clientDisconnected: disconnected, hooks: cfg.Hooks, decorateLink: cfg.DecorateLink,
+		clientDisconnected: disconnected, hooks: cfg.Hooks, observers: initObserverSlots(cfg.Observers),
+		decorateLink:          cfg.DecorateLink,
 		enableTraceParameters: cfg.EnableTraceParameters,
 		clientDisconnectTimer: cfg.ClientDisconnectTimer,
 	}
@@ -429,8 +433,8 @@ func New(cfg Config) *Session {
 	if cfg.MetricTags != nil {
 		s.obsVals.setMetricTags(cfg.MetricTags)
 	}
-	if cfg.Hooks.LinkChanged != nil && cfg.InitialLink != nil {
-		cfg.Hooks.LinkChanged(cfg.InitialLink)
+	if cfg.InitialLink != nil {
+		s.attachCheckout(AcquiredLink{Link: cfg.InitialLink, Meta: cfg.InitialCheckoutMeta})
 	}
 	return s
 }
@@ -588,6 +592,9 @@ func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
 func (s *Session) Backend() Backend        { return s.backend }
 func (s *Session) PendingBackend() Backend { return s.pendingRemaps().backend }
+func (s *Session) ReadStates() []ReadStateConfig {
+	return readStatesToConfig(s.currentReadStates())
+}
 
 // SetLivenessProbe replaces the client liveness probe. The next checkout uses
 // it. Call it from the goroutine that runs the session.
@@ -622,10 +629,11 @@ func (s *Session) RecordNewPreparedStatement(action actions.ClientMessageAction)
 	return s.handleRecordNewPreparedStmt(action)
 }
 func (s *Session) ForceCloseBackendOnClientDisconnect(backendLink link.Link) {
-	s.forceCloseBackendOnClientDisconnect(backendLink)
+	s.forceCloseHandleOnClientDisconnect(link.AbortHandleFor(backendLink))
 }
 
 func (s *Session) setLink(backendLink link.Link) {
+	s.abortHandle.Store(link.AbortHandleFor(backendLink))
 	s.link = backendLink
 	s.unnamedStmtOnLink = false
 	if backendLink == nil && s.hooks.RoutedLinkChanged != nil {
@@ -636,6 +644,50 @@ func (s *Session) setLink(backendLink link.Link) {
 	}
 }
 
+// attachCheckout publishes a checked-out link and notifies observers.
+func (s *Session) attachCheckout(acquired AcquiredLink) {
+	s.setLink(acquired.Link)
+	s.notifyCheckout(acquired.Meta)
+}
+
+func (s *Session) releaseCurrentLink(recordClientDisconnect bool) {
+	if s.link == nil {
+		return
+	}
+	s.mirrorTap.OnRelease()
+	s.mirrorTap = nil
+	destroyedByRelease := recordClientDisconnect && !s.link.Idle()
+	// Fence out-of-band Cancel and ForceClose before the connection goes back to
+	// the pool. MarkReleased is idempotent, so a link that also fences itself in
+	// Release is unaffected.
+	s.abortHandle.Swap(nil).MarkReleased()
+	releaseErr := s.link.Release()
+	if destroyedByRelease {
+		s.recordBackendDestroyedOnClientDisconnect("release")
+	}
+	if releaseErr != nil {
+		pgproxy.Logger().Warn("error releasing session link", "err", releaseErr)
+	}
+	s.setLink(nil)
+	s.notifyRelease()
+}
+
+func (s *Session) sendToLink(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
+	s.link.Send(msg, expectation)
+	s.mirrorTap.OnSend(msg, expectation)
+}
+
+func (s *Session) checkoutBackend(ctx context.Context, routed Backend, request LinkRequest) (AcquiredLink, error) {
+	if cb, ok := routed.(CheckoutBackend); ok {
+		return cb.Checkout(ctx, request)
+	}
+	backendLink, err := routed.Acquire(ctx, request)
+	if err != nil {
+		return AcquiredLink{}, err
+	}
+	return AcquiredLink{Link: backendLink}, nil
+}
+
 func (s *Session) setDiscardUntilSync(discard bool) {
 	s.discardUntilSync = discard
 	if s.hooks.DiscardChanged != nil {
@@ -643,24 +695,17 @@ func (s *Session) setDiscardUntilSync(discard bool) {
 	}
 }
 
-// Cancel runs on the listener's cancel-request goroutine. It does not hold linkMu
-// while contacting Postgres; link.Link makes Cancel on a released link safe.
+// Cancel runs on the listener's cancel-request goroutine. It touches only the
+// active link's AbortHandle, which safely becomes a no-op once Release starts.
+// With no link held the handle is nil and Cancel does nothing; the request may
+// have arrived after the query completed.
+// TODO(enhancement): if the session is currently waiting to acquire a link, we should definitely cancel that!
 func (s *Session) Cancel() error {
-	s.linkMu.Lock()
-	backendLink := s.link
-	s.linkMu.Unlock()
-	if backendLink == nil {
-		// Nothing to cancel: the session is currently idle with no link.
-		// This is not necessarily an error; the cancel request might have arrived after the query completed.
-		// TODO(enhancement): if the session is currently waiting to acquire a link, we should definitely cancel that!
-		return nil
-	}
-	return backendLink.Cancel()
+	return s.abortHandle.Load().Cancel()
 }
 
+// Idle reports whether the session holds no busy link. Call on the session goroutine.
 func (s *Session) Idle() bool {
-	s.linkMu.Lock()
-	defer s.linkMu.Unlock()
 	return s.link == nil || s.link.Idle()
 }
 
@@ -945,23 +990,14 @@ func (s *Session) handleStateRemapping() bool {
 		return false
 	}
 
-	// Guard link teardown under linkMu so the client monitor goroutine
-	// cannot observe a partially-released link while the inner message loop is live.
-	s.linkMu.Lock()
-	linkHeld := s.link != nil
-	if !linkHeld {
-		s.linkMu.Unlock()
+	if s.link == nil {
 		// if the link wasn't busy we can just pretend nothing happened and process the received message
 		return false
 	}
 	// The link is currently busy, so we have to forcefully kill it.
 	// This will close the underlying connection to PG as well so no
 	// need to explicitly abort the ongoing transaction.
-	if err := s.link.Release(); err != nil {
-		pgproxy.Logger().Warn("error releasing session link", "err", err)
-	}
-	s.setLink(nil)
-	s.linkMu.Unlock()
+	s.releaseCurrentLink(false)
 
 	// We need to handle in-flight transactions
 
@@ -972,16 +1008,21 @@ func (s *Session) handleStateRemapping() bool {
 	if s.hooks.BackendMessage != nil {
 		s.hooks.BackendMessage(rollbackError)
 	}
+	s.notifyBackendMessage(rollbackError)
 	s.clientConn.Send(rollbackError)
 	readyForQuery := buildReadyForQueryIdleMessage()
 	if s.hooks.BackendMessage != nil {
 		s.hooks.BackendMessage(readyForQuery)
 	}
+	s.notifyBackendMessage(readyForQuery)
 	s.clientConn.Send(readyForQuery)
-	if s.hooks.ClientFlushSucceeded == nil {
+	if s.hooks.ClientFlushSucceeded == nil && len(s.observers) == 0 {
 		s.clientConn.Flush()
 	} else if s.flushClientConn() == nil {
-		s.hooks.ClientFlushSucceeded()
+		if s.hooks.ClientFlushSucceeded != nil {
+			s.hooks.ClientFlushSucceeded()
+		}
+		s.notifyClientFlushSucceeded()
 	}
 
 	// TODO: this abort does not drain an in-flight extended-query pipeline
@@ -1057,8 +1098,11 @@ func (s *Session) handleClientMessage(msg pgproto3.FrontendMessage) error {
 	// The no-link recovery Sync is handled before the decision engine's normal
 	// observation callback. Expose that accepted boundary while continuing to
 	// omit the messages discarded before it.
-	if discardingWithoutLink && !action.DiscardUntilSync && s.hooks.FrontendMessage != nil {
-		s.hooks.FrontendMessage(msg)
+	if discardingWithoutLink && !action.DiscardUntilSync {
+		if s.hooks.FrontendMessage != nil {
+			s.hooks.FrontendMessage(msg)
+		}
+		s.notifyFrontendMessage(msg)
 	}
 
 	return s.handleAction(action)
@@ -1084,6 +1128,7 @@ func (s *Session) handleAction(action ClientMessageAction) error {
 			if s.hooks.BackendMessage != nil {
 				s.hooks.BackendMessage(msg)
 			}
+			s.notifyBackendMessage(msg)
 			s.clientConn.Send(msg)
 		}
 		err := s.flushClientConn()
@@ -1093,6 +1138,7 @@ func (s *Session) handleAction(action ClientMessageAction) error {
 		if s.hooks.ClientFlushSucceeded != nil {
 			s.hooks.ClientFlushSucceeded()
 		}
+		s.notifyClientFlushSucceeded()
 	}
 
 	if err := s.handleProxyMsgToPg(action); err != nil {
@@ -1130,15 +1176,14 @@ func (s *Session) handleAction(action ClientMessageAction) error {
 	return nil
 }
 
-// mirroringLinkFor returns link unchanged unless traffic mirroring applies to
-// this session, in which case it wraps it so every message the session sends on
-// the link is also queued for shadow replay. The session owns the queue: it is
-// created lazily on the first mirrored link and reused until mirroring is
+// startMirrorTap returns a per-checkout mirroring tap when traffic mirroring
+// applies to this session, or nil otherwise. The session owns the queue: it is
+// created lazily on the first mirrored checkout and reused until mirroring is
 // disabled (torn down here) or the session closes.
-func (s *Session) mirroringLinkFor(source link.Link) link.Link {
+func (s *Session) startMirrorTap() *mirror.Tap {
 	if !s.mirroringApplicable() {
 		s.stopMirroring()
-		return source
+		return nil
 	}
 	m := s.mirroring.Policy(s.ctx)
 	tags := append(append([]string(nil), s.obsVals.metricTags...), "source_database:"+m.SourceDatabase)
@@ -1146,7 +1191,7 @@ func (s *Session) mirroringLinkFor(source link.Link) link.Link {
 		s.mirror = mirror.NewQueue(m.QueueSize, s.mirrorBudget)
 		s.startMirrorWorker(tags)
 	}
-	return mirror.NewLink(source, s.mirror, tags)
+	return mirror.NewTap(s.mirror, tags)
 }
 
 // stopMirroring releases the queue and worker when mirroring turns off mid-session, so a
@@ -1221,27 +1266,25 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 			ctx = s.acquireCtx
 		}
 
-		acquired, err := routed.Acquire(ctx, request)
+		acquired, err := s.checkoutBackend(ctx, routed, request)
 		if err != nil {
 			if s.clientDisconnected.Load() {
 				return &clientDisconnectedError{cause: err}
 			}
 			return fmt.Errorf("error linking session to a postgres conn: %w", err)
 		}
-		routedLink := acquired
-		acquired = s.mirroringLinkFor(acquired)
-		s.linkMu.Lock()
-		s.setLink(acquired)
-		s.linkMu.Unlock()
+		s.mirrorTap = s.startMirrorTap()
+		s.setLink(acquired.Link)
 		if s.hooks.RoutedLinkChanged != nil {
-			s.hooks.RoutedLinkChanged(routedLink)
+			s.hooks.RoutedLinkChanged(acquired.Link)
 		}
+		s.notifyCheckout(acquired.Meta)
 
-		// The monitor may have fired between newSessionLinkFn returning and
-		// the assignment above, seen s.link == nil, skipped ForceClose, and
+		// The monitor may have fired between checkoutBackend returning and
+		// setLink publishing abortHandle, seen no handle, skipped ForceClose, and
 		// exited. Re-check so we don't block on Receive() with a dead client.
 		if s.clientDisconnected.Load() {
-			s.forceCloseBackendOnClientDisconnect(acquired)
+			s.forceCloseHandleOnClientDisconnect(s.abortHandle.Load())
 			return &clientDisconnectedError{cause: context.Canceled}
 		}
 	}
@@ -1257,7 +1300,7 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	}
 	s.handleEnsureUnnamedPreparedStmt(action)
 
-	s.link.Send(action.ProxyMsgToPg, action.AddReplyExpectation)
+	s.sendToLink(action.ProxyMsgToPg, action.AddReplyExpectation)
 
 	if s.dynamicRoutingEnabled && !action.HandleReadQuery {
 		s.lastWrite = time.Now()
@@ -1277,18 +1320,18 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 	}
 	// if the connection already has this pending named statement, can just send back ParseComplete
 	if preparedStatement.IsProxyNamedPreparedStmt() && s.link.HasExistingNamedPreparedStmt(preparedStatement) {
-		if m, ok := s.link.(mirror.StmtDefMirror); ok {
+		if s.mirrorTap != nil {
 			// No Parse is forwarded, but the shadow uses a different connection that may
 			// lack it. Must precede the flush below, or the batch can end on an
 			// unanswered ParseReply and release a non-idle shadow link.
-			m.MirrorParse(&pgproto3.Parse{
+			s.mirrorTap.OnSuppressedParse(&pgproto3.Parse{
 				Name:          preparedStatement.GetProxyName(),
 				Query:         preparedStatement.GetSQLQuery(),
 				ParameterOIDs: preparedStatement.GetParamOIDs(),
 			})
 		}
 		// first flush all buffered messages to Postgres
-		s.link.Send(&pgproto3.Flush{}, query.NoReply)
+		s.sendToLink(&pgproto3.Flush{}, query.NoReply)
 		discardedUntilSync, err := s.flushPostgres()
 		if err != nil {
 			return false, err // should be well-annotated by flushPostgres()
@@ -1302,6 +1345,7 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 			if s.hooks.BackendMessage != nil {
 				s.hooks.BackendMessage(parseComplete)
 			}
+			s.notifyBackendMessage(parseComplete)
 			s.clientConn.Send(parseComplete)
 			if err := s.flushClientConn(); err != nil {
 				return false, fmt.Errorf("error flushing proxied msg(s) to client: %w", err)
@@ -1309,6 +1353,7 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 			if s.hooks.ClientFlushSucceeded != nil {
 				s.hooks.ClientFlushSucceeded()
 			}
+			s.notifyClientFlushSucceeded()
 			return false, nil
 		}
 	}
@@ -1347,7 +1392,7 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 		}
 		return nil
 	}
-	s.link.Send(&pgproto3.Parse{Name: preparedStatement.GetProxyName(), Query: preparedStatement.GetSQLQuery(), ParameterOIDs: preparedStatement.GetParamOIDs()}, query.ParseReply)
+	s.sendToLink(&pgproto3.Parse{Name: preparedStatement.GetProxyName(), Query: preparedStatement.GetSQLQuery(), ParameterOIDs: preparedStatement.GetParamOIDs()}, query.ParseReply)
 	s.pStmtState.EnqueuePendingStmt(preparedStatement, true)
 	return nil
 }
@@ -1362,7 +1407,7 @@ func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
 		return
 	}
-	s.link.Send(&pgproto3.Parse{Query: s.unnamedStmt.GetSQLQuery(), ParameterOIDs: s.unnamedStmt.GetParamOIDs()}, query.ParseReply)
+	s.sendToLink(&pgproto3.Parse{Query: s.unnamedStmt.GetSQLQuery(), ParameterOIDs: s.unnamedStmt.GetParamOIDs()}, query.ParseReply)
 	s.pStmtState.EnqueuePendingStmt(s.unnamedStmt, true)
 	s.unnamedPendingGens = append(s.unnamedPendingGens, s.unnamedGen)
 	s.unnamedStmtOnLink = true
@@ -1432,6 +1477,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 		return false, fmt.Errorf("error flushing messages to linked postgres conn: %w", err)
 	}
+	s.mirrorTap.OnFlushSucceeded()
 	s.obsVals.traceState.FinishTrace(err)
 
 	timesFlushed := 0
@@ -1525,6 +1571,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		if s.hooks.BackendMessage != nil {
 			s.hooks.BackendMessage(msg)
 		}
+		s.notifyBackendMessage(msg)
 		action, err := query.DecidePgMessageAction(msg, expectation, s.obsVals.traceState)
 		if err != nil {
 			return discardedUntilSync, fmt.Errorf("error handling postgres message: %w", err)
@@ -1599,13 +1646,7 @@ func (s *Session) flushPostgres() (bool, error) {
 		}
 		if action.ReleaseLinkIfIdle && s.link.Idle() {
 			s.invalidatePendingStmts(false)
-			err := s.link.Release()
-			if err != nil {
-				pgproxy.Logger().Warn("error releasing session link", "err", err)
-			}
-			s.linkMu.Lock()
-			s.setLink(nil)
-			s.linkMu.Unlock()
+			s.releaseCurrentLink(false)
 			break
 		}
 	}
@@ -1620,8 +1661,11 @@ func (s *Session) flushPostgres() (bool, error) {
 		s.obsVals.traceState.FinishTrace()
 	}
 	s.obsVals.traceState.FinishRootTrace()
-	if clientWriteSucceeded && s.hooks.ClientFlushSucceeded != nil {
-		s.hooks.ClientFlushSucceeded()
+	if clientWriteSucceeded {
+		if s.hooks.ClientFlushSucceeded != nil {
+			s.hooks.ClientFlushSucceeded()
+		}
+		s.notifyClientFlushSucceeded()
 	}
 	if pgSkippingUntilSync {
 		// The error came before the client's Sync, as in a pipeline flushed with
@@ -1719,29 +1763,20 @@ func (s *Session) currentReadStates() []*ReadState {
 }
 
 func (s *Session) close(err error) {
-	defer s.hooksCloseOnce.Do(func() {
-		if s.hooks.Closed != nil {
-			s.hooks.Closed()
-		}
-	})
+	defer func() {
+		s.hooksCloseOnce.Do(func() {
+			if s.hooks.Closed != nil {
+				s.hooks.Closed()
+			}
+		})
+		s.notifyClosed()
+	}()
 
 	clientDisconnected := s.clientDisconnected.Load()
 
-	s.linkMu.Lock()
-	if s.link != nil {
-		// A client EOF or Terminate received between checkouts bypasses the client
-		// monitor. Release closes the link when that disconnect leaves it non-idle.
-		destroyedByReleaseOnClientDisconnect := clientDisconnected && !s.link.Idle()
-		releaseErr := s.link.Release()
-		if destroyedByReleaseOnClientDisconnect {
-			s.recordBackendDestroyedOnClientDisconnect("release")
-		}
-		if releaseErr != nil {
-			pgproxy.Logger().Warn("error releasing session link", "err", releaseErr)
-		}
-		s.setLink(nil)
-	}
-	s.linkMu.Unlock()
+	// A client EOF or Terminate received between checkouts bypasses the client
+	// monitor. Release closes the link when that disconnect leaves it non-idle.
+	s.releaseCurrentLink(clientDisconnected)
 	if s.timerMonitor != nil {
 		s.timerMonitor.close()
 	}
@@ -1764,8 +1799,8 @@ func (s *Session) close(err error) {
 	}
 }
 
-func (s *Session) forceCloseBackendOnClientDisconnect(backendLink link.Link) {
-	if backendLink.ForceClose() {
+func (s *Session) forceCloseHandleOnClientDisconnect(handle *link.AbortHandle) {
+	if handle.ForceClose() {
 		s.recordBackendDestroyedOnClientDisconnect("force_close")
 	}
 }

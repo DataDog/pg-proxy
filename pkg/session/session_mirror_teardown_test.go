@@ -59,42 +59,41 @@ func mirrorTestSession(t *testing.T, budget *mirror.Budget, acquireShadow func(c
 	return s, enabled
 }
 
-// TestMirroringLinkFor_RebuildsOnReEnable: turning the policy off drops the queue and
+// TestStartMirrorTap_RebuildsOnReEnable: turning the policy off drops the queue and
 // worker, and turning it back on builds new ones. The rebuild is what re-reads the
 // ShadowDatabase and tags, which a worker otherwise pins for its whole lifetime.
-func TestMirroringLinkFor_RebuildsOnReEnable(t *testing.T) {
+func TestStartMirrorTap_RebuildsOnReEnable(t *testing.T) {
 	s, enabled := mirrorTestSession(t, mirror.NewBudget(1<<20), nil)
 
-	s.mirroringLinkFor(&testLink{})
+	require.NotNil(t, s.startMirrorTap())
 	firstQueue, firstWorker := s.mirror, s.mirrorWorker
 	require.NotNil(t, firstQueue)
 	require.NotNil(t, firstWorker)
 
 	enabled.Store(false)
-	source := &testLink{}
-	require.Same(t, link.Link(source), s.mirroringLinkFor(source), "a disabled session must not wrap its link")
+	require.Nil(t, s.startMirrorTap(), "a disabled session must not create a mirror tap")
 	require.Nil(t, s.mirror, "the queue must be torn down when mirroring is disabled")
 	require.Nil(t, s.mirrorWorker, "the worker must be torn down when mirroring is disabled")
 
 	// The disable branch runs on every transaction while mirroring is off, so repeated
 	// teardowns must not double-close the queue.
 	for range 2 {
-		s.mirroringLinkFor(&testLink{})
+		require.Nil(t, s.startMirrorTap())
 		require.Nil(t, s.mirror)
 	}
 
 	enabled.Store(true)
-	s.mirroringLinkFor(&testLink{})
+	require.NotNil(t, s.startMirrorTap())
 	require.NotNil(t, s.mirror)
 	require.NotNil(t, s.mirrorWorker)
 	require.NotSame(t, firstQueue, s.mirror, "re-enabling must build a fresh queue")
 	require.NotSame(t, firstWorker, s.mirrorWorker, "re-enabling must build a fresh worker")
 }
 
-// TestMirroringLinkFor_ReleasesBudgetOnDisable: the undrained tail's bytes go back to the
+// TestStartMirrorTap_ReleasesBudgetOnDisable: the undrained tail's bytes go back to the
 // shared, process-wide budget as soon as mirroring is disabled, instead of trickling back
 // batch by batch (or never, while the worker is parked) and starving live mirrored sessions.
-func TestMirroringLinkFor_ReleasesBudgetOnDisable(t *testing.T) {
+func TestStartMirrorTap_ReleasesBudgetOnDisable(t *testing.T) {
 	const queuedMessages = 4
 	payload := strings.Repeat("x", 1024)
 	inFlightCost := oneSendCost(t, payload)
@@ -119,9 +118,9 @@ func TestMirroringLinkFor_ReleasesBudgetOnDisable(t *testing.T) {
 	s, enabled := mirrorTestSession(t, budget, acquireShadow)
 	t.Cleanup(releaseWorker)
 
-	mirrored := s.mirroringLinkFor(&testLink{})
+	tap := s.startMirrorTap()
 	for range queuedMessages {
-		mirrored.Send(&pgproto3.Query{String: payload}, query.QueryReply)
+		tap.OnSend(&pgproto3.Query{String: payload}, query.QueryReply)
 	}
 	select {
 	case <-acquireStarted: // the worker holds the first message in flight and is stuck acquiring
@@ -131,7 +130,7 @@ func TestMirroringLinkFor_ReleasesBudgetOnDisable(t *testing.T) {
 	require.Positive(t, budget.UsedBytes())
 
 	enabled.Store(false)
-	s.mirroringLinkFor(&testLink{})
+	require.Nil(t, s.startMirrorTap())
 	require.LessOrEqual(t, budget.UsedBytes(), inFlightCost,
 		"disabling must return the undrained tail at once, leaving only what the worker holds")
 
@@ -148,27 +147,26 @@ func oneSendCost(t *testing.T, payload string) int64 {
 	budget := mirror.NewBudget(1 << 20)
 	q := mirror.NewQueue(1<<20, budget)
 	t.Cleanup(q.Close)
-	mirror.NewLink(&testLink{}, q, nil).Send(&pgproto3.Query{String: payload}, query.QueryReply)
+	mirror.NewTap(q, nil).OnSend(&pgproto3.Query{String: payload}, query.QueryReply)
 	used := budget.UsedBytes()
 	require.Positive(t, used, "a Send must reserve something, or the measurement is meaningless")
 	return used
 }
 
-// TestMirroringLinkFor_NoPolicyIsNoOp: mirroringLinkFor runs on every link acquire in the
+// TestStartMirrorTap_NoPolicyIsNoOp: startMirrorTap runs on every link acquire in the
 // process, including deployments with no mirroring configured, so it must stay inert there.
-func TestMirroringLinkFor_NoPolicyIsNoOp(t *testing.T) {
+func TestStartMirrorTap_NoPolicyIsNoOp(t *testing.T) {
 	s := New(Config{Context: context.Background(), Client: &testClient{}})
 
-	source := &testLink{}
-	require.Same(t, link.Link(source), s.mirroringLinkFor(source))
+	require.Nil(t, s.startMirrorTap())
 	require.Nil(t, s.mirror)
 	require.Nil(t, s.mirrorWorker)
 }
 
-// TestMirroringLinkFor_DisableDoesNotWaitOnWedgedShadow: a shadow stuck waiting for a reply
-// must not make a real query wait. Disabling hands the source link straight back and the
+// TestStartMirrorTap_DisableDoesNotWaitOnWedgedShadow: a shadow stuck waiting for a reply
+// must not make a real query wait. Disabling returns nil immediately and the
 // wedged shadow is force-closed and released off the client path.
-func TestMirroringLinkFor_DisableDoesNotWaitOnWedgedShadow(t *testing.T) {
+func TestStartMirrorTap_DisableDoesNotWaitOnWedgedShadow(t *testing.T) {
 	shadowBlocked := make(chan struct{})
 	var unblockOnce sync.Once
 	unblockShadow := func() { unblockOnce.Do(func() { close(shadowBlocked) }) }
@@ -192,9 +190,9 @@ func TestMirroringLinkFor_DisableDoesNotWaitOnWedgedShadow(t *testing.T) {
 	// last-in-first-out, and a Stop against a still-wedged fake would wait out both timeouts.
 	t.Cleanup(unblockShadow)
 
-	mirrored := s.mirroringLinkFor(&testLink{})
-	mirrored.Send(&pgproto3.Query{String: "select 1"}, query.QueryReply)
-	require.NoError(t, mirrored.Flush()) // the flush sentinel is what sends the worker into the shadow read
+	tap := s.startMirrorTap()
+	tap.OnSend(&pgproto3.Query{String: "select 1"}, query.QueryReply)
+	tap.OnFlushSucceeded() // the flush sentinel is what sends the worker into the shadow read
 	select {
 	case <-receiveStarted:
 	case <-time.After(5 * time.Second):
@@ -203,8 +201,7 @@ func TestMirroringLinkFor_DisableDoesNotWaitOnWedgedShadow(t *testing.T) {
 
 	enabled.Store(false)
 	start := time.Now()
-	source := &testLink{}
-	require.Same(t, link.Link(source), s.mirroringLinkFor(source), "a disabled session must hand its source link back unwrapped")
+	require.Nil(t, s.startMirrorTap(), "a disabled session must not return a mirror tap")
 	require.Less(t, time.Since(start), mirror.TeardownDrainTimeout,
 		"teardown must not hold the client path while the shadow is wedged")
 
@@ -215,11 +212,11 @@ func TestMirroringLinkFor_DisableDoesNotWaitOnWedgedShadow(t *testing.T) {
 		"the detached stop must force-close and release the wedged shadow link")
 }
 
-// TestMirroringLinkFor_RebuiltWorkerIsSeededWithConfirmedStmts: teardown destroys the
+// TestStartMirrorTap_RebuiltWorkerIsSeededWithConfirmedStmts: teardown destroys the
 // worker, and its statement catalog is a local in the worker's goroutine, so a rebuilt
 // worker starts empty. The client has already prepared and will never send Parse again,
 // so without the seed every later Bind reaches the shadow as a bare Bind and errors 26000.
-func TestMirroringLinkFor_RebuiltWorkerIsSeededWithConfirmedStmts(t *testing.T) {
+func TestStartMirrorTap_RebuiltWorkerIsSeededWithConfirmedStmts(t *testing.T) {
 	const proxyName = "ddproxy_seeded"
 	stmt := prepared.CreatePreparedStatement("client_stmt", proxyName, "select $1::int", []uint32{23})
 
@@ -232,19 +229,19 @@ func TestMirroringLinkFor_RebuiltWorkerIsSeededWithConfirmedStmts(t *testing.T) 
 	s, enabled := mirrorTestSession(t, mirror.NewBudget(1<<20), acquireShadow)
 	require.NoError(t, s.pStmtState.AddConfirmedNamedStmt(stmt), "the source connection holds the statement before mirroring is toggled")
 
-	s.mirroringLinkFor(&testLink{})
+	require.NotNil(t, s.startMirrorTap())
 	enabled.Store(false)
-	s.mirroringLinkFor(&testLink{})
+	require.Nil(t, s.startMirrorTap())
 	require.Nil(t, s.mirrorWorker, "disabling must tear the worker, and its catalog, down")
 
 	enabled.Store(true)
-	mirrored := s.mirroringLinkFor(&testLink{})
+	tap := s.startMirrorTap()
 	require.NotNil(t, s.mirrorWorker, "re-enabling must build a fresh worker")
 
 	// The client prepared before the toggle, so it now sends Bind alone: nothing on this
 	// batch tells the worker what proxyName means except the seed.
-	mirrored.Send(&pgproto3.Bind{PreparedStatement: proxyName}, query.BindReply)
-	require.NoError(t, mirrored.Flush())
+	tap.OnSend(&pgproto3.Bind{PreparedStatement: proxyName}, query.BindReply)
+	tap.OnFlushSucceeded()
 
 	parse, ok := receiveFrontendMsg(t, shadowSent).(*pgproto3.Parse)
 	require.True(t, ok, "the rebuilt worker must inject the Parse before the Bind, or the shadow answers 26000")
