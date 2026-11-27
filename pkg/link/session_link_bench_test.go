@@ -56,10 +56,7 @@ func BenchmarkParseExistingNamedStmt(b *testing.B) {
 // removal is part of the measured cost.
 func BenchmarkRecordNewNamedStmt(b *testing.B) {
 	l, _ := newWarmLink(b, 50)
-	held, err := getConnPreparedStmts(l.(*SessionLink).conn)
-	if err != nil {
-		b.Fatal(err)
-	}
+	held := l.(*SessionLink).connState.stmts
 	stmts := testStmts("new", 64)
 	b.ReportAllocs()
 	b.ResetTimer()

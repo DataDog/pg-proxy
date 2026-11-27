@@ -48,10 +48,8 @@ type SessionLink struct {
 	discardingUntilSync bool                     // if true, in an extended query error state where all messages will be discarded until a Sync
 	readyForQuery       bool                     // true after Postgres has sent ReadyForQuery for the latest request
 	marks               SessionMarks             // what this checkout may have done to session state
-	// foreignUnnamed: the connection's last release skipped the reset, and no
-	// request has been sent on this link yet.
-	foreignUnnamed bool
 
+	connState                  *connState // the conn's state; nil once released, or with no conn
 	namedPreparedStmtThreshold int
 	createdTime                int
 	sessionLinkTags            []string
@@ -90,10 +88,10 @@ func (link *SessionLink) SetRoleToken(token string) {
 // the last checkout's statement may still be there, and no client may reach it.
 // The Close rides the request's round trip, nothing before it can fail and make
 // Postgres skip it, and its CloseComplete is not forwarded. A simple Query drops
-// the statement itself.
+// the statement itself. Either way the request clears the connection's mark.
 func (link *SessionLink) Send(msg pgproto3.FrontendMessage, expectation query.ReplyExpectation) {
-	if link.foreignUnnamed && expectation != query.NoReply {
-		link.foreignUnnamed = false
+	if state := link.connState; state != nil && state.resetSkipped && expectation != query.NoReply {
+		state.resetSkipped = false
 		if _, ok := msg.(*pgproto3.Query); !ok {
 			link.pgConn.Send(&pgproto3.Close{ObjectType: 'S'})
 			link.replyExpectations = append(link.replyExpectations, query.ProxyCloseReply)
@@ -232,6 +230,9 @@ func (link *SessionLink) Release() error {
 			link.conn.Release()
 			link.conn = nil
 		}
+		// The next link to check the conn out owns its state. Cancel and ForceClose
+		// never read it, so this needs no fence.
+		link.connState = nil
 		link.pgConn = nil
 	}()
 
@@ -287,12 +288,12 @@ func (link *SessionLink) Release() error {
 		if reports {
 			start = time.Now()
 		}
+		// The reset is what discards the unnamed statement; without it, the next
+		// checkout's client could run this one's. A reset also clears a mark that no
+		// request on this link took over.
+		link.connState.resetSkipped = action == resetSkip
 		var err error
-		if action == resetSkip {
-			// The reset is what discards the unnamed statement; without it, the next
-			// checkout's client could run this one's.
-			link.conn.Conn().PgConn().CustomData()[customDataResetSkippedKey] = true
-		} else {
+		if action != resetSkip {
 			err = link.runReset(action)
 		}
 		if reports {
@@ -364,8 +365,9 @@ func (link *SessionLink) reportReset(action resetAction, reason string, start ti
 // connection.
 func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string, fullCheck bool) error {
 	pgConn := link.conn.Conn().PgConn()
-	baseline, haveBaseline := pgConn.CustomData()[customDataAuditBaselineKey].(auditBaseline)
-	haveBaseline = haveBaseline && baseline.sql == link.reset.auditSQL
+	state := link.connState
+	baseline := state.auditBaseline
+	haveBaseline := baseline.sql == link.reset.auditSQL
 
 	var statements []string
 	if fullCheck {
@@ -409,10 +411,10 @@ func (link *SessionLink) runAuditedReset(ctx context.Context, reset []string, fu
 	changed := link.reset.changedColumns(before, after)
 	switch {
 	case !haveBaseline:
-		pgConn.CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: link.reset.auditSQL, values: after}
+		state.auditBaseline = auditBaseline{sql: link.reset.auditSQL, values: after}
 	case len(changed) > 0:
 		// Read the baseline again next time, in case a server default changed.
-		delete(pgConn.CustomData(), customDataAuditBaselineKey)
+		state.auditBaseline = auditBaseline{}
 	}
 
 	for _, setting := range changed {
@@ -553,56 +555,43 @@ func (link *SessionLink) HasExistingNamedPreparedStmt(preparedStatement prepared
 	if preparedStatement == nil || !preparedStatement.IsProxyNamedPreparedStmt() {
 		return false
 	}
-	_, hasExistingNamedPreparedStmt, _ := link.checkForValidSessionLinkAndExistingNamedPreparedStmt(preparedStatement)
-	return hasExistingNamedPreparedStmt
+	if link.connState == nil {
+		return false
+	}
+	_, ok := link.connState.stmts[preparedStatement.GetProxyName()]
+	return ok
 }
 
-func (link *SessionLink) checkForValidSessionLinkAndExistingNamedPreparedStmt(preparedStatement prepared.PreparedStatement) (map[string]ConnPreparedStmt, bool, error) {
-	if preparedStatement == nil {
-		// this signifies a bug in the code
-		return nil, false, fmt.Errorf("unexpectedly attempting to check for a nil prepared stmt on a session link")
-	}
-
-	connPreparedStmts, err := getConnPreparedStmts(link.conn)
-	if err != nil {
-		return nil, false, err
-	}
-	stmtName := preparedStatement.GetProxyName()
-	_, connHasPreparedStmt := connPreparedStmts[stmtName]
-	return connPreparedStmts, connHasPreparedStmt, nil
-}
-
-// Checks whether the SessionLink has already created a prepared statement. If it has not been created, it will
-// record on the underlying connection that it has. If the statement was already created, increment its usage count.
-// Check its calling methods for an explanation on when these different scenarios occur.
-// In the case that a prepared statement will be created, it checks whether it has exceeded the max number of prepared statements
-// on the connection, and if so, deallocates one.
+// recordPreparedStatement records on the connection that a named prepared statement
+// was created on it, or, when existingOnConn is set, that one it already holds was
+// used. Check its calling methods for when each happens. Nothing here enforces the
+// per-connection cap: Release deallocates the excess.
 func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.PreparedStatement, existingOnConn bool) error {
-	connPreparedStmts, err := getConnPreparedStmts(link.conn)
-	if err != nil {
-		return err
+	state := link.connState
+	if state == nil {
+		return errNoConnState
 	}
-	stats, err := getConnStats(link.conn)
-	if err != nil {
-		return err
-	}
-
 	stmtName := preparedStatement.GetProxyName()
 
 	if existingOnConn {
-		metaData := connPreparedStmts[stmtName]
-		metaData.UsageCount++
-		metaData.TimeLastUsed = time.Now().Nanosecond()
-		connPreparedStmts[stmtName] = metaData
-		if metaData.UsageCount > stats.preparedStmtsMaxUsage {
-			stats.preparedStmtsMaxUsage = metaData.UsageCount
+		usage, onConn := state.stmts[stmtName]
+		if !onConn {
+			// Nothing to count: an entry for a statement the connection lacks could never
+			// be deallocated. Callers check HasExistingNamedPreparedStmt first, and failing
+			// here would end the client's session over a usage statistic.
+			return nil
+		}
+		usage.usageCount++
+		usage.timeLastUsed = time.Now().Nanosecond()
+		if usage.usageCount > state.stats.preparedStmtsMaxUsage {
+			state.stats.preparedStmtsMaxUsage = usage.usageCount
 		}
 		link.exportStats()
 		return nil
 	}
 
-	stats.preparedStmtsCreatedCount++
-	connPreparedStmts[stmtName] = ConnPreparedStmt{Name: stmtName, TimeLastUsed: time.Now().Nanosecond()}
+	state.stats.preparedStmtsCreatedCount++
+	state.stmts[stmtName] = &stmtUsage{timeLastUsed: time.Now().Nanosecond()}
 	link.exportStats()
 
 	return nil
@@ -616,12 +605,9 @@ func (link *SessionLink) recordPreparedStatement(preparedStatement prepared.Prep
 // we will only export stats when a connection is linked to a SessionLink.
 // SessionLinks are expected to be relatively short lived due to the nature of tx-level pooling. As a result,
 // this is expected to be called on events such as checkout & release rather than at time intervals.
+// The link must hold a connection.
 func (link *SessionLink) exportStats() {
-	connStats, err := getConnStats(link.conn)
-	if err != nil {
-		pgproxy.Logger().Error("error getting conn's statistics", "error", err)
-		return
-	}
+	connStats := &link.connState.stats
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtDeallocatedCount, float64(connStats.preparedStmtsDeallocatedCount), link.sessionLinkTags, 1)
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtCreatedCount, float64(connStats.preparedStmtsCreatedCount), link.sessionLinkTags, 1)
 	_ = pgproxy.Metrics().Gauge(connPreparedStmtMaxUsage, float64(connStats.preparedStmtsMaxUsage), link.sessionLinkTags, 1)
@@ -631,27 +617,22 @@ func (link *SessionLink) exportStats() {
 // if the total number of prepared statements exceeds the maximum allowed. It ensures that the
 // connection stays within the configured limit of prepared statements to avoid memory overuse.
 // There is a roundtrip for each message that needs to be deallocated, which is a potential point of optimization.
-// However, if there is an error that occurs, it will not block subsequent error messages from being sent.
+// It stops at the first failed Deallocate and leaves the rest on the connection. A
+// network failure has already closed the connection (pgx closes it on any I/O error),
+// so the pool discards it.
+// The link must hold a live connection.
 func (link *SessionLink) deallocateExcessPreparedStatements() error {
-	connPreparedStmts, err := getConnPreparedStmts(link.conn)
-	if err != nil {
-		return err
-	}
-	preparedStmtCount := len(connPreparedStmts)
-	if preparedStmtCount <= link.namedPreparedStmtThreshold {
+	state := link.connState
+	excess := len(state.stmts) - link.namedPreparedStmtThreshold
+	if excess <= 0 {
 		return nil
 	}
-	stmtsToDeallocateCount := preparedStmtCount - link.namedPreparedStmtThreshold
-	for _, stmtName := range StmtsToDeallocate(connPreparedStmts, stmtsToDeallocateCount, link.createdTime) {
+	for _, stmtName := range state.stmtsToDeallocate(excess, link.createdTime) {
 		if err := link.conn.Conn().PgConn().Deallocate(context.Background(), stmtName); err != nil {
 			return err
 		}
-		delete(connPreparedStmts, stmtName)
-		stats, err := getConnStats(link.conn)
-		if err != nil {
-			return err
-		}
-		stats.preparedStmtsDeallocatedCount++
+		delete(state.stmts, stmtName)
+		state.stats.preparedStmtsDeallocatedCount++
 	}
 	return nil
 }
