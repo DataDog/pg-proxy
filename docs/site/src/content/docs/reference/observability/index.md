@@ -134,6 +134,7 @@ env -u OTEL_TRACES_EXPORTER \
 | `DD_VERSION` | Unset | Version tag for all three signals. |
 | `DD_AGENT_HOST` | Local Agent | Agent hostname for traces and DogStatsD. Set it explicitly for a remote Agent. |
 | `DD_TRACE_ENABLED` | `true` | Set to `false` to disable native tracing. |
+| `DD_TRACER_EXPERIMENTAL_SPAN_POOL_ENABLED` | `true` | Recycle finished spans to reduce allocations in the `pg-proxy` binary. Set to `false` to disable pooling. |
 
 With no destination configured, metrics go to `127.0.0.1:8125`. Traces use the local Agent socket if available, otherwise `http://localhost:8126`.
 
