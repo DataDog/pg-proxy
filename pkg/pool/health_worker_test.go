@@ -3336,7 +3336,8 @@ func TestAggregatedSQLDecisionsControlPublishedRouting(t *testing.T) {
 			w.applyPatroniHealth(health, map[string]bool{a: true, b: false}, nil, []string{a, b}, time.Now())
 			now := time.Now()
 			if len(tc.other) > 0 {
-				health.recordSQLComparisonPoll(false, &sqlHealthTarget{poolHealth: health}, 0, now, now, []string{a, b}, SQLHealthCheckOutcome{Results: tc.other})
+				// Seed a normal credential completion, not telemetry-only raw evidence.
+				w.completeSQLHealthCheck(&sqlHealthTarget{poolHealth: health}, 0, now, []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{Results: tc.other})
 			}
 			w.completeSQLHealthCheck(&sqlHealthTarget{poolHealth: health}, 0, now, []string{a, b}, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{Results: tc.results})
 			assert.Equal(t, tc.wantSQL, health.sqlRoutingActive)
@@ -3405,6 +3406,9 @@ func TestSQLComparisonPrunesEvictedResultsAndRejectsLateCompletion(t *testing.T)
 			var published *sqlHealthComparisonSnapshot
 			for _, target := range []*sqlHealthTarget{first, second} {
 				published = s.recordSQLComparisonPoll(trackPotential, target, 0, at, at, candidates, SQLHealthCheckOutcome{Results: results})
+				s.sqlComparisonMu.Lock()
+				s.recordSQLPollEvidenceLocked(target, at, at, SQLHealthCheckOutcome{Results: results}, sqlCompletePoll, nil)
+				s.sqlComparisonMu.Unlock()
 			}
 			// A single missing DNS response must not bypass the normal retention threshold.
 			require.ElementsMatch(t, candidates, s.refreshSQLResolved(trackPotential, []string{"A"}, 2))
@@ -3415,6 +3419,8 @@ func TestSQLComparisonPrunesEvictedResultsAndRejectsLateCompletion(t *testing.T)
 				require.Equal(t, []string{"A"}, cached.CandidateIPs)
 				require.Equal(t, results[:1], cached.Results)
 				require.Equal(t, at, cached.ObservedAt)
+				require.Equal(t, results[:1], s.sqlRoutingLatest[target].Results)
+				require.NotContains(t, s.sqlBanLatest[target], "B")
 			}
 			// Snapshots already handed to hooks must remain independent of cache pruning.
 			for _, snapshot := range published.results {
@@ -3989,7 +3995,10 @@ func TestSQLRoutingTimestampFollowsFlagEvaluation(t *testing.T) {
 			complete := func(primary string) {
 				at := time.Now()
 				w.completeSQLHealthCheck(target, 0, at, ips, map[string]struct{}{a: {}, b: {}}, SQLHealthCheckOutcome{
-					StartedAt: at, Results: []SQLHealthCheckResult{{IP: a, InRecovery: primary != a}, {IP: b, InRecovery: primary != b}},
+					StartedAt: at, Results: []SQLHealthCheckResult{
+						{IP: a, InRecovery: primary != a, StartedAt: at, CompletedAt: at},
+						{IP: b, InRecovery: primary != b, StartedAt: at, CompletedAt: at},
+					},
 				})
 			}
 			w.applyPatroniHealth(s, map[string]bool{a: true, b: false}, nil, ips, time.Now())

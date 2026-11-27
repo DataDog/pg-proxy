@@ -37,8 +37,9 @@ of choosing a route from SQL results.
 
 The main path is:
 
-`scheduleSQLRefresh` -> `SQLHealthChecker.Check` -> `completeSQLHealthCheck` ->
-`aggregateSQLHealthCheckOutcomes` -> `hybridHealthPolicy.observeSQLRound`.
+`scheduleSQLRefresh` -> `SQLHealthChecker.Check` -> `completeSQLHealthCheckMode` ->
+`aggregateSQLHealthCheckOutcomes` ->
+`hybridHealthPolicy.observeSQLRoundWithRoutingEvidence`.
 
 Patroni updates arrive separately through `applyPatroniHealth` -> `observePatroni`.
 The policy chooses a result, and the worker publishes it for client routing.
@@ -64,6 +65,23 @@ snapshots from the active credentials. They do not all have to finish together.
 So the one-second tick schedules work; it does not mean every saved result is
 exactly one second old.
 
+The worker keeps three separate views of the evidence:
+
+- `sqlComparisonLatest`: each credential's complete raw snapshot for comparison
+  metrics.
+- `sqlRoutingLatest`: each credential's normal routing snapshot, including the
+  captured list of banned IPs it skipped. A new normal poll replaces this
+  snapshot as a whole.
+- `sqlBanLatest`: each credential's latest observation per retained IP, including
+  shutdown errors that can veto recovery. Recovery evidence can change ban
+  eligibility without supplying a routing role or refreshing routing timestamps.
+
+A routing decision still waits for every IP checked by its credential. Empty
+filtered credential outcomes do not contribute a timestamp to routing freshness;
+nonempty successful and error results continue through the existing conflict and
+freshness checks. DNS eviction and target invalidation remove obsolete evidence
+from all three views.
+
 These results feed SQL/Patroni comparison metrics and, when SQL routing is enabled,
 routing decisions. Availability subscribers can hear about a successful primary
 earlier, as soon as that probe finishes. Routing still waits for the full checks
@@ -86,8 +104,9 @@ slow IP can delay that round after this IP's probe has finished.
 
 Overlapping probes, missing timestamps, and invalid intervals cannot establish
 which role is newer, so their conflicting successful results still require
-Patroni fallback. Errors do not replace successful roles. Raw per-credential
-snapshots remain available for diagnosis.
+Patroni fallback. One credential's errors do not erase another credential's
+successful role; a new normal poll replaces its own credential's previous
+snapshot. Raw per-credential snapshots remain available for diagnosis.
 
 Shutdown-banlist exclusions take precedence over this table for routing; see
 [SQL shutdown banlist](#sql-shutdown-banlist). Raw comparison results are unchanged.
@@ -276,6 +295,9 @@ SQL/Patroni comparison and Patroni-only shadow routing remain unchanged. Client
 routing uses the worker publication path; mismatch metrics still reflect the raw
 observations. A newer Patroni observation of a banned IP cannot invalidate an
 otherwise usable SQL route: that IP is not an eligible fallback.
+
+[sql_health_evidence_test.go](sql_health_evidence_test.go) covers separation of
+ban and routing evidence, recovery eligibility, freshness, and raw comparisons.
 
 ## SQL snapshot timing
 

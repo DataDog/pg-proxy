@@ -304,6 +304,15 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	fresh SQLHealthResultsSnapshot,
 	evaluatedAt time.Time,
 ) hybridRoutingDecision {
+	return p.observeSQLRoundWithRoutingEvidence(candidateIPs, outcome, nil, fresh, evaluatedAt)
+}
+
+// Ban evidence includes recovery results and cached shutdowns from every
+// credential. Separate routing evidence contains only normal routing polls.
+func (p *hybridHealthPolicy) observeSQLRoundWithRoutingEvidence(
+	candidateIPs []string, outcome SQLHealthCheckOutcome, routingEvidence *SQLHealthCheckOutcome,
+	fresh SQLHealthResultsSnapshot, evaluatedAt time.Time,
+) hybridRoutingDecision {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -314,6 +323,9 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	decision.routingBanChanges = p.routingBannedIPs.update(candidateIPs, outcome, fresh)
 	decision.routingBannedIPs = maps.Clone(p.routingBannedIPs)
 	routingOutcome := p.routingEligibleOutcomeLocked(outcome)
+	if routingEvidence != nil {
+		routingOutcome = p.routingEligibleOutcomeLocked(*routingEvidence)
+	}
 	fallbackReason, timeoutType := sqlHealthFallback(routingOutcome)
 	if !p.routingEnabled {
 		return decision
@@ -323,7 +335,7 @@ func (p *hybridHealthPolicy) observeSQLRound(
 	// old topology before Patroni restored routing. Unknown start times also cannot
 	// supersede that recovery. Keep the barrier after accepting a fresh snapshot so
 	// another late completion cannot subsequently roll routing back.
-	if !p.patroniRecoveryAt.IsZero() && !outcome.StartedAt.After(p.patroniRecoveryAt) {
+	if !p.patroniRecoveryAt.IsZero() && !routingOutcome.StartedAt.After(p.patroniRecoveryAt) {
 		decision.routingResult = SQLRoutingResultPatroniRecovery
 		return decision
 	}
