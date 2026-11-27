@@ -253,14 +253,14 @@ type fixedBackend struct {
 	loadShedder *passthroughLoadShedder
 }
 
-func (b *fixedBackend) Acquire(context.Context, LinkRequest) (link.Link, error) {
+func (b *fixedBackend) Checkout(context.Context, LinkRequest) (AcquiredLink, error) {
 	if b.acquireErr != nil {
-		return nil, b.acquireErr
+		return AcquiredLink{}, b.acquireErr
 	}
 	if !b.acquired.CompareAndSwap(false, true) {
-		return nil, errors.New("only expect a single link")
+		return AcquiredLink{}, errors.New("only expect a single link")
 	}
-	return b.backendLink, nil
+	return AcquiredLink{Link: b.backendLink}, nil
 }
 
 func (b *fixedBackend) LoadShedder() LoadShedder {

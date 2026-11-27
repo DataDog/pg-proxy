@@ -56,10 +56,6 @@ type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
 // A nil annotator leaves CheckoutMeta.Annotation nil.
 type CheckoutAnnotator func(session.CheckoutMeta) any
 
-// LinkDecorator wraps a link after checkout with the pool that supplied the
-// connection. Deprecated: use CheckoutAnnotator with session.Observer instead.
-type LinkDecorator func(link.Link, pool.Pool, *pgxpool.Conn, session.LinkRequest) link.Link
-
 // Config configures one logical cluster backend.
 type Config struct {
 	ClusterName         string
@@ -71,7 +67,6 @@ type Config struct {
 	RoleSessionFactory  RoleSessionFactory
 	LinkFactory         LinkFactory
 	CheckoutAnnotator   CheckoutAnnotator
-	LinkDecorator       LinkDecorator
 }
 
 // Runtime owns routing and connection checkout for one logical database cluster.
@@ -89,13 +84,9 @@ type Runtime struct {
 	roleSessionFactory  RoleSessionFactory
 	linkFactory         LinkFactory
 	checkoutAnnotator   CheckoutAnnotator
-	linkDecorator       LinkDecorator
 }
 
-var (
-	_ session.Backend         = (*Runtime)(nil)
-	_ session.CheckoutBackend = (*Runtime)(nil)
-)
+var _ session.Backend = (*Runtime)(nil)
 
 // PoolSelector selects the primary or a replica pool for a checkout.
 type PoolSelector struct {
@@ -131,7 +122,6 @@ func New(cfg Config) *Runtime {
 		roleSessionFactory:  cfg.RoleSessionFactory,
 		linkFactory:         linkFactory,
 		checkoutAnnotator:   cfg.CheckoutAnnotator,
-		linkDecorator:       cfg.LinkDecorator,
 	}
 }
 
@@ -158,17 +148,7 @@ func (r *Runtime) CanPerformDynamicRouting(dynamicRoutingEnabled bool) bool {
 	return false
 }
 
-// Acquire implements session.Backend by delegating to Checkout.
-// Deprecated: use Checkout directly.
-func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (link.Link, error) {
-	acquired, err := r.Checkout(ctx, request)
-	if err != nil {
-		return nil, err
-	}
-	return acquired.Link, nil
-}
-
-// Checkout implements session.CheckoutBackend by acquiring a pool connection,
+// Checkout implements session.Backend by acquiring a pool connection,
 // constructing a link, and returning typed checkout metadata alongside it.
 func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (session.AcquiredLink, error) {
 	start := time.Now()
@@ -216,9 +196,6 @@ func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (se
 	backendLink, err := r.linkFactory(conn, opts)
 	if err != nil {
 		return session.AcquiredLink{}, err
-	}
-	if r.linkDecorator != nil && request.DecorateLink {
-		backendLink = r.linkDecorator(backendLink, selectedPool, conn, request)
 	}
 	meta := session.CheckoutMeta{
 		ClusterName:   r.clusterName,

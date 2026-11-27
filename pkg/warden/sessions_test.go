@@ -13,15 +13,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/session"
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
 
 type testBackend struct{ id string }
 
-func (testBackend) Acquire(context.Context, session.LinkRequest) (link.Link, error) {
-	return nil, nil
+func (testBackend) Checkout(context.Context, session.LinkRequest) (session.AcquiredLink, error) {
+	return session.AcquiredLink{}, nil
 }
 func (testBackend) Close()                            {}
 func (testBackend) LoadShedder() session.LoadShedder  { return nil }

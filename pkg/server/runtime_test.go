@@ -6,15 +6,11 @@
 package server
 
 import (
-	"context"
-	"fmt"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/listener"
 	"github.com/DataDog/pg-proxy/pkg/session"
 	"github.com/DataDog/pg-proxy/pkg/topology"
@@ -85,7 +81,7 @@ func TestRuntimeResolveStartup(t *testing.T) {
 
 func TestRuntimeReadStatesPreserveAvailableWeights(t *testing.T) {
 	runtime, inventory := newRuntimeForTest()
-	zeroBackend, defaultBackend := &sessionExtensionTestBackend{}, &sessionExtensionTestBackend{}
+	zeroBackend, defaultBackend := &stubSessionBackend{}, &stubSessionBackend{}
 	inventory.backends["zero"] = &testBackend{Backend: zeroBackend}
 	inventory.backends["default"] = &testBackend{Backend: defaultBackend}
 	reads := topology.ReadClusters{
@@ -140,11 +136,11 @@ func TestRuntimeDynamicRouting(t *testing.T) {
 // A concurrent inventory refresh must not replace the backend already resolved for startup.
 func TestRuntimeSessionUsesResolvedBackendAndAuthenticatedIdentity(t *testing.T) {
 	runtime, inventory := newRuntimeForTest()
-	checkoutBackend := &sessionExtensionTestBackend{}
+	checkoutBackend := &stubSessionBackend{}
 	inventory.backends["primary"].(*testBackend).Backend = checkoutBackend
 	resolved, err := runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})
 	require.NoError(t, err)
-	inventory.backends["primary"] = &testBackend{Backend: &sessionExtensionTestBackend{}}
+	inventory.backends["primary"] = &testBackend{Backend: &stubSessionBackend{}}
 	active, err := runtime.NewSession(listener.SessionConfig[ResolvedStartup]{
 		Context: t.Context(), Resolved: resolved,
 		Request: listener.StartupRequest{User: "db-role", Options: listener.SessionOptions{AutoCachedPreparedStatements: true}},
@@ -178,73 +174,7 @@ func TestRuntimePassesClientDisconnectTimer(t *testing.T) {
 	}
 }
 
-func TestRuntimeInstallsSessionExtensionsWithAuthenticatedInfo(t *testing.T) {
-	runtime, _ := newRuntimeForTest()
-	resolved, err := runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})
-	require.NoError(t, err)
-
-	var got SessionInfo
-	closed := 0
-	runtime.cfg.SessionExtensions = func(info SessionInfo) SessionExtensions {
-		got = info
-		return SessionExtensions{Hooks: session.Hooks{Closed: func() { closed++ }}}
-	}
-	created, err := runtime.NewSession(listener.SessionConfig[ResolvedStartup]{
-		Context: t.Context(),
-		Request: listener.StartupRequest{
-			User:     "database-role",
-			Database: "testdb",
-			Options:  listener.SessionOptions{PassthroughUser: true},
-		},
-		Resolved: resolved,
-		Service:  "client-service",
-	})
-	require.NoError(t, err)
-	created.(*session.Session).Close(nil)
-
-	assert.Equal(t, SessionInfo{
-		User:            "database-role",
-		LogicalDatabase: "testdb",
-		Service:         "client-service",
-		PassthroughUser: true,
-	}, got)
-	assert.Equal(t, 1, closed)
-}
-
-type sessionExtensionTestBackend struct {
-	session.Backend
-	requests []session.LinkRequest
-}
-
-func (b *sessionExtensionTestBackend) Acquire(_ context.Context, request session.LinkRequest) (link.Link, error) {
-	b.requests = append(b.requests, request)
-	return nil, fmt.Errorf("stop after recording checkout")
-}
-
-func TestRuntimePassesDecorationToCheckout(t *testing.T) {
-	for _, decorate := range []bool{false, true} {
-		t.Run(fmt.Sprintf("decorate=%t", decorate), func(t *testing.T) {
-			runtime, _ := newRuntimeForTest()
-			resolved, err := runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})
-			require.NoError(t, err)
-			runtime.cfg.SessionExtensions = func(SessionInfo) SessionExtensions {
-				return SessionExtensions{DecorateLink: decorate}
-			}
-			created, err := runtime.NewSession(listener.SessionConfig[ResolvedStartup]{
-				Context: t.Context(), Resolved: resolved,
-			})
-			require.NoError(t, err)
-			active := created.(*session.Session)
-			backend := &sessionExtensionTestBackend{}
-			active.RemapBackend(backend)
-			active.ApplyStateRemapping()
-			err = active.HandleAction(session.ClientMessageAction{ProxyMsgToPg: &pgproto3.Query{String: "select 1"}})
-			require.ErrorContains(t, err, "stop after recording checkout")
-			require.Len(t, backend.requests, 1)
-			assert.Equal(t, decorate, backend.requests[0].DecorateLink)
-		})
-	}
-}
+type stubSessionBackend struct{ session.Backend }
 
 type closeOrderObserver struct {
 	session.NoopObserver

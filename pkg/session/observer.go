@@ -6,8 +6,6 @@
 package session
 
 import (
-	"context"
-
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
@@ -33,13 +31,6 @@ type CheckoutMeta struct {
 type AcquiredLink struct {
 	Link link.Link
 	Meta CheckoutMeta
-}
-
-// CheckoutBackend is implemented by backends that return CheckoutMeta alongside
-// each checked-out link.
-type CheckoutBackend interface {
-	Backend
-	Checkout(context.Context, LinkRequest) (AcquiredLink, error)
 }
 
 // Observer receives read-only session lifecycle and protocol notifications.

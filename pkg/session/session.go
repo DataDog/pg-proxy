@@ -180,19 +180,15 @@ type Session struct {
 	unnamedGen         uint64
 	unnamedPendingGens []uint64
 
-	// reportMu orders remaps and their hook reports. Remap* callers hold it to queue
-	// and report; the session goroutine holds it to apply and report, and is the only
-	// writer of backend and readStates. Other goroutines read those under it.
-	reportMu sync.Mutex
-	// pending holds the remaps queued for the next message boundary, or nil. It is
-	// replaced under reportMu and read without a lock.
-	pending atomic.Pointer[pendingRemap]
+	// pendingBackend and pendingReadStates hold remaps queued for the next
+	// message boundary. Independent atomics let RemapBackend and RemapReadStates
+	// proceed lock-free while only the session goroutine writes backend and readStates.
+	pendingBackend    atomic.Pointer[Backend]
+	pendingReadStates atomic.Pointer[[]ReadStateConfig]
 
 	obsVals               *SessionObservabilityValues
 	metrics               Metrics
-	hooks                 Hooks
 	observers             []observerSlot
-	decorateLink          bool
 	enableTraceParameters bool
 	paramTypes            *bindParamTypes // allocated on the first statement Describe
 
@@ -205,28 +201,13 @@ type Session struct {
 
 	mirroring Mirroring
 
-	mirror         *mirror.Queue  // per-session mirror queue; nil until the first mirrored link
-	mirrorBudget   *mirror.Budget // shared, process-wide byte budget for all mirror queues (set by the listener)
-	mirrorWorker   *mirror.Worker // drains s.mirror onto the shadow DB; started with s.mirror
-	mirrorTap      *mirror.Tap    // per-checkout mirroring tap; nil when mirroring is off or no link is held
-	hooksCloseOnce sync.Once
+	mirror       *mirror.Queue  // per-session mirror queue; nil until the first mirrored link
+	mirrorBudget *mirror.Budget // shared, process-wide byte budget for all mirror queues (set by the listener)
+	mirrorWorker *mirror.Worker // drains s.mirror onto the shadow DB; started with s.mirror
+	mirrorTap    *mirror.Tap    // per-checkout mirroring tap; nil when mirroring is off or no link is held
 }
 
 var _ SessionHandle = (*Session)(nil)
-
-// pendingRemap is a snapshot of the queued remaps. A nil field has nothing queued.
-type pendingRemap struct {
-	backend    Backend
-	readStates *[]ReadStateConfig
-}
-
-// pendingRemaps returns a copy of the queued remaps.
-func (s *Session) pendingRemaps() pendingRemap {
-	if pending := s.pending.Load(); pending != nil {
-		return *pending
-	}
-	return pendingRemap{}
-}
 
 // ClientTransport is the post-authentication PostgreSQL frontend transport.
 type ClientTransport interface {
@@ -244,9 +225,6 @@ type LinkRequest struct {
 	MaxPreparedStmts      int
 	MetricTags            []string
 	TraceState            *query.TraceState
-	// DecorateLink asks the backend to run LinkDecorator for this checkout.
-	// The listener sets it on the session independently of notification hooks.
-	DecorateLink bool
 }
 
 // LoadShedder gates one complete backend checkout.
@@ -254,9 +232,9 @@ type LoadShedder interface {
 	Run(context.Context, func() error, Priority) (fnErr error, shedErr error)
 }
 
-// Backend acquires links and supplies checkout-scoped load shedding.
+// Backend checks out links (with checkout metadata) and supplies checkout-scoped load shedding.
 type Backend interface {
-	Acquire(context.Context, LinkRequest) (link.Link, error)
+	Checkout(context.Context, LinkRequest) (AcquiredLink, error)
 	LoadShedder() LoadShedder
 }
 
@@ -294,33 +272,6 @@ type MirrorPolicy struct {
 type Mirroring struct {
 	Policy        func(context.Context) MirrorPolicy
 	AcquireShadow func(context.Context, string, LinkRequest) (link.Link, error)
-}
-
-// Hooks expose optional session state transition notifications. Callbacks run
-// synchronously on the session goroutine, except where noted, and must return
-// promptly. They must not mutate message values. A callback that retains message
-// data after it returns must copy that data first.
-type Hooks struct {
-	LinkChanged          func(link.Link)
-	RoutedLinkChanged    func(link.Link)
-	FrontendMessage      func(pgproto3.FrontendMessage)
-	BackendMessage       func(pgproto3.BackendMessage)
-	ClientFlushSucceeded func()
-	Closed               func()
-	// BackendChanged and ReadStatesChanged report remaps:
-	//   - Queued: (current, pending) on the Remap* caller's goroutine. pending is
-	//     never nil: RemapReadStates(nil) reports an empty slice, and
-	//     RemapBackend(nil), which cancels a queued backend, reports the current one.
-	//   - Applied: (applied, nil) on the session goroutine, at a message boundary.
-	//   - Order: one session's reports never overlap and arrive in the order the
-	//     remaps take effect. Each report holds a lock the other goroutine needs, so
-	//     keep reports fast.
-	//   - Calls: reports must not call RemapBackend or RemapReadStates. Reports on
-	//     the caller's goroutine may call Backend and PendingBackend, but not
-	//     CurrentLink.
-	BackendChanged    func(current Backend, pending Backend)
-	ReadStatesChanged func(current []ReadStateConfig, pending []ReadStateConfig)
-	DiscardChanged    func(bool)
 }
 
 // Config contains only portable session inputs.
@@ -365,12 +316,8 @@ type Config struct {
 	// checkout. False, the default, starts a goroutine and a ticker for each
 	// checkout. True keeps one timer and one acquire context for the session and
 	// arms the timer for each checkout.
-	ClientDisconnectTimer bool
-	Hooks                 Hooks
-	Observers             []Observer
-	// DecorateLink requests decoration when the session checks out a routed link.
-	// The listener sets this explicitly; installing hooks does not enable it.
-	DecorateLink             bool
+	ClientDisconnectTimer    bool
+	Observers                []Observer
 	InitialLink              link.Link
 	InitialCheckoutMeta      CheckoutMeta
 	InitialClientReplyBuffer []byte
@@ -422,8 +369,7 @@ func New(cfg Config) *Session {
 		obsVals:                      createSessionObservabilityValues(cfg.User, cfg.Database, cfg.Service, cfg.PassthroughUser),
 		metrics:                      resolveMetrics(cfg.Metrics),
 		mirroring:                    cfg.Mirroring, mirrorBudget: cfg.MirrorBudget,
-		clientDisconnected: disconnected, hooks: cfg.Hooks, observers: initObserverSlots(cfg.Observers),
-		decorateLink:          cfg.DecorateLink,
+		clientDisconnected: disconnected, observers: initObserverSlots(cfg.Observers),
 		enableTraceParameters: cfg.EnableTraceParameters,
 		clientDisconnectTimer: cfg.ClientDisconnectTimer,
 	}
@@ -579,8 +525,7 @@ func (s *Session) TraceState() *query.TraceState {
 	return s.obsVals.traceState
 }
 
-// CurrentLink and Backend take no lock. Call them on the session goroutine, or
-// from a hook as Hooks allows.
+// CurrentLink and Backend take no lock. Call them on the session goroutine.
 func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
@@ -589,9 +534,14 @@ func (s *Session) ClientDisconnectTimer() bool { return s.clientDisconnectTimer 
 func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 	return s.pStmtState
 }
-func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
-func (s *Session) Backend() Backend        { return s.backend }
-func (s *Session) PendingBackend() Backend { return s.pendingRemaps().backend }
+func (s *Session) DiscardUntilSync() bool { return s.discardUntilSync }
+func (s *Session) Backend() Backend       { return s.backend }
+func (s *Session) PendingBackend() Backend {
+	if p := s.pendingBackend.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
 func (s *Session) ReadStates() []ReadStateConfig {
 	return readStatesToConfig(s.currentReadStates())
 }
@@ -636,12 +586,6 @@ func (s *Session) setLink(backendLink link.Link) {
 	s.abortHandle.Store(link.AbortHandleFor(backendLink))
 	s.link = backendLink
 	s.unnamedStmtOnLink = false
-	if backendLink == nil && s.hooks.RoutedLinkChanged != nil {
-		s.hooks.RoutedLinkChanged(nil)
-	}
-	if s.hooks.LinkChanged != nil {
-		s.hooks.LinkChanged(backendLink)
-	}
 }
 
 // attachCheckout publishes a checked-out link and notifies observers.
@@ -677,22 +621,8 @@ func (s *Session) sendToLink(msg pgproto3.FrontendMessage, expectation query.Rep
 	s.mirrorTap.OnSend(msg, expectation)
 }
 
-func (s *Session) checkoutBackend(ctx context.Context, routed Backend, request LinkRequest) (AcquiredLink, error) {
-	if cb, ok := routed.(CheckoutBackend); ok {
-		return cb.Checkout(ctx, request)
-	}
-	backendLink, err := routed.Acquire(ctx, request)
-	if err != nil {
-		return AcquiredLink{}, err
-	}
-	return AcquiredLink{Link: backendLink}, nil
-}
-
 func (s *Session) setDiscardUntilSync(discard bool) {
 	s.discardUntilSync = discard
-	if s.hooks.DiscardChanged != nil {
-		s.hooks.DiscardChanged(discard)
-	}
 }
 
 // Cancel runs on the listener's cancel-request goroutine. It touches only the
@@ -982,7 +912,7 @@ func (s *Session) drain() error {
 // sends the client a fresh ReadyForQuery; returns true in that case to signal
 // the caller to skip the current message.
 func (s *Session) handleStateRemapping() bool {
-	if s.pending.Load() == nil {
+	if s.pendingBackend.Load() == nil && s.pendingReadStates.Load() == nil {
 		// Nothing to do here, business as usual
 		return false
 	}
@@ -1005,23 +935,14 @@ func (s *Session) handleStateRemapping() bool {
 
 	// Inform the client about the reset
 	rollbackError := buildTransactionRollbackErrorResponse()
-	if s.hooks.BackendMessage != nil {
-		s.hooks.BackendMessage(rollbackError)
-	}
 	s.notifyBackendMessage(rollbackError)
 	s.clientConn.Send(rollbackError)
 	readyForQuery := buildReadyForQueryIdleMessage()
-	if s.hooks.BackendMessage != nil {
-		s.hooks.BackendMessage(readyForQuery)
-	}
 	s.notifyBackendMessage(readyForQuery)
 	s.clientConn.Send(readyForQuery)
-	if s.hooks.ClientFlushSucceeded == nil && len(s.observers) == 0 {
+	if len(s.observers) == 0 {
 		s.clientConn.Flush()
 	} else if s.flushClientConn() == nil {
-		if s.hooks.ClientFlushSucceeded != nil {
-			s.hooks.ClientFlushSucceeded()
-		}
 		s.notifyClientFlushSucceeded()
 	}
 
@@ -1034,51 +955,35 @@ func (s *Session) handleStateRemapping() bool {
 	return true
 }
 
-// applyPendingRemaps applies and reports the queued remaps, and returns whether the
-// backend changed. Only the session goroutine calls it, after seeing a pending remap.
+// applyPendingRemaps applies queued remaps and returns whether the primary
+// backend changed. Only the session goroutine calls it.
 func (s *Session) applyPendingRemaps() bool {
-	s.reportMu.Lock()
-	defer s.reportMu.Unlock()
-	remap := s.pending.Swap(nil)
-
 	// Apply read states update first — no link disruption needed since this only
 	// affects routing decisions for future link acquisitions.
-	if remap.readStates != nil {
-		newReadStates := make([]*ReadState, 0, len(*remap.readStates))
-		for _, rs := range *remap.readStates {
+	if readStates := s.pendingReadStates.Swap(nil); readStates != nil {
+		newReadStates := make([]*ReadState, 0, len(*readStates))
+		for _, rs := range *readStates {
 			newReadStates = append(newReadStates, &ReadState{backend: rs.Backend, weight: rs.Weight})
 		}
 		s.readStates = newReadStates
 		if len(newReadStates) > 0 {
 			s.dynamicRoutingEnabled = true
 		}
-		if s.hooks.ReadStatesChanged != nil {
-			s.hooks.ReadStatesChanged(readStatesToConfig(newReadStates), nil)
-		}
 	}
-	if remap.backend == nil {
+	nextBackend := s.pendingBackend.Swap(nil)
+	if nextBackend == nil {
 		return false
 	}
-	s.backend = remap.backend
-	if s.hooks.BackendChanged != nil {
-		s.hooks.BackendChanged(s.backend, nil)
-	}
+	s.backend = *nextBackend
 	return true
 }
 
 // RemapReadStates queues read routing for the next message boundary; the last call wins.
 func (s *Session) RemapReadStates(readStates []ReadStateConfig) {
 	if readStates == nil {
-		readStates = []ReadStateConfig{} // a nil pending value marks the applied report
+		readStates = []ReadStateConfig{}
 	}
-	s.reportMu.Lock()
-	defer s.reportMu.Unlock()
-	next := s.pendingRemaps()
-	next.readStates = &readStates
-	s.pending.Store(&next)
-	if s.hooks.ReadStatesChanged != nil {
-		s.hooks.ReadStatesChanged(readStatesToConfig(s.readStates), readStates)
-	}
+	s.pendingReadStates.Store(&readStates)
 }
 
 func (s *Session) handleClientMessage(msg pgproto3.FrontendMessage) error {
@@ -1099,9 +1004,6 @@ func (s *Session) handleClientMessage(msg pgproto3.FrontendMessage) error {
 	// observation callback. Expose that accepted boundary while continuing to
 	// omit the messages discarded before it.
 	if discardingWithoutLink && !action.DiscardUntilSync {
-		if s.hooks.FrontendMessage != nil {
-			s.hooks.FrontendMessage(msg)
-		}
 		s.notifyFrontendMessage(msg)
 	}
 
@@ -1125,18 +1027,12 @@ func (s *Session) handleAction(action ClientMessageAction) error {
 
 	if len(action.ReplyMsgsToClient) > 0 {
 		for _, msg := range action.ReplyMsgsToClient {
-			if s.hooks.BackendMessage != nil {
-				s.hooks.BackendMessage(msg)
-			}
 			s.notifyBackendMessage(msg)
 			s.clientConn.Send(msg)
 		}
 		err := s.flushClientConn()
 		if err != nil {
 			return fmt.Errorf("error flushing proxied msg(s) to client: %w", err)
-		}
-		if s.hooks.ClientFlushSucceeded != nil {
-			s.hooks.ClientFlushSucceeded()
 		}
 		s.notifyClientFlushSucceeded()
 	}
@@ -1254,7 +1150,6 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 			MaxPreparedStmts:      link.DefaultPreparedStmtsPerConnection,
 			MetricTags:            s.obsVals.metricTags,
 			TraceState:            s.obsVals.traceState,
-			DecorateLink:          s.decorateLink,
 		}
 
 		if s.passthroughUser {
@@ -1266,7 +1161,7 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 			ctx = s.acquireCtx
 		}
 
-		acquired, err := s.checkoutBackend(ctx, routed, request)
+		acquired, err := routed.Checkout(ctx, request)
 		if err != nil {
 			if s.clientDisconnected.Load() {
 				return &clientDisconnectedError{cause: err}
@@ -1274,14 +1169,10 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 			return fmt.Errorf("error linking session to a postgres conn: %w", err)
 		}
 		s.mirrorTap = s.startMirrorTap()
-		s.setLink(acquired.Link)
-		if s.hooks.RoutedLinkChanged != nil {
-			s.hooks.RoutedLinkChanged(acquired.Link)
-		}
-		s.notifyCheckout(acquired.Meta)
+		s.attachCheckout(acquired)
 
-		// The monitor may have fired between checkoutBackend returning and
-		// setLink publishing abortHandle, seen no handle, skipped ForceClose, and
+		// The monitor may have fired between Checkout returning and setLink
+		// publishing abortHandle, seen no handle, skipped ForceClose, and
 		// exited. Re-check so we don't block on Receive() with a dead client.
 		if s.clientDisconnected.Load() {
 			s.forceCloseHandleOnClientDisconnect(s.abortHandle.Load())
@@ -1342,16 +1233,10 @@ func (s *Session) handleRecordNewPreparedStmt(action ClientMessageAction) (proxy
 				return false, err
 			}
 			parseComplete := &pgproto3.ParseComplete{}
-			if s.hooks.BackendMessage != nil {
-				s.hooks.BackendMessage(parseComplete)
-			}
 			s.notifyBackendMessage(parseComplete)
 			s.clientConn.Send(parseComplete)
 			if err := s.flushClientConn(); err != nil {
 				return false, fmt.Errorf("error flushing proxied msg(s) to client: %w", err)
-			}
-			if s.hooks.ClientFlushSucceeded != nil {
-				s.hooks.ClientFlushSucceeded()
 			}
 			s.notifyClientFlushSucceeded()
 			return false, nil
@@ -1568,9 +1453,6 @@ func (s *Session) flushPostgres() (bool, error) {
 			}
 			return discardedUntilSync, fmt.Errorf("error receiving message from linked postgres conn: %w", err)
 		}
-		if s.hooks.BackendMessage != nil {
-			s.hooks.BackendMessage(msg)
-		}
 		s.notifyBackendMessage(msg)
 		action, err := query.DecidePgMessageAction(msg, expectation, s.obsVals.traceState)
 		if err != nil {
@@ -1662,9 +1544,6 @@ func (s *Session) flushPostgres() (bool, error) {
 	}
 	s.obsVals.traceState.FinishRootTrace()
 	if clientWriteSucceeded {
-		if s.hooks.ClientFlushSucceeded != nil {
-			s.hooks.ClientFlushSucceeded()
-		}
 		s.notifyClientFlushSucceeded()
 	}
 	if pgSkippingUntilSync {
@@ -1678,20 +1557,13 @@ func (s *Session) flushPostgres() (bool, error) {
 }
 
 // RemapBackend queues a backend for the next message boundary; the last call wins.
+// Passing nil cancels any previously queued backend remap.
 func (s *Session) RemapBackend(backend Backend) {
-	s.reportMu.Lock()
-	defer s.reportMu.Unlock()
-	next := s.pendingRemaps()
-	next.backend = backend
-	s.pending.Store(&next)
-	if s.hooks.BackendChanged != nil {
-		if backend == nil {
-			// Cancelled: the next boundary keeps the current backend. A nil pending
-			// value marks the applied report.
-			backend = s.backend
-		}
-		s.hooks.BackendChanged(s.backend, backend)
+	if backend == nil {
+		s.pendingBackend.Store(nil)
+		return
 	}
+	s.pendingBackend.Store(&backend)
 }
 
 // router selects a state from readsState if we wish to route a read query
@@ -1763,14 +1635,7 @@ func (s *Session) currentReadStates() []*ReadState {
 }
 
 func (s *Session) close(err error) {
-	defer func() {
-		s.hooksCloseOnce.Do(func() {
-			if s.hooks.Closed != nil {
-				s.hooks.Closed()
-			}
-		})
-		s.notifyClosed()
-	}()
+	defer s.notifyClosed()
 
 	clientDisconnected := s.clientDisconnected.Load()
 

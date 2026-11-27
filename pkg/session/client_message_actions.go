@@ -39,9 +39,6 @@ func (s *Session) DecideClientMessageAction(msg pgproto3.FrontendMessage) (Clien
 			if s.enableTraceParameters && observesClientMessage(msg) {
 				s.observeClientMessage(msg, state)
 			}
-			if s.hooks.FrontendMessage != nil {
-				s.hooks.FrontendMessage(msg)
-			}
 			s.notifyFrontendMessage(msg)
 		},
 		QueryObserved: func(_ string, _ actions.PGQueryProtocolType) {

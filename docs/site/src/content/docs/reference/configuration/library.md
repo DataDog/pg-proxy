@@ -50,7 +50,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `Inventory` | Required lookup of logical databases and backend state. |
 | `Settings` | `topology.RuntimeConfig`, including `PostgresMessageBufferSize` and `ClientDisconnectTimer`. |
 | `ParameterStatuses` | Optional callback to update a private copy of backend parameters. The callback must not retain the map. |
-| `SessionExtensions` | Optional hooks and link decoration for each authenticated session. |
+| `Observers` | Optional slice of `server.SessionObserverFactory` builders that attach read-only `session.Observer` instances to each authenticated session. |
 | `RandomInt` | Random-number function used by routing. |
 | `Mirroring` | Session traffic-mirroring integration. |
 | `Metrics` | Optional session metric implementation; otherwise sessions use the global metric client. |
@@ -63,6 +63,13 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 `ClientDisconnectTimer` selects how each session checks for a client that disconnects during a backend checkout: `false`, the default, starts a goroutine and a ticker for each checkout, and `true` keeps one timer for the session. It is the library form of the `client_disconnect_timer` proxy setting.
 
 `ReplyBufferPool` is the library form of the `reply_buffer_pool` proxy setting, and it is off by default. With `true`, a reply of 512 bytes or more continues in a buffer from a pool that all sessions share, and the buffer goes back to the pool after the reply's last write to the client. Thus the client connection must not keep the slice that `Write` receives, as `io.Writer` requires.
+
+## Session observers and checkout metadata
+
+Embedders that need to observe protocol traffic or attach per-checkout metadata (such as the exact pool selected after replica fallback and the effective PostgreSQL role) configure two complementary hooks:
+
+- `backend.Config.CheckoutAnnotator`: runs once per checkout with a value `session.CheckoutMeta` (containing `ClusterName`, `Pool`, `EffectiveRole`, `Rerouted`, and `ForReadQuery`) and returns an optional annotation stored in `CheckoutMeta.Annotation`. It never receives the underlying `link.Link` or `*pgxpool.Conn`. Panics are recovered, logged, and counted via `pg_proxy.backend.checkout_annotator_panic`.
+- `server.RuntimeConfig.Observers`: a slice of `server.SessionObserverFactory` functions composed in registration order. Each returned `session.Observer` (embed `session.NoopObserver` to implement only the callbacks needed) runs synchronously on the session goroutine with no session locks held, receiving `OnCheckout(CheckoutMeta)`, `OnFrontendMessage`, `OnBackendMessage`, `OnClientFlushSucceeded`, `OnRelease`, and `OnClosed`. A panic in any observer callback is recovered, disables only that observer, calls its `OnClosed` once, and emits `pg_proxy.session.observer_panic`; the session and remaining observers continue unaffected.
 
 ## Logical databases
 
