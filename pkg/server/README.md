@@ -23,9 +23,9 @@ The mirror budget is shared by all sessions from one runtime.
 The caller owns both inventories. Construction binds the socket. `Run`, `Close`,
 and context shutdown retain the listener's existing ordering. Startup errors,
 read weights (including explicit zero), admission, metrics, and extension behavior
-remain unchanged. An embedder can add environment metadata in place to the
-runtime's single private copy of backend parameters, preserving backend
-precedence (including empty values) and the proxy version override.
+remain unchanged. An embedder can edit backend parameters in place through
+`RuntimeConfig.ParameterStatuses`, which receives a private copy made for each
+startup. Its values replace the backend's. The callback must not retain the map.
 
 Tests cover real startup/cancel packets, registry cleanup, shutdown waiting,
 startup resolution, read routing, and session extensions.

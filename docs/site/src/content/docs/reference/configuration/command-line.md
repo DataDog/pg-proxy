@@ -21,7 +21,7 @@ Database, listener, session, and authentication settings are in the [configurati
 | `-telemetry` | Unset | Telemetry preset for traces, metrics, and logs: `datadog`, `otel`, or `none`. When unset, each signal follows its `OTEL_*_EXPORTER` variable. See [Telemetry configuration](../../observability/). |
 | `-tracing` | Unset | `otel` or `none`. Overrides `OTEL_TRACES_EXPORTER` for traces only. Cannot be combined with `-telemetry`. Prefer `-telemetry` or `OTEL_TRACES_EXPORTER`. |
 | `-trace-parameters` | `false` | Record raw bind parameter values as `db.parameters.N` tags on sampled traces. SQL text is recorded either way. See [Query parameters](../../observability/#query-parameters). |
-| `-validate-config` | `false` | Check the configuration file and local TLS files, print every error found, and exit without starting the proxy. Exits `0` if the file is valid, `1` if not. Does not connect to PostgreSQL or open the listener. |
+| `-validate-config` | `false` | Check the configuration file, the credential files and variables it names, local TLS files, and the telemetry flags and environment, then exit without starting the proxy. Errors are printed one per line, naming the setting, flag, or variable; credential errors name the entry by index, such as `user 0`. A file that cannot be decoded stops the check before the others run: a syntax error, a wrong type, or an unknown or duplicate field. YAML errors give a line, JSON type and field errors give a line and column, and a JSON syntax error gives a byte offset. Exits `0` if everything checked is valid, `1` if not. Does not connect to PostgreSQL or open the listener. |
 | `-log-level` | `INFO` | Minimum log level: `DEBUG`, `INFO`, `WARN`, or `ERROR`. Applies to stderr and OTLP logs. |
 
 The binary does not accept positional arguments.
@@ -33,7 +33,7 @@ The binary does not accept positional arguments.
 | `OTEL_TRACES_EXPORTER`, `OTEL_METRICS_EXPORTER`, `OTEL_LOGS_EXPORTER` | Choose `otlp` or `none` for each signal when `-telemetry` is unset. |
 | `OTEL_EXPORTER_OTLP_*`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_METRIC_EXPORT_INTERVAL`, and other `OTEL_*` SDK variables | OTLP destination, identity, and timing. See [OpenTelemetry](../../observability/#opentelemetry). |
 | `DD_AGENT_HOST`, `DD_SERVICE`, `DD_ENV`, `DD_VERSION`, `DD_DOGSTATSD_*`, `DD_TRACE_*` | Native Datadog traces and metrics with `-telemetry datadog`. See [Native Datadog](../../observability/#native-datadog). |
-| `PGSSLROOTCERT`, `PGSSLMODE`, `PGOPTIONS`, and other libpq `PG*` variables | Defaults for backend connections, for settings the configuration file does not set. See [`databases`](../configuration-file/#databases). |
+| `PGSSLROOTCERT`, `PGSSLMODE`, `PGOPTIONS`, and other libpq `PG*` variables | Defaults for backend connections, for settings the configuration file does not set. `PGHOST`, `PGDATABASE`, `PGUSER`, and `PGPASSWORD` never apply, because the binary always sets those values; an omitted password is empty unless the libpq password file (`PGPASSFILE`, or `~/.pgpass` by default) has one. See [`databases`](../configuration-file/#databases). |
 | Any name in `password_env` or `scram_sha_256_env` | Credentials named in the configuration file. See [credential references](../client-authentication/#credential-references). |
 
 ## Signals and exit status

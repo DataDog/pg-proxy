@@ -53,7 +53,7 @@ Run the same checks CI runs, from the repository root:
 gofmt -l .                     # must print nothing; fix with gofmt -w
 go mod tidy -diff              # must print nothing
 go build ./...
-go vet -tags=integration ./...
+go vet -tags=integration,regress ./...
 go test -count=1 ./...         # runs the performance budgets, which -race skips
 go test -race -count=1 ./...
 go test -tags=integration -race -count=1 ./...   # requires Docker
@@ -132,8 +132,9 @@ These unit tests fail when a change makes the proxy do more work per query:
 
 - `TestProtocolCycleAllocationBudgets` in `pkg/session` counts heap allocations per query cycle.
 - `TestProtocolCycleRoundTripBudgets` in `pkg/session` and `TestReleaseResetSQL` in `pkg/link` count writes to PostgreSQL and to the client, and reset queries.
+- `TestBackendStatementsPerClientStatement` in `cmd/pg-proxy`, an integration test, uses `pg_stat_statements` to check, against a real PostgreSQL server, the statements PostgreSQL runs for each client statement, including the reset queries. Its container preloads that extension; with `PG_PROXY_TEST_DATABASE_URL`, it skips itself unless the server preloads it and tracks utility statements.
 - `TestLargeBindAmplification` in `pkg/session` bounds the memory used to forward a 64 MiB parameter.
-- The `goleak` check in each package's `main_test.go` fails a package whose tests leave a goroutine running.
+- The `goleak` check in the `main_test.go` of `pkg/backend`, `pkg/link`, `pkg/listener`, `pkg/mirror`, `pkg/pool`, and `pkg/session` fails the package when its tests leave a goroutine running.
 
 The race detector changes allocation counts, so the allocation and large-parameter tests skip themselves under `-race`. CI runs them in the Go (minimum) job, with the Go version in `go.mod`. Run them without `-race` to print the current counts:
 

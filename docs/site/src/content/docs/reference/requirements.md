@@ -28,8 +28,8 @@ CI builds and tests on Linux (Ubuntu 24.04, x86-64). The binary also builds and 
 
 | PostgreSQL | Status |
 | --- | --- |
-| 14, 18 | Tested in CI on every change. |
-| 15, 16, 17 | The full integration suite passes. Not yet tested in CI. |
+| 14, 18 | The integration and PostgreSQL regression suites run in CI on every change. |
+| 15, 16, 17 | The PostgreSQL regression suite runs in CI on every change. The full integration suite passes, but CI does not run it on these versions. |
 | 13 and older | Not tested. |
 
 PG Proxy speaks PostgreSQL wire protocol version 3.0, which every supported PostgreSQL version uses. Features that depend on session state have limits under transaction pooling; see [Transaction-pooling compatibility](../compatibility/).

@@ -29,7 +29,7 @@ databases:
     max_conns: 5
 ```
 
-Keep the rest of your configuration, including `clusters`, `logical_databases`, and `proxy`. Zero or omitted pool settings use pgx defaults; negative values and minimum connections above the maximum are rejected.
+Keep the rest of your configuration, including `clusters`, `logical_databases`, and `proxy`. Zero or omitted pool settings use pgx defaults, except that a replica without `max_conn_lifetime` uses 15 minutes, plus 5 minutes of jitter unless `max_conn_lifetime_jitter` is set; negative values and minimum connections above the maximum are rejected.
 
 ## 3. Restart and check connectivity
 

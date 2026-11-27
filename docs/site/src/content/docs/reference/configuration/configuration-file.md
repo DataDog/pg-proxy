@@ -65,8 +65,11 @@ A list. Each entry opens one backend connection pool for each cluster that uses 
 | `connection_options` | `connectionOptions` | Inherit `PGOPTIONS` | Map of PostgreSQL settings sent as `-c key=value` in the startup `options` parameter, for example `statement_timeout: 30s`. An empty map clears `PGOPTIONS`. |
 | `runtime_params` | `runtimeParams` | None | Map of startup parameters sent directly, for example `search_path`. |
 | `application_name` | `applicationName` | None | Backend `application_name`. Clients cannot set it through the proxy. |
+| `reset_mode` | `resetMode` | `always` | When the proxy resets a backend connection's session state as it returns to the pool: `always`, `audit`, `dynamic`, or `off`. Empty means `always`. See [Session reset modes](../../../explanation/pooling/#session-reset-modes). |
+| `reset_audit_settings` | `resetAuditSettings` | None | List of custom settings, each named `prefix.name` (for example `app.tenant_id`), that `audit` mode checks on every audited release in addition to its built-in list. |
+| `reset_audit_rate` | `resetAuditRate` | `0.1` | Share of the releases that `dynamic` would skip which `audit` mode checks, from `0` to `1`. Zero means the default, `0.1`. |
 
-Negative pool values fail startup.
+Negative pool values fail startup. An unknown `reset_mode`, a `reset_audit_settings` entry that is not of the form `prefix.name`, or a `reset_audit_rate` outside `0` to `1` also fails startup. The audit settings apply only with `reset_mode: audit`, but are validated in every mode.
 
 **Durations.** In YAML, write durations as Go duration strings such as `15m` or `1h30m`. In JSON, `maxConnLifetime` and `maxConnLifetimeJitter` are integers in **nanoseconds**: `900000000000` is 15 minutes. A string such as `"15m"` fails startup in JSON.
 

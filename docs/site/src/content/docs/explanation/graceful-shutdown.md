@@ -11,7 +11,7 @@ Graceful shutdown gives active transactions an opportunity to finish before the 
 
 ## Stop accepting, then drain
 
-The application stops accepting new connections and signals existing sessions to drain. A session that has no active backend work can close promptly. A busy session continues processing until it reaches an idle state that is safe to release.
+The application stops accepting new connections and signals existing sessions to drain. In the library, both follow the context passed to `server.NewServer`: cancel it to drain sessions. `Server.Close` alone only stops accepting, and `Run` then returns without waiting for sessions. A session that has no active backend work can close promptly. A busy session continues processing until it reaches an idle state that is safe to release. A connection that has not finished TLS, startup, or authentication when shutdown begins is closed instead: with a startup error, or with none if its TLS handshake has not finished.
 
 At that point, the proxy sends this error and closes the client connection:
 

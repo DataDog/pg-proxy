@@ -14,7 +14,7 @@ Authentication decides whether a client may connect. TLS protects traffic on the
 The binary has two modes:
 
 - **Trust mode** (default). The proxy listens only on loopback and accepts any client that connects with the backend user name. Use it only for local development.
-- **Password mode.** With `proxy.password_auth_enabled`, clients authenticate with SCRAM-SHA-256 as users listed in the configuration file. Each user lists the logical databases it may use. TLS is required, and the proxy may listen on any address.
+- **Password mode.** With `proxy.password_auth_enabled`, clients authenticate with SCRAM-SHA-256 as users listed in the configuration file. Each user lists the logical databases it may use. TLS is required, and the proxy may listen on any IP address.
 
 Proxy users are separate from backend roles: every client of a logical database runs its queries as that database's configured backend user. See [Client authentication](../../reference/configuration/client-authentication/) and [Client TLS](../../reference/configuration/client-tls/) to set them up.
 

@@ -18,7 +18,7 @@ PG Proxy provides two places for an application to apply a load-shedding policy:
 
 | Check | What it protects | What a rejection does |
 | --- | --- | --- |
-| New client connection | Capacity to handle client connections in the proxy. | Rejects and closes the new connection. |
+| New client connection | Capacity to handle client connections in the proxy. | Sends a `FATAL` error with SQLSTATE `08006` and closes the new connection. A client whose first message is an SSL request receives only `N`, the refusal of TLS, before the close. |
 | New backend work | Capacity to accept more work for a backend. | Returns an error to the client before processing that work. |
 
 The connection check covers the lifetime of an accepted connection. The backend check covers an attempt to acquire and use a pooled PostgreSQL connection, including the time spent waiting for one.
@@ -52,5 +52,7 @@ Session caps and load-shedding policy are separate controls; setting a session c
 The library supplies the checks and protocol behavior. The embedding application supplies the policy that decides when to admit or reject work. It might use resource usage, the time spent waiting for backend connections, or a concurrency budget.
 
 Without a listener load shedder, the listener skips that check. The built-in backend runtime also defaults to accepting work when no load shedder is supplied. Setting a client priority does not enable an overload policy by itself.
+
+The `pg-proxy` binary supplies no load-shedding policy, so neither check rejects work and `pg_proxy.priority` has no effect there. A priority value outside `0` to `5` uses the default, `3`.
 
 See [Go library configuration](../../reference/configuration/library/) for the application integration points and [Set connection and session limits](../../how-to/set-pool-limits/) for the separate capacity limits.

@@ -56,7 +56,8 @@ type Credentials struct {
 `DatabaseSettings` holds the shared fields without credentials. Embedding it
 keeps your application on the same field definitions as the library.
 
-- **Included:** the connection fields, `max_conns`, `connection_options`, and the
+- **Included:** the connection fields, `max_conns`, `connection_options`, the
+  reset fields (`reset_mode`, `reset_audit_settings`, `reset_audit_rate`), and the
   discovery fields (`postgres_host`, `route_through_envoy`, `load_balanced_servers`).
 - **Not included:** the pool tuning fields (`min_conns`, `min_idle_conns`,
   `max_conn_lifetime`, `max_conn_lifetime_jitter`), `application_name`, and
@@ -147,7 +148,9 @@ library type, so they would reject `password_env`. After decoding, call
 
 Credential validation does not check routes or listener options. Your application
 still needs to check the settings it uses and report an error for anything it
-cannot support. The unchanged `users` section in this example retains the
+cannot support. The readers do not check the reset fields either: call
+`DatabaseSettings.ValidateReset()` for each database with your other checks.
+`link.NewResetPolicy` also calls it when it builds a pool's reset policy. The unchanged `users` section in this example retains the
 library's password and SCRAM verifier support; the environment-variable rule
 applies only to database passwords.
 
