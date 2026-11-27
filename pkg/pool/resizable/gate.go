@@ -6,25 +6,30 @@
 package resizable
 
 import (
-	"context"
+	"container/list"
 	"fmt"
 	"sync"
 	"time"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
-const acquireRetryInterval = 10 * time.Millisecond
-
-// resizableGate is a dynamically resizable semaphore for all physical
-// connections belonging to one physical pgx instance. A slot remains reserved while
-// a connection is being constructed, is idle or acquired, and is cleaning up.
+// One gate per pgxpool, shared by checkout admission and backend dialers.
 type resizableGate struct {
-	mu             sync.Mutex
-	limit          int32
-	totalOpenConns int32
-	// numConnsRetiring prevents concurrent releases from selecting more than the excess.
+	mu               sync.Mutex
+	limit            int32
+	totalOpenConns   int32
 	numConnsRetiring int32
-	// availabilitySignal is the channel each blocked acquisition waits on.
-	availabilitySignal chan struct{}
+	sockets          map[*pgconn.PgConn]*budgetConn
+
+	closed   bool
+	waiting  list.List // *admission, in arrival order
+	sequence uint64
+	pending  int32 // grants not yet consumed by a physical dial or completed checkout
+	timer    *time.Timer
+	delay    time.Duration
+	stop     chan struct{}
+	idle     func() int32
 }
 
 func newResizableGate(limit int32) (*resizableGate, error) {
@@ -32,137 +37,45 @@ func newResizableGate(limit int32) (*resizableGate, error) {
 		return nil, fmt.Errorf("connection limit must be positive: %d", limit)
 	}
 	return &resizableGate{
-		limit:              limit,
-		availabilitySignal: make(chan struct{}),
+		limit: limit, sockets: make(map[*pgconn.PgConn]*budgetConn),
+		stop: make(chan struct{}),
 	}, nil
 }
 
-// tryReserve reserves capacity for a physical connection before construction
-// begins. Holding the lock across the check and increment prevents concurrent
-// constructors from exceeding the limit.
-func (g *resizableGate) tryReserve() bool {
+func (g *resizableGate) reserve(a *admission) error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.closed {
+		return errPoolClosed
+	}
 	if g.totalOpenConns >= g.limit {
-		return false
+		return errVirtualConnectionLimit
 	}
 	g.totalOpenConns++
-	return true
+	g.consumeGrant(a)
+	return nil
 }
 
-// hasCapacity is only an acquisition hint. BeforeConnect still reserves capacity
-// atomically, since another caller can consume it before construction starts.
-func (g *resizableGate) hasCapacity() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.totalOpenConns < g.limit
-}
-
-// connConstructionFailed removes capacity reserved for a connection
-// that failed to finish construction.
-func (g *resizableGate) connConstructionFailed() {
-	g.decrementTotalOpenConns(false)
-}
-
-// connClosed records that a physical connection has finished closing.
-func (g *resizableGate) connClosed() {
-	g.decrementTotalOpenConns(false)
-}
-
-// retiringConnClosed records that a connection selected for retirement
-// has finished closing.
-func (g *resizableGate) retiringConnClosed() {
-	g.decrementTotalOpenConns(true)
-}
-
-func (g *resizableGate) decrementTotalOpenConns(retiring bool) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.totalOpenConns == 0 {
-		return
-	}
-	g.totalOpenConns--
-	if retiring && g.numConnsRetiring > 0 {
-		g.numConnsRetiring--
-	}
-	if g.totalOpenConns < g.limit {
-		g.wakeWaiters()
-	}
-}
-
-// trackClosingConnection records a closure selected by pgx or a caller hook
-// so downsizing excludes it while physical cleanup is pending.
-func (g *resizableGate) trackClosingConnection() {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	g.numConnsRetiring++
-}
-
-// tryRetireExcessConnection selects one released connection for closure when
-// the connections not already retiring still exceed the current limit.
-func (g *resizableGate) tryRetireExcessConnection() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.totalOpenConns-g.numConnsRetiring <= g.limit {
-		return false
-	}
-	g.numConnsRetiring++
-	return true
-}
-
-// needsRetirement excludes connections whose cleanup is already pending.
-func (g *resizableGate) needsRetirement() bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.totalOpenConns-g.numConnsRetiring > g.limit
-}
-
-// resize changes the maximum number of physical connections. Existing
-// connections above a smaller limit retain their slots until they close.
 func (g *resizableGate) resize(limit int32) error {
 	if limit <= 0 {
 		return fmt.Errorf("connection limit must be positive: %d", limit)
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	previousLimit := g.limit
-	g.limit = limit
-	if g.limit > previousLimit {
-		g.wakeWaiters()
+	if g.closed {
+		return errPoolClosed
 	}
+	if limit > g.limit {
+		g.hint()
+	}
+	g.limit = limit
 	return nil
 }
 
-// notifyIdleConnAvailability wakes acquisitions when an existing connection
-// becomes idle even though the number of physical connections did not change.
-func (g *resizableGate) notifyIdleConnAvailability() {
+func (g *resizableGate) needsRetirement() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.wakeWaiters()
-}
-
-// wait returns on an availability hint or a bounded retry. The retry covers
-// pgxpool publishing an idle connection after AfterRelease and constructor
-// paths that publish idle connections without calling AfterRelease.
-func (g *resizableGate) wait(ctx context.Context, availability <-chan struct{}) error {
-	timer := time.NewTimer(acquireRetryInterval)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-availability:
-		return nil
-	case <-timer.C:
-		return nil
-	}
-}
-
-// wakeWaiters closes the channel held by blocked Acquire calls, then creates a
-// channel for later blocked calls. The caller must hold g.mu to prevent
-// concurrent reads or closes.
-func (g *resizableGate) wakeWaiters() {
-	close(g.availabilitySignal)
-	g.availabilitySignal = make(chan struct{})
+	return g.totalOpenConns-g.numConnsRetiring > g.limit
 }
 
 func (g *resizableGate) getLimit() int32 {
@@ -170,24 +83,8 @@ func (g *resizableGate) getLimit() int32 {
 	defer g.mu.Unlock()
 	return g.limit
 }
-
 func (g *resizableGate) getTotalOpenConns() int32 {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.totalOpenConns
-}
-
-func (g *resizableGate) getNumConnsRetiring() int32 {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.numConnsRetiring
-}
-
-// getAvailabilitySignal returns the channel a blocked Acquire call should wait on.
-// Callers capture it before trying pgxpool.Acquire so they cannot miss a
-// connection becoming idle between those two operations.
-func (g *resizableGate) getAvailabilitySignal() <-chan struct{} {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.availabilitySignal
 }

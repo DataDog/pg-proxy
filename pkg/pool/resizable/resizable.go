@@ -68,45 +68,13 @@ func New(ctx context.Context, config *pgxpool.Config, limit int32) (*Resizable, 
 		reconcileStop: make(chan struct{}),
 		reconcileDone: make(chan struct{}),
 	}
+	gate.idle = func() int32 { return pgx.Stat().IdleConns() }
 	go r.reconcileConnections(r.releaseIdleConnections)
 	return r, nil
 }
 
 func (r *Resizable) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
-	return acquireWithGate(ctx, r.gate, func() bool {
-		select {
-		case <-r.reconcileStop:
-			// Let pgx return its closed-pool error rather than waiting on capacity.
-			return true
-		default:
-			return r.pgx.Stat().IdleConns() > 0
-		}
-	}, r.pgx.Acquire)
-}
-
-func acquireWithGate(
-	ctx context.Context,
-	gate *resizableGate,
-	idleAvailable func() bool,
-	acquire func(context.Context) (*pgxpool.Conn, error),
-) (*pgxpool.Conn, error) {
-	for {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		signal := gate.getAvailabilitySignal()
-		// Do not invoke pgx's constructor merely to have BeforeConnect reject it.
-		// Availability is a hint: competing acquisitions can still win the race.
-		if gate.hasCapacity() || idleAvailable() {
-			conn, err := acquire(ctx)
-			if !errors.Is(err, errVirtualConnectionLimit) {
-				return conn, err
-			}
-		}
-		if err := gate.wait(ctx, signal); err != nil {
-			return nil, err
-		}
-	}
+	return r.gate.acquire(ctx, r.pgx.Acquire)
 }
 
 // Resize accepts a new virtual connection limit without waiting for physical
@@ -157,8 +125,8 @@ func (r *Resizable) Limit() int32 { return r.gate.getLimit() }
 
 func (r *Resizable) GetPhysicalCeiling() int32 { return r.pgx.Config().MaxConns }
 
-// TotalConnectionsOpen includes connections being constructed or cleaned up in
-// addition to the idle and acquired connections visible in pgxpool statistics.
+// TotalConnectionsOpen counts in-flight backend dials and their open sockets.
+// Selecting a connection for retirement does not return its slot.
 func (r *Resizable) TotalConnectionsOpen() int32 { return r.gate.getTotalOpenConns() }
 
 func (r *Resizable) Config() *pgxpool.Config { return r.pgx.Config() }
@@ -243,6 +211,7 @@ func (r *Resizable) releaseIdleConnections() {
 
 func (r *Resizable) Close() {
 	r.closeOnce.Do(func() {
+		r.gate.close()
 		close(r.reconcileStop)
 		<-r.reconcileDone
 		r.pgx.Close()

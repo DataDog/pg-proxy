@@ -7,36 +7,15 @@ package resizable
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/stretchr/testify/assert"
 )
 
-func TestConnectionTracerReleasesFailedReservationOnce(t *testing.T) {
-	releases := 0
-	tracer := newConnectionTracer(nil, func() { releases++ })
-	failure := pgx.TraceConnectEndData{Err: errors.New("connect failed")}
-
-	tracer.TraceConnectEnd(context.Background(), failure)
-	tracer.TraceConnectEnd(context.Background(), failure)
-
-	assert.Equal(t, 1, releases)
-}
-
-func TestConnectionTracerKeepsSuccessfulReservation(t *testing.T) {
-	releases := 0
-	tracer := newConnectionTracer(nil, func() { releases++ })
-
-	tracer.TraceConnectEnd(context.Background(), pgx.TraceConnectEndData{})
-
-	assert.Zero(t, releases)
-}
-
 func TestConnectionTracerDelegatesSupportedInterfaces(t *testing.T) {
 	underlying := &recordingTracer{}
-	tracer := newConnectionTracer(underlying, func() {})
+	tracer := newConnectionTracer(underlying, testGate(t, 1, nil))
 	ctx := context.Background()
 
 	tracer.TraceQueryStart(ctx, nil, pgx.TraceQueryStartData{})
@@ -48,7 +27,7 @@ func TestConnectionTracerDelegatesSupportedInterfaces(t *testing.T) {
 	tracer.TraceCopyFromEnd(ctx, nil, pgx.TraceCopyFromEndData{})
 	tracer.TracePrepareStart(ctx, nil, pgx.TracePrepareStartData{})
 	tracer.TracePrepareEnd(ctx, nil, pgx.TracePrepareEndData{})
-	tracer.TraceConnectStart(ctx, pgx.TraceConnectStartData{})
+	tracer.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: testConfig(t, 1).ConnConfig})
 	tracer.TraceConnectEnd(ctx, pgx.TraceConnectEndData{})
 
 	assert.Equal(t, []string{
@@ -62,14 +41,15 @@ func TestConnectionTracerDelegatesSupportedInterfaces(t *testing.T) {
 
 func TestConnectionTracerSupportsNilAndQueryOnlyTracers(t *testing.T) {
 	ctx := context.Background()
-	tracer := newConnectionTracer(nil, func() {})
+	gate := testGate(t, 1, nil)
+	tracer := newConnectionTracer(nil, gate)
 	assert.Equal(t, ctx, tracer.TraceBatchStart(ctx, nil, pgx.TraceBatchStartData{}))
 	assert.Equal(t, ctx, tracer.TraceCopyFromStart(ctx, nil, pgx.TraceCopyFromStartData{}))
 	assert.Equal(t, ctx, tracer.TracePrepareStart(ctx, nil, pgx.TracePrepareStartData{}))
-	assert.Equal(t, ctx, tracer.TraceConnectStart(ctx, pgx.TraceConnectStartData{}))
+	assert.IsType(t, &connectAttempt{}, tracer.TraceConnectStart(ctx, pgx.TraceConnectStartData{ConnConfig: testConfig(t, 1).ConnConfig}).Value(connectKey{}))
 
 	query := &queryOnlyTracer{}
-	tracer = newConnectionTracer(query, func() {})
+	tracer = newConnectionTracer(query, gate)
 	tracer.TraceQueryEnd(ctx, nil, pgx.TraceQueryEndData{})
 	tracer.TraceBatchEnd(ctx, nil, pgx.TraceBatchEndData{})
 	assert.True(t, query.called)

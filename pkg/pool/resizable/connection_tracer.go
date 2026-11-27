@@ -7,31 +7,34 @@ package resizable
 
 import (
 	"context"
-	"sync"
+	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
 )
 
 // connectionTracer preserves every pgx tracing interface exposed by an
-// existing tracer and releases a reserved gate slot when connection setup
-// fails. pgx has no connection-failure lifecycle hook, so ConnectTracer is needed
-// to account for failures after BeforeConnect reserves capacity.
+// existing tracer and tags the dial contexts of one pgx.ConnectConfig call.
+// pgconn also uses the dialer for out-of-band cancellation sockets.
 type connectionTracer struct {
+	gate     *resizableGate
 	query    pgx.QueryTracer
 	batch    pgx.BatchTracer
 	copyFrom pgx.CopyFromTracer
 	prepare  pgx.PrepareTracer
 	connect  pgx.ConnectTracer
-
-	onConnectFailure func()
-	releaseOnce      sync.Once
 }
 
-func newConnectionTracer(underlying pgx.QueryTracer, onConnectFailure func()) *connectionTracer {
-	tracer := &connectionTracer{
-		query:            underlying,
-		onConnectFailure: onConnectFailure,
-	}
+type connectKey struct{}
+
+// Each ConnectConfig call tries fallback addresses sequentially. Its dialer
+// may also be called concurrently by a cancellation handler.
+type connectAttempt struct {
+	socket      *budgetConn
+	established atomic.Bool
+}
+
+func newConnectionTracer(underlying pgx.QueryTracer, gate *resizableGate) *connectionTracer {
+	tracer := &connectionTracer{query: underlying, gate: gate}
 	tracer.batch, _ = underlying.(pgx.BatchTracer)
 	tracer.copyFrom, _ = underlying.(pgx.CopyFromTracer)
 	tracer.prepare, _ = underlying.(pgx.PrepareTracer)
@@ -98,16 +101,19 @@ func (t *connectionTracer) TracePrepareEnd(ctx context.Context, conn *pgx.Conn, 
 }
 
 func (t *connectionTracer) TraceConnectStart(ctx context.Context, data pgx.TraceConnectStartData) context.Context {
+	grant, _ := ctx.Value(admissionKey{}).(*admission)
 	if t.connect != nil {
-		return t.connect.TraceConnectStart(ctx, data)
+		ctx = t.connect.TraceConnectStart(ctx, data)
 	}
-	return ctx
+	if grant != nil && ctx.Value(admissionKey{}) != grant {
+		ctx = context.WithValue(ctx, admissionKey{}, grant)
+	}
+	attempt := new(connectAttempt)
+	t.gate.wrapDials(data.ConnConfig, attempt)
+	return context.WithValue(ctx, connectKey{}, attempt)
 }
 
 func (t *connectionTracer) TraceConnectEnd(ctx context.Context, data pgx.TraceConnectEndData) {
-	if data.Err != nil {
-		defer t.releaseOnce.Do(t.onConnectFailure)
-	}
 	if t.connect != nil {
 		t.connect.TraceConnectEnd(ctx, data)
 	}

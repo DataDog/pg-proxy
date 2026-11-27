@@ -19,6 +19,12 @@ Platform team built it and runs it in production.
   authentication, routing, load shedding, and telemetry through Go interfaces.
   See [Go library configuration](docs/site/src/content/docs/reference/configuration/library.md).
 
+When you embed [the resizable connection pool](pkg/pool/resizable), waiting
+callers are admitted in arrival order, but their checkouts can finish out of
+order. A backend dial uses one slot until the dial fails or its socket closes;
+returning a healthy connection to the pool makes it reusable without freeing
+that slot.
+
 ## Features
 
 - [**Transaction pooling.**](docs/site/src/content/docs/explanation/pooling.md) Keep many more client sessions open than backend connections.
