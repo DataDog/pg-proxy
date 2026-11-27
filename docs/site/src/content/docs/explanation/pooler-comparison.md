@@ -192,6 +192,6 @@ Replica routing also changes consistency. A pooler's ability to send reads to re
 
 ## Performance comparison
 
-There are no comparable benchmarks in these docs yet. Threading model or feature count alone does not establish which pooler is faster.
+[Benchmarks](../benchmarks/) reports PG Proxy's own pgbench results; it does not compare poolers. Threading model or feature count alone does not establish which pooler is faster.
 
 For a meaningful comparison, keep PostgreSQL, hardware, client drivers, TLS, pool sizes, query mix, and concurrency consistent. Measure throughput, tail latency, CPU, memory, and behavior when pools are full or backends fail. Include the prepared-statement and transaction patterns your application actually uses.

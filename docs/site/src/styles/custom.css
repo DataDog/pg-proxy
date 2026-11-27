@@ -77,3 +77,9 @@ header.header { background: var(--sl-color-bg); border-bottom: 1px solid var(--s
     position: static;
   }
 }
+
+/* Benchmark tables fill the content column. */
+.sl-markdown-content .bench-table table {
+  display: table;
+  width: 100%;
+}

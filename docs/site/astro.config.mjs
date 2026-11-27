@@ -34,6 +34,7 @@ export default defineConfig({
         { slug: 'features' },
         { slug: 'reference/limitations' },
         { slug: 'explanation/pooler-comparison' },
+        { slug: 'explanation/benchmarks' },
       ] },
       { label: 'How-to guides', items: [
         { slug: 'how-to/local-development' },

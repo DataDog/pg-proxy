@@ -28,6 +28,7 @@ Since then, we've run it in production, fixed it, and learned what works. We thi
 - [Features](features/): Pooling, prepared statements, read routing, observability, and application integrations.
 - [Limitations](reference/limitations/): Transaction-pooling constraints and current implementation limits.
 - [Compare poolers](explanation/pooler-comparison/): How PG Proxy compares with other connection poolers such as PgBouncer, Pgpool-II, Odyssey, and PgDog.
+- [Benchmarks](explanation/benchmarks/): PG Proxy throughput and latency under pgbench, and the settings used to measure them.
 
 ## How-to guides
 

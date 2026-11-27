@@ -43,7 +43,9 @@ Use neutral substitutes:
   `SELECT id, name FROM users WHERE id = $1`, with made-up parameter values.
 - Scale: "a deployment with thousands of client connections", not a cluster name
   or a production figure.
-- Performance claims: numbers from benchmarks or tests in this repository.
+- Performance claims: numbers from benchmarks or tests in this repository, or
+  from runs that follow the method on the Benchmarks page
+  (`docs/site/src/content/docs/explanation/benchmarks.md`).
 
 Internal context, such as an incident, a ticket, or a production trace, may
 inform a change. Describe the behavior it revealed in general terms. Do not copy
