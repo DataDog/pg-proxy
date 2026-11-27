@@ -222,7 +222,8 @@ const (
 	resetReasonClientSQL       = "client_sql"
 	resetReasonPreparedStmt    = "prepared_stmt"
 	resetReasonParameterStatus = "parameter_status"
-	resetReasonAudit           = "audit" // dynamic would skip this release
+	resetReasonServerVersion   = "server_version" // the server may drop the role on a clean checkout
+	resetReasonAudit           = "audit"          // dynamic would skip this release
 	resetReasonClean           = "clean"
 )
 
@@ -237,7 +238,10 @@ const (
 )
 
 // resetDecision reports what a release with marks does about the reset, and why.
-func (p ResetPolicy) resetDecision(marks SessionMarks) (action resetAction, reason string) {
+// rolePersists says the role set at connection time survives the client's own
+// RESET SESSION AUTHORIZATION or DISCARD ALL, which the scanner does not count;
+// see resetDropsRole.
+func (p ResetPolicy) resetDecision(marks SessionMarks, rolePersists bool) (action resetAction, reason string) {
 	mode := p.Mode()
 	switch {
 	case mode == config.ResetAlways:
@@ -250,11 +254,55 @@ func (p ResetPolicy) resetDecision(marks SessionMarks) (action resetAction, reas
 		return resetSend, resetReasonPreparedStmt
 	case marks&MarkParameterStatus != 0:
 		return resetSend, resetReasonParameterStatus
+	case !rolePersists:
+		return resetSend, resetReasonServerVersion
 	case mode == config.ResetAudit:
 		return p.sampleAudit(), resetReasonAudit
 	default:
 		return resetSkip, resetReasonClean
 	}
+}
+
+// resetDropsRole reports whether a server whose server_version is version drops
+// a role set at connection time (ALTER ROLE ... SET role, or a startup option)
+// when a client runs RESET SESSION AUTHORIZATION, which DISCARD ALL also runs.
+// The releases before the CVE-2024-10978 fix do, and from PostgreSQL 14 they
+// send no ParameterStatus for it when the session user does not change: 14.0 to
+// 14.13, 15.0 to 15.8, 16.0 to 16.4 and 17.0. Earlier releases report
+// session_authorization on every RESET, which marks the checkout. A version that
+// does not start with a number counts as one that drops the role.
+func resetDropsRole(version string) bool {
+	major, n := leadingInt(version)
+	if n == 0 {
+		return true
+	}
+	var fixedMinor int
+	switch major {
+	case 14:
+		fixedMinor = 14
+	case 15:
+		fixedMinor = 9
+	case 16:
+		fixedMinor = 5
+	case 17:
+		fixedMinor = 1
+	default:
+		return false
+	}
+	minor := 0 // a beta or release candidate precedes the .0 release
+	if n < len(version) && version[n] == '.' {
+		minor, _ = leadingInt(version[n+1:])
+	}
+	return minor < fixedMinor
+}
+
+// leadingInt returns the decimal number s starts with and its length in bytes.
+func leadingInt(s string) (v, n int) {
+	for n < len(s) && s[n] >= '0' && s[n] <= '9' {
+		v = v*10 + int(s[n]-'0')
+		n++
+	}
+	return v, n
 }
 
 // reasonTags returns the reset metrics' tags for a release's decision: its

@@ -33,6 +33,10 @@ const (
 	// ResetDynamic runs the reset only when something in the checkout may have
 	// changed session state. It does not see changes made inside functions or
 	// triggers that the client's SQL does not name, including a change of role.
+	// Without a RoleSession, it resets on every release on a server that lacks
+	// the CVE-2024-10978 fix (14.0 to 14.13, 15.0 to 15.8, 16.0 to 16.4, 17.0),
+	// where a client's RESET SESSION AUTHORIZATION or DISCARD ALL can drop a
+	// role set at connection time without a sign the proxy sees.
 	ResetDynamic ResetMode = "dynamic"
 	// ResetOff never sends a reset. A client's SET carries over to the next
 	// client of the connection.

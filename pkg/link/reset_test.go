@@ -7,11 +7,13 @@ package link
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -54,13 +56,54 @@ func TestResetDecision(t *testing.T) {
 		{config.ResetAudit, MarkParameterStatus, resetSend, "parameter_status"},
 	}
 	for _, test := range tests {
-		action, reason := mustResetPolicy(t, test.mode).resetDecision(test.marks)
+		action, reason := mustResetPolicy(t, test.mode).resetDecision(test.marks, true)
 		assert.Equal(t, test.wantAction, action, "mode %q marks %b", test.mode, test.marks)
 		assert.Equal(t, test.wantReason, reason, "mode %q marks %b", test.mode, test.marks)
 	}
-	action, reason := ResetPolicy{}.resetDecision(MarkClientSQL)
+	action, reason := ResetPolicy{}.resetDecision(MarkClientSQL, true)
 	assert.Equal(t, resetSend, action, "the zero policy resets on every release")
 	assert.Equal(t, "always", reason)
+
+	// On a server that may have dropped the role, a clean checkout resets too.
+	for _, test := range []struct {
+		mode       config.ResetMode
+		marks      SessionMarks
+		wantAction resetAction
+		wantReason string
+	}{
+		{config.ResetDynamic, 0, resetSend, "server_version"},
+		{config.ResetAudit, 0, resetSend, "server_version"},
+		{config.ResetDynamic, MarkClientSQL, resetSend, "client_sql"},
+		{config.ResetOff, 0, resetSkip, "off"},
+		{config.ResetAlways, 0, resetSend, "always"},
+	} {
+		action, reason := mustResetPolicy(t, test.mode).resetDecision(test.marks, false)
+		assert.Equal(t, test.wantAction, action, "mode %q marks %b", test.mode, test.marks)
+		assert.Equal(t, test.wantReason, reason, "mode %q marks %b", test.mode, test.marks)
+	}
+}
+
+func TestResetDropsRole(t *testing.T) {
+	for version, want := range map[string]bool{
+		"17.0":                               true,
+		"17.1":                               false,
+		"17.11 (Ubuntu 17.11-1.pgdg24.04+2)": false,
+		"17beta1":                            true,
+		"16.4":                               true,
+		"16.5":                               false,
+		"15.8":                               true,
+		"15.9":                               false,
+		"14.0":                               true,
+		"14.13":                              true,
+		"14.14":                              false,
+		"13.16":                              false, // reports session_authorization on every RESET
+		"18.0":                               false,
+		"19devel":                            false,
+		"":                                   true,
+		"unknown":                            true,
+	} {
+		assert.Equal(t, want, resetDropsRole(version), "server_version %q", version)
+	}
 }
 
 func TestAuditSampling(t *testing.T) {
@@ -81,7 +124,7 @@ func TestAuditSampling(t *testing.T) {
 		{1, 1, resetFullAudited},
 	} {
 		policy.auditRate, policy.fullCheckRate = test.auditRate, test.fullCheckRate
-		action, reason := policy.resetDecision(0)
+		action, reason := policy.resetDecision(0, true)
 		assert.Equal(t, test.want, action, "audit rate %v, full-check rate %v", test.auditRate, test.fullCheckRate)
 		assert.Equal(t, "audit", reason, "every release dynamic would skip counts as audit, checked or not")
 	}
@@ -171,22 +214,28 @@ func serveReset(received chan<- pgproto3.FrontendMessage, rows ...[][]byte) func
 
 func TestReleaseByMode(t *testing.T) {
 	tests := []struct {
-		mode       config.ResetMode
-		marks      SessionMarks
-		wantQuery  string // empty: no reset sent
-		wantReason string // empty: no reset metrics
+		mode          config.ResetMode
+		marks         SessionMarks
+		serverVersion string // empty: testServerVersion
+		wantQuery     string // empty: no reset sent
+		wantReason    string // empty: no reset metrics
 	}{
-		{config.ResetAlways, MarkClientSQL, testReset, ""},
-		{config.ResetDynamic, 0, "", "clean"},
-		{config.ResetDynamic, MarkClientSQL, testReset, "client_sql"},
-		{config.ResetOff, MarkClientSQL, "", "off"},
+		{config.ResetAlways, MarkClientSQL, "", testReset, ""},
+		{config.ResetDynamic, 0, "", "", "clean"},
+		{config.ResetDynamic, MarkClientSQL, "", testReset, "client_sql"},
+		{config.ResetDynamic, 0, "16.4", testReset, "server_version"},
+		{config.ResetOff, MarkClientSQL, "", "", "off"},
 	}
 	for _, test := range tests {
 		t.Run(string(test.mode)+"/"+test.wantReason, func(t *testing.T) {
 			metrics := newRecordingMetrics()
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics}))
 			received := make(chan pgproto3.FrontendMessage, 1)
-			conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
+			serverVersion := test.serverVersion
+			if serverVersion == "" {
+				serverVersion = testServerVersion
+			}
+			conn, _ := newSessionLinkTestPoolServingVersion(t, serverVersion, serveReset(received))
 			pgConn := conn.Conn().PgConn()
 			tags := []string{"database_cluster:test-cluster"}
 			link, err := New(conn, Options{MetricTags: tags, Reset: mustResetPolicy(t, test.mode)})
@@ -223,6 +272,29 @@ func TestReleaseByMode(t *testing.T) {
 			}
 			assert.Equal(t, wantLatencies, metrics.distributions["datadog."+pgproxy.MetricResetLatency])
 		})
+	}
+}
+
+// quietRoleSession manages the role without sending SQL.
+type quietRoleSession struct{}
+
+func (quietRoleSession) Set(context.Context, *pgxpool.Conn, []string) (string, error) { return "", nil }
+func (quietRoleSession) Reset(context.Context, *pgxpool.Conn, string, []string) error { return nil }
+
+// TestReleaseWithRoleSessionOnServerThatDropsRole: a RoleSession restores the
+// role on every release, so ResetDynamic still skips a clean checkout's reset on
+// a server that may drop it.
+func TestReleaseWithRoleSessionOnServerThatDropsRole(t *testing.T) {
+	received := make(chan pgproto3.FrontendMessage, 1)
+	conn, _ := newSessionLinkTestPoolServingVersion(t, "16.4", serveReset(received))
+	link, err := New(conn, Options{Role: quietRoleSession{}, Reset: mustResetPolicy(t, config.ResetDynamic)})
+	require.NoError(t, err)
+
+	require.NoError(t, link.Release())
+	select {
+	case msg := <-received:
+		t.Fatalf("sent %#v, want no reset", msg)
+	default:
 	}
 }
 

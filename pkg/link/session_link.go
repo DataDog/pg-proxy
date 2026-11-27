@@ -300,7 +300,9 @@ func (link *SessionLink) Release() error {
 	// including the identity reset when no RoleSession ran above. ResetAlways sends it
 	// and reports nothing, as before reset_mode existed.
 	if link.conn != nil && !link.conn.Conn().IsClosed() {
-		action, reason := link.reset.resetDecision(link.marks)
+		// A RoleSession reset the role above, whatever the server does with it.
+		rolePersists := link.role != nil || !resetDropsRole(link.conn.Conn().PgConn().ParameterStatus("server_version"))
+		action, reason := link.reset.resetDecision(link.marks, rolePersists)
 		reports := link.reset.reports()
 		var start time.Time
 		if reports {

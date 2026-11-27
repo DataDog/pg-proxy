@@ -364,9 +364,20 @@ func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backen
 	return conn
 }
 
+// testServerVersion is the server_version the test backend reports by default:
+// a release that keeps the connection's role (see resetDropsRole).
+const testServerVersion = "17.6"
+
 // newSessionLinkTestPoolServing is newSessionLinkTestPoolConnServing that also
 // returns closeAndWait, which closes the pool and returns once serve has.
 func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
+	t.Helper()
+	return newSessionLinkTestPoolServingVersion(t, testServerVersion, serve)
+}
+
+// newSessionLinkTestPoolServingVersion is newSessionLinkTestPoolServing with a
+// backend that reports serverVersion.
+func newSessionLinkTestPoolServingVersion(t *testing.T, serverVersion string, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
 	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
@@ -386,6 +397,7 @@ func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) 
 		}
 
 		backend.Send(&pgproto3.AuthenticationOk{})
+		backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: serverVersion})
 		backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}})
 		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 		if err := backend.Flush(); err != nil {

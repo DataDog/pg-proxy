@@ -29,7 +29,9 @@ import "strings"
 //     quote) may change the session: the scanner cannot tell where it ends.
 //
 // RESET and DISCARD never count: they can only return a session to its
-// baseline. Scan stops at the first sign of a session change, or at text it
+// baseline. (Before the CVE-2024-10978 fix, RESET SESSION AUTHORIZATION, which
+// DISCARD ALL also runs, could drop a role set at connection time; the caller
+// covers those servers.) Scan stops at the first sign of a session change, or at text it
 // cannot lex, and reports true without reading the rest.
 func Scan(sql string, scsOn bool) bool {
 	n := len(sql)
