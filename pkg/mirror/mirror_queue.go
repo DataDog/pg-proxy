@@ -10,6 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -52,6 +53,7 @@ type mirrorItem struct {
 	msg         pgproto3.FrontendMessage // nil for a sentinel
 	expectation query.ReplyExpectation
 	typ         mirrorItemType
+	marks       link.SessionMarks // for a release sentinel: the source checkout's session marks
 	size        int
 }
 

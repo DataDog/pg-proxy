@@ -61,6 +61,12 @@ func TestPgMessageActions(t *testing.T) {
 			wantDeallocate:      true,
 		},
 		{
+			name:        "close complete for a Close the proxy sent",
+			msg:         &pgproto3.CloseComplete{},
+			expectation: ProxyCloseReply,
+			wantAction:  PgMessageAction{ResolveReplyExpectation: true},
+		},
+		{
 			name:            "unexpected close complete",
 			msg:             &pgproto3.CloseComplete{},
 			expectation:     QueryReply,
@@ -285,6 +291,16 @@ func TestPgMessageActions(t *testing.T) {
 			name:        "extended query error response, e.g. for BindReply",
 			msg:         &pgproto3.ErrorResponse{Message: "testing"},
 			expectation: BindReply,
+			wantAction: PgMessageAction{
+				ProxyMsgToClient: &pgproto3.ErrorResponse{Message: "testing"},
+				DiscardUntilSync: true,
+			},
+			wantTraceFinished: true,
+		},
+		{
+			name:        "extended query error response for a Close the proxy sent",
+			msg:         &pgproto3.ErrorResponse{Message: "testing"},
+			expectation: ProxyCloseReply,
 			wantAction: PgMessageAction{
 				ProxyMsgToClient: &pgproto3.ErrorResponse{Message: "testing"},
 				DiscardUntilSync: true,

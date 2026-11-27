@@ -1257,6 +1257,11 @@ func (s *Session) handleProxyMsgToPg(action ClientMessageAction) error {
 	}
 	s.handleEnsureUnnamedPreparedStmt(action)
 
+	if s.link.UsesSessionMarks() {
+		if marks := action.SessionMarks(s.pStmtState, s.unnamedStmt); marks != 0 {
+			s.link.MarkSession(marks)
+		}
+	}
 	s.link.Send(action.ProxyMsgToPg, action.AddReplyExpectation)
 
 	if s.dynamicRoutingEnabled && !action.HandleReadQuery {
@@ -1355,9 +1360,10 @@ func (s *Session) handleCheckExistingPreparedStmt(action ClientMessageAction) er
 // handleEnsureUnnamedPreparedStmt re-creates the client's unnamed prepared statement
 // on the link's connection before a Bind or Describe that refers to it. The client
 // may have parsed it on a link that has since been released (for example psql's
-// \gdesc sends Parse+Sync, then Describe+Sync). Releasing a link runs RESET ALL as a
-// simple Query, and any simple Query discards the unnamed statement. The
-// ParseComplete is not forwarded to the client.
+// \gdesc sends Parse+Sync, then Describe+Sync). The release reset is a simple Query,
+// and any simple Query discards the unnamed statement; a release that skips it
+// leaves the next link to close the statement first. The ParseComplete is not
+// forwarded to the client.
 func (s *Session) handleEnsureUnnamedPreparedStmt(action ClientMessageAction) {
 	if !action.EnsureUnnamedPreparedStmt || s.unnamedStmt == nil || s.unnamedStmtOnLink {
 		return
@@ -1381,9 +1387,9 @@ func (s *Session) invalidateUnnamedStmt() {
 }
 
 // confirmUnnamedStmt records the unnamed statement a ParseComplete confirms, if
-// no later message replaced or destroyed it. It stores a plain copy: the
-// confirmed value wraps the statement for the pending queue, and re-creating it
-// would otherwise nest another wrapper on each reuse.
+// no later message replaced or destroyed it. It stores the plain statement: the
+// confirmed value wraps it for the pending queue, and keeping the wrapper would
+// nest another one on each reuse. The plain statement keeps any cached verdict.
 func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 	if len(s.unnamedPendingGens) == 0 {
 		return
@@ -1393,14 +1399,18 @@ func (s *Session) confirmUnnamedStmt(confirmed prepared.PreparedStatement) {
 	if generation != s.unnamedGen {
 		return
 	}
-	s.unnamedStmt = prepared.CreatePreparedStatement("", "", confirmed.GetSQLQuery(), confirmed.GetParamOIDs())
+	s.unnamedStmt = prepared.Unwrap(confirmed)
 	s.unnamedStmtOnLink = true
 }
 
 // invalidatePendingStmts drops the pending statement queue and the unnamed
-// generations recorded alongside it.
+// generations recorded alongside it. An unnamed Parse still pending did not
+// create the statement, so the next Bind or Describe of it re-creates it.
 func (s *Session) invalidatePendingStmts(fromError bool) {
 	s.pStmtState.InvalidatePendingStmts(fromError)
+	if len(s.unnamedPendingGens) > 0 {
+		s.unnamedStmtOnLink = false
+	}
 	s.unnamedPendingGens = nil
 }
 

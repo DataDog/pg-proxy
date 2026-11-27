@@ -32,6 +32,8 @@ var _ link.Link = (*testLink)(nil)
 
 type testLink struct {
 	calls                  testLinkCalls
+	marks                  link.SessionMarks
+	usesMarks              bool // UsesSessionMarks
 	send                   func(pgproto3.FrontendMessage, query.ReplyExpectation)
 	flush                  func() error
 	receive                func() (pgproto3.BackendMessage, error)
@@ -97,6 +99,10 @@ func (l *testLink) ResolveNextExpectation() {
 	}
 }
 func (l *testLink) DiscardingUntilSync() bool { return false }
+func (l *testLink) MarkSession(marks link.SessionMarks) {
+	l.marks |= marks
+}
+func (l *testLink) UsesSessionMarks() bool { return l.usesMarks }
 
 func (l *testLink) DiscardUntilSync() {
 	l.calls.discardUntilSync++

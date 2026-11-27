@@ -10,7 +10,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -143,4 +145,28 @@ func TestMirroringLink_MirrorParseEnqueuesWithParseReply(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, query.ParseReply, it.expectation)
 	assert.IsType(t, &pgproto3.Parse{}, it.msg)
+}
+
+// TestMirroringLink_ReleaseCarriesSessionMarks: marks reach the source link and ride
+// the release sentinel, so the worker can mark the shadow link that replayed them.
+func TestMirroringLink_ReleaseCarriesSessionMarks(t *testing.T) {
+	q := newMirrorQueue(queueCapRoomy, nil)
+	source := &fakeShadowLink{}
+	l := newMirroringLink(source, q, nil)
+
+	l.MarkSession(link.MarkClientSQL)
+	l.Send(&pgproto3.Query{String: "SET search_path = app"}, query.QueryReply)
+	assert.NoError(t, l.Flush())
+	assert.NoError(t, l.Release())
+
+	assert.Equal(t, link.MarkClientSQL, source.marks, "the source link must see the marks too")
+	require.Equal(t, []mirrorItemType{mirrorMsg, mirrorFlush, mirrorRelease}, queuedTypes(q))
+	assert.Equal(t, link.MarkClientSQL, q.items[2].marks)
+}
+
+// TestMirroringLink_UsesMarksForTheShadow: the shadow's release reads the batch's
+// marks, so the mirroring link asks for them even when its source does not.
+func TestMirroringLink_UsesMarksForTheShadow(t *testing.T) {
+	l := newMirroringLink(&fakeShadowLink{ignoreMarks: true}, newMirrorQueue(queueCapRoomy, nil), nil)
+	assert.True(t, l.UsesSessionMarks())
 }

@@ -26,6 +26,7 @@ import (
 	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 	proxydatadog "github.com/DataDog/pg-proxy/pkg/datadog"
 	"github.com/DataDog/pg-proxy/pkg/limiter"
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/topology"
 )
@@ -300,6 +301,7 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		}
 	}
 	cfg.databases = make(map[string]*pgxpool.Config, len(shared.Databases))
+	cfg.resets = make(map[string]link.ResetPolicy, len(shared.Databases))
 	for i, database := range shared.Databases {
 		if database.Name == "" {
 			issues = append(issues, fmt.Errorf("databases[%d].name: database name is required", i))
@@ -320,10 +322,15 @@ func (cfg config) withSharedConfig(shared pgconfig.Config) (config, error) {
 		if err != nil {
 			issues = append(issues, configurationContext(fmt.Sprintf("databases[%d]", i), err))
 		}
+		reset, err := link.NewResetPolicy(database.DatabaseSettings)
+		if err != nil {
+			issues = append(issues, configurationContext(fmt.Sprintf("databases[%d]", i), err))
+		}
 		// Keep declared names even when their settings are invalid. Routing checks
 		// must not misreport an invalid pool as an unknown database.
 		if !duplicate {
 			cfg.databases[database.Name] = settings
+			cfg.resets[database.Name] = reset
 		}
 	}
 	cfg.clusters = maps.Clone(shared.Clusters)
