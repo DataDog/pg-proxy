@@ -48,7 +48,7 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 | `server.RuntimeConfig` field | Purpose |
 | --- | --- |
 | `Inventory` | Required lookup of logical databases and backend state. |
-| `Settings` | `topology.RuntimeConfig`, including `PostgresMessageBufferSize`. |
+| `Settings` | `topology.RuntimeConfig`, including `PostgresMessageBufferSize` and `ClientDisconnectTimer`. |
 | `ParameterStatuses` | Optional callback to update a private copy of backend parameters. The callback must not retain the map. |
 | `SessionExtensions` | Optional hooks and link decoration for each authenticated session. |
 | `RandomInt` | Random-number function used by routing. |
@@ -59,6 +59,8 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 `topology.DefaultPostgresMessageBufferSize` is `10_240`. The library does not apply it for you: with `PostgresMessageBufferSize` left at `0`, the session flushes to the client after every reply message. Set it to `topology.DefaultPostgresMessageBufferSize` unless you have a reason not to. The `pg-proxy` binary uses the default unless `proxy.postgres_msg_buffer_size` (JSON: `postgresMsgBufferSize`) is set to a positive value. Negative values fail at startup.
 
 `PostgresMessageBufferSize` controls when buffered replies are flushed to the client. It does not cap incoming message sizes; see [Client-message size limitations](../../limitations/#client-messages-have-no-configured-size-limit).
+
+`ClientDisconnectTimer` selects how each session checks for a client that disconnects during a backend checkout: `false`, the default, starts a goroutine and a ticker for each checkout, and `true` keeps one timer for the session. It is the library form of the `client_disconnect_timer` proxy setting.
 
 `ReplyBufferPool` is the library form of the `reply_buffer_pool` proxy setting, and it is off by default. With `true`, a reply of 512 bytes or more continues in a buffer from a pool that all sessions share, and the buffer goes back to the pool after the reply's last write to the client. Thus the client connection must not keep the slice that `Write` receives, as `io.Writer` requires.
 

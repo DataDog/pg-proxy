@@ -96,6 +96,34 @@ func TestReadJSONPreservesUnsetAndZero(t *testing.T) {
 	}
 }
 
+func TestClientDisconnectTimerSetting(t *testing.T) {
+	fromYAML, err := ReadYAML(strings.NewReader("proxy:\n  client_disconnect_timer: true\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	fromJSON, err := ReadJSON(strings.NewReader(`{"proxy":{"clientDisconnectTimer":true}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !fromYAML.Proxy.ClientDisconnectTimer || fromYAML.Proxy != fromJSON.Proxy {
+		t.Fatalf("YAML and JSON must both enable the timer: %+v, %+v", fromYAML.Proxy, fromJSON.Proxy)
+	}
+	omitted, err := ReadYAML(strings.NewReader("proxy:\n  listener_address: 127.0.0.1:5432\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if omitted.Proxy.ClientDisconnectTimer {
+		t.Fatal("a file without the field must keep the goroutine monitor")
+	}
+	data, err := json.Marshal(omitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "clientDisconnectTimer") {
+		t.Fatalf("an unset field must not appear in serialized config: %s", data)
+	}
+}
+
 func TestEmptyConfigSections(t *testing.T) {
 	data, err := json.Marshal(Config{})
 	if err != nil {

@@ -10,10 +10,25 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/DataDog/pg-proxy/internal/itest"
+	pgconfig "github.com/DataDog/pg-proxy/pkg/config"
 )
+
+func TestProxyConfigClientDisconnectTimer(t *testing.T) {
+	pg := &itest.Postgres{Host: "localhost", Port: 5432}
+	require.NotContains(t, proxyConfig(pg, "127.0.0.1:0", 4, false), "client_disconnect_timer",
+		"the default config must stay readable by refs that predate the setting")
+	for _, timer := range []bool{false, true} {
+		cfg, err := pgconfig.ReadYAML(strings.NewReader(proxyConfig(pg, "127.0.0.1:0", 4, timer)))
+		require.NoError(t, err)
+		require.Equal(t, timer, cfg.Proxy.ClientDisconnectTimer)
+	}
+}
 
 const pgbenchOutput = `pgbench (17.5)
 transaction type: select1.sql

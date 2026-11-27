@@ -196,7 +196,10 @@ type Session struct {
 	paramTypes            *bindParamTypes // allocated on the first statement Describe
 
 	clientDisconnected                 *atomic.Bool    // set when a client disconnect is detected
-	acquireCtx                         context.Context // context for connection acquisition, set by client monitor
+	acquireCtx                         context.Context // context for connection acquisition, set by client monitor; in timer mode it lasts for the session, not one checkout
+	clientDisconnectTimer              bool            // check for disconnects with timerMonitor; see Config.ClientDisconnectTimer
+	timerMonitor                       *timerMonitor   // created at the first checkout when clientDisconnectTimer is set
+	livenessProbeChanged               bool            // set by SetLivenessProbe so the next checkout rebuilds timerMonitor
 	backendDestroyedOnClientDisconnect atomic.Bool     // true after recording that this session destroyed its backend because the client disconnected
 
 	mirroring Mirroring
@@ -356,6 +359,11 @@ type Config struct {
 	MetricTags            []string
 	Metrics               Metrics
 	ClientDisconnected    *atomic.Bool
+	// ClientDisconnectTimer selects how the session checks LivenessProbe during a
+	// checkout. False, the default, starts a goroutine and a ticker for each
+	// checkout. True keeps one timer and one acquire context for the session and
+	// arms the timer for each checkout.
+	ClientDisconnectTimer bool
 	Hooks                 Hooks
 	// DecorateLink requests decoration when the session checks out a routed link.
 	// The listener sets this explicitly; installing hooks does not enable it.
@@ -413,6 +421,7 @@ func New(cfg Config) *Session {
 		mirroring:                    cfg.Mirroring, mirrorBudget: cfg.MirrorBudget,
 		clientDisconnected: disconnected, hooks: cfg.Hooks, decorateLink: cfg.DecorateLink,
 		enableTraceParameters: cfg.EnableTraceParameters,
+		clientDisconnectTimer: cfg.ClientDisconnectTimer,
 	}
 	if cfg.TraceState != nil {
 		s.obsVals.traceState = cfg.TraceState
@@ -572,14 +581,19 @@ func (s *Session) CurrentLink() link.Link { return s.link }
 func (s *Session) ClientDisconnected() bool {
 	return s.clientDisconnected.Load()
 }
+func (s *Session) ClientDisconnectTimer() bool { return s.clientDisconnectTimer }
 func (s *Session) PreparedStatements() prepared.PreparedStatementState {
 	return s.pStmtState
 }
 func (s *Session) DiscardUntilSync() bool  { return s.discardUntilSync }
 func (s *Session) Backend() Backend        { return s.backend }
 func (s *Session) PendingBackend() Backend { return s.pendingRemaps().backend }
+
+// SetLivenessProbe replaces the client liveness probe. The next checkout uses
+// it. Call it from the goroutine that runs the session.
 func (s *Session) SetLivenessProbe(probe ClientLivenessProbe) {
 	s.livenessProbe = probe
+	s.livenessProbeChanged = true
 }
 func (s *Session) SetAutoPreparedStatementsEnabled(enabled bool) {
 	s.AutoPreparedStmtsEnabled = enabled
@@ -598,6 +612,9 @@ func (s *Session) FlushPostgres() (bool, error)   { return s.flushPostgres() }
 func (s *Session) HandleAction(action actions.ClientMessageAction) error {
 	return s.handleAction(action)
 }
+
+// Close tears the session down. Call it from the goroutine that runs the
+// session, not from a link or a hook that may run on another goroutine.
 func (s *Session) Close(err error)               { s.close(err) }
 func (s *Session) QueryLoadShedder() LoadShedder { return s.queryLoadShedder() }
 func (s *Session) ApplyStateRemapping() bool     { return s.handleStateRemapping() }
@@ -1712,7 +1729,7 @@ func (s *Session) close(err error) {
 
 	s.linkMu.Lock()
 	if s.link != nil {
-		// A client EOF or Terminate received between messages bypasses the per-message
+		// A client EOF or Terminate received between checkouts bypasses the client
 		// monitor. Release closes the link when that disconnect leaves it non-idle.
 		destroyedByReleaseOnClientDisconnect := clientDisconnected && !s.link.Idle()
 		releaseErr := s.link.Release()
@@ -1725,6 +1742,9 @@ func (s *Session) close(err error) {
 		s.setLink(nil)
 	}
 	s.linkMu.Unlock()
+	if s.timerMonitor != nil {
+		s.timerMonitor.close()
+	}
 	if s.mirror != nil {
 		s.mirror.Close() // wakes the worker so it drops the tail and exits
 	}

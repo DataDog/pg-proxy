@@ -43,7 +43,9 @@ type options struct {
 	GOMAXPROCS string        `json:"gomaxprocs"`
 	ProxyCPUs  string        `json:"proxy_cpus,omitempty"`
 	ClientCPUs string        `json:"client_cpus,omitempty"`
-	Out        string        `json:"-"`
+	// BClientDisconnectTimer sets proxy.client_disconnect_timer for B only.
+	BClientDisconnectTimer bool   `json:"b_client_disconnect_timer,omitempty"`
+	Out                    string `json:"-"`
 }
 
 // pgbenchThreads caps pgbench worker threads (-j).
@@ -83,6 +85,7 @@ func parseFlags(args []string) (options, error) {
 	flags.StringVar(&opts.GOMAXPROCS, "gomaxprocs", "1", "GOMAXPROCS for the proxy; empty uses the Go default")
 	flags.StringVar(&opts.ProxyCPUs, "proxy-cpus", "", "Linux only: pin the proxy with taskset -c to this CPU list")
 	flags.StringVar(&opts.ClientCPUs, "client-cpus", "", "Linux only: pin pgbench with taskset -c to this CPU list")
+	flags.BoolVar(&opts.BClientDisconnectTimer, "b-client-disconnect-timer", false, "set proxy.client_disconnect_timer for B only; B must accept the setting")
 	flags.StringVar(&opts.Out, "out", "", "results directory (default: ./pgbench-results/<UTC timestamp>)")
 	if err := flags.Parse(args); err != nil {
 		return opts, err

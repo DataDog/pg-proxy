@@ -107,6 +107,7 @@ A map from the name clients connect to, to its routing.
 | `default_max_user_sessions` | `defaultMaxUserSessions` | `10000` | Maximum client sessions for each client user. Zero uses the default. |
 | `shutdown_grace_period` | `shutdownGracePeriod` | `30s` | Time allowed for sessions and pools to close after `SIGINT` or `SIGTERM`. A positive Go duration string in both YAML and JSON. See [Graceful shutdown](../../../explanation/graceful-shutdown/). |
 | `postgres_msg_buffer_size` | `postgresMsgBufferSize` | `10240` | Bytes of PostgreSQL replies the proxy buffers before it flushes them to the client. |
+| `client_disconnect_timer` | `clientDisconnectTimer` | `false` | How each session checks for a client that disconnects during a backend checkout. `false` starts a goroutine and a ticker for each checkout. `true` keeps one timer for the session and arms it for each checkout. Both check every 100 ms and act the same way on a disconnect. |
 | `reply_buffer_pool` | `replyBufferPool` | `false` | `true` lets a reply of 512 bytes or more continue in a buffer from a pool that all sessions share, so that replies of many rows do not allocate a new buffer each time. `false` keeps one buffer of at most 1 KiB for each session, and a larger reply grows its own buffer. |
 | `jwt_auth_enabled` | `jwtAuthEnabled` | `false` | Not supported by the binary; `true` fails startup. |
 

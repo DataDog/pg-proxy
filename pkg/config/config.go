@@ -93,6 +93,10 @@ type ProxySettings struct {
 	JWTAuthEnabled        bool   `mapstructure:"jwt_auth_enabled" json:"jwtAuthEnabled" yaml:"jwt_auth_enabled"`
 	TLSRequired           bool   `mapstructure:"tls_required" json:"tlsRequired" yaml:"tls_required"`
 	PostgresMsgBufferSize int32  `mapstructure:"postgres_msg_pg_size" json:"postgresMsgBufferSize" yaml:"postgres_msg_buffer_size"`
+	// ClientDisconnectTimer makes each session check for a client disconnect
+	// during a backend checkout with one reusable timer, instead of a goroutine
+	// and a ticker for each checkout. False keeps the goroutine.
+	ClientDisconnectTimer bool `mapstructure:"client_disconnect_timer" json:"clientDisconnectTimer,omitempty" yaml:"client_disconnect_timer,omitempty"`
 	// ReplyBufferPool lets a reply of 512 bytes or more continue in a buffer from
 	// a pool that all sessions share, so that replies of many rows do not grow a
 	// new buffer each time. Off by default.

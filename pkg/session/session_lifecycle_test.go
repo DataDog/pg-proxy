@@ -277,9 +277,9 @@ type fakeLivenessProbe struct {
 func (p *fakeLivenessProbe) IsDisconnected() bool { return p.disconnected.Load() }
 func (p *fakeLivenessProbe) triggerDisconnect()   { p.disconnected.Store(true) }
 
-func newRunningTestSession(t *testing.T) (*Session, *pgproto3.Frontend, *pgproto3.Backend, func()) {
+func newRunningTestSession(t *testing.T, configure ...func(*Config)) (*Session, *pgproto3.Frontend, *pgproto3.Backend, func()) {
 	t.Helper()
-	s, fakeClient, fakePG, _, closer := newRunningTestSessionWithBackend(t)
+	s, fakeClient, fakePG, _, closer := newRunningTestSessionWithBackend(t, configure...)
 	return s, fakeClient, fakePG, closer
 }
 
@@ -649,9 +649,13 @@ func TestFatal57P03_SessionReceivesSwitchoverHint(t *testing.T) {
 // session goroutine writes s.link = nil (under linkMu) when releasing an
 // idle link. With race = "on" this test would fail if the mutex were missing.
 func TestClientMonitorConcurrentLinkAccess(t *testing.T) {
+	forEachDisconnectMonitor(t, testClientMonitorConcurrentLinkAccess)
+}
+
+func testClientMonitorConcurrentLinkAccess(t *testing.T, timer bool) {
 	t.Run("reused_buffer", func(t *testing.T) {
 		probe := &fakeLivenessProbe{}
-		s, fakeClient, fakePG, closer := newRunningTestSession(t)
+		s, fakeClient, fakePG, closer := newRunningTestSession(t, withDisconnectTimer(timer))
 		s.SetLivenessProbe(probe)
 		defer closer()
 

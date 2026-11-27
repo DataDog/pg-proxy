@@ -57,6 +57,8 @@ type config struct {
 	databases           map[string]*pgxpool.Config
 	clusters            map[string]pgconfig.Cluster // Primary and replica database names.
 	logicalDatabases    map[string]topology.LogicalDatabase
+
+	clientDisconnectTimer bool // see pgconfig.ProxySettings.ClientDisconnectTimer
 }
 
 func main() {
@@ -305,6 +307,7 @@ func newProxy(ctx context.Context, cfg config) (*localProxy, error) {
 			EnableTraceParameters: cfg.telemetry.CaptureBindParameters,
 			Settings: topology.RuntimeConfig{
 				PostgresMessageBufferSize: cfg.messageBufferSize,
+				ClientDisconnectTimer:     cfg.clientDisconnectTimer,
 				ReplyBufferPool:           cfg.replyBufferPool,
 			},
 		},

@@ -37,6 +37,9 @@ type LogicalDatabase struct {
 // runtime.
 type RuntimeConfig struct {
 	PostgresMessageBufferSize int
+	// ClientDisconnectTimer selects session.Config.ClientDisconnectTimer for
+	// every session.
+	ClientDisconnectTimer bool
 	// ReplyBufferPool lends pooled buffers to replies that outgrow a session's
 	// reply buffer. See session.Config.ReplyBufferPool.
 	ReplyBufferPool bool
