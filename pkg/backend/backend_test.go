@@ -22,6 +22,7 @@ import (
 	"golang.org/x/time/rate"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/internal/fakepg"
 	"github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/pool"
@@ -279,6 +280,56 @@ type fakeRole struct{}
 
 func (fakeRole) Set(context.Context, *pgxpool.Conn, []string) (string, error) { return "", nil }
 func (fakeRole) Reset(context.Context, *pgxpool.Conn, string, []string) error { return nil }
+
+type failingRole struct{ fakeRole }
+
+func (failingRole) Set(context.Context, *pgxpool.Conn, []string) (string, error) {
+	return "", errors.New("permission denied to set role")
+}
+
+// When link.New fails, no link holds the conn, so the default factory must destroy
+// it: released alone it would return to the pool in an unknown state, and kept it
+// would hold a pool slot forever. A custom factory owns its conn on error, so
+// Checkout must leave it alone, including one the factory has already released.
+func TestLinkFactoryOwnsConnOnError(t *testing.T) {
+	// checkout runs one Checkout against a single-conn fake Postgres and returns its
+	// pool and Checkout's error.
+	checkout := func(t *testing.T, cfg Config) (*pgxpool.Pool, error) {
+		pgPool := fakepg.NewPool(t, fakepg.NewServer(fakepg.Answer))
+		var acquired *pgxpool.Conn
+		t.Cleanup(func() {
+			if acquired != nil {
+				acquired.Release() // a no-op once released; keeps a leak from hanging the pool's cleanup
+			}
+		})
+		cfg.ClusterName, cfg.PrimaryDatabaseName = "cluster-a", "primary-a"
+		cfg.Primary = &fakePool{acquire: func(ctx context.Context) (*pgxpool.Conn, error) {
+			conn, err := pgPool.Acquire(ctx)
+			acquired = conn
+			return conn, err
+		}}
+		acquiredLink, err := New(cfg).Checkout(context.Background(), session.LinkRequest{PassthroughRoleName: "app_user"})
+		require.Error(t, err)
+		require.Nil(t, acquiredLink.Link)
+		return pgPool, err
+	}
+
+	t.Run("default factory destroys the conn", func(t *testing.T) {
+		pgPool, _ := checkout(t, Config{RoleSessionFactory: func(string) link.RoleSession { return failingRole{} }})
+		// pgxpool destroys a closed conn in the background, so wait for it to go.
+		require.Eventually(t, func() bool { return pgPool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond,
+			"the conn must be destroyed: not left checked out, and not pooled in an unknown state")
+	})
+	t.Run("custom factory releases its conn", func(t *testing.T) {
+		sentinel := errors.New("link factory sentinel")
+		pgPool, err := checkout(t, Config{LinkFactory: func(conn *pgxpool.Conn, _ link.Options) (link.Link, error) {
+			conn.Release()
+			return nil, sentinel
+		}})
+		require.ErrorIs(t, err, sentinel)
+		require.Equal(t, int32(1), pgPool.Stat().IdleConns(), "a custom factory's released conn stays pooled")
+	})
+}
 
 func TestAcquireBuildsLinkWithInjectedDependencies(t *testing.T) {
 	metrics := &recordingMetrics{}

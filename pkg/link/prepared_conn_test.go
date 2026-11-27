@@ -195,6 +195,13 @@ func TestStmtsToDeallocate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			stmtNames := StmtsToDeallocate(tt.connPreparedStmts, tt.stmtsToDeallocateN, tt.sessionCreatedTime)
 			assert.ElementsMatch(t, tt.expectedStmtNames, stmtNames, "Statements selected for deallocation should match expected")
+
+			// Release selects through the connection's own state; it must agree.
+			state := &connState{stmts: make(map[string]*stmtUsage, len(tt.connPreparedStmts))}
+			for name, stmt := range tt.connPreparedStmts {
+				state.stmts[name] = &stmtUsage{usageCount: stmt.UsageCount, timeLastUsed: stmt.TimeLastUsed}
+			}
+			assert.ElementsMatch(t, tt.expectedStmtNames, state.stmtsToDeallocate(tt.stmtsToDeallocateN, tt.sessionCreatedTime))
 		})
 	}
 }

@@ -46,7 +46,9 @@ var parameterStatusKeys = []string{
 // Returning nil disables role management for that checkout.
 type RoleSessionFactory func(roleName string) link.RoleSession
 
-// LinkFactory wraps an acquired connection as a session link.
+// LinkFactory wraps an acquired connection as a session link. On error the factory
+// still owns the connection and must close or release it, as link.NewOrDiscard,
+// the default, does.
 type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
 
 // CheckoutAnnotator attaches an optional embedder-defined value to each
@@ -111,7 +113,7 @@ func New(cfg Config) *Runtime {
 	}
 	linkFactory := cfg.LinkFactory
 	if linkFactory == nil {
-		linkFactory = link.New
+		linkFactory = link.NewOrDiscard
 	}
 	return &Runtime{
 		selector: &PoolSelector{
@@ -233,8 +235,6 @@ func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (se
 	return session.AcquiredLink{Link: backendLink, Meta: meta}, nil
 }
 
-const customDataConnUserKey = "pgProxyConnUser"
-
 func effectiveRoleForCheckout(passthroughRole string, conn *pgxpool.Conn) string {
 	if passthroughRole != "" {
 		return passthroughRole
@@ -242,19 +242,7 @@ func effectiveRoleForCheckout(passthroughRole string, conn *pgxpool.Conn) string
 	if conn == nil {
 		return ""
 	}
-	// Cache the connection's configured user in pgconn.CustomData once per
-	// physical connection: pgx's Conn.Config() deep-copies ConnConfig,
-	// RuntimeParams, TLS config, and Fallbacks on every call.
-	pgxConn := conn.Conn()
-	customData := pgxConn.PgConn().CustomData()
-	if user, ok := customData[customDataConnUserKey].(string); ok {
-		return user
-	}
-	user := pgxConn.Config().User
-	if customData != nil { // nil for a PgConn rebuilt from a hijacked one without CustomData
-		customData[customDataConnUserKey] = user
-	}
-	return user
+	return link.LoginUser(conn)
 }
 
 func (r *Runtime) runCheckoutAnnotator(meta session.CheckoutMeta, tags []string) (annotation any) {

@@ -234,6 +234,8 @@ type LoadShedder interface {
 
 // Backend checks out links (with checkout metadata) and supplies checkout-scoped load shedding.
 type Backend interface {
+	// Checkout returns a link that the session releases when done with it. On error
+	// it returns no link and leaves no connection checked out.
 	Checkout(context.Context, LinkRequest) (AcquiredLink, error)
 	LoadShedder() LoadShedder
 }
