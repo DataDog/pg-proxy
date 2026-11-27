@@ -67,6 +67,7 @@ type Link interface {
 // conn returns to the pool. Nil Options.Role means no role management.
 type RoleSession interface {
 	// Set changes the Postgres role after acquire; returns opaque token for Reset.
+	// It must not release or close conn, which stays New's caller's on error.
 	Set(ctx context.Context, conn *pgxpool.Conn, tags []string) (token string, err error)
 	// Reset restores the role before the conn returns to the pool. It must undo
 	// everything Set changed, and a client's SET ROLE or SET SESSION AUTHORIZATION:
@@ -89,6 +90,8 @@ type Options struct {
 }
 
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
+// On success the link owns conn until Release. On error the caller still owns conn,
+// whose session state is then unknown; NewOrDiscard discards it.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	setUpConnMetaData(conn)
 	// The link takes over the mark: its release sets it again if it skips too.
@@ -124,6 +127,21 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	}
 
 	return sl, nil
+}
+
+// NewOrDiscard is New for a caller that gives up conn either way. If New fails, it
+// closes conn and releases it, so the pool destroys it rather than reusing a conn in
+// an unknown session state. The Terminate that the close sends is bounded, so a
+// backend that stopped reading cannot stall the caller.
+func NewOrDiscard(conn *pgxpool.Conn, opts Options) (Link, error) {
+	l, err := New(conn, opts)
+	if err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = conn.Conn().Close(ctx)
+		conn.Release()
+	}
+	return l, err
 }
 
 // NewFrontendLink builds a link with only a Frontend (conn nil) for unit tests.

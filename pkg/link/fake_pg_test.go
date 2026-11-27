@@ -53,12 +53,7 @@ func checkOut(pool *pgxpool.Pool, maxPreparedStmts int) (Link, error) {
 	if err != nil {
 		return nil, err
 	}
-	l, err := New(conn, Options{MaxPreparedStmts: maxPreparedStmts, MetricTags: []string{"database:app_db"}})
-	if err != nil {
-		conn.Release()
-		return nil, err
-	}
-	return l, nil
+	return NewOrDiscard(conn, Options{MaxPreparedStmts: maxPreparedStmts, MetricTags: []string{"database:app_db"}})
 }
 
 // recordAll records stmts as created on the link's connection.

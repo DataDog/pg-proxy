@@ -200,14 +200,9 @@ func newCycleHarness(tb testing.TB, withRole bool) *cycleHarness {
 		if err != nil {
 			return nil, err
 		}
-		backendLink, err := link.New(conn, link.Options{
+		return link.NewOrDiscard(conn, link.Options{
 			MaxPreparedStmts: request.MaxPreparedStmts, MetricTags: request.MetricTags, Role: role,
 		})
-		if err != nil {
-			conn.Release()
-			return nil, err
-		}
-		return backendLink, nil
 	}}
 
 	config, err := pgxpool.ParseConfig("postgres://app_user@127.0.0.1/app_db?sslmode=disable")

@@ -46,7 +46,9 @@ var parameterStatusKeys = []string{
 // Returning nil disables role management for that checkout.
 type RoleSessionFactory func(roleName string) link.RoleSession
 
-// LinkFactory wraps an acquired connection as a session link.
+// LinkFactory wraps an acquired connection as a session link. On error the factory
+// still owns the connection and must close or release it, as link.NewOrDiscard,
+// the default, does.
 type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
 
 // CheckoutAnnotator attaches an optional embedder-defined value to each
@@ -111,7 +113,7 @@ func New(cfg Config) *Runtime {
 	}
 	linkFactory := cfg.LinkFactory
 	if linkFactory == nil {
-		linkFactory = link.New
+		linkFactory = link.NewOrDiscard
 	}
 	return &Runtime{
 		selector: &PoolSelector{

@@ -7,6 +7,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -677,4 +678,43 @@ func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
 	assert.False(t, link.ForceClose())
 	assert.NoError(t, link.Cancel())
 	assert.False(t, pooled.IsClosed(), "the pooled connection must stay open")
+}
+
+// failingRoleSession fails to set the role.
+type failingRoleSession struct{ noopRoleSession }
+
+func (failingRoleSession) Set(context.Context, *pgxpool.Conn, []string) (string, error) {
+	return "", errors.New("permission denied to set role")
+}
+
+// A link that fails to set the role is never built. New leaves the conn to its
+// caller: it neither closes it nor hands it back to the pool, since the caller may
+// still do either.
+func TestNewLeavesConnToCallerWhenRoleSetFails(t *testing.T) {
+	pool := newFakePgPool(t).pool
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(conn.Release)
+
+	l, err := New(conn, Options{Role: failingRoleSession{}})
+	require.Error(t, err)
+	require.Nil(t, l)
+	require.Equal(t, int32(1), pool.Stat().AcquiredConns(), "the caller still holds the conn")
+	require.False(t, conn.Conn().IsClosed(), "the caller decides what to do with the conn")
+}
+
+// NewOrDiscard destroys a conn New failed on, rather than leak it or pool it in an
+// unknown session state.
+func TestNewOrDiscardDestroysConnWhenRoleSetFails(t *testing.T) {
+	pool := newFakePgPool(t).pool
+	conn, err := pool.Acquire(context.Background())
+	require.NoError(t, err)
+	pgxConn := conn.Conn()
+
+	l, err := NewOrDiscard(conn, Options{Role: failingRoleSession{}})
+	require.Error(t, err)
+	require.Nil(t, l)
+	require.True(t, pgxConn.IsClosed())
+	// pgxpool destroys a closed conn in the background, so wait for it to go.
+	require.Eventually(t, func() bool { return pool.Stat().TotalConns() == 0 }, 5*time.Second, time.Millisecond)
 }
