@@ -14,6 +14,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/DataDog/datadog-go/v5/statsd"
 	"github.com/DataDog/dd-trace-go/v2/ddtrace/tracer"
@@ -28,6 +29,7 @@ type Options struct {
 	Dependencies  pgproxy.Dependencies
 	TracerOptions []tracer.StartOption
 	StatsdOptions []statsd.Option
+	ChildSpanMode ChildSpanMode
 	// LogWriter defaults to stderr. Ignored when Dependencies.LogHandler is set.
 	LogWriter io.Writer
 	// LogLevel defaults to INFO. Ignored when Dependencies.LogHandler is set.
@@ -42,6 +44,15 @@ type Options struct {
 // require Agent log collection; this helper does not send logs over the network.
 func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 	deps := opts.Dependencies
+	if err := opts.ChildSpanMode.Validate(); err != nil {
+		return deps, nil, err
+	}
+	if opts.ChildSpanMode.enabled() && deps.Tracer != nil {
+		return deps, nil, errors.New("child span mode requires this helper to own the native tracer")
+	}
+	if _, noMetrics := deps.Metrics.(pgproxy.NoopMetrics); opts.ChildSpanMode.enabled() && noMetrics {
+		return deps, nil, errors.New("child span mode requires a metrics client")
+	}
 	if deps.Tracer == nil {
 		if err := ValidateTracingEnvironment(); err != nil {
 			return deps, nil, err
@@ -94,6 +105,10 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 		}
 		// Needs Datadog Agent 7.25.0 or later. StatsdOptions can override it.
 		options := []statsd.Option{statsd.WithExtendedClientSideAggregation()}
+		if opts.ChildSpanMode.enabled() {
+			// Frequent flushes limit bursts of work from phase distributions.
+			options = append(options, statsd.WithAggregationInterval(250*time.Millisecond))
+		}
 		if os.Getenv("DD_SERVICE") == "" {
 			options = append(options, statsd.WithTags([]string{"service:" + service}))
 		}
@@ -128,6 +143,9 @@ func Start(opts Options) (pgproxy.Dependencies, func() error, error) {
 			return deps, nil, errors.New("could not initialize Datadog tracer")
 		}
 		deps.Tracer = Tracer{}
+		if opts.ChildSpanMode.enabled() {
+			deps.Tracer = operationTracer{mode: opts.ChildSpanMode}
+		}
 	}
 	shutdown := sync.OnceValue(func() error {
 		if ownsTracer {

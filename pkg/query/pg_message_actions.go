@@ -12,6 +12,8 @@ import (
 	"github.com/jackc/pgerrcode"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgproto3"
+
+	pgproxy "github.com/DataDog/pg-proxy"
 )
 
 // LeaderSwitchoverHint is appended to error messages that match IsSwitchoverSignature,
@@ -180,7 +182,7 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 		// It is not part of any expectation. Proxy it on.
 
 	case *pgproto3.ErrorResponse:
-		traceState.FinishTrace(fmt.Errorf("code %s: %s", m.Code, m.Message))
+		traceState.finishTrace(pgproxy.OperationBackendError, fmt.Errorf("code %s: %s", m.Code, m.Message))
 		if m.Severity == "FATAL" {
 			// FATAL always closes the session; annotation happens in closeErrorResponse()
 			// to avoid double-appending the hint when the error is forwarded to the client.

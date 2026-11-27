@@ -22,10 +22,41 @@ PG Proxy records query and protocol spans with either Datadog or OpenTelemetry. 
 
 The OpenTelemetry adapter marks the incoming request span as `SERVER` and its processing child spans as `INTERNAL`. The native Datadog adapter marks both root and child spans as `server`. Both adapters set the database system to `postgres`. The exact query `-- ping` does not start a root trace.
 
+## Child spans and operation metrics
+
+With `-telemetry datadog`, the pg-proxy binary defaults to `-child-span-mode full`.
+In this mode Datadog APM can compute statistics from children of traces rejected
+by the sampler. The following experimental modes require `-telemetry datadog`.
+
+| Mode | Behavior |
+| --- | --- |
+| `shadow` | Creates the existing spans and also sends direct DogStatsD operation metrics. Use this mode to compare the two metric sources. |
+| `sampled` | Sends the same DogStatsD metrics and skips children on proxy-local roots with a rejected sampling decision. Roots with propagated context, kept roots and undecided roots retain their children. |
+
+The direct metrics are `datadog.pg_proxy.trace_operations.hits`,
+`datadog.pg_proxy.trace_operations.errors`, and
+`datadog.pg_proxy.trace_operations.latency_us` (a distribution). They follow
+the child operation boundaries and use a bounded `operation` tag. Errors add
+`source:postgres` for PostgreSQL error responses or `source:proxy` for
+proxy-observed failures. The root span keeps its own errors and timing behavior.
+
+In `shadow` and `sampled` modes, the DogStatsD client created by PG Proxy
+flushes aggregated metrics every 250 ms to reduce the work per flush.
+Embedders can set a different interval through `StatsdOptions` or supply their
+own metrics client.
+
+Existing child-derived `trace.*` metrics lose coverage in `sampled` mode. The
+DogStatsD metrics use a separate namespace and bounded dimensions and may differ
+in timing and aggregation. Compare counts, error rates and latency distributions
+in `shadow` mode before migrating any monitoring. Sampling individual spans with
+`DD_SPAN_SAMPLING_RULES` or `DD_SPAN_SAMPLING_RULES_FILE` requires `full` or
+`shadow`. Use either mode when the trace may be promoted after phase recording
+begins. Throughput gains depend on the fraction of rejected local roots.
+
 ## Propagation
 
-Without incoming context, each query or protocol batch gets a proxy-local root
-span and child spans. For OpenTelemetry, leading or trailing sqlcommenter blocks
+Without incoming context, each traced query or protocol batch gets a
+proxy-local root span. For OpenTelemetry, leading or trailing sqlcommenter blocks
 can supply W3C `traceparent` and URL-encoded `tracestate`:
 
 ```sql
