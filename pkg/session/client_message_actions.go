@@ -73,8 +73,8 @@ func (s *Session) actionState() actions.State {
 	}
 }
 
-// NewFlushErrorAction returns a ClientMessageAction that ensures PostgreSQL flushes pending messages
-// before sending an error response to the client.
+// NewFlushErrorAction drains pending replies before failing the backend
+// transaction and returning a locally detected statement error to the client.
 func NewFlushErrorAction(response *pgproto3.ErrorResponse, err error) ClientMessageAction {
 	logFlushError(response, err)
 	return actions.NewFlushErrorAction(response)

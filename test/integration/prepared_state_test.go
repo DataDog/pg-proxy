@@ -25,8 +25,6 @@ const (
 		"so it answers a later client's Parse of the same SQL locally and Bind gets 26000"
 	sameSQLInPipeline = "TODO: when two statement names in one pipeline have the same SQL, " +
 		"proxy does not record the second name, so Bind of it gets 26000"
-	localErrorInTransaction = "TODO: proxy answers a duplicate Parse inside BEGIN with a local 42P05 " +
-		"that PostgreSQL never sees, so ReadyForQuery stays T and a later COMMIT commits"
 	sqlDeallocate = "TODO: proxy passes SQL DEALLOCATE of a client statement name to PostgreSQL, " +
 		"which returns 26000, and keeps the name: a re-Parse gets 42P05 and a later Bind runs the old SQL"
 )
@@ -134,9 +132,8 @@ func TestPreparedStatementLifecycle(t *testing.T) {
 			},
 		}, {
 			// PostgreSQL aborts the transaction, so COMMIT rolls back both inserts.
-			name:      "duplicate Parse in a transaction",
-			setup:     []string{"DROP TABLE IF EXISTS lifecycle_events", "CREATE TABLE lifecycle_events (label text)"},
-			proxySkip: localErrorInTransaction,
+			name:  "duplicate Parse in a transaction",
+			setup: []string{"DROP TABLE IF EXISTS lifecycle_events", "CREATE TABLE lifecycle_events (label text)"},
 			steps: []step{
 				simpleQuery("BEGIN"),
 				ready(&pgproto3.Parse{Name: "duplicate", Query: "SELECT 'first' AS label"}, &pgproto3.Sync{}),
