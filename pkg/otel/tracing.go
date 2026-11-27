@@ -93,6 +93,8 @@ func (s otelSpan) Sampled() bool {
 	return s.span.IsRecording() && s.span.SpanContext().IsSampled()
 }
 
+func (s otelSpan) IsRecording() bool { return s.span.IsRecording() }
+
 // SQL text, error messages and tag values may contain invalid UTF-8. Escape
 // only telemetry copies so protobuf encoding cannot drop the entire export batch.
 func escapeInvalidUTF8(value string) string {

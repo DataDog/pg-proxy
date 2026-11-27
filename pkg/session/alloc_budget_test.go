@@ -27,10 +27,10 @@ import (
 //
 // BenchmarkProtocolCycle runs the same cycles for benchstat comparisons.
 var protocolCycleAllocBudgets = map[string]float64{
-	"one_shot_extended":     51,
-	"simple_query":          27,
-	"named_statement_reuse": 34,
-	"pipeline_30":           493,
+	"one_shot_extended":     41,
+	"simple_query":          19,
+	"named_statement_reuse": 24,
+	"pipeline_30":           485,
 }
 
 func TestProtocolCycleAllocationBudgets(t *testing.T) {

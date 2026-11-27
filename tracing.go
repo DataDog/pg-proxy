@@ -25,6 +25,12 @@ type Span interface {
 	Finish(err error)
 }
 
+// RecordingReporter optionally identifies spans that discard all tags. A span
+// can record tags even when its trace is unsampled.
+type RecordingReporter interface {
+	IsRecording() bool
+}
+
 // SamplingReporter is optionally implemented by spans that know whether their
 // trace will be kept. The proxy skips building costly tag values, such as Bind
 // parameters, for traces that report false. Spans that do not implement it are
@@ -46,3 +52,4 @@ func (noopSpan) StartChild(string) Span { return noopSpan{} }
 func (noopSpan) SetTag(string, any)     {}
 func (noopSpan) Finish(error)           {}
 func (noopSpan) Sampled() bool          { return false }
+func (noopSpan) IsRecording() bool      { return false }
