@@ -42,30 +42,46 @@ func (c *testClient) Flush() error {
 	return c.flushErr
 }
 
-type flushRecordingHooks struct {
+type flushRecordingObserver struct {
+	NoopObserver
 	events  *[]string
 	flushed chan struct{}
+	count   *int
 }
 
-func (h flushRecordingHooks) hooks() Hooks {
-	return Hooks{
-		BackendMessage:       h.observeBackend,
-		ClientFlushSucceeded: h.clientFlushSucceeded,
+func (o flushRecordingObserver) OnBackendMessage(pgproto3.BackendMessage) {
+	if o.events != nil {
+		*o.events = append(*o.events, "observe")
 	}
 }
 
-func (h flushRecordingHooks) observeBackend(pgproto3.BackendMessage) {
-	if h.events != nil {
-		*h.events = append(*h.events, "observe")
+func (o flushRecordingObserver) OnClientFlushSucceeded() {
+	if o.events != nil {
+		*o.events = append(*o.events, "flush_succeeded")
+	}
+	if o.count != nil {
+		*o.count++
+	}
+	if o.flushed != nil {
+		close(o.flushed)
 	}
 }
 
-func (h flushRecordingHooks) clientFlushSucceeded() {
-	if h.events != nil {
-		*h.events = append(*h.events, "flush_succeeded")
+type funcObserver struct {
+	NoopObserver
+	onFrontend func(pgproto3.FrontendMessage)
+	onClosed   func()
+}
+
+func (o funcObserver) OnFrontendMessage(msg pgproto3.FrontendMessage) {
+	if o.onFrontend != nil {
+		o.onFrontend(msg)
 	}
-	if h.flushed != nil {
-		close(h.flushed)
+}
+
+func (o funcObserver) OnClosed() {
+	if o.onClosed != nil {
+		o.onClosed()
 	}
 }
 
@@ -192,8 +208,7 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 			t.Run(test.name, func(t *testing.T) {
 				var events []string
 				client := &testClient{events: &events, flushErr: test.flushErr}
-				hooks := flushRecordingHooks{events: &events}.hooks()
-				session := New(Config{Client: client, Hooks: hooks})
+				session := New(Config{Client: client, Observers: []Observer{flushRecordingObserver{events: &events}}})
 				err := session.handleAction(ClientMessageAction{ReplyMsgsToClient: []pgproto3.BackendMessage{&pgproto3.EmptyQueryResponse{}, &pgproto3.ReadyForQuery{TxStatus: 'I'}}})
 				require.Equal(t, test.wantError, err != nil)
 				require.Equal(t, test.want, events)
@@ -218,7 +233,7 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 					release: writeRelease,
 					err:     test.writeErr,
 				}
-				recorder := flushRecordingHooks{flushed: make(chan struct{})}
+				recorder := flushRecordingObserver{flushed: make(chan struct{})}
 				session := New(Config{
 					Client:     &testClient{},
 					ClientConn: clientConn,
@@ -226,7 +241,7 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 						expectation: query.BindReply,
 						reply:       &pgproto3.BindComplete{},
 					},
-					Hooks: recorder.hooks(),
+					Observers: []Observer{recorder},
 				})
 
 				flushDone := make(chan error, 1)
@@ -278,7 +293,7 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 		flushSucceeded := 0
 		session := New(Config{
 			Client: &testClient{}, ClientConn: clientConn, InitialLink: backendLink,
-			Hooks: Hooks{ClientFlushSucceeded: func() { flushSucceeded++ }},
+			Observers: []Observer{flushRecordingObserver{count: &flushSucceeded}},
 		})
 
 		_, err := session.flushPostgres()
@@ -308,7 +323,7 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 				}
 				session := New(Config{
 					Client: pgproto3.NewBackend(clientConn, clientConn), ClientConn: clientConn,
-					InitialLink: backendLink, Hooks: flushRecordingHooks{events: &events}.hooks(),
+					InitialLink: backendLink, Observers: []Observer{flushRecordingObserver{events: &events}},
 				})
 
 				proxyToPostgres, err := session.handleRecordNewPreparedStmt(ClientMessageAction{RecordNewPreparedStmt: statement})
@@ -338,7 +353,7 @@ func TestSessionHooksObserveSuccessfulClientDelivery(t *testing.T) {
 				expectation: query.ParseReply,
 				reply:       &pgproto3.ParseComplete{},
 			},
-			Hooks: Hooks{ClientFlushSucceeded: func() { flushSucceeded++ }},
+			Observers: []Observer{flushRecordingObserver{count: &flushSucceeded}},
 		})
 		session.pStmtState.EnqueuePendingStmt(
 			prepared.CreatePreparedStatement("client-name", "proxy-name", "select 1", nil),
@@ -405,47 +420,15 @@ func TestFlushPostgresWritesAtBufferSize(t *testing.T) {
 	}
 }
 
-func TestSessionDecorationIsIndependentOfRouteNotification(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		decorate bool
-		notify   bool
-	}{
-		{name: "neither"},
-		{name: "notification only", notify: true},
-		{name: "decoration only", decorate: true},
-		{name: "both", decorate: true, notify: true},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			backendLink := &testLink{}
-			backend := &namedBackend{acquire: func(_ context.Context, request LinkRequest) (link.Link, error) {
-				require.Equal(t, test.decorate, request.DecorateLink)
-				return backendLink, nil
-			}}
-			notifications := 0
-			var hooks Hooks
-			if test.notify {
-				hooks.RoutedLinkChanged = func(routedLink link.Link) {
-					require.Same(t, backendLink, routedLink)
-					notifications++
-				}
-			}
-			session := New(Config{Backend: backend, Hooks: hooks, DecorateLink: test.decorate})
-			require.NoError(t, session.handleProxyMsgToPg(ClientMessageAction{ProxyMsgToPg: &pgproto3.Query{String: "select 1"}}))
-			require.EqualValues(t, 1, backend.acquisitions.Load())
-			require.Equal(t, test.notify, notifications == 1)
-			backendLink.assertCalls(t, testLinkCalls{send: 1})
-		})
-	}
-}
-
-func TestFrontendHookSkipsDiscardedMessages(t *testing.T) {
+func TestFrontendObserverSkipsDiscardedMessages(t *testing.T) {
 	var observed []pgproto3.FrontendMessage
 	session := New(Config{
 		Client:                  &testClient{},
 		InitialDiscardUntilSync: true,
-		Hooks: Hooks{FrontendMessage: func(msg pgproto3.FrontendMessage) {
-			observed = append(observed, msg)
+		Observers: []Observer{funcObserver{
+			onFrontend: func(msg pgproto3.FrontendMessage) {
+				observed = append(observed, msg)
+			},
 		}},
 	})
 
@@ -457,7 +440,7 @@ func TestFrontendHookSkipsDiscardedMessages(t *testing.T) {
 	require.IsType(t, &pgproto3.Sync{}, observed[0])
 }
 
-func TestClosedHookRunsOnce(t *testing.T) {
+func TestClosedObserverRunsOnce(t *testing.T) {
 	var events []string
 	backendLink := &testLink{release: func() error {
 		events = append(events, "release")
@@ -466,8 +449,10 @@ func TestClosedHookRunsOnce(t *testing.T) {
 	session := New(Config{
 		Client:      &testClient{},
 		InitialLink: backendLink,
-		Hooks: Hooks{Closed: func() {
-			events = append(events, "closed")
+		Observers: []Observer{funcObserver{
+			onClosed: func() {
+				events = append(events, "closed")
+			},
 		}},
 	})
 

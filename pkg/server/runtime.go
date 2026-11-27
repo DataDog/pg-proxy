@@ -43,17 +43,6 @@ type SessionInfo struct {
 // authenticated session. Returning nil disables that observer for the session.
 type SessionObserverFactory func(SessionInfo) session.Observer
 
-// SessionExtensions configures optional hooks and link decoration independently.
-// Deprecated: use Observers on RuntimeConfig instead.
-type SessionExtensions struct {
-	Hooks        session.Hooks
-	DecorateLink bool
-}
-
-// SessionExtensionsFactory configures extensions for one authenticated session.
-// Deprecated: use SessionObserverFactory instead.
-type SessionExtensionsFactory func(SessionInfo) SessionExtensions
-
 // RuntimeConfig supplies routing inventory and application session integrations.
 type RuntimeConfig struct {
 	Inventory Inventory
@@ -62,7 +51,6 @@ type RuntimeConfig struct {
 	// The callback must not retain the map.
 	ParameterStatuses func(map[string]string)
 	Observers         []SessionObserverFactory
-	SessionExtensions SessionExtensionsFactory
 	RandomInt         func(int) int
 	Mirroring         session.Mirroring
 	Metrics           session.Metrics
@@ -139,10 +127,6 @@ func (r *Runtime) NewSession(cfg listener.SessionConfig[ResolvedStartup]) (liste
 		Service:         cfg.Service,
 		PassthroughUser: cfg.Request.Options.PassthroughUser,
 	}
-	var extensions SessionExtensions
-	if r.cfg.SessionExtensions != nil {
-		extensions = r.cfg.SessionExtensions(info)
-	}
 	var observers []session.Observer
 	if len(r.cfg.Observers) > 0 {
 		observers = make([]session.Observer, 0, len(r.cfg.Observers))
@@ -181,9 +165,7 @@ func (r *Runtime) NewSession(cfg listener.SessionConfig[ResolvedStartup]) (liste
 		MetricTags:               cfg.MetricTags,
 		Metrics:                  r.cfg.Metrics,
 		EnableTraceParameters:    r.cfg.EnableTraceParameters,
-		Hooks:                    extensions.Hooks,
 		Observers:                observers,
-		DecorateLink:             extensions.DecorateLink,
 	})
 	return session, nil
 }

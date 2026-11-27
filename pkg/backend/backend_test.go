@@ -302,7 +302,7 @@ func TestAcquireBuildsLinkWithInjectedDependencies(t *testing.T) {
 		},
 	})
 	baseTags := []string{"service:test"}
-	_, err := runtime.Acquire(context.Background(), session.LinkRequest{
+	_, err := runtime.Checkout(context.Background(), session.LinkRequest{
 		ForReadQuery:        true,
 		PassthroughRoleName: "role-a",
 		MaxPreparedStmts:    12,
@@ -317,92 +317,6 @@ func TestAcquireBuildsLinkWithInjectedDependencies(t *testing.T) {
 	require.NotEmpty(t, metrics.counts)
 	assert.Equal(t, "datadog.pg_proxy.sessions.connections", metrics.counts[0].name)
 	assert.Contains(t, metrics.counts[0].tags, "outcome:successful")
-}
-
-func TestAcquireDecoratesLinkOnlyWhenRequested(t *testing.T) {
-	primary := &fakePool{}
-	decorated := 0
-	var selected pool.Pool
-	runtime := New(Config{
-		ClusterName:         "cluster-a",
-		PrimaryDatabaseName: "primary-a",
-		Primary:             primary,
-		LinkFactory: func(*pgxpool.Conn, link.Options) (link.Link, error) {
-			return nil, nil
-		},
-		LinkDecorator: func(backendLink link.Link, selectedPool pool.Pool, _ *pgxpool.Conn, _ session.LinkRequest) link.Link {
-			decorated++
-			selected = selectedPool
-			return backendLink
-		},
-	})
-
-	_, err := runtime.Acquire(context.Background(), session.LinkRequest{})
-	require.NoError(t, err)
-	assert.Zero(t, decorated)
-
-	_, err = runtime.Acquire(context.Background(), session.LinkRequest{DecorateLink: true})
-	require.NoError(t, err)
-	assert.Equal(t, 1, decorated)
-	assert.Same(t, primary, selected)
-}
-
-func TestAcquireDecoratorReceivesExactSelectedPool(t *testing.T) {
-	tests := []struct {
-		name           string
-		routeToReplica bool
-		replicaAcquire func(context.Context) (*pgxpool.Conn, error)
-		expectReplica  bool
-	}{
-		{name: "direct primary"},
-		{
-			name:           "successful replica",
-			routeToReplica: true,
-			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, nil },
-			expectReplica:  true,
-		},
-		{
-			name:           "replica failure falls back to primary",
-			routeToReplica: true,
-			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) {
-				return nil, errors.New("replica unavailable")
-			},
-		},
-	}
-
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			primary := &fakePool{}
-			replica := &fakePool{acquire: test.replicaAcquire}
-			var selected pool.Pool
-			runtime := New(Config{
-				ClusterName:         "cluster-a",
-				PrimaryDatabaseName: "primary-a",
-				Primary:             primary,
-				Replicas:            []pool.Pool{replica},
-				LinkFactory: func(*pgxpool.Conn, link.Options) (link.Link, error) {
-					return nil, nil
-				},
-				LinkDecorator: func(backendLink link.Link, selectedPool pool.Pool, _ *pgxpool.Conn, _ session.LinkRequest) link.Link {
-					selected = selectedPool
-					return backendLink
-				},
-			})
-			runtime.selector.randomIntFn = func(int) int { return 25 }
-
-			_, err := runtime.Acquire(context.Background(), session.LinkRequest{
-				DynamicRoutingEnabled: test.routeToReplica,
-				ForReadQuery:          test.routeToReplica,
-				DecorateLink:          true,
-			})
-			require.NoError(t, err)
-			if test.expectReplica {
-				assert.Same(t, replica, selected)
-			} else {
-				assert.Same(t, primary, selected)
-			}
-		})
-	}
 }
 
 func TestCanPerformDynamicRouting(t *testing.T) {
@@ -679,7 +593,7 @@ func (l *releaseOnlyLink) Release() error {
 	return nil
 }
 
-func TestAcquireUsesSelectedPoolsResetPolicy(t *testing.T) {
+func TestCheckoutUsesSelectedPoolsResetPolicy(t *testing.T) {
 	policy := func(mode config.ResetMode) link.ResetPolicy {
 		p, err := link.NewResetPolicy(config.DatabaseSettings{ResetMode: mode})
 		require.NoError(t, err)
@@ -727,7 +641,7 @@ func TestAcquireUsesSelectedPoolsResetPolicy(t *testing.T) {
 			})
 			runtime.selector.randomIntFn = func(int) int { return 25 }
 
-			_, err := runtime.Acquire(context.Background(), session.LinkRequest{
+			_, err := runtime.Checkout(context.Background(), session.LinkRequest{
 				DynamicRoutingEnabled: test.routeToReplica,
 				ForReadQuery:          test.routeToReplica,
 			})

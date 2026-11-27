@@ -92,10 +92,6 @@ type checkoutTestBackend struct {
 	acquire func(context.Context, LinkRequest) (link.Link, error)
 }
 
-func (b *checkoutTestBackend) Acquire(ctx context.Context, req LinkRequest) (link.Link, error) {
-	return b.acquire(ctx, req)
-}
-
 func (b *checkoutTestBackend) Checkout(ctx context.Context, req LinkRequest) (AcquiredLink, error) {
 	l, err := b.acquire(ctx, req)
 	if err != nil {
