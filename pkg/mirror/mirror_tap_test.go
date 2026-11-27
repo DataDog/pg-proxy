@@ -10,7 +10,9 @@ import (
 
 	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -140,9 +142,25 @@ func TestTap_SuppressedParseEnqueuesWithParseReply(t *testing.T) {
 func TestTap_NilIsNoOp(t *testing.T) {
 	var tap *Tap
 	assert.NotPanics(t, func() {
+		tap.OnMarkSession(link.MarkClientSQL)
 		tap.OnSend(&pgproto3.Query{String: "x"}, query.QueryReply)
 		tap.OnSuppressedParse(&pgproto3.Parse{Name: "s1", Query: "select 1"})
 		tap.OnFlushSucceeded()
 		tap.OnRelease()
 	})
+}
+
+// TestTap_ReleaseCarriesSessionMarks: marks ride the release sentinel, so the
+// worker can mark the shadow link that replayed them.
+func TestTap_ReleaseCarriesSessionMarks(t *testing.T) {
+	q := newMirrorQueue(queueCapRoomy, nil)
+	tap := NewTap(q, nil)
+
+	tap.OnMarkSession(link.MarkClientSQL)
+	tap.OnSend(&pgproto3.Query{String: "SET search_path = app"}, query.QueryReply)
+	tap.OnFlushSucceeded()
+	tap.OnRelease()
+
+	require.Equal(t, []mirrorItemType{mirrorMsg, mirrorFlush, mirrorRelease}, queuedTypes(q))
+	assert.Equal(t, link.MarkClientSQL, q.items[2].marks)
 }

@@ -21,15 +21,24 @@ import (
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
-// recordingMetrics is a minimal pgproxy.MetricsClient that records Count calls.
+// recordingMetrics is a minimal pgproxy.MetricsClient that records Count and
+// Distribution calls.
 type recordingMetrics struct {
 	pgproxy.NoopMetrics
-	mu     sync.Mutex
-	counts map[string]map[string][]int64 // metric -> tagsKey -> values
+	mu            sync.Mutex
+	counts        map[string]map[string][]int64 // metric -> tagsKey -> values
+	distributions map[string]int                // metric -> number of values
 }
 
 func newRecordingMetrics() *recordingMetrics {
-	return &recordingMetrics{counts: make(map[string]map[string][]int64)}
+	return &recordingMetrics{counts: make(map[string]map[string][]int64), distributions: make(map[string]int)}
+}
+
+func (m *recordingMetrics) Distribution(name string, _ float64, _ []string, _ float64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.distributions[name]++
+	return nil
 }
 
 func tagsKey(tags []string) string {
@@ -355,9 +364,20 @@ func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backen
 	return conn
 }
 
+// testServerVersion is the server_version the test backend reports by default:
+// a release that keeps the connection's role (see resetDropsRole).
+const testServerVersion = "17.6"
+
 // newSessionLinkTestPoolServing is newSessionLinkTestPoolConnServing that also
 // returns closeAndWait, which closes the pool and returns once serve has.
 func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
+	t.Helper()
+	return newSessionLinkTestPoolServingVersion(t, testServerVersion, serve)
+}
+
+// newSessionLinkTestPoolServingVersion is newSessionLinkTestPoolServing with a
+// backend that reports serverVersion.
+func newSessionLinkTestPoolServingVersion(t *testing.T, serverVersion string, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
 	t.Helper()
 
 	clientConn, serverConn := net.Pipe()
@@ -377,6 +397,7 @@ func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) 
 		}
 
 		backend.Send(&pgproto3.AuthenticationOk{})
+		backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: serverVersion})
 		backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}})
 		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 		if err := backend.Flush(); err != nil {

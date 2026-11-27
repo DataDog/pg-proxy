@@ -72,6 +72,11 @@ type Config struct {
 	LinkFactory         LinkFactory
 	CheckoutAnnotator   CheckoutAnnotator
 	LinkDecorator       LinkDecorator
+	// PrimaryReset and ReplicaResets select how links from each pool reset their
+	// connection when it returns to the pool. ReplicaResets is in Replicas order.
+	// A missing entry, like the zero ResetPolicy, resets on every release.
+	PrimaryReset  link.ResetPolicy
+	ReplicaResets []link.ResetPolicy
 }
 
 // Runtime owns routing and connection checkout for one logical database cluster.
@@ -90,6 +95,8 @@ type Runtime struct {
 	linkFactory         LinkFactory
 	checkoutAnnotator   CheckoutAnnotator
 	linkDecorator       LinkDecorator
+	primaryReset        link.ResetPolicy
+	replicaResets       []link.ResetPolicy
 }
 
 var (
@@ -132,7 +139,21 @@ func New(cfg Config) *Runtime {
 		linkFactory:         linkFactory,
 		checkoutAnnotator:   cfg.CheckoutAnnotator,
 		linkDecorator:       cfg.LinkDecorator,
+		primaryReset:        cfg.PrimaryReset,
+		replicaResets:       append([]link.ResetPolicy(nil), cfg.ReplicaResets...),
 	}
+}
+
+// resetPolicy returns the reset policy of the replica at index replica, or of
+// the primary when replica is negative.
+func (r *Runtime) resetPolicy(replica int) link.ResetPolicy {
+	if replica < 0 {
+		return r.primaryReset
+	}
+	if replica < len(r.replicaResets) {
+		return r.replicaResets[replica]
+	}
+	return link.ResetPolicy{}
 }
 
 // PrimaryPool returns the primary pool for app-owned lifecycle integrations such as probers.
@@ -179,7 +200,8 @@ func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (se
 
 	// Note that if dynamic routing acquires a replica conn for a qualified parse,
 	// then all subsequent queries in the tx will be forwarded to the replica
-	conn, selectedPool, rerouted, err := r.acquireConnection(ctx, request.DynamicRoutingEnabled && request.ForReadQuery, request.SessionLastWrite)
+	conn, replica, err := r.acquireConnection(ctx, request.DynamicRoutingEnabled && request.ForReadQuery, request.SessionLastWrite)
+	rerouted := replica >= 0
 	// Emitting the metric before the error check to maintain existing behaviour
 	// and to have observability on the number of connections that are rerouted
 	// even if they fail
@@ -209,6 +231,7 @@ func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (se
 	opts := link.Options{
 		MaxPreparedStmts: request.MaxPreparedStmts,
 		MetricTags:       sessionLinkTags,
+		Reset:            r.resetPolicy(replica),
 	}
 	if request.PassthroughRoleName != "" && r.roleSessionFactory != nil {
 		opts.Role = r.roleSessionFactory(request.PassthroughRoleName)
@@ -217,6 +240,7 @@ func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (se
 	if err != nil {
 		return session.AcquiredLink{}, err
 	}
+	selectedPool := r.selector.pool(replica)
 	if r.linkDecorator != nil && request.DecorateLink {
 		backendLink = r.linkDecorator(backendLink, selectedPool, conn, request)
 	}
@@ -277,33 +301,33 @@ func buildSessionLinkMetricTags(baseTags []string, clusterName string, forRead b
 
 // AcquireConnection returns a connection and whether it came from a replica pool.
 func (r *Runtime) AcquireConnection(ctx context.Context, replicaReroutingEligible bool, sessionLastWrite time.Time) (*pgxpool.Conn, bool, error) {
-	conn, _, rerouted, err := r.acquireConnection(ctx, replicaReroutingEligible, sessionLastWrite)
-	return conn, rerouted, err
+	conn, replica, err := r.acquireConnection(ctx, replicaReroutingEligible, sessionLastWrite)
+	return conn, replica >= 0, err
 }
 
-func (r *Runtime) acquireConnection(ctx context.Context, replicaReroutingEligible bool, sessionLastWrite time.Time) (*pgxpool.Conn, pool.Pool, bool, error) {
+// acquireConnection returns a connection and, when it came from a replica, that
+// replica's index in the replicas. -1 means the primary, including a fallback
+// to it after a replica failed.
+func (r *Runtime) acquireConnection(ctx context.Context, replicaReroutingEligible bool, sessionLastWrite time.Time) (*pgxpool.Conn, int, error) {
 	r.sessionsWaiting.Add(1)
 	defer r.decrementSessionsWaiting()
 
 	if replicaReroutingEligible {
-		selected, rerouted := r.selector.selectPool(sessionLastWrite)
-		if rerouted {
+		if replica := r.selector.selectReplica(sessionLastWrite); replica >= 0 {
 			replicaCtx, cancel := context.WithTimeout(ctx, replicaAcquireConnectionTimeout)
 			defer cancel()
-			conn, err := selected.Acquire(replicaCtx)
+			conn, err := r.selector.replicas[replica].Acquire(replicaCtx)
 			if err != nil {
 				pgproxy.Logger().Error(fmt.Sprintf("failed to acquire connection from replica pool: %v", err))
 				conn, err = r.fallbackToPrimary(ctx)
-				return conn, r.selector.primary, false, err
+				return conn, -1, err
 			}
-			return conn, selected, true, nil
+			return conn, replica, nil
 		}
-		conn, err := selected.Acquire(ctx)
-		return conn, selected, rerouted, err
 	}
 
 	conn, err := r.selector.primary.Acquire(ctx)
-	return conn, r.selector.primary, false, err
+	return conn, -1, err
 }
 
 func (r *Runtime) decrementSessionsWaiting() {
@@ -353,28 +377,37 @@ func isReadAfterWrite(sessionLastWrite time.Time) bool {
 		time.Since(sessionLastWrite) < readAfterWriteThreshold
 }
 
-// roundRobinSelect returns the next replica pool to query
-// replicaPools is guaranteed to be non-empty by the caller
-func (p *PoolSelector) roundRobinSelect(replicaPools []pool.Pool) pool.Pool {
-	if len(replicaPools) == 1 {
-		return replicaPools[0]
+// roundRobinIndex returns the index of the next replica pool to query
+// p.replicas is guaranteed to be non-empty by the caller
+func (p *PoolSelector) roundRobinIndex() int {
+	if len(p.replicas) == 1 {
+		return 0
 	}
-	idx := p.roundRobin.Next(len(replicaPools))
+	idx := p.roundRobin.Next(len(p.replicas))
 	// This should never happen since we check the length of the list before calling Next,
 	// but it's good to have the check here to ensure that we don't panic
 	if idx == pool.InvalidIndex {
 		pgproxy.Logger().Warn("round robin counter returned -1, returning first replica pool")
-		return replicaPools[0]
+		return 0
 	}
-	return replicaPools[idx]
+	return idx
 }
 
-// selectPool returns a primary or replica pool to query and if the query will be rerouted to a replica pool
-func (p *PoolSelector) selectPool(sessionLastWrite time.Time) (pool.Pool, bool) {
+// selectReplica returns the index in p.replicas of the replica to reroute a
+// query to, or -1 to keep it on the primary.
+func (p *PoolSelector) selectReplica(sessionLastWrite time.Time) int {
 	if p.shouldReroute(sessionLastWrite) {
-		return p.roundRobinSelect(p.replicas), true
+		return p.roundRobinIndex()
 	}
-	return p.primary, false
+	return -1
+}
+
+// pool returns the replica at index replica, or the primary when it is negative.
+func (p *PoolSelector) pool(replica int) pool.Pool {
+	if replica < 0 {
+		return p.primary
+	}
+	return p.replicas[replica]
 }
 
 // StartStats starts exporting sessions-waiting and primary pool stats every two seconds.

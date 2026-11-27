@@ -22,6 +22,7 @@ import (
 	"golang.org/x/time/rate"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/pool"
 	"github.com/DataDog/pg-proxy/pkg/session"
@@ -72,20 +73,20 @@ func TestSelectPool(t *testing.T) {
 	runtime := newTestRuntime(primary, replica)
 
 	runtime.selector.randomIntFn = func(int) int { return 5 }
-	selected, rerouted := runtime.selector.selectPool(time.Time{})
-	assert.Same(t, primary, selected)
-	assert.False(t, rerouted)
+	index := runtime.selector.selectReplica(time.Time{})
+	assert.Equal(t, -1, index)
+	assert.Same(t, primary, runtime.selector.pool(index))
 
 	runtime.selector.randomIntFn = func(int) int { return 25 }
-	selected, rerouted = runtime.selector.selectPool(time.Time{})
-	assert.Same(t, replica, selected)
-	assert.True(t, rerouted)
+	index = runtime.selector.selectReplica(time.Time{})
+	assert.Equal(t, 0, index)
+	assert.Same(t, replica, runtime.selector.pool(index))
 
 	runtime = newTestRuntime(primary)
 	runtime.selector.randomIntFn = func(int) int { return 25 }
-	selected, rerouted = runtime.selector.selectPool(time.Time{})
-	assert.Same(t, primary, selected)
-	assert.False(t, rerouted)
+	index = runtime.selector.selectReplica(time.Time{})
+	assert.Equal(t, -1, index)
+	assert.Same(t, primary, runtime.selector.pool(index))
 }
 
 func TestSelectPoolRoundRobin(t *testing.T) {
@@ -94,9 +95,9 @@ func TestSelectPoolRoundRobin(t *testing.T) {
 	runtime := newTestRuntime(primary, replicas...)
 	runtime.selector.randomIntFn = func(int) int { return 25 }
 	for _, expected := range []int{1, 0, 1, 0} {
-		selected, rerouted := runtime.selector.selectPool(time.Time{})
-		assert.Same(t, replicas[expected], selected)
-		assert.True(t, rerouted)
+		index := runtime.selector.selectReplica(time.Time{})
+		assert.Equal(t, expected, index)
+		assert.Same(t, replicas[expected], runtime.selector.pool(index))
 	}
 }
 
@@ -676,4 +677,62 @@ type releaseOnlyLink struct {
 func (l *releaseOnlyLink) Release() error {
 	l.conn.Release()
 	return nil
+}
+
+func TestAcquireUsesSelectedPoolsResetPolicy(t *testing.T) {
+	policy := func(mode config.ResetMode) link.ResetPolicy {
+		p, err := link.NewResetPolicy(config.DatabaseSettings{ResetMode: mode})
+		require.NoError(t, err)
+		return p
+	}
+	tests := []struct {
+		name           string
+		replicaResets  []link.ResetPolicy
+		routeToReplica bool
+		replicaAcquire func(context.Context) (*pgxpool.Conn, error)
+		want           config.ResetMode
+	}{
+		{name: "primary", replicaResets: []link.ResetPolicy{policy(config.ResetDynamic)}, want: config.ResetAudit},
+		{
+			name: "replica", replicaResets: []link.ResetPolicy{policy(config.ResetDynamic)}, routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, nil },
+			want:           config.ResetDynamic,
+		},
+		{
+			name: "replica without a policy resets always", routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, nil },
+			want:           config.ResetAlways,
+		},
+		{
+			name: "replica failure falls back to the primary's policy", replicaResets: []link.ResetPolicy{policy(config.ResetDynamic)},
+			routeToReplica: true,
+			replicaAcquire: func(context.Context) (*pgxpool.Conn, error) { return nil, errors.New("replica unavailable") },
+			want:           config.ResetAudit,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			var got link.Options
+			runtime := New(Config{
+				ClusterName:         "cluster-a",
+				PrimaryDatabaseName: "primary-a",
+				Primary:             &fakePool{},
+				Replicas:            []pool.Pool{&fakePool{acquire: test.replicaAcquire}},
+				PrimaryReset:        policy(config.ResetAudit),
+				ReplicaResets:       test.replicaResets,
+				LinkFactory: func(_ *pgxpool.Conn, options link.Options) (link.Link, error) {
+					got = options
+					return nil, nil
+				},
+			})
+			runtime.selector.randomIntFn = func(int) int { return 25 }
+
+			_, err := runtime.Acquire(context.Background(), session.LinkRequest{
+				DynamicRoutingEnabled: test.routeToReplica,
+				ForReadQuery:          test.routeToReplica,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, test.want, got.Reset.Mode())
+		})
+	}
 }

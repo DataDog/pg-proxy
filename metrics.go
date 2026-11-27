@@ -24,6 +24,7 @@ const (
 	MetricQueryParseLatency    = "pg_proxy.messages.parse.latency_us"
 	MetricFlushPostgresLatency = "pg_proxy.flush_postgres.latency_us"
 	MetricConnectWait          = "pg_proxy.sessions.connect_wait_us"
+	MetricResetLatency         = "pg_proxy.sessions.connections.reset.latency_us"
 )
 
 // MetricsClient is the metric subset used by the proxy. Existing StatsD clients

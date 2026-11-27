@@ -17,8 +17,10 @@ import (
 
 	pgproxy "github.com/DataDog/pg-proxy"
 	"github.com/DataDog/pg-proxy/pkg/classifier"
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
+	"github.com/DataDog/pg-proxy/pkg/sessionsql"
 )
 
 // ClientMessageAction contains a set of actions the proxy will take to handle
@@ -65,6 +67,32 @@ type ClientMessageAction struct {
 	// This is only valid for replacing auto-cached unnamed prepared statements, as named prepared statements must be deallocated
 	// before the name can be reused.
 	UpdateAutoCachedUnnamedPreparedStmt prepared.PreparedStatement
+}
+
+// SessionMarks returns what proxying the action's message may do to session state:
+// running a simple Query's text, or the statement a Bind names. Judging scans SQL
+// text, which only some reset modes need, so the session calls it just before
+// sending, and only for a link that uses the marks. stmts and unnamed are the
+// session's prepared statements and its confirmed unnamed statement then.
+func (action *ClientMessageAction) SessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
+	switch m := action.ProxyMsgToPg.(type) {
+	case *pgproto3.Query:
+		return sessionMarks(sessionsql.ScanEither(m.String), link.MarkClientSQL)
+	case *pgproto3.Bind:
+		if action.EnsureUnnamedPreparedStmt {
+			return bindSessionMarks(stmts, unnamed)
+		}
+		// DecideClientMessageAction renamed the Bind to the statement's proxy name.
+		stmt := action.CheckExistingPreparedStmt
+		if stmt == nil && m.PreparedStatement != "" {
+			stmt = stmts.FindPendingNamedStmtFromProxyName(m.PreparedStatement)
+		}
+		if stmt == nil {
+			return link.MarkPreparedStmt // the proxy cannot tell what it runs
+		}
+		return sessionMarks(stmt.MayChangeSession(), link.MarkPreparedStmt)
+	}
+	return 0
 }
 
 // PGQueryProtocolType represents the Postgres query protocol used by a client message.
@@ -317,6 +345,33 @@ func handleClientQuery(msg pgproto3.FrontendMessage, sql string, protocol PGQuer
 	}
 	action.HandleReadQuery = classification.ReadOnly
 	return action, nil
+}
+
+// sessionMarks converts a scanner verdict to the marks a link records. source is
+// the mark for a possible session change.
+func sessionMarks(mayChangeSession bool, source link.SessionMarks) link.SessionMarks {
+	if mayChangeSession {
+		return source
+	}
+	return 0
+}
+
+// bindSessionMarks returns the marks for a Bind of the unnamed statement, which the
+// proxy does not keep in the prepared statement state once confirmed. One still
+// pending in this pipeline, including the copy the session re-creates on a new link,
+// is the one the Bind refers to, so it wins over unnamed, the client's confirmed
+// one. A confirmed entry for "" is one auto-caching left before it was turned
+// off, which this Bind does not run. A Bind the proxy cannot match to a Parse may
+// run anything.
+func bindSessionMarks(stmts prepared.PreparedStatementState, unnamed prepared.PreparedStatement) link.SessionMarks {
+	stmt := stmts.FindPendingNamedStmtFromClientName("")
+	if stmt == nil {
+		stmt = unnamed
+	}
+	if stmt == nil {
+		return link.MarkPreparedStmt
+	}
+	return sessionMarks(stmt.MayChangeSession(), link.MarkPreparedStmt)
 }
 
 // ShouldDiscardUntilSync reports whether the proxy should skip the message.
