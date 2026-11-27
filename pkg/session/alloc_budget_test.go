@@ -89,6 +89,39 @@ func cycleAllocsPerRun(run func()) float64 {
 	return float64(fewest-1) / allocWindow // less connResource.getConn's one allocation
 }
 
+func TestProtocolCycleObserverAllocationBudget(t *testing.T) {
+	if raceEnabled {
+		t.Skip("the race detector changes allocation counts")
+	}
+	for _, pc := range []protocolCycle{protocolCycles[1], protocolCycles[3]} { // simple_query, pipeline_30
+		t.Run(pc.name, func(t *testing.T) {
+			budget, ok := protocolCycleAllocBudgets[pc.name]
+			require.True(t, ok)
+			h := newCycleHarness(t, false)
+			origAcquire := h.backend.acquire
+			metaBackend := &checkoutTestBackend{
+				meta: CheckoutMeta{
+					ClusterName:   "example-cluster",
+					EffectiveRole: "app_user",
+					Annotation:    "precomputed-route",
+				},
+				acquire: origAcquire,
+			}
+			client := h.newClient(func(cfg *Config) {
+				cfg.Backend = metaBackend
+				cfg.Observers = []Observer{NoopObserver{}}
+			})
+			script := pc.cycle(t, h)
+			var err error
+			allocs := cycleAllocsPerRun(func() { err = cmp.Or(err, client.run(script)) })
+			require.NoError(t, err)
+			t.Logf("%s with observer allocates %v times per cycle; baseline budget is %v", pc.name, allocs, budget)
+			require.LessOrEqualf(t, allocs, budget,
+				"installing a no-op observer added allocations to %s", pc.name)
+		})
+	}
+}
+
 func BenchmarkProtocolCycle(b *testing.B) {
 	for _, pc := range protocolCycles {
 		b.Run(pc.name, func(b *testing.B) {

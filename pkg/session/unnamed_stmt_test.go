@@ -15,6 +15,7 @@ import (
 
 	"github.com/DataDog/pg-proxy/pkg/actions"
 	"github.com/DataDog/pg-proxy/pkg/link"
+	"github.com/DataDog/pg-proxy/pkg/mirror"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
@@ -108,6 +109,19 @@ func TestSessionMarksOnlyForLinksThatUseThem(t *testing.T) {
 	using := &testLink{usesMarks: true}
 	sendThroughSession(t, using, setter)
 	assert.Equal(t, link.MarkClientSQL, using.marks)
+}
+
+// TestSessionMarksWhileMirroring: a mirroring checkout judges every message, even
+// through a link whose release does not read the marks, because the shadow's does.
+func TestSessionMarksWhileMirroring(t *testing.T) {
+	q := mirror.NewQueue(1<<20, nil)
+	t.Cleanup(q.Close)
+	backendLink := &testLink{send: func(pgproto3.FrontendMessage, query.ReplyExpectation) {}}
+	s := New(Config{Context: context.Background(), Client: &testClient{}, InitialLink: backendLink})
+	s.mirrorTap = mirror.NewTap(q, nil)
+
+	require.NoError(t, s.handleClientMessage(&pgproto3.Query{String: "SET search_path = app"}))
+	assert.Equal(t, link.MarkClientSQL, backendLink.marks)
 }
 
 // TestPreparedStatementsUnjudgedForLinksWithoutMarks: Parse and Bind through a link

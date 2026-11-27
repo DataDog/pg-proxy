@@ -49,11 +49,15 @@ type RoleSessionFactory func(roleName string) link.RoleSession
 // LinkFactory wraps an acquired connection as a session link.
 type LinkFactory func(*pgxpool.Conn, link.Options) (link.Link, error)
 
+// CheckoutAnnotator attaches an optional embedder-defined value to each
+// checkout's CheckoutMeta. It receives only value metadata (including the exact
+// pool selected, after any replica fallback, and the effective Postgres role)
+// and never receives the link or underlying connection.
+// A nil annotator leaves CheckoutMeta.Annotation nil.
+type CheckoutAnnotator func(session.CheckoutMeta) any
+
 // LinkDecorator wraps a link after checkout with the pool that supplied the
-// connection. Callers that later need another connection to the same backend
-// (for example DBM replay) use that pool instead of routing again.
-// Nil leaves the link unchanged. The backend calls this only when
-// request.DecorateLink is true, independently of session notification hooks.
+// connection. Deprecated: use CheckoutAnnotator with session.Observer instead.
 type LinkDecorator func(link.Link, pool.Pool, *pgxpool.Conn, session.LinkRequest) link.Link
 
 // Config configures one logical cluster backend.
@@ -66,6 +70,7 @@ type Config struct {
 	LoadShedder         session.LoadShedder
 	RoleSessionFactory  RoleSessionFactory
 	LinkFactory         LinkFactory
+	CheckoutAnnotator   CheckoutAnnotator
 	LinkDecorator       LinkDecorator
 	// PrimaryReset and ReplicaResets select how links from each pool reset their
 	// connection when it returns to the pool. ReplicaResets is in Replicas order.
@@ -88,12 +93,16 @@ type Runtime struct {
 	loadShedder         session.LoadShedder
 	roleSessionFactory  RoleSessionFactory
 	linkFactory         LinkFactory
+	checkoutAnnotator   CheckoutAnnotator
 	linkDecorator       LinkDecorator
 	primaryReset        link.ResetPolicy
 	replicaResets       []link.ResetPolicy
 }
 
-var _ session.Backend = (*Runtime)(nil)
+var (
+	_ session.Backend         = (*Runtime)(nil)
+	_ session.CheckoutBackend = (*Runtime)(nil)
+)
 
 // PoolSelector selects the primary or a replica pool for a checkout.
 type PoolSelector struct {
@@ -128,6 +137,7 @@ func New(cfg Config) *Runtime {
 		loadShedder:         loadShedder,
 		roleSessionFactory:  cfg.RoleSessionFactory,
 		linkFactory:         linkFactory,
+		checkoutAnnotator:   cfg.CheckoutAnnotator,
 		linkDecorator:       cfg.LinkDecorator,
 		primaryReset:        cfg.PrimaryReset,
 		replicaResets:       append([]link.ResetPolicy(nil), cfg.ReplicaResets...),
@@ -169,8 +179,19 @@ func (r *Runtime) CanPerformDynamicRouting(dynamicRoutingEnabled bool) bool {
 	return false
 }
 
-// Acquire implements session.Backend by acquiring a pool connection and constructing a link.
+// Acquire implements session.Backend by delegating to Checkout.
+// Deprecated: use Checkout directly.
 func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (link.Link, error) {
+	acquired, err := r.Checkout(ctx, request)
+	if err != nil {
+		return nil, err
+	}
+	return acquired.Link, nil
+}
+
+// Checkout implements session.CheckoutBackend by acquiring a pool connection,
+// constructing a link, and returning typed checkout metadata alongside it.
+func (r *Runtime) Checkout(ctx context.Context, request session.LinkRequest) (session.AcquiredLink, error) {
 	start := time.Now()
 
 	// Own the tags: link setup appends cluster/routing information, while the
@@ -201,7 +222,7 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 			outcome = "ctx_cancelled"
 		}
 		_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections", 1, append(sessionLinkTags, "outcome:"+outcome), 1)
-		return nil, err
+		return session.AcquiredLink{}, err
 	}
 
 	_ = pgproxy.Metrics().Count("pg_proxy.sessions.connections", 1, append(sessionLinkTags, "outcome:successful"), 1)
@@ -217,12 +238,58 @@ func (r *Runtime) Acquire(ctx context.Context, request session.LinkRequest) (lin
 	}
 	backendLink, err := r.linkFactory(conn, opts)
 	if err != nil {
-		return nil, err
+		return session.AcquiredLink{}, err
 	}
+	selectedPool := r.selector.pool(replica)
 	if r.linkDecorator != nil && request.DecorateLink {
-		backendLink = r.linkDecorator(backendLink, r.selector.pool(replica), conn, request)
+		backendLink = r.linkDecorator(backendLink, selectedPool, conn, request)
 	}
-	return backendLink, nil
+	meta := session.CheckoutMeta{
+		ClusterName:   r.clusterName,
+		Pool:          selectedPool,
+		EffectiveRole: effectiveRoleForCheckout(request.PassthroughRoleName, conn),
+		Rerouted:      rerouted,
+		ForReadQuery:  request.ForReadQuery,
+	}
+	if r.checkoutAnnotator != nil {
+		meta.Annotation = r.runCheckoutAnnotator(meta, sessionLinkTags)
+	}
+	return session.AcquiredLink{Link: backendLink, Meta: meta}, nil
+}
+
+const customDataConnUserKey = "pgProxyConnUser"
+
+func effectiveRoleForCheckout(passthroughRole string, conn *pgxpool.Conn) string {
+	if passthroughRole != "" {
+		return passthroughRole
+	}
+	if conn == nil {
+		return ""
+	}
+	// Cache the connection's configured user in pgconn.CustomData once per
+	// physical connection: pgx's Conn.Config() deep-copies ConnConfig,
+	// RuntimeParams, TLS config, and Fallbacks on every call.
+	pgxConn := conn.Conn()
+	customData := pgxConn.PgConn().CustomData()
+	if user, ok := customData[customDataConnUserKey].(string); ok {
+		return user
+	}
+	user := pgxConn.Config().User
+	if customData != nil { // nil for a PgConn rebuilt from a hijacked one without CustomData
+		customData[customDataConnUserKey] = user
+	}
+	return user
+}
+
+func (r *Runtime) runCheckoutAnnotator(meta session.CheckoutMeta, tags []string) (annotation any) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			annotation = nil
+			_ = pgproxy.Metrics().Count("pg_proxy.backend.checkout_annotator_panic", 1, tags, 1)
+			pgproxy.Logger().Error("checkout annotator panicked", "cluster", r.clusterName, "panic", recovered)
+		}
+	}()
+	return r.checkoutAnnotator(meta)
 }
 
 func buildSessionLinkMetricTags(baseTags []string, clusterName string, forRead bool) []string {

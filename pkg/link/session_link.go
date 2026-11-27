@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -36,14 +35,14 @@ import (
 // long lived (living for the lifetime of a client's connection), and Postgres connections are also
 // long lived (returning to the connection pool when a SessionLink is released).
 //
-// A SessionLink is typically only accessed synchronously by the Session that owns it. However, in the case
-// that a tx is cancelled, the SessionLink will be accessed concurrently.
-// Therefore, a mutex is introduced to prevent race conditions between the SessionLink being released and the tx being cancelled.
+// A SessionLink is owned by the Session goroutine. Out-of-band Cancel and
+// ForceClose calls go through its embedded AbortHandle, which serializes them
+// against Release so they never touch a connection returned to the pool.
 type SessionLink struct {
 	conn     *pgxpool.Conn
 	pgConn   *pgproto3.Frontend // type is Frontend as the pg-proxy is acting as the "frontend" for this pg conn
 	txStatus query.TxStatus
-	lock     sync.Mutex
+	abort    AbortHandle
 
 	replyExpectations   []query.ReplyExpectation // expected replies from the linked pg conn
 	discardingUntilSync bool                     // if true, in an extended query error state where all messages will be discarded until a Sync
@@ -205,10 +204,12 @@ func (link *SessionLink) Idle() bool {
 	return link.getComputedState() == sessionLinkStateIdle
 }
 
-// Cancel cancels a request
+// Cancel cancels an in-flight request on the underlying Postgres connection.
 func (link *SessionLink) Cancel() error {
-	link.lock.Lock()
-	defer link.lock.Unlock()
+	return link.abort.cancel(link)
+}
+
+func (link *SessionLink) cancelLocked() error {
 	if link.conn == nil {
 		// The connection has already been released, so there's nothing to cancel
 		return nil
@@ -222,14 +223,16 @@ func (link *SessionLink) Cancel() error {
 // Release returns the Postgres connection to the pool. Once released, a SessionLink must be destroyed and
 // not used again.
 func (link *SessionLink) Release() error {
-	link.lock.Lock()
+	// Fence out concurrent Cancel/ForceClose calls before touching or returning
+	// the connection: any in-flight abort finishes before MarkReleased returns,
+	// and later calls return immediately without blocking on Release's SQL resets.
+	link.abort.MarkReleased()
 	defer func() {
 		if link.conn != nil {
 			link.conn.Release()
 			link.conn = nil
 		}
 		link.pgConn = nil
-		link.lock.Unlock()
 	}()
 
 	// Destroy a link that is not at a reusable command boundary before anything else
@@ -481,8 +484,10 @@ func (link *SessionLink) nonIdleReleaseLogMessage(computedState string, pid uint
 // call concurrently with Receive() — net.Conn.Close() is goroutine-safe and
 // will cause a blocking Read to return immediately.
 func (link *SessionLink) ForceClose() bool {
-	link.lock.Lock()
-	defer link.lock.Unlock()
+	return link.abort.forceClose(link)
+}
+
+func (link *SessionLink) forceCloseLocked() bool {
 	if link.conn == nil || link.conn.Conn().IsClosed() {
 		return false
 	}

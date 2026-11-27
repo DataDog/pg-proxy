@@ -28,15 +28,11 @@ func newConcurrencyTestSession(hooks Hooks) *Session {
 
 // checkOut and checkIn set and clear the session's link, as a checkout does.
 func checkOut(s *Session, backendLink link.Link) {
-	s.linkMu.Lock()
 	s.setLink(backendLink)
-	s.linkMu.Unlock()
 }
 
 func checkIn(s *Session) {
-	s.linkMu.Lock()
 	s.setLink(nil)
-	s.linkMu.Unlock()
 }
 
 // runConcurrently runs session and host on separate goroutines with no

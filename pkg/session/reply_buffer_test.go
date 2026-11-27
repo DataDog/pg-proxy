@@ -107,9 +107,7 @@ func TestFlushPostgresReplySizes(t *testing.T) {
 				for round := range 3 {
 					clientConn.written, clientConn.writeLens = nil, nil
 					backendLink, _ := reusableReplyLink(test.reply)
-					s.linkMu.Lock()
 					s.setLink(backendLink)
-					s.linkMu.Unlock()
 
 					_, err := s.flushPostgres()
 					require.NoError(t, err, "round %d", round)
@@ -231,9 +229,7 @@ func TestFlushPostgresConcurrentSessionsKeepTheirOwnBytes(t *testing.T) {
 				r := replies[round%len(replies)]
 				clientConn.written, clientConn.writeLens = nil, nil
 				backendLink, _ := reusableReplyLink(r.reply)
-				s.linkMu.Lock()
 				s.setLink(backendLink)
-				s.linkMu.Unlock()
 				if _, err := s.flushPostgres(); err != nil {
 					errs <- err
 					return

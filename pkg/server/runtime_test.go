@@ -245,3 +245,57 @@ func TestRuntimePassesDecorationToCheckout(t *testing.T) {
 		})
 	}
 }
+
+type closeOrderObserver struct {
+	session.NoopObserver
+	name  string
+	order *[]string
+}
+
+func (o closeOrderObserver) OnClosed() { *o.order = append(*o.order, o.name) }
+
+func TestRuntimeComposesMultipleObservers(t *testing.T) {
+	runtime, _ := newRuntimeForTest()
+	resolved, err := runtime.ResolveStartup(t.Context(), listener.StartupRequest{Database: "testdb"})
+	require.NoError(t, err)
+
+	var seenInfos []SessionInfo
+	var closeOrder []string
+	runtime.cfg.Observers = []SessionObserverFactory{
+		nil,
+		func(info SessionInfo) session.Observer {
+			seenInfos = append(seenInfos, info)
+			return closeOrderObserver{name: "first", order: &closeOrder}
+		},
+		func(info SessionInfo) session.Observer {
+			seenInfos = append(seenInfos, info)
+			return nil // skipped cleanly
+		},
+		func(info SessionInfo) session.Observer {
+			seenInfos = append(seenInfos, info)
+			return closeOrderObserver{name: "second", order: &closeOrder}
+		},
+	}
+
+	created, err := runtime.NewSession(listener.SessionConfig[ResolvedStartup]{
+		Context: t.Context(),
+		Request: listener.StartupRequest{
+			User:     "database-role",
+			Database: "testdb",
+			Options:  listener.SessionOptions{PassthroughUser: true},
+		},
+		Resolved: resolved,
+		Service:  "client-service",
+	})
+	require.NoError(t, err)
+	created.(*session.Session).Close(nil)
+
+	wantInfo := SessionInfo{
+		User:            "database-role",
+		LogicalDatabase: "testdb",
+		Service:         "client-service",
+		PassthroughUser: true,
+	}
+	assert.Equal(t, []SessionInfo{wantInfo, wantInfo, wantInfo}, seenInfos)
+	assert.Equal(t, []string{"first", "second"}, closeOrder)
+}

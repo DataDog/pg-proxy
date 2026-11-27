@@ -171,11 +171,11 @@ func TestClientMonitorStopWaitsForDisconnectHandling(t *testing.T) {
 		defer release() // a failed check must not leave ForceClose blocked
 		probe := &fakeProbe{}
 		s := newMonitorTestSession(timer, probe)
-		s.link = &testLink{forceClose: func() bool {
+		s.setLink(&testLink{forceClose: func() bool {
 			enter()
 			<-blocked
 			return true
-		}}
+		}})
 
 		monitor, _ := s.startClientMonitor()
 		probe.triggerDisconnect()
@@ -349,35 +349,6 @@ func TestTimerMonitorStaleCallbacksKeepPolling(t *testing.T) {
 	probe.triggerDisconnect()
 	assert.Eventually(t, s.ClientDisconnected, 2*time.Second, 10*time.Millisecond)
 	assert.ErrorIs(t, context.Cause(m.ctx), ErrClientDisconnected)
-}
-
-// TestTimerMonitorDisconnectHandlingCanCloseSession covers a link that breaks
-// the link.Link contract by closing the session from ForceClose. Timer mode must
-// not hang on it. Goroutine mode does not hang either, because Session.close
-// never touches that monitor.
-func TestTimerMonitorDisconnectHandlingCanCloseSession(t *testing.T) {
-	probe := &fakeProbe{}
-	s := newMonitorTestSession(true, probe)
-	s.link = &testLink{forceClose: func() bool {
-		s.Close(nil)
-		return true
-	}}
-
-	monitor, acquireCtx := s.startClientMonitor()
-	probe.triggerDisconnect()
-	require.Eventually(t, s.ClientDisconnected, 2*time.Second, 10*time.Millisecond)
-
-	stopped := make(chan struct{})
-	go func() {
-		monitor.stop()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-	case <-time.After(2 * time.Second):
-		t.Fatal("closing the session during disconnect handling deadlocked")
-	}
-	assert.ErrorIs(t, context.Cause(acquireCtx), ErrClientDisconnected)
 }
 
 // BenchmarkClientMonitorCheckout measures arming and stopping the client

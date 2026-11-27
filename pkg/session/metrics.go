@@ -227,6 +227,10 @@ func (s *Session) recordBackendDestroyed(path string) {
 	)
 }
 
+func (s *Session) recordObserverPanic(hook string) {
+	s.metrics.Count(observerPanicMetric, 1, newMetricTags(appendTags(s.obsVals.metricTags, "hook:"+hook)))
+}
+
 func isFatalPostgresError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), pgSeverityFatal)
 }
