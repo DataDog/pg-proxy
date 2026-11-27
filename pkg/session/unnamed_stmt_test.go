@@ -6,11 +6,18 @@
 package session
 
 import (
+	"context"
 	"testing"
 
+	"github.com/jackc/pgx/v5/pgproto3"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/DataDog/pg-proxy/pkg/actions"
+	"github.com/DataDog/pg-proxy/pkg/link"
+	"github.com/DataDog/pg-proxy/pkg/mirror"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
+	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
 // replayUnnamedStmt queues stmt the way handleEnsureUnnamedPreparedStmt does and
@@ -46,4 +53,93 @@ func TestSupersededParseCompleteDoesNotRestoreUnnamedStmt(t *testing.T) {
 	s.confirmUnnamedStmt(s.pStmtState.ConfirmPendingStmt())
 	require.Nil(t, s.unnamedStmt)
 	require.Empty(t, s.unnamedPendingGens)
+}
+
+// TestDiscardedReparseIsSentAgain: when an earlier error makes Postgres skip the
+// Parse that re-creates the client's unnamed statement, the next Bind sends it
+// again, rather than reach whatever unnamed statement the connection holds.
+func TestDiscardedReparseIsSentAgain(t *testing.T) {
+	var sent []pgproto3.FrontendMessage
+	s := &Session{
+		pStmtState:  prepared.CreateProxyPreparedStmtsState(nil),
+		unnamedStmt: prepared.CreatePreparedStatement("", "", "SELECT 1", nil),
+		link: &testLink{send: func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) {
+			sent = append(sent, msg)
+		}},
+	}
+	bind := actions.ClientMessageAction{ProxyMsgToPg: &pgproto3.Bind{}, EnsureUnnamedPreparedStmt: true}
+
+	s.handleEnsureUnnamedPreparedStmt(bind)
+	s.invalidatePendingStmts(true)
+	s.handleEnsureUnnamedPreparedStmt(bind)
+	require.Len(t, sent, 2)
+	assert.Equal(t, sent[0], sent[1])
+
+	s.confirmUnnamedStmt(s.pStmtState.ConfirmPendingStmt())
+	s.invalidatePendingStmts(true)
+	s.handleEnsureUnnamedPreparedStmt(bind)
+	assert.Len(t, sent, 2, "an answered Parse left the statement on the connection")
+}
+
+// sendThroughSession has a session holding backendLink handle msgs in order until
+// it starts discarding, and returns the session, what the link was sent and what
+// the client received.
+func sendThroughSession(t *testing.T, backendLink *testLink, msgs ...pgproto3.FrontendMessage) (s *Session, sent []pgproto3.FrontendMessage, received []pgproto3.BackendMessage) {
+	t.Helper()
+	backendLink.send = func(msg pgproto3.FrontendMessage, _ query.ReplyExpectation) { sent = append(sent, msg) }
+	client := &testClient{}
+	s = New(Config{Context: context.Background(), Client: client, InitialLink: backendLink})
+	for _, msg := range msgs {
+		require.NoError(t, s.handleClientMessage(msg))
+		if s.discardUntilSync {
+			break
+		}
+	}
+	return s, sent, client.sent
+}
+
+// TestSessionMarksOnlyForLinksThatUseThem: the session judges a message only for
+// a link whose release reads the marks.
+func TestSessionMarksOnlyForLinksThatUseThem(t *testing.T) {
+	setter := &pgproto3.Query{String: "SET search_path = app"}
+	ignoring := &testLink{}
+	sendThroughSession(t, ignoring, setter)
+	assert.Zero(t, ignoring.marks)
+
+	using := &testLink{usesMarks: true}
+	sendThroughSession(t, using, setter)
+	assert.Equal(t, link.MarkClientSQL, using.marks)
+}
+
+// TestSessionMarksWhileMirroring: a mirroring checkout judges every message, even
+// through a link whose release does not read the marks, because the shadow's does.
+func TestSessionMarksWhileMirroring(t *testing.T) {
+	q := mirror.NewQueue(1<<20, nil)
+	t.Cleanup(q.Close)
+	backendLink := &testLink{send: func(pgproto3.FrontendMessage, query.ReplyExpectation) {}}
+	s := New(Config{Context: context.Background(), Client: &testClient{}, InitialLink: backendLink})
+	s.mirrorTap = mirror.NewTap(q, nil)
+
+	require.NoError(t, s.handleClientMessage(&pgproto3.Query{String: "SET search_path = app"}))
+	assert.Equal(t, link.MarkClientSQL, backendLink.marks)
+}
+
+// TestPreparedStatementsUnjudgedForLinksWithoutMarks: Parse and Bind through a link
+// that does not use session marks scan no statement text, named or unnamed.
+func TestPreparedStatementsUnjudgedForLinksWithoutMarks(t *testing.T) {
+	for _, name := range []string{"named", ""} {
+		for _, usesMarks := range []bool{false, true} {
+			backendLink := &testLink{usesMarks: usesMarks}
+			s, sent, _ := sendThroughSession(t, backendLink,
+				&pgproto3.Parse{Name: name, Query: "SET search_path = app"},
+				&pgproto3.Bind{PreparedStatement: name})
+			require.Len(t, sent, 2)
+			stmt := s.pStmtState.FindPendingNamedStmtFromClientName(name)
+			require.NotNil(t, stmt, "statement %q", name)
+			assert.Equal(t, usesMarks, prepared.Judged(stmt), "statement %q, link uses marks: %v", name, usesMarks)
+			if usesMarks {
+				assert.Equal(t, link.MarkPreparedStmt, backendLink.marks)
+			}
+		}
+	}
 }

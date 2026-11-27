@@ -53,6 +53,14 @@ type Link interface {
 	RecordNewNamedPreparedStmt(preparedStatement prepared.PreparedStatement) error
 	RecordExistingNamedPreparedStmtUsed(preparedStatement prepared.PreparedStatement) error
 	HasExistingNamedPreparedStmt(preparedStatement prepared.PreparedStatement) bool
+	// MarkSession records what this checkout may have done to session state.
+	// Release uses the marks to decide whether to reset the connection.
+	// Wrappers must forward it, or a dynamic reset can skip a needed reset.
+	MarkSession(marks SessionMarks)
+	// UsesSessionMarks reports whether anything reads the marks. When nothing does,
+	// the session skips judging its messages, which scans SQL text. A wrapper that
+	// consumes marks itself must report its own need, not just the inner link's.
+	UsesSessionMarks() bool
 }
 
 // RoleSession changes the Postgres role after acquire and restores it before the
@@ -60,9 +68,15 @@ type Link interface {
 type RoleSession interface {
 	// Set changes the Postgres role after acquire; returns opaque token for Reset.
 	Set(ctx context.Context, conn *pgxpool.Conn, tags []string) (token string, err error)
-	// Reset restores the role before the conn returns to the pool. It must also undo a
-	// client's SET ROLE or SET SESSION AUTHORIZATION: with a RoleSession, Release runs
-	// only RESET ALL, which leaves both in place.
+	// Reset restores the role before the conn returns to the pool. It must undo
+	// everything Set changed, and a client's SET ROLE or SET SESSION AUTHORIZATION:
+	// after it, Release sends at most RESET ALL, which leaves both in place, and
+	// under config.ResetDynamic or config.ResetOff it may send nothing.
+	//
+	// Set may not leave the unnamed prepared statement holding its query, as pgx's
+	// exec and describe-exec modes do: on a connection whose last release reset,
+	// a client's Bind of the unnamed statement would run the role change with the
+	// client's arguments.
 	Reset(ctx context.Context, conn *pgxpool.Conn, token string, tags []string) error
 }
 
@@ -71,11 +85,18 @@ type Options struct {
 	MaxPreparedStmts int
 	MetricTags       []string
 	Role             RoleSession // nil = no role management
+	Reset            ResetPolicy // zero value = reset on every release
 }
 
 // New wraps an already-acquired conn. The embedder acquires from its pool first.
 func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 	setUpConnMetaData(conn)
+	// The link takes over the mark: its release sets it again if it skips too.
+	customData := conn.Conn().PgConn().CustomData()
+	_, foreignUnnamed := customData[customDataResetSkippedKey]
+	if foreignUnnamed {
+		delete(customData, customDataResetSkippedKey)
+	}
 
 	sl := &SessionLink{
 		conn:                       conn,
@@ -88,6 +109,8 @@ func New(conn *pgxpool.Conn, opts Options) (Link, error) {
 		createdTime:                time.Now().Nanosecond(),
 		sessionLinkTags:            opts.MetricTags,
 		role:                       opts.Role,
+		reset:                      opts.Reset,
+		foreignUnnamed:             foreignUnnamed,
 	}
 	sl.abort.target = sl
 	sl.exportStats()

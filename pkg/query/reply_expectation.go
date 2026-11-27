@@ -19,6 +19,9 @@ const (
 	ExecuteReply
 	CloseReply
 	SyncReply
+	// ProxyCloseReply expects the CloseComplete for a Close the proxy sent on its
+	// own. It is not forwarded to the client.
+	ProxyCloseReply
 )
 
 func (e ReplyExpectation) String() string {
@@ -39,6 +42,8 @@ func (e ReplyExpectation) String() string {
 		return "CloseReply"
 	case SyncReply:
 		return "SyncReply"
+	case ProxyCloseReply:
+		return "ProxyCloseReply"
 	default:
 		return "UnknownExpectation"
 	}

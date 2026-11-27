@@ -95,6 +95,9 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 	case *pgproto3.CloseComplete:
 		if expectation == CloseReply {
 			action.ResolveReplyExpectation = true
+		} else if expectation == ProxyCloseReply {
+			action.ResolveReplyExpectation = true
+			action.ProxyMsgToClient = nil
 		} else {
 			return PgMessageAction{}, fmt.Errorf("expected a %s, but received %#v", expectation, m)
 		}
@@ -187,7 +190,7 @@ func DecidePgMessageAction(msg pgproto3.BackendMessage, expectation ReplyExpecta
 			return PgMessageAction{}, pgconn.ErrorResponseToPgError(m)
 		}
 		annotateIfSwitchoverError(m)
-		if expectation == ParseReply || expectation == BindReply || expectation == DescribeReply || expectation == ExecuteReply || expectation == CloseReply {
+		if expectation == ParseReply || expectation == BindReply || expectation == DescribeReply || expectation == ExecuteReply || expectation == CloseReply || expectation == ProxyCloseReply {
 			// This error was in response to an Extended Query Mode message. Postgres will discard all messages until a sync
 			action.DiscardUntilSync = true
 		} else if expectation == QueryReply || expectation == SyncReply {

@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5/pgproto3"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/pkg/link"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
 
@@ -22,9 +23,10 @@ type Tap struct {
 	q    *mirrorQueue
 	tags []string
 
-	batchHasData bool // any data admitted since acquire; gates the release sentinel
-	flushHasData bool // data admitted since the last flush; gates the flush sentinel
-	poisoned     bool // a message in this batch was dropped; worker must skip it whole
+	batchHasData bool              // any data admitted since acquire; gates the release sentinel
+	flushHasData bool              // data admitted since the last flush; gates the flush sentinel
+	poisoned     bool              // a message in this batch was dropped; worker must skip it whole
+	marks        link.SessionMarks // what the batch may have done to session state; rides the release sentinel
 }
 
 // NewTap creates a per-checkout mirroring tap backed by q.
@@ -112,15 +114,26 @@ func (t *Tap) OnFlushSucceeded() {
 	}
 }
 
+// OnMarkSession keeps the marks the session recorded on the source link for the
+// batch. The worker sends the shadow the same messages without deciding their
+// actions, so it would otherwise see no marks but the shadow's own
+// ParameterStatus.
+func (t *Tap) OnMarkSession(marks link.SessionMarks) {
+	if t == nil {
+		return
+	}
+	t.marks |= marks
+}
+
 // OnRelease marks the batch boundary so the worker returns its shadow link at
-// the same ready-for-query point. Guaranteed (enqueueSentinel) so a full queue
-// can't strand the link, but only for a batch that admitted data (no data means
-// no link was acquired).
+// the same ready-for-query point, with the batch's session marks. Guaranteed
+// (enqueueSentinel) so a full queue can't strand the link or drop the marks, but
+// only for a batch that admitted data (no data means no link was acquired).
 func (t *Tap) OnRelease() {
 	if t == nil {
 		return
 	}
 	if t.batchHasData {
-		t.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead})
+		t.q.enqueueSentinel(mirrorItem{typ: mirrorRelease, size: mirrorItemOverhead, marks: t.marks})
 	}
 }

@@ -223,7 +223,7 @@ func (w *mirrorWorker) run() {
 		case mirrorRelease:
 			recorded = false
 			release() // free budget before the (possibly slow) shadow RESET
-			w.releaseLink()
+			w.releaseLink(it.marks)
 			skipping = false // next batch starts clean
 		}
 	}
@@ -363,12 +363,15 @@ func (w *mirrorWorker) discardLink() {
 	w.count("mirror.shadow_link.discarded")
 }
 
-// releaseLink returns the borrowed shadow link to the pool. No-op if none is held.
-func (w *mirrorWorker) releaseLink() {
+// releaseLink returns the shadow link to its pool, marked first with the source
+// checkout's session marks: the shadow replayed what that checkout ran. No-op if
+// none is held.
+func (w *mirrorWorker) releaseLink(marks link.SessionMarks) {
 	link := w.take()
 	if link == nil {
 		return
 	}
+	link.MarkSession(marks)
 	if err := link.Release(); err != nil {
 		pgproxy.Logger().Warn("mirror worker failed to release shadow link", "err", err)
 	}

@@ -222,3 +222,18 @@ func (p *PreparedStatementsSuite) TestFindKnownNamedStmtFromClientName_AutoCache
 	foundStmt = p.pStmtState.FindKnownNamedStmtFromClientName("")
 	assert.True(p.T(), PreparedStatementEquivalent(autoCachedPStmt, foundStmt))
 }
+
+func TestVerdictJudgedOnFirstCall(t *testing.T) {
+	stmt := CreatePreparedStatement("", "", "SET search_path = app", nil)
+	assert.False(t, Judged(stmt), "creating a statement scans nothing")
+	assert.True(t, stmt.MayChangeSession())
+	assert.True(t, Judged(stmt), "the verdict is cached")
+
+	clean := CreatePreparedStatement("", "", "SELECT 1", nil)
+	assert.False(t, clean.MayChangeSession())
+	assert.True(t, Judged(clean), "a clean verdict is cached too")
+
+	queued := createQueuedPreparedStmt(createQueuedPreparedStmt(stmt, true), false)
+	assert.Same(t, stmt, Unwrap(queued), "Unwrap removes every queue wrapper")
+	assert.True(t, Judged(queued))
+}
