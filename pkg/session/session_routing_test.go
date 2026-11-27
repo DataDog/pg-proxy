@@ -54,7 +54,7 @@ func frontendBackend(name string, frontend *pgproto3.Frontend) *namedBackend {
 	}
 }
 
-func runTestSession(t testing.TB, session *Session, fakeClient *pgproto3.Frontend) (done <-chan error, closer func()) {
+func runTestSession(t *testing.T, session *Session, fakeClient *pgproto3.Frontend) (done <-chan error, closer func()) {
 	t.Helper()
 	doneCh := make(chan error, 1)
 	go func() { doneCh <- session.Run() }()

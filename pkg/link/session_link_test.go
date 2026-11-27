@@ -8,7 +8,6 @@ package link
 import (
 	"context"
 	"errors"
-	"net"
 	"sync"
 	"testing"
 	"time"
@@ -19,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/internal/fakepg"
 	"github.com/DataDog/pg-proxy/pkg/prepared"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
@@ -249,10 +249,10 @@ func TestReleaseNonIdleDestroysBeforeRoleReset(t *testing.T) {
 	}
 	require.Equal(t, sessionLinkStateNoReadyForQuery, link.getComputedState())
 
-	// The test backend answers the startup handshake and then reads exactly one more
-	// message (the Terminate from closing the connection). Any query Release issues
-	// would therefore never be answered, so a Release that returns promptly is itself
-	// the assertion that no query was issued.
+	// The test backend answers nothing after the startup handshake, so a query Release
+	// issued would fail and Release would return an error, and blockingRoleSession's
+	// Reset never returns. A Release that returns promptly and cleanly is therefore
+	// the assertion that it issued nothing.
 	released := make(chan error, 1)
 	go func() { released <- link.Release() }()
 
@@ -303,42 +303,19 @@ func TestReleaseResetSQL(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			// The fake records each message as Release writes it, so a second message is
+			// recorded too, and answers it, so it cannot hang Release.
 			var sent []pgproto3.FrontendMessage
-			conn, closeAndWait := newSessionLinkTestPoolServing(t, func(backend *pgproto3.Backend) {
-				// Answer every Query and Sync until the pool closes the connection, so a
-				// second query, or one sent with the extended protocol, is recorded
-				// instead of holding Release until its reset times out.
-				for {
-					msg, err := backend.Receive()
-					if err != nil {
-						return
-					}
-					switch msg := msg.(type) {
-					case *pgproto3.Terminate:
-						return
-					case *pgproto3.Query:
-						copied := *msg // Receive reuses message values.
-						sent = append(sent, &copied)
-						// pgx reads results until ReadyForQuery, so one CommandComplete suffices.
-						backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-						_ = backend.Flush()
-					case *pgproto3.Sync:
-						sent = append(sent, msg)
-						backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-						_ = backend.Flush()
-					default:
-						sent = append(sent, msg)
-					}
-				}
+			conn := newSessionLinkTestPoolConnServing(t, func(msg []byte) []byte {
+				decoded, err := fakepg.Decode(msg)
+				require.NoError(t, err)
+				sent = append(sent, decoded)
+				return fakepg.Answer(msg)
 			})
 			link, err := New(conn, Options{Role: test.role})
 			require.NoError(t, err)
 
 			releaseErr := link.Release()
-			// Once the backend has seen the connection close, sent also holds any
-			// message Release did not wait on.
-			closeAndWait()
 			require.Equal(t, []pgproto3.FrontendMessage{&pgproto3.Query{String: test.want}}, sent,
 				"Release must reset the connection with exactly one simple query")
 			require.NoError(t, releaseErr)
@@ -353,15 +330,14 @@ func TestReleaseResetFailureClosesConnection(t *testing.T) {
 	restore := pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: metrics})
 	t.Cleanup(restore)
 
-	conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
-		if _, err := backend.Receive(); err != nil {
-			return
+	resetFailed := fakepg.Encode[pgproto3.BackendMessage](t,
+		&pgproto3.ErrorResponse{Severity: "ERROR", Code: "XX000", Message: "reset failed"},
+		&pgproto3.ReadyForQuery{TxStatus: 'I'})
+	conn := newSessionLinkTestPoolConnServing(t, func(msg []byte) []byte {
+		if msg[0] == 'Q' {
+			return resetFailed
 		}
-		backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "XX000", Message: "reset failed"})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		_ = backend.Flush()
-		// Read the Terminate sent when Release closes the connection.
-		_, _ = backend.Receive()
+		return nil // the Terminate sent when Release closes the connection
 	})
 	pgxConn := conn.Conn()
 	tags := []string{"database_cluster:test-cluster"}
@@ -376,82 +352,33 @@ func TestReleaseResetFailureClosesConnection(t *testing.T) {
 	assert.Equal(t, []int64{1}, counts)
 }
 
+// newSessionLinkTestPoolConn returns a pool conn whose fake Postgres answers
+// nothing after the startup handshake, so any query on it fails at once.
 func newSessionLinkTestPoolConn(t *testing.T) *pgxpool.Conn {
 	t.Helper()
-	// Read the Terminate sent when Release closes the non-idle connection.
-	return newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) { _, _ = backend.Receive() })
+	return newSessionLinkTestPoolConnServing(t, nil)
 }
 
-// newSessionLinkTestPoolConnServing returns a pool conn whose test backend answers
-// the startup handshake and then hands the connection to serve.
-func newSessionLinkTestPoolConnServing(t *testing.T, serve func(*pgproto3.Backend)) *pgxpool.Conn {
+// newSessionLinkTestPoolConnServing returns a pool conn whose fake Postgres reports
+// testServerVersion, passes each message to respond, and queues the reply it returns.
+func newSessionLinkTestPoolConnServing(t *testing.T, respond func(msg []byte) []byte) *pgxpool.Conn {
 	t.Helper()
-	conn, _ := newSessionLinkTestPoolServing(t, serve)
-	return conn
+	return newSessionLinkTestPoolConnServingVersion(t, testServerVersion, respond)
 }
 
-// testServerVersion is the server_version the test backend reports by default:
+// testServerVersion is the server_version the fake Postgres reports by default:
 // a release that keeps the connection's role (see resetDropsRole).
 const testServerVersion = "17.6"
 
-// newSessionLinkTestPoolServing is newSessionLinkTestPoolConnServing that also
-// returns closeAndWait, which closes the pool and returns once serve has.
-func newSessionLinkTestPoolServing(t *testing.T, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
+// newSessionLinkTestPoolConnServingVersion is newSessionLinkTestPoolConnServing with
+// a fake Postgres that reports serverVersion.
+func newSessionLinkTestPoolConnServingVersion(t *testing.T, serverVersion string, respond func(msg []byte) []byte) *pgxpool.Conn {
 	t.Helper()
-	return newSessionLinkTestPoolServingVersion(t, testServerVersion, serve)
-}
-
-// newSessionLinkTestPoolServingVersion is newSessionLinkTestPoolServing with a
-// backend that reports serverVersion.
-func newSessionLinkTestPoolServingVersion(t *testing.T, serverVersion string, serve func(*pgproto3.Backend)) (conn *pgxpool.Conn, closeAndWait func()) {
-	t.Helper()
-
-	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		_ = clientConn.Close()
-		_ = serverConn.Close()
-	})
-
-	handshakeResult := make(chan error, 1)
-	served := make(chan struct{})
-	go func() {
-		defer close(served)
-		backend := pgproto3.NewBackend(serverConn, serverConn)
-		if _, err := backend.ReceiveStartupMessage(); err != nil {
-			handshakeResult <- err
-			return
-		}
-
-		backend.Send(&pgproto3.AuthenticationOk{})
-		backend.Send(&pgproto3.ParameterStatus{Name: "server_version", Value: serverVersion})
-		backend.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 2}})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		if err := backend.Flush(); err != nil {
-			handshakeResult <- err
-			return
-		}
-		handshakeResult <- nil
-
-		serve(backend)
-	}()
-
-	config, err := pgxpool.ParseConfig("postgres://test@127.0.0.1/test?sslmode=disable")
+	server := fakepg.NewServer(respond)
+	server.ServerVersion = serverVersion
+	conn, err := fakepg.NewPool(t, server).Acquire(context.Background())
 	require.NoError(t, err)
-	config.ConnConfig.DialFunc = func(context.Context, string, string) (net.Conn, error) {
-		return clientConn, nil
-	}
-
-	pool, err := pgxpool.NewWithConfig(context.Background(), config)
-	require.NoError(t, err)
-	t.Cleanup(pool.Close)
-
-	conn, err = pool.Acquire(context.Background())
-	require.NoError(t, err)
-	require.NoError(t, <-handshakeResult)
-	return conn, func() {
-		pool.Close()
-		<-served
-	}
+	return conn
 }
 
 func TestSendSimple(t *testing.T) {
@@ -656,24 +583,31 @@ func (bb *blockingBuffer) Write(p []byte) (int, error) {
 func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
 	resetReceived := make(chan struct{})
 	replyToReset := make(chan struct{})
-	conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
-		if _, err := backend.Receive(); err != nil {
-			return
+	held := false
+	conn := newSessionLinkTestPoolConnServing(t, func(msg []byte) []byte {
+		// The first message is the reset. Holding its reply inside Release's write
+		// keeps Release running.
+		if !held {
+			held = true
+			close(resetReceived)
+			<-replyToReset
 		}
-		close(resetReceived)
-		<-replyToReset
-		backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		_ = backend.Flush()
-		// Read the Terminate sent when the pool closes the connection.
-		_, _ = backend.Receive()
+		return fakepg.Answer(msg)
 	})
 	pooled := conn.Conn()
 	link, err := New(conn, Options{})
 	require.NoError(t, err)
 
-	released := make(chan error, 1)
-	go func() { released <- link.Release() }()
+	var releaseErr error
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		releaseErr = link.Release()
+	}()
+	reply := sync.OnceFunc(func() { close(replyToReset) })
+	// After a failed check, let Release finish before the pool closes, which waits
+	// for the conn Release holds.
+	t.Cleanup(func() { reply(); <-released })
 	<-resetReceived
 
 	// ForceClose and Cancel overlap Release, so they must wait for Release and then
@@ -689,15 +623,15 @@ func TestCancelAndForceCloseDoNothingOnceReleaseStarts(t *testing.T) {
 		t.Fatal("Cancel did not wait for Release")
 	case <-time.After(50 * time.Millisecond):
 	}
-	close(replyToReset)
-	require.NoError(t, <-released)
+	reply()
+	<-released
+	require.NoError(t, releaseErr)
 	assert.False(t, <-forceClosed)
 	select {
 	case err := <-cancelled:
-		assert.NoError(t, err)
+		assert.NoError(t, err, "a cancel request fails here: the fake refuses a second dial")
 	case <-time.After(time.Second):
-		// A cancel request on the released connection blocks on the test pipe.
-		t.Fatal("Cancel used the connection after Release started")
+		t.Fatal("Cancel did not return after Release")
 	}
 
 	assert.False(t, link.ForceClose())
@@ -755,7 +689,7 @@ func TestReleaseDeallocatesExcessAndReportsStats(t *testing.T) {
 	require.NoError(t, l.RecordExistingNamedPreparedStmtUsed(stmts[0]))
 	require.NoError(t, l.RecordExistingNamedPreparedStmtUsed(stmts[0]))
 	require.NoError(t, l.Release())
-	require.Equal(t, int64(1), fake.closes.Load(), "one statement over the cap means one Deallocate")
+	require.Equal(t, 1, fake.closes, "one statement over the cap means one Deallocate")
 
 	// The next checkout reports the connection's stats and sees only the survivors.
 	next := newFakePgLink(t, fake.pool, limit)

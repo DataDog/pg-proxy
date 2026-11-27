@@ -8,10 +8,8 @@ package link
 import (
 	"context"
 	"fmt"
-	"sync/atomic"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgproto3"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/DataDog/pg-proxy/internal/fakepg"
@@ -22,18 +20,18 @@ import (
 // answers RESET and Deallocate, which is all Release sends.
 type fakePg struct {
 	pool   *pgxpool.Pool
-	closes atomic.Int64 // statement Close messages received, one per Deallocate
+	closes int // statement Close messages received, one per Deallocate
 }
 
 func newFakePgPool(tb testing.TB) *fakePg {
 	tb.Helper()
 	fake := &fakePg{}
-	fake.pool = fakepg.NewPool(tb, func(backend *pgproto3.Backend, msg pgproto3.FrontendMessage) bool {
-		if _, ok := msg.(*pgproto3.Close); ok {
-			fake.closes.Add(1)
+	fake.pool = fakepg.NewPool(tb, fakepg.NewServer(func(msg []byte) []byte {
+		if msg[0] == 'C' {
+			fake.closes++
 		}
-		return fakepg.Answer(backend, msg)
-	})
+		return fakepg.Answer(msg)
+	}))
 	return fake
 }
 

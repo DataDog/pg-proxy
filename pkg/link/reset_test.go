@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	pgproxy "github.com/DataDog/pg-proxy"
+	"github.com/DataDog/pg-proxy/internal/fakepg"
 	"github.com/DataDog/pg-proxy/pkg/config"
 	"github.com/DataDog/pg-proxy/pkg/query"
 )
@@ -173,35 +174,40 @@ func TestChangedColumns(t *testing.T) {
 		[][]byte{nil, []byte(""), nil}, [][]byte{nil, nil, nil}), "NULL and an empty string differ")
 }
 
-// serveReset answers the first Query with one result per statement, using rows for
-// SELECT statements in order, then reads the Terminate sent at pool close.
-func serveReset(received chan<- pgproto3.FrontendMessage, rows ...[][]byte) func(*pgproto3.Backend) {
-	return func(backend *pgproto3.Backend) {
-		msg, err := backend.Receive()
-		if err != nil {
-			return
+// serveReset answers the first message, a Query, with one result per statement,
+// using rows for SELECT statements in order, and sends the message to received.
+func serveReset(t *testing.T, received chan<- pgproto3.FrontendMessage, rows ...[][]byte) func(msg []byte) []byte {
+	answered := false
+	return func(msg []byte) []byte {
+		if answered {
+			return nil // the Terminate sent at pool close
 		}
-		received <- msg
-		if q, ok := msg.(*pgproto3.Query); ok {
-			for _, statement := range strings.Split(q.String, "; ") {
-				if strings.HasPrefix(statement, "SELECT ") && len(rows) > 0 {
-					row := rows[0]
-					rows = rows[1:]
-					fields := make([]pgproto3.FieldDescription, len(row))
-					for i := range fields {
-						fields[i] = pgproto3.FieldDescription{Name: []byte("c"), DataTypeOID: 25}
-					}
-					backend.Send(&pgproto3.RowDescription{Fields: fields})
-					backend.Send(&pgproto3.DataRow{Values: row})
-					backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
-					continue
+		answered = true
+		decoded, err := fakepg.Decode(msg)
+		require.NoError(t, err)
+		received <- decoded
+		q, ok := decoded.(*pgproto3.Query)
+		if !ok {
+			return nil
+		}
+		var reply []pgproto3.BackendMessage
+		for _, statement := range strings.Split(q.String, "; ") {
+			if strings.HasPrefix(statement, "SELECT ") && len(rows) > 0 {
+				row := rows[0]
+				rows = rows[1:]
+				fields := make([]pgproto3.FieldDescription, len(row))
+				for i := range fields {
+					fields[i] = pgproto3.FieldDescription{Name: []byte("c"), DataTypeOID: 25}
 				}
-				backend.Send(&pgproto3.CommandComplete{CommandTag: []byte("RESET")})
+				reply = append(reply,
+					&pgproto3.RowDescription{Fields: fields},
+					&pgproto3.DataRow{Values: row},
+					&pgproto3.CommandComplete{CommandTag: []byte("SELECT 1")})
+				continue
 			}
-			backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-			_ = backend.Flush()
+			reply = append(reply, &pgproto3.CommandComplete{CommandTag: []byte("RESET")})
 		}
-		_, _ = backend.Receive()
+		return fakepg.Encode(t, append(reply, &pgproto3.ReadyForQuery{TxStatus: 'I'})...)
 	}
 }
 
@@ -228,7 +234,7 @@ func TestReleaseByMode(t *testing.T) {
 			if serverVersion == "" {
 				serverVersion = testServerVersion
 			}
-			conn, _ := newSessionLinkTestPoolServingVersion(t, serverVersion, serveReset(received))
+			conn := newSessionLinkTestPoolConnServingVersion(t, serverVersion, serveReset(t, received))
 			pgConn := conn.Conn().PgConn()
 			tags := []string{"database_cluster:test-cluster"}
 			link, err := New(conn, Options{MetricTags: tags, Reset: mustResetPolicy(t, test.mode)})
@@ -273,7 +279,7 @@ func TestReleaseByMode(t *testing.T) {
 // a server that may drop it.
 func TestReleaseWithRoleSessionOnServerThatDropsRole(t *testing.T) {
 	received := make(chan pgproto3.FrontendMessage, 1)
-	conn, _ := newSessionLinkTestPoolServingVersion(t, "16.4", serveReset(received))
+	conn := newSessionLinkTestPoolConnServingVersion(t, "16.4", serveReset(t, received))
 	link, err := New(conn, Options{Role: noopRoleSession{}, Reset: mustResetPolicy(t, config.ResetDynamic)})
 	require.NoError(t, err)
 
@@ -293,7 +299,7 @@ func TestReleaseClearsSkippedReset(t *testing.T) {
 		t.Run(string(mode), func(t *testing.T) {
 			t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: newRecordingMetrics()}))
 			received := make(chan pgproto3.FrontendMessage, 1)
-			conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
+			conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received))
 			pgConn := conn.Conn().PgConn()
 			pgConn.CustomData()[customDataResetSkippedKey] = true
 			link, err := New(conn, Options{Reset: mustResetPolicy(t, mode)})
@@ -392,7 +398,7 @@ func TestReleaseAuditUnsampledSendsPlainReset(t *testing.T) {
 	policy := mustResetPolicy(t, config.ResetAudit)
 	policy.auditRate = 0
 	received := make(chan pgproto3.FrontendMessage, 1)
-	conn := newSessionLinkTestPoolConnServing(t, serveReset(received))
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received))
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
 
@@ -412,7 +418,7 @@ func TestReleaseAuditReadsBaselineOnFirstUse(t *testing.T) {
 	// A function changed search_path and app.tenant_id; the reset restores both.
 	before, after := auditRows(policy, map[string][]byte{"search_path": []byte("leaked"), "app.tenant_id": []byte("t1")})
 	received := make(chan pgproto3.FrontendMessage, 1)
-	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, before, after))
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, before, after))
 	pgConn := conn.Conn().PgConn()
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
@@ -447,7 +453,7 @@ func TestReleaseAuditComparesWithBaseline(t *testing.T) {
 			policy := auditEveryRelease(t, 0)
 			before, baseline := auditRows(policy, test.changed)
 			received := make(chan pgproto3.FrontendMessage, 1)
-			conn := newSessionLinkTestPoolConnServing(t, serveReset(received, before))
+			conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, before))
 			pgConn := conn.Conn().PgConn()
 			pgConn.CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
 			link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
@@ -474,7 +480,7 @@ func TestReleaseAuditSampledFullCheck(t *testing.T) {
 	before, baseline := auditRows(policy, map[string][]byte{"synchronous_commit": []byte("off")})
 	full := [][]byte{[]byte("synchronous_commit,work_mem")}
 	received := make(chan pgproto3.FrontendMessage, 1)
-	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, full, before))
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, full, before))
 	conn.Conn().PgConn().CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
@@ -500,7 +506,7 @@ func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
 	policy := auditEveryRelease(t, 1)
 	before, baseline := auditRows(policy, nil)
 	received := make(chan pgproto3.FrontendMessage, 1)
-	conn := newSessionLinkTestPoolConnServing(t, serveReset(received, [][]byte{nil}, before))
+	conn := newSessionLinkTestPoolConnServing(t, serveReset(t, received, [][]byte{nil}, before))
 	conn.Conn().PgConn().CustomData()[customDataAuditBaselineKey] = auditBaseline{sql: policy.auditSQL, values: baseline}
 	link, err := New(conn, Options{MetricTags: []string{"database_cluster:test-cluster"}, Reset: policy})
 	require.NoError(t, err)
@@ -517,14 +523,13 @@ func TestReleaseAuditFullCheckFindingNothing(t *testing.T) {
 
 func TestReleaseAuditCheckFailureClosesConnection(t *testing.T) {
 	t.Cleanup(pgproxy.Bootstrap(pgproxy.Dependencies{Metrics: newRecordingMetrics()}))
-	conn := newSessionLinkTestPoolConnServing(t, func(backend *pgproto3.Backend) {
-		if _, err := backend.Receive(); err != nil {
-			return
+	conn := newSessionLinkTestPoolConnServing(t, func(msg []byte) []byte {
+		if msg[0] != 'Q' {
+			return nil // the Terminate sent when Release closes the connection
 		}
-		backend.Send(&pgproto3.ErrorResponse{Severity: "ERROR", Code: "42501", Message: "permission denied"})
-		backend.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
-		_ = backend.Flush()
-		_, _ = backend.Receive()
+		return fakepg.Encode[pgproto3.BackendMessage](t,
+			&pgproto3.ErrorResponse{Severity: "ERROR", Code: "42501", Message: "permission denied"},
+			&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	})
 	pgxConn := conn.Conn()
 	link, err := New(conn, Options{Reset: auditEveryRelease(t, 0)})

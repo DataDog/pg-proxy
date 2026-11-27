@@ -304,7 +304,7 @@ func TestAcquireDiscardsConnOnlyForDefaultFactory(t *testing.T) {
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			pgPool := fakepg.NewPool(t, fakepg.Answer)
+			pgPool := fakepg.NewPool(t, fakepg.NewServer(fakepg.Answer))
 			var acquired *pgxpool.Conn
 			t.Cleanup(func() {
 				if acquired != nil {
