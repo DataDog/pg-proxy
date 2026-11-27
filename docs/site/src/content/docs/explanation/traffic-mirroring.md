@@ -15,11 +15,17 @@ Each mirrored session has a queue and a worker. The proxy forwards a message to 
 
 The worker reads and discards shadow responses. It does not compare result rows with the source or return shadow results to the client. Mirrored writes execute on the shadow, so the shadow must be a separate destination intended for replay.
 
+## Prepared statements on the shadow
+
+The worker borrows a shadow connection for each batch, independently of the source's connection, so a `Bind` can reach a shadow connection that never saw its `Parse`. The worker remembers each named statement the session prepared, including statements confirmed before mirroring started. Before it replays a `Bind` or `Describe`, it parses the statement again on a shadow connection that lacks it. It skips a replayed `Parse` when the shadow connection already has that statement. The unnamed statement needs no such step: the `Parse` that re-creates it on each source checkout is replayed too.
+
+The statement catalog holds up to 4096 statements or 4 MiB of statement definitions for each mirrored session, dropping the oldest first. It is not counted against the queue limits below.
+
 ## What happens when the shadow falls behind
 
 Queue capacity is measured in bytes, including an estimate of message overhead. Each session has a limit, and the server runtime shares an additional byte budget across its sessions. Queued messages and messages still buffered for replay count toward those limits.
 
-When a data message would exceed a budget, its copy is dropped. The worker skips the remaining messages in that acquisition batch and resumes after its release boundary. Replay errors can also cause a batch to be skipped. Closing the queue discards its unread tail.
+When a data message would exceed a budget, its copy is dropped. The worker skips the remaining messages in that acquisition batch and resumes after its release boundary. Replay errors can also cause a batch to be skipped. Closing the queue discards its unread tail. A dropped `Parse` also loses that statement's definition, so later batches that use it can fail on shadow connections that lack it, until the source sends that `Parse` again.
 
 The client path does not wait for shadow execution or for queue capacity. Copying messages, accounting for memory, and running workers still consume resources; asynchronous replay does not guarantee unchanged latency.
 
@@ -27,7 +33,7 @@ The client path does not wait for shadow execution or for queue capacity. Copyin
 
 Mirroring can expose workload and protocol problems on the shadow, but delivery is best effort. Dropped traffic, different starting data, and independent execution can make the databases diverge. Use separate validation when you need to compare results or verify an upgrade. Mirroring does not maintain a database replica.
 
-Monitor queued-message counts, drops, and replay errors through the [mirroring metrics](../../reference/observability/metrics/#traffic-mirroring). A count of replayed messages alone does not prove that the source and shadow produced equivalent results.
+Monitor queued-message counts, drops, replay errors, and shadow error responses through the [mirroring metrics](../../reference/observability/metrics/#traffic-mirroring). A count of replayed messages alone does not prove that the source and shadow produced equivalent results.
 
 ## Application integration
 

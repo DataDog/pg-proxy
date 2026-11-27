@@ -16,8 +16,9 @@ Lifecycle logs and metrics use the dependencies supplied through
 | Credential loading | None | Secret-store and local environment loading |
 
 Read `Controller.Accept`, `Reconciler.Accept`, and
-`Warden.ReconcileLogicalDatabases` for the main flow. `pkg/server` uses
-`Warden.Sessions()` directly.
+`Warden.ReconcileLogicalDatabases` for the main flow. An embedder can pass
+`Warden.Sessions()` to `pkg/server` as `server.Config.Sessions`; serving Warden
+backends as a `server.Inventory` needs a small adapter.
 
 Configuration updates follow this order:
 

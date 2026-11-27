@@ -25,7 +25,9 @@ The public Go API lives under `pkg/`; the `pg-proxy` binary lives under `cmd/pg-
 | `pkg/query` | Post-auth message decisions and query tracing |
 | `pkg/bindparams` | Bounded copies of Bind parameters, decoded into per-position trace tags |
 | `pkg/prepared` | Prepared-statement name mapping for txn pooling |
+| `pkg/sessionsql` | Allocation-free scan of SQL text for statements that may change session state, used by the `dynamic` and `audit` reset modes |
 | `pkg/pool` | Direct, discovered, static cloud, and replica pool runtimes; instance health, selection, and pgx adapters |
+| `pkg/pool/resizable` | A pgx pool wrapper that enforces a connection limit that can change at runtime, below the configured `MaxConns` |
 | `pkg/link` | Session↔Postgres link: expectations, prepared-on-conn, release |
 | `pkg/limiter` | Portable global and per-service session caps |
 | `pkg/listener` | TCP/TLS negotiation, startup, admission, and session lifecycle |

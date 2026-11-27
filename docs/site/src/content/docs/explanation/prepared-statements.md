@@ -27,13 +27,15 @@ For named statements, the proxy generates a backend name from the SQL text and p
 3. In a later transaction, the client sends `Bind` or `Describe` using its original name.
 4. If the selected backend connection lacks the statement, the proxy prepares it there before forwarding the operation.
 
+If the backend connection already has the statement when the client sends `Parse`, for example because another client prepared the same SQL, the proxy replies `ParseComplete` itself instead of forwarding it.
+
 The client does not receive extra preparation replies for this internal work. Its statement remains associated with its client session even as backend connections change.
 
 ## Unnamed statements
 
-Some drivers send `Parse` for the unnamed statement in one transaction and `Bind` or `Describe` for it later. PG Proxy remembers the client's last unnamed statement and, if a later transaction runs on a different backend connection, parses it again there before the `Bind` or `Describe`. As in PostgreSQL, a simple `Query` or a `Close` of the unnamed statement discards it.
+Some drivers send `Parse` for the unnamed statement in one transaction and `Bind` or `Describe` for it later. PG Proxy remembers the client's last unnamed statement and, in each later transaction that uses it, parses it again on that transaction's backend connection before the first `Bind` or `Describe`. It does so even when the pool returns the same connection, because releasing a connection discards the unnamed statement: the release reset is a simple query, and when a [reset mode](../pooling/#session-reset-modes) skips the reset, the next checkout closes the unnamed statement before its first request. As in PostgreSQL, a client's simple `Query` or `Close` of the unnamed statement discards it.
 
-This re-parses the statement on every new backend connection. To cache unnamed statements per backend connection instead, set this client startup option. It gives each unnamed statement a proxy-generated name and tracks it like a named statement:
+This re-parses the statement once in each transaction that uses it. To cache unnamed statements per backend connection instead, set this client startup option. It gives each unnamed statement a proxy-generated name and tracks it like a named statement:
 
 ```text
 options='-c pg_proxy.auto_cached_prepared_statements=true'

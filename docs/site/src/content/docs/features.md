@@ -15,13 +15,13 @@ Read [Limitations](../reference/limitations/) for transaction-pooling constraint
 
 ## Transaction pooling
 
-Share backend PostgreSQL connections across client sessions. A connection stays with a transaction and returns to the pool when it is safe to reuse, allowing applications to keep more client sessions open than backend connections.
+Share backend PostgreSQL connections across client sessions. A connection stays with a transaction and returns to the pool when it is safe to reuse, allowing applications to keep more client sessions open than backend connections. A reset on release keeps one client's session settings from reaching the next; each database can reset on every release, only when a checkout may have changed session state, or never.
 
 Read [Transaction pooling](../explanation/pooling/) and [Transaction-pooling compatibility](../reference/compatibility/) for the implications for session state.
 
 ## Prepared statements across transactions
 
-Use protocol-level named prepared statements even when successive transactions use different backend connections. PG Proxy maps client names to backend names and prepares statements on a connection when needed. Optional automatic caching extends this handling to unnamed statements.
+Use protocol-level named prepared statements even when successive transactions use different backend connections. PG Proxy maps client names to backend names and prepares statements on a connection when needed. The client's unnamed statement is parsed again in each transaction that uses it; optional automatic caching instead caches unnamed statements per backend connection, like named ones.
 
 Read [Prepared statements](../explanation/prepared-statements/) and the [client connection options](../reference/configuration/client-connections/).
 
@@ -67,7 +67,7 @@ See [Set connection and session limits](../how-to/set-pool-limits/), [Client con
 
 ## Traffic mirroring
 
-Available only to applications that embed the library; the `pg-proxy` binary does not support it. Replay copies of forwarded messages on a separate database while clients continue using the source. Per-session queues and a shared byte budget limit replay memory. Copies can be dropped when capacity is exhausted; shadow execution does not hold up the client waiting for its results.
+Available only to applications that embed the library; the `pg-proxy` binary does not support it. Replay copies of forwarded messages on a separate database while clients continue using the source. Per-session queues and a shared byte budget limit queued replay data; each mirrored session also keeps up to 4 MiB of prepared-statement definitions outside those limits. Copies can be dropped when capacity is exhausted; shadow execution does not hold up the client waiting for its results.
 
 Read [Traffic mirroring](../explanation/traffic-mirroring/) for replay behavior, application integration, and limits.
 

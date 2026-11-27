@@ -15,6 +15,10 @@ Transaction pooling shares PostgreSQL connections between clients. Session state
 
 PG Proxy also has specific boundaries around prepared statements and connection cleanup. See [Transaction-pooling compatibility](../compatibility/) for supported SQL patterns, client options, and the state that can remain on a reused connection.
 
+## The `dynamic` reset mode can leak session state
+
+With `reset_mode: dynamic`, the proxy skips the release reset when the checkout's SQL shows no sign of changing session state. A function or trigger can still change a setting, or the role, without the client's SQL naming it. Unless PostgreSQL reports that setting with `ParameterStatus`, the change survives the skipped reset and reaches the next client of the connection. `off` never resets, so every change reaches the next client. The default, `always`, has neither gap. Run `audit` first to see which settings `dynamic` would leak on your traffic. See [Reset modes](../compatibility/#reset-modes).
+
 ## Traces can contain sensitive data
 
 When tracing is enabled, both Datadog and OpenTelemetry spans can contain raw SQL and error messages. The `pg-proxy` binary omits bind parameter values by default; `-trace-parameters=true` enables capture as `db.parameters.N` tags on sampled traces. Disabling capture does not remove SQL literals from `db.statement` or redact error messages. PG Proxy does not provide general telemetry redaction. See [Telemetry configuration](../observability/) for binary and library options.

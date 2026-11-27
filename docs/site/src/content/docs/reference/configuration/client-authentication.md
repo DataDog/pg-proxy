@@ -18,7 +18,8 @@ valid TLS certificate/key pair. JSON calls these `passwordAuthEnabled` and
 including `0.0.0.0:15432` and `[::]:15432`. Authentication requires TLS even on
 loopback. JWT authentication remains a separate, unsupported mode.
 
-Each `users` entry requires a unique `static_credentials.username`, exactly one
+Each `users` entry requires a unique `static_credentials.username` of at most
+256 bytes, with no NUL byte, exactly one
 `password` or `scram_sha_256`, and an explicit list of logical `databases`.
 JSON uses `staticCredentials` and `scramSHA256`. Usernames and database names
 match exactly, including case. Unknown users and databases outside the user's

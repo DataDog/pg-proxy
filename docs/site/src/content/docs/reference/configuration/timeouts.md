@@ -16,6 +16,8 @@ Connection setup, waiting for a pooled connection, and executing SQL are separat
 | PostgreSQL `statement_timeout` | Execution of a statement on the backend, including time spent waiting for locks. |
 | Client query deadline | How long the client waits; cancellation and connection reuse depend on the driver and protocol state. |
 
+The proxy does not limit how long a session waits for a connection from a primary pool. The wait ends when a connection is free, or when the proxy detects that the client disconnected, which it checks every 100 ms during a checkout on Linux. It then closes the backend connection it acquired, if any. A read routed to a replica waits at most 50 ms before it falls back to the primary; see [Read routing](../../../explanation/read-routing/).
+
 ## Backend pool setting
 
 In the `pg-proxy` configuration file, add `connection_options` to the relevant `databases` entry:
@@ -24,7 +26,7 @@ In the `pg-proxy` configuration file, add `connection_options` to the relevant `
 databases:
   - name: primary
     host: 127.0.0.1
-    port: 5432
+    port: 15432
     dbname: postgres
     username: postgres
     password: postgres
@@ -78,5 +80,7 @@ These limits are built into the `pg-proxy` binary and cannot be configured.
 | Authentication message size | 16 KiB | Larger messages during authentication fail the connection. Messages after authentication have no size limit. |
 | Connection reset on release | 5 seconds | If the reset that runs when a backend connection goes back to the pool takes longer, the connection is closed. See [Transaction pooling](../../../explanation/pooling/#session-state-belongs-to-the-backend). |
 | Telemetry flush on shutdown | 5 seconds | OpenTelemetry providers have this long to send buffered data after sessions close. |
+| Backend check at startup | 1 second | Each primary and replica pool must open a connection and answer a ping within this time, or the binary fails to start. |
+| Client TCP keepalive | 15 seconds idle, then 3 probes 15 seconds apart | A client that disappears without closing its connection is detected after about 60 seconds, and its session ends. |
 
-Applications that embed the library set the first three with `server.Config.StartupTimeout`, `MaxPendingConnections`, and `AuthenticationMessageLimit`. Each defaults to `0`, which means no limit. See [Go library configuration](../library/).
+Applications that embed the library set the first three with `server.Config.StartupTimeout`, `MaxPendingConnections`, and `AuthenticationMessageLimit`. Each defaults to `0`, which means no limit. See [Go library configuration](../library/). The connection reset and TCP keepalive limits apply to the library too.

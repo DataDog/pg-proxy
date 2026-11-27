@@ -19,7 +19,7 @@ level=ERROR msg="failed to open connection from 127.0.0.1:36676: logical databas
 
 ## The proxy does not start
 
-Run `pg-proxy -config proxy.yaml -validate-config` first. It reports every configuration error it can find, one per line, with the field path and the line in the file, and exits with status `1` if there are any. It does not connect to PostgreSQL.
+Run `pg-proxy -config proxy.yaml -validate-config` first. It reports configuration errors one per line, with the field path, and exits with status `1` if there are any. A syntax or type error in the file also gives the line, and stops the check before the other checks run, so run it again after fixing one. It does not connect to PostgreSQL.
 
 At startup, the same errors are printed after `invalid configuration:` and the process exits with status `1` before it opens any pool or the listener.
 
@@ -49,7 +49,8 @@ After the configuration is valid, the proxy opens a connection to every backend.
 | `FATAL: could not establish connection` | `startup_failure`, at `stage=authenticate` | Without password authentication: the client user is not the backend `username`. Connect as that user. |
 | `FATAL: could not establish connection` | `invalid_credentials` | Wrong password, unknown user, or a logical database that is not in the user's `databases` list. |
 | `FATAL: TLS is required` | `tls_required` | `tls_required` is on and the client connected without TLS. Use `sslmode=require` or `verify-full`. |
-| `FATAL: pg-proxy is at capacity. Please retry.` (SQLSTATE `53300`) | Not logged | A session limit was reached: `proxy.max_sessions`, `proxy.default_max_user_sessions`, or the user's `max_sessions`. See [Set connection and session limits](../../how-to/set-pool-limits/). |
+| `FATAL: pg-proxy is at capacity. Please retry.` (SQLSTATE `53300`) | Not logged | The global session limit, `proxy.max_sessions`, was reached. See [Set connection and session limits](../../how-to/set-pool-limits/). |
+| `FATAL: Service connection limit reached. Please retry.` (SQLSTATE `53300`) | Not logged | The client user's session limit was reached: the user's `max_sessions`, or `proxy.default_max_user_sessions`. |
 | Connection refused | None | The proxy is not running, or listens on another address. Check `proxy.listener_address` (default `127.0.0.1:5432`). |
 | Proxy exits at startup with `address already in use` | None | Another process, often a local PostgreSQL server, already listens on `proxy.listener_address`. The default `127.0.0.1:5432` is the standard PostgreSQL port; set `proxy.listener_address` to a free port. |
 | Connection closes after about 10 seconds | Varies | The client did not finish TLS, startup, and authentication within 10 seconds. |

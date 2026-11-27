@@ -71,7 +71,7 @@ Check the file:
 go run ./cmd/pg-proxy -config proxy.yaml -validate-config
 ```
 
-This reports every configuration error it finds, with the field path and line, then exits: status `0` if the file is valid, `1` if not. It does not connect to PostgreSQL or open the listener, so a valid file can still fail to start if the database is unreachable or the port is in use.
+This reports configuration errors with their field paths, then exits: status `0` if the file is valid, `1` if not. A syntax or type error also gives the line, and stops the check until you fix it. It does not connect to PostgreSQL or open the listener, so a valid file can still fail to start if the database is unreachable or the port is in use.
 
 Start `pg-proxy`:
 

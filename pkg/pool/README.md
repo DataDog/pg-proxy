@@ -168,7 +168,7 @@ answer for B rules it out. An unusable error also rules it out unless another
 credential successfully reports B as primary. Conflicting successful roles or
 more than one primary IP prevent keeping B. A shutdown ban also rules B out.
 
-For a snapshot that reaches `observeSQL`, use the following order:
+For a snapshot that reaches `observeSQLRound`, use the following order:
 
 | Order and condition | Result | History changes |
 | --- | --- | --- |

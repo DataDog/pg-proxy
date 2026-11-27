@@ -68,6 +68,10 @@ These dependencies are process-wide. `Bootstrap` returns a restore function for 
 
 `topology.LogicalDatabase.Cluster` selects the primary cluster. `ReadClusters` maps read-cluster names to their runtime weights. The application supplies configuration and backend discovery through the inventory interfaces.
 
+## Connection reset on release
+
+`backend.Config.PrimaryReset` and `ReplicaResets`, in `Replicas` order, select how links from each pool reset their connection when it returns to the pool. Build one `link.ResetPolicy` per pool with `link.NewResetPolicy(database.DatabaseSettings)`, which validates the `reset_mode`, `reset_audit_settings`, and `reset_audit_rate` fields, and share it across that pool's links. The zero `ResetPolicy`, and a missing `ReplicaResets` entry, reset on every release, like `always`. On a link that has a role implementation from `RoleSessionFactory`, that implementation resets the role and the reset runs only `RESET ALL`. See [Session reset modes](../../../explanation/pooling/#session-reset-modes).
+
 ## Telemetry settings
 
 Install telemetry dependencies with `pgproxy.Bootstrap` before creating proxy components. Omitted integrations are disabled. Your application keeps providers and clients alive until sessions stop, then flushes and shuts them down.
